@@ -20,10 +20,11 @@ DEFAULT_CONFIG = {
     "stacking_kappa_high": 3.0,
     "stacking_winsor_limits": "0.05,0.05", # String, sera parsé
     "stacking_final_combine_method": "mean",
+    "poststack_equalize_rgb": True,
     "apply_radial_weight": False,
     "radial_feather_fraction": 0.8,
     "radial_shape_power": 2.0,
-    "use_gpu_phase5": False,
+    "use_gpu_phase5": True,
     "gpu_id_phase5": 0,
     "gpu_selector": "",
     "final_assembly_method": "reproject_coadd", # Options: "reproject_coadd", "incremental",
@@ -31,17 +32,38 @@ DEFAULT_CONFIG = {
     "astrometry_local_path": "",
     "astrometry_api_key": "",
     "save_final_as_uint16": False,
+    "legacy_rgb_cube": False,
     "coadd_use_memmap": True,
     "coadd_memmap_dir": "",
     "coadd_cleanup_memmap": True,
     "assembly_process_workers": 0,  # Worker count for final assembly (both methods)
     "auto_limit_frames_per_master_tile": True,
-    "winsor_worker_limit": 4,
+    "winsor_worker_limit": 10,
+    "winsor_max_frames_per_pass": 0,
     "max_raw_per_master_tile": 0,
+    "center_out_normalization_p3": True,
+    "p3_center_sky_percentile": [25.0, 60.0],
+    "p3_center_robust_clip_sigma": 2.5,
+    "p3_center_preview_size": 256,
+    "p3_center_min_overlap_fraction": 0.03,
+    # --- Intertile photometric calibration options ---
+    "intertile_photometric_match": True,
+    "intertile_preview_size": 512,
+    "intertile_overlap_min": 0.05,
+    "intertile_sky_percentile": [30.0, 70.0],
+    "intertile_robust_clip_sigma": 2.5,
+    "use_auto_intertile": False,
+    # Early GUI filter option (Phase 0 header-only scan)
+    "enable_early_filter": True,
     # --- CLES POUR LE ROGNAGE DES MASTER TUILES ---
     "apply_master_tile_crop": True,       # Désactivé par défaut
-    "master_tile_crop_percent": 18.0      # Pourcentage par côté si activé (ex: 10%)
-    # --- FIN CLES POUR LE ROGNAGE --- 
+    "master_tile_crop_percent": 5.0,     # Pourcentage par côté si activé (ex: 10%)
+    "quality_crop_enabled": False,
+    "quality_crop_band_px": 32,
+    "quality_crop_k_sigma": 2.0,
+    "quality_crop_margin_px": 8,
+    "crop_follow_signal": True,
+    # --- FIN CLES POUR LE ROGNAGE ---
 }
 
 def get_config_path():
@@ -86,6 +108,7 @@ def load_config():
             except Exception: print(f"ERROR: {msg_title} - {msg_text} (messagebox error)")
     # else:
         # print(f"Config file not found at {config_path}. Using default configuration.")
+    current_config.setdefault("crop_follow_signal", False)
     return current_config
 
 def save_config(config_data):

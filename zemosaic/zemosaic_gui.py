@@ -1,7 +1,54 @@
 # zemosaic_gui.py
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║ ZeMosaic / ZeSeestarStacker Project                                  ║
+║                                                                      ║
+║ Auteur  : Tinystork, seigneur des couteaux à beurre (aka Tristan Nauleau)  
+║ Partenaire : J.A.R.V.I.S. (/ˈdʒɑːrvɪs/) — Just a Rather Very Intelligent System  
+║              (aka ChatGPT, Grand Maître du ciselage de code)         ║
+║                                                                      ║
+║ Licence : GNU General Public License v3.0 (GPL-3.0)                  ║
+║                                                                      ║
+║ Description :                                                        ║
+║   Ce programme a été forgé à la lueur des pixels et de la caféine,   ║
+║   dans le but noble de transformer des nuages de photons en art      ║
+║   astronomique. Si vous l’utilisez, pensez à dire “merci”,           ║
+║   à lever les yeux vers le ciel, ou à citer Tinystork et J.A.R.V.I.S.║
+║   (le karma des développeurs en dépend).                             ║
+║                                                                      ║
+║ Avertissement :                                                      ║
+║   Aucune IA ni aucun couteau à beurre n’a été blessé durant le       ║
+║   développement de ce code.                                          ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║ ZeMosaic / ZeSeestarStacker Project                                  ║
+║                                                                      ║
+║ Author  : Tinystork, Lord of the Butter Knives (aka Tristan Nauleau) ║
+║ Partner : J.A.R.V.I.S. (/ˈdʒɑːrvɪs/) — Just a Rather Very Intelligent System  
+║           (aka ChatGPT, Grand Master of Code Chiseling)              ║
+║                                                                      ║
+║ License : GNU General Public License v3.0 (GPL-3.0)                  ║
+║                                                                      ║
+║ Description:                                                         ║
+║   This program was forged under the sacred light of pixels and       ║
+║   caffeine, with the noble intent of turning clouds of photons into  ║
+║   astronomical art. If you use it, please consider saying “thanks,”  ║
+║   gazing at the stars, or crediting Tinystork and J.A.R.V.I.S. —     ║
+║   developer karma depends on it.                                     ║
+║                                                                      ║
+║ Disclaimer:                                                          ║
+║   No AIs or butter knives were harmed in the making of this code.    ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+from core.tk_safe import patch_tk_variables
+
+patch_tk_variables()
 import threading
 import multiprocessing
 import os
@@ -86,8 +133,8 @@ class ZeMosaicGUI:
 
 
         try:
-            self.root.geometry("750x780") # Légère augmentation pour le nouveau widget
-            self.root.minsize(700, 630) # Légère augmentation
+            self.root.geometry("1050x950") # Légère augmentation pour le nouveau widget
+            self.root.minsize(800, 700) # Légère augmentation
         except tk.TclError:
             pass
 
@@ -108,12 +155,23 @@ class ZeMosaicGUI:
                 "stacking_kappa_high": 3.0,
                 "stacking_winsor_limits": "0.05,0.05",
                 "stacking_final_combine_method": "mean",
+                "poststack_equalize_rgb": True,
+                # Logging
+                "logging_level": "INFO",
                 "apply_radial_weight": False,
                 "radial_feather_fraction": 0.8,
                 "radial_shape_power": 2.0,
                 "min_radial_weight_floor": 0.0, # Ajouté lors du test du plancher radial
                 "final_assembly_method": "reproject_coadd",
-                "num_processing_workers": 0 # 0 pour auto, anciennement -1
+                "num_processing_workers": 0, # 0 pour auto, anciennement -1
+                # Prétraitement GPU (facultatif) : suppression du gradient de fond
+                # DÉSACTIVÉE par défaut pour conserver le rendu antérieur
+                "preprocess_remove_background_gpu": True,
+                "preprocess_background_sigma": 24.0,
+                # Valeur par défaut alignée avec le worker (0.05°)
+                "cluster_panel_threshold": 0.05,
+                "cluster_target_groups": 0,
+                "cluster_orientation_split_deg": 0.0
             }
 
         # --- GPU Detection helper ---
@@ -182,7 +240,11 @@ class ZeMosaicGUI:
             self.localizer = MockLocalizer(language_code=default_lang_from_config)
         
         # --- Variable compteur tuile phase 3
-        self.master_tile_count_var = tk.StringVar(value="") # Initialement vide
+        self.master_tile_count_var = tk.StringVar(master=self.root, value="") # Initialement vide
+        # Compteur de fichiers bruts traités pendant la Phase 1
+        self.file_count_var = tk.StringVar(master=self.root, value="")
+        # Indicateur de phase courante (texte traduit)
+        self.phase_var = tk.StringVar(master=self.root, value="")
         
         
         # --- Définition des listes de clés pour les ComboBoxes ---
@@ -194,58 +256,66 @@ class ZeMosaicGUI:
         # --- FIN Définition des listes de clés ---
 
         # --- Tkinter Variables ---
-        self.input_dir_var = tk.StringVar()
-        self.output_dir_var = tk.StringVar()
-        self.astap_exe_path_var = tk.StringVar(value=self.config.get("astap_executable_path", ""))
-        self.astap_data_dir_var = tk.StringVar(value=self.config.get("astap_data_directory_path", ""))
-        self.astap_search_radius_var = tk.DoubleVar(value=self.config.get("astap_default_search_radius", 3.0))
-        self.astap_downsample_var = tk.IntVar(value=self.config.get("astap_default_downsample", 2))
-        self.astap_sensitivity_var = tk.IntVar(value=self.config.get("astap_default_sensitivity", 100))
-        self.cluster_threshold_var = tk.DoubleVar(value=self.config.get("cluster_panel_threshold", 0.5))
-        self.save_final_uint16_var = tk.BooleanVar(value=self.config.get("save_final_as_uint16", False))
+        self.input_dir_var = tk.StringVar(master=self.root)
+        self.output_dir_var = tk.StringVar(master=self.root)
+        self.astap_exe_path_var = tk.StringVar(master=self.root, value=self.config.get("astap_executable_path", ""))
+        self.astap_data_dir_var = tk.StringVar(master=self.root, value=self.config.get("astap_data_directory_path", ""))
+        self.astap_search_radius_var = tk.DoubleVar(master=self.root, value=self.config.get("astap_default_search_radius", 3.0))
+        self.astap_downsample_var = tk.IntVar(master=self.root, value=self.config.get("astap_default_downsample", 2))
+        self.astap_sensitivity_var = tk.IntVar(master=self.root, value=self.config.get("astap_default_sensitivity", 100))
+        self.cluster_threshold_var = tk.DoubleVar(master=self.root, value=self.config.get("cluster_panel_threshold", 0.05))
+        self.cluster_target_groups_var = tk.IntVar(master=self.root, value=self.config.get("cluster_target_groups", 0))
+        self.cluster_orientation_split_var = tk.DoubleVar(master=self.root, value=self.config.get("cluster_orientation_split_deg", 0.0))
+        self.save_final_uint16_var = tk.BooleanVar(master=self.root, value=self.config.get("save_final_as_uint16", False))
+        self.legacy_rgb_cube_var = tk.BooleanVar(master=self.root, value=self.config.get("legacy_rgb_cube", False))
+        try:
+            self.save_final_uint16_var.trace_add("write", self._update_legacy_toggle_state)
+        except Exception:
+            pass
 
         # --- Solver Settings ---
         try:
             self.solver_settings = SolverSettings.load_default()
         except Exception:
             self.solver_settings = SolverSettings()
-        self.solver_choice_var = tk.StringVar(value=self.solver_settings.solver_choice)
+        self.solver_choice_var = tk.StringVar(master=self.root, value=self.solver_settings.solver_choice)
         self.solver_choice_var.trace_add("write", self._update_solver_frames)
-        self.astrometry_api_key_var = tk.StringVar(value=self.solver_settings.api_key)
-        self.astrometry_timeout_var = tk.IntVar(value=self.solver_settings.timeout)
-        self.astrometry_downsample_var = tk.IntVar(value=self.solver_settings.downsample)
+        self.astrometry_api_key_var = tk.StringVar(master=self.root, value=self.solver_settings.api_key)
+        self.astrometry_timeout_var = tk.IntVar(master=self.root, value=self.solver_settings.timeout)
+        self.astrometry_downsample_var = tk.IntVar(master=self.root, value=self.solver_settings.downsample)
         
         self.is_processing = False
         self.worker_process = None
         self.progress_queue = None
-        self.progress_bar_var = tk.DoubleVar(value=0.0)
-        self.eta_var = tk.StringVar(value=self._tr("initial_eta_value", "--:--:--"))
-        self.elapsed_time_var = tk.StringVar(value=self._tr("initial_elapsed_time", "00:00:00"))
+        self.progress_bar_var = tk.DoubleVar(master=self.root, value=0.0)
+        self.eta_var = tk.StringVar(master=self.root, value=self._tr("initial_eta_value", "--:--:--"))
+        self.elapsed_time_var = tk.StringVar(master=self.root, value=self._tr("initial_elapsed_time", "00:00:00"))
         self._chrono_start_time = None
         self._chrono_after_id = None
         self._stage_times = {}
         
-        self.current_language_var = tk.StringVar(value=self.localizer.language_code)
+        self.current_language_var = tk.StringVar(master=self.root, value=self.localizer.language_code)
         self.current_language_var.trace_add("write", self._on_language_change)
         
         # --- Variables Tkinter pour les Options de Stacking ---
-        self.stacking_normalize_method_var = tk.StringVar(value=self.config.get("stacking_normalize_method", self.norm_method_keys[0]))
-        self.stacking_weighting_method_var = tk.StringVar(value=self.config.get("stacking_weighting_method", self.weight_method_keys[0]))
-        self.stacking_rejection_algorithm_var = tk.StringVar(value=self.config.get("stacking_rejection_algorithm", self.reject_algo_keys[1]))
+        self.stacking_normalize_method_var = tk.StringVar(master=self.root, value=self.config.get("stacking_normalize_method", self.norm_method_keys[0]))
+        self.stacking_weighting_method_var = tk.StringVar(master=self.root, value=self.config.get("stacking_weighting_method", self.weight_method_keys[0]))
+        self.stacking_rejection_algorithm_var = tk.StringVar(master=self.root, value=self.config.get("stacking_rejection_algorithm", self.reject_algo_keys[1]))
         
-        self.stacking_kappa_low_var = tk.DoubleVar(value=self.config.get("stacking_kappa_low", 3.0))
-        self.stacking_kappa_high_var = tk.DoubleVar(value=self.config.get("stacking_kappa_high", 3.0))
-        self.stacking_winsor_limits_str_var = tk.StringVar(value=self.config.get("stacking_winsor_limits", "0.05,0.05"))
-        self.stacking_final_combine_method_var = tk.StringVar(value=self.config.get("stacking_final_combine_method", self.combine_method_keys[0]))
-        
+        self.stacking_kappa_low_var = tk.DoubleVar(master=self.root, value=self.config.get("stacking_kappa_low", 3.0))
+        self.stacking_kappa_high_var = tk.DoubleVar(master=self.root, value=self.config.get("stacking_kappa_high", 3.0))
+        self.stacking_winsor_limits_str_var = tk.StringVar(master=self.root, value=self.config.get("stacking_winsor_limits", "0.05,0.05"))
+        self.stacking_final_combine_method_var = tk.StringVar(master=self.root, value=self.config.get("stacking_final_combine_method", self.combine_method_keys[0]))
+        self.poststack_equalize_rgb_var = tk.BooleanVar(master=self.root, value=self.config.get("poststack_equalize_rgb", True))
+
         # --- PONDÉRATION RADIALE ---
-        self.apply_radial_weight_var = tk.BooleanVar(value=self.config.get("apply_radial_weight", False))
-        self.radial_feather_fraction_var = tk.DoubleVar(value=self.config.get("radial_feather_fraction", 0.8))
-        self.min_radial_weight_floor_var = tk.DoubleVar(value=self.config.get("min_radial_weight_floor", 0.0)) # Ajouté
+        self.apply_radial_weight_var = tk.BooleanVar(master=self.root, value=self.config.get("apply_radial_weight", False))
+        self.radial_feather_fraction_var = tk.DoubleVar(master=self.root, value=self.config.get("radial_feather_fraction", 0.8))
+        self.min_radial_weight_floor_var = tk.DoubleVar(master=self.root, value=self.config.get("min_radial_weight_floor", 0.0)) # Ajouté
         # radial_shape_power est géré via self.config directement
         
         # --- METHODE D'ASSEMBLAGE ---
-        self.final_assembly_method_var = tk.StringVar(
+        self.final_assembly_method_var = tk.StringVar(master=self.root, 
             value=self.config.get("final_assembly_method", self.assembly_method_keys[0])
         )
         self.final_assembly_method_var.trace_add("write", self._on_assembly_method_change)
@@ -256,24 +326,78 @@ class ZeMosaicGUI:
         num_workers_from_config = self.config.get("num_processing_workers", 0)
         if num_workers_from_config == -1:
             num_workers_from_config = 0
-        self.num_workers_var = tk.IntVar(value=num_workers_from_config)
-        self.winsor_workers_var = tk.IntVar(value=self.config.get("winsor_worker_limit", 6))
+        self.num_workers_var = tk.IntVar(master=self.root, value=num_workers_from_config)
+        self.winsor_workers_var = tk.IntVar(master=self.root, value=self.config.get("winsor_worker_limit", 6))
+        self.winsor_max_frames_var = tk.IntVar(master=self.root, value=self.config.get("winsor_max_frames_per_pass", 0))
         # --- FIN NOMBRE DE WORKERS ---
         # --- NOUVELLES VARIABLES TKINTER POUR LE ROGNAGE ---
-        self.apply_master_tile_crop_var = tk.BooleanVar(
+        self.apply_master_tile_crop_var = tk.BooleanVar(master=self.root,
             value=self.config.get("apply_master_tile_crop", True) # Désactivé par défaut
         )
-        self.master_tile_crop_percent_var = tk.DoubleVar(
-            value=self.config.get("master_tile_crop_percent", 18.0) # 18% par côté par défaut si activé
+        self.master_tile_crop_percent_var = tk.DoubleVar(master=self.root,
+            value=self.config.get("master_tile_crop_percent", 10.0) # 10% par côté par défaut si activé
         )
-        self.use_memmap_var = tk.BooleanVar(value=self.config.get("coadd_use_memmap", False))
-        self.mm_dir_var = tk.StringVar(value=self.config.get("coadd_memmap_dir", ""))
-        self.cleanup_memmap_var = tk.BooleanVar(value=self.config.get("coadd_cleanup_memmap", True))
-        self.auto_limit_frames_var = tk.BooleanVar(value=self.config.get("auto_limit_frames_per_master_tile", True))
-        self.max_raw_per_tile_var = tk.IntVar(value=self.config.get("max_raw_per_master_tile", 0))
-        self.use_gpu_phase5_var = tk.BooleanVar(value=self.config.get("use_gpu_phase5", False))
+        self.quality_crop_enabled_var = tk.BooleanVar(master=self.root,
+            value=self.config.get("quality_crop_enabled", False)
+        )
+        self.quality_crop_band_var = tk.IntVar(master=self.root,
+            value=self.config.get("quality_crop_band_px", 32)
+        )
+        self.quality_crop_ks_var = tk.DoubleVar(master=self.root,
+            value=self.config.get("quality_crop_k_sigma", 2.0)
+        )
+        self.quality_crop_margin_var = tk.IntVar(master=self.root,
+            value=self.config.get("quality_crop_margin_px", 8)
+        )
+        self.use_memmap_var = tk.BooleanVar(master=self.root, value=self.config.get("coadd_use_memmap", False))
+        try:
+            self.quality_crop_enabled_var.trace_add("write", self._update_quality_crop_state)
+        except Exception:
+            pass
+        self.mm_dir_var = tk.StringVar(master=self.root, value=self.config.get("coadd_memmap_dir", ""))
+        self.cleanup_memmap_var = tk.BooleanVar(master=self.root, value=self.config.get("coadd_cleanup_memmap", True))
+        self.auto_limit_frames_var = tk.BooleanVar(master=self.root, value=self.config.get("auto_limit_frames_per_master_tile", True))
+        self.max_raw_per_tile_var = tk.IntVar(master=self.root, value=self.config.get("max_raw_per_master_tile", 0))
+        intertile_sky_cfg = self.config.get("intertile_sky_percentile", [30.0, 70.0])
+        if not (isinstance(intertile_sky_cfg, (list, tuple)) and len(intertile_sky_cfg) >= 2):
+            intertile_sky_cfg = [30.0, 70.0]
+        self.intertile_match_var = tk.BooleanVar(master=self.root, value=self.config.get("intertile_photometric_match", True))
+        self.intertile_preview_size_var = tk.IntVar(master=self.root, value=self.config.get("intertile_preview_size", 512))
+        self.intertile_overlap_min_var = tk.DoubleVar(master=self.root, value=self.config.get("intertile_overlap_min", 0.05))
+        self.intertile_sky_low_var = tk.DoubleVar(master=self.root, value=float(intertile_sky_cfg[0]))
+        self.intertile_sky_high_var = tk.DoubleVar(master=self.root, value=float(intertile_sky_cfg[1]))
+        self.intertile_clip_sigma_var = tk.DoubleVar(master=self.root, value=self.config.get("intertile_robust_clip_sigma", 2.5))
+        self.use_auto_intertile_var = tk.BooleanVar(
+            master=self.root,
+            value=self.config.get("use_auto_intertile", False),
+        )
+        center_sky_cfg = self.config.get("p3_center_sky_percentile", [25.0, 60.0])
+        if not (isinstance(center_sky_cfg, (list, tuple)) and len(center_sky_cfg) >= 2):
+            center_sky_cfg = [25.0, 60.0]
+        self.center_out_normalization_var = tk.BooleanVar(
+            master=self.root,
+            value=self.config.get("center_out_normalization_p3", True),
+        )
+        self.p3_center_preview_size_var = tk.IntVar(
+            master=self.root,
+            value=self.config.get("p3_center_preview_size", 256),
+        )
+        self.p3_center_overlap_var = tk.DoubleVar(
+            master=self.root,
+            value=self.config.get("p3_center_min_overlap_fraction", 0.03),
+        )
+        self.p3_center_sky_low_var = tk.DoubleVar(master=self.root, value=float(center_sky_cfg[0]))
+        self.p3_center_sky_high_var = tk.DoubleVar(master=self.root, value=float(center_sky_cfg[1]))
+        self.p3_center_clip_sigma_var = tk.DoubleVar(
+            master=self.root,
+            value=self.config.get("p3_center_robust_clip_sigma", 2.5),
+        )
+        self.use_gpu_phase5_var = tk.BooleanVar(master=self.root, value=self.config.get("use_gpu_phase5", False))
+        # Logging level var (keys are ERROR, WARN, INFO, DEBUG)
+        self.logging_level_keys = ["ERROR", "WARN", "INFO", "DEBUG"]
+        self.logging_level_var = tk.StringVar(master=self.root, value=str(self.config.get("logging_level", "INFO")).upper())
         self._gpus = _detect_gpus()
-        self.gpu_selector_var = tk.StringVar(
+        self.gpu_selector_var = tk.StringVar(master=self.root, 
             value=self.config.get("gpu_selector", self._gpus[0][0] if self._gpus else "")
         )
         # ---  ---
@@ -281,6 +405,8 @@ class ZeMosaicGUI:
         self.translatable_widgets = {}
 
         self._build_ui()
+        self._update_quality_crop_state()
+        self._update_crop_options_state()
         self._update_solver_frames()
         self.root.after_idle(self._update_ui_language) # Déplacé après _build_ui pour que les widgets existent
         #self.root.after_idle(self._update_assembly_dependent_options) # En prévision d'un forçage de combinaisons 
@@ -500,6 +626,31 @@ class ZeMosaicGUI:
         ttk.Label(folders_frame, text="").grid(row=2, column=0, padx=5, pady=5, sticky="w"); self.translatable_widgets["save_final_16bit_label"] = folders_frame.grid_slaves(row=2,column=0)[0]
         ttk.Checkbutton(folders_frame, variable=self.save_final_uint16_var).grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
+        self.output_advanced_button = ttk.Button(
+            folders_frame,
+            text="",
+            command=self._toggle_output_advanced_options,
+        )
+        self.output_advanced_button.grid(row=3, column=0, columnspan=3, padx=5, pady=(0, 2), sticky="w")
+
+        self.output_advanced_frame = ttk.Frame(folders_frame)
+        self.output_advanced_frame.grid(row=4, column=0, columnspan=3, padx=5, pady=(0, 5), sticky="ew")
+        self.output_advanced_frame.columnconfigure(1, weight=1)
+
+        legacy_label = ttk.Label(self.output_advanced_frame, text="")
+        legacy_label.grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["legacy_rgb_cube_label"] = legacy_label
+        self.legacy_rgb_cube_check = ttk.Checkbutton(
+            self.output_advanced_frame,
+            variable=self.legacy_rgb_cube_var,
+        )
+        self.legacy_rgb_cube_check.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+
+        self._output_advanced_expanded = False
+        self.output_advanced_frame.grid_remove()
+        self._update_output_advanced_button_text()
+        self._update_legacy_toggle_state()
+
 
         # --- ASTAP Configuration Frame ---
         astap_cfg_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -531,6 +682,17 @@ class ZeMosaicGUI:
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["astap_sensitivity_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]; param_row_idx+=1
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
         ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]
+        param_row_idx += 1
+        # Target stacks (optional auto-threshold)
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_target_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0, to=999, increment=1, textvariable=self.cluster_target_groups_var, width=8).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_target_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]
+        param_row_idx += 1
+        # Split by orientation (deg)
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_orientation_split_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
+        ttk.Spinbox(params_frame, from_=0.0, to=180.0, increment=1.0, textvariable=self.cluster_orientation_split_var, width=8, format="%.1f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        ttk.Label(params_frame, text="").grid(row=param_row_idx, column=2, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_orientation_split_note"] = params_frame.grid_slaves(row=param_row_idx,column=2)[0]
         param_row_idx += 1
         # Removed: Force Luminance option (images are sent to ASTAP as-is)
 
@@ -611,6 +773,10 @@ class ZeMosaicGUI:
         self.final_combine_combo = ttk.Combobox(stacking_options_frame, values=[], state="readonly", width=25)
         self.final_combine_combo.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="ew", columnspan=3)
         self.final_combine_combo.bind("<<ComboboxSelected>>", lambda e, c=self.final_combine_combo, v=self.stacking_final_combine_method_var, k_list=self.combine_method_keys, p="combine_method": self._combo_to_key(e, c, v, k_list, p)); stk_opt_row += 1
+        self.post_equalize_rgb_label = ttk.Label(stacking_options_frame, text="")
+        self.post_equalize_rgb_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_post_equalize_rgb_label"] = self.post_equalize_rgb_label
+        self.post_equalize_rgb_check = ttk.Checkbutton(stacking_options_frame, variable=self.poststack_equalize_rgb_var)
+        self.post_equalize_rgb_check.grid(row=stk_opt_row, column=1, padx=5, pady=3, sticky="w"); stk_opt_row += 1
         # Pondération Radiale
         self.apply_radial_weight_label = ttk.Label(stacking_options_frame, text="")
         self.apply_radial_weight_label.grid(row=stk_opt_row, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["stacking_apply_radial_label"] = self.apply_radial_weight_label
@@ -697,6 +863,24 @@ class ZeMosaicGUI:
         winsor_workers_note = ttk.Label(perf_options_frame, text="")
         winsor_workers_note.grid(row=1, column=2, padx=(10,5), pady=5, sticky="ew")
         self.translatable_widgets["winsor_workers_note"] = winsor_workers_note
+
+        winsor_frames_label = ttk.Label(perf_options_frame, text="")
+        winsor_frames_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.translatable_widgets["winsor_frames_label"] = winsor_frames_label
+
+        self.winsor_frames_spinbox = ttk.Spinbox(
+            perf_options_frame,
+            from_=0,
+            to=9999,
+            increment=1,
+            textvariable=self.winsor_max_frames_var,
+            width=8
+        )
+        self.winsor_frames_spinbox.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+
+        winsor_frames_note = ttk.Label(perf_options_frame, text="")
+        winsor_frames_note.grid(row=2, column=2, padx=(10,5), pady=5, sticky="ew")
+        self.translatable_widgets["winsor_frames_note"] = winsor_frames_note
         # --- FIN CADRE OPTIONS DE PERFORMANCE ---
         # --- NOUVEAU CADRE : OPTIONS DE ROGNAGE DES TUILES MAÎTRESSES ---
         crop_options_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
@@ -736,6 +920,68 @@ class ZeMosaicGUI:
         crop_percent_note = ttk.Label(crop_options_frame, text="")
         crop_percent_note.grid(row=crop_opt_row, column=2, padx=(10,5), pady=3, sticky="ew")
         self.translatable_widgets["master_tile_crop_percent_note"] = crop_percent_note
+        crop_opt_row += 1
+
+        self.quality_crop_check = ttk.Checkbutton(
+            crop_options_frame,
+            text="",
+            variable=self.quality_crop_enabled_var,
+            command=self._update_quality_crop_state,
+        )
+        self.quality_crop_check.grid(row=crop_opt_row, column=0, columnspan=3, padx=5, pady=(6, 3), sticky="w")
+        self.translatable_widgets["quality_crop_toggle_label"] = self.quality_crop_check
+        crop_opt_row += 1
+
+        self.quality_crop_advanced_frame = ttk.LabelFrame(crop_options_frame, text="")
+        self.quality_crop_advanced_frame.grid(row=crop_opt_row, column=0, columnspan=3, padx=5, pady=(0, 6), sticky="ew")
+        self.translatable_widgets["quality_crop_advanced"] = self.quality_crop_advanced_frame
+        for col_idx in range(6):
+            self.quality_crop_advanced_frame.columnconfigure(col_idx, weight=0)
+
+        quality_band_label = ttk.Label(self.quality_crop_advanced_frame, text="")
+        quality_band_label.grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["quality_crop_band_label"] = quality_band_label
+        self.quality_crop_band_spinbox = ttk.Spinbox(
+            self.quality_crop_advanced_frame,
+            from_=4,
+            to=256,
+            increment=4,
+            textvariable=self.quality_crop_band_var,
+            width=6,
+        )
+        self.quality_crop_band_spinbox.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+
+        quality_ks_label = ttk.Label(self.quality_crop_advanced_frame, text="")
+        quality_ks_label.grid(row=0, column=2, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["quality_crop_ks_label"] = quality_ks_label
+        self.quality_crop_ks_spinbox = ttk.Spinbox(
+            self.quality_crop_advanced_frame,
+            from_=0.5,
+            to=5.0,
+            increment=0.1,
+            format="%.1f",
+            textvariable=self.quality_crop_ks_var,
+            width=6,
+        )
+        self.quality_crop_ks_spinbox.grid(row=0, column=3, padx=5, pady=3, sticky="w")
+
+        quality_margin_label = ttk.Label(self.quality_crop_advanced_frame, text="")
+        quality_margin_label.grid(row=0, column=4, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["quality_crop_margin_label"] = quality_margin_label
+        self.quality_crop_margin_spinbox = ttk.Spinbox(
+            self.quality_crop_advanced_frame,
+            from_=0,
+            to=64,
+            increment=1,
+            textvariable=self.quality_crop_margin_var,
+            width=6,
+        )
+        self.quality_crop_margin_spinbox.grid(row=0, column=5, padx=5, pady=3, sticky="w")
+        self._quality_crop_inputs = [
+            self.quality_crop_band_spinbox,
+            self.quality_crop_ks_spinbox,
+            self.quality_crop_margin_spinbox,
+        ]
         crop_opt_row += 1
         # --- FIN  CADRE DE ROGNAGE ---
 
@@ -792,6 +1038,211 @@ class ZeMosaicGUI:
         self.use_gpu_phase5_var.trace_add("write", on_gpu_check)
         on_gpu_check()
 
+        intertile_label = ttk.Label(final_assembly_options_frame, text="")
+        intertile_label.grid(row=asm_opt_row, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["intertile_match_label"] = intertile_label
+        self.intertile_match_check = ttk.Checkbutton(
+            final_assembly_options_frame,
+            variable=self.intertile_match_var,
+        )
+        self.intertile_match_check.grid(row=asm_opt_row, column=1, padx=5, pady=3, sticky="w")
+        asm_opt_row += 1
+
+        intertile_params_frame = ttk.Frame(final_assembly_options_frame)
+        intertile_params_frame.grid(row=asm_opt_row, column=0, columnspan=2, padx=5, pady=(0, 3), sticky="ew")
+        intertile_params_frame.columnconfigure(1, weight=1)
+
+        preview_label = ttk.Label(intertile_params_frame, text="")
+        preview_label.grid(row=0, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["intertile_preview_label"] = preview_label
+        ttk.Spinbox(
+            intertile_params_frame,
+            from_=128,
+            to=2048,
+            increment=64,
+            textvariable=self.intertile_preview_size_var,
+            width=8,
+        ).grid(row=0, column=1, padx=(8, 5), pady=2, sticky="w")
+        preview_hint = ttk.Label(intertile_params_frame, text="")
+        preview_hint.grid(row=0, column=2, padx=(8, 0), pady=2, sticky="w")
+        self.translatable_widgets["intertile_preview_hint"] = preview_hint
+
+        overlap_label = ttk.Label(intertile_params_frame, text="")
+        overlap_label.grid(row=1, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["intertile_overlap_label"] = overlap_label
+        ttk.Spinbox(
+            intertile_params_frame,
+            from_=0.0,
+            to=1.0,
+            increment=0.01,
+            textvariable=self.intertile_overlap_min_var,
+            width=8,
+            format="%.2f",
+        ).grid(row=1, column=1, padx=(8, 5), pady=2, sticky="w")
+        overlap_hint = ttk.Label(intertile_params_frame, text="")
+        overlap_hint.grid(row=1, column=2, padx=(8, 0), pady=2, sticky="w")
+        self.translatable_widgets["intertile_overlap_hint"] = overlap_hint
+
+        sky_label = ttk.Label(intertile_params_frame, text="")
+        sky_label.grid(row=2, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["intertile_sky_label"] = sky_label
+        sky_frame = ttk.Frame(intertile_params_frame)
+        sky_frame.grid(row=2, column=1, padx=(8, 5), pady=2, sticky="w")
+        ttk.Spinbox(
+            sky_frame,
+            from_=0.0,
+            to=100.0,
+            increment=1.0,
+            textvariable=self.intertile_sky_low_var,
+            width=5,
+            format="%.1f",
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Spinbox(
+            sky_frame,
+            from_=0.0,
+            to=100.0,
+            increment=1.0,
+            textvariable=self.intertile_sky_high_var,
+            width=5,
+            format="%.1f",
+        ).pack(side=tk.LEFT)
+
+        clip_label = ttk.Label(intertile_params_frame, text="")
+        clip_label.grid(row=3, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["intertile_clip_label"] = clip_label
+        ttk.Spinbox(
+            intertile_params_frame,
+            from_=0.5,
+            to=10.0,
+            increment=0.1,
+            textvariable=self.intertile_clip_sigma_var,
+            width=8,
+            format="%.1f",
+        ).grid(row=3, column=1, padx=(8, 5), pady=2, sticky="w")
+
+        self.intertile_auto_check = ttk.Checkbutton(
+            intertile_params_frame,
+            variable=self.use_auto_intertile_var,
+            text="",
+        )
+        self.intertile_auto_check.grid(row=4, column=0, columnspan=3, padx=0, pady=(4, 2), sticky="w")
+        self.translatable_widgets["intertile_auto_label"] = self.intertile_auto_check
+
+        asm_opt_row += 1
+        center_out_label = ttk.Label(final_assembly_options_frame, text="")
+        center_out_label.grid(row=asm_opt_row, column=0, padx=5, pady=3, sticky="w")
+        self.translatable_widgets["p3_center_out_label"] = center_out_label
+        self.center_out_check = ttk.Checkbutton(
+            final_assembly_options_frame,
+            variable=self.center_out_normalization_var,
+        )
+        self.center_out_check.grid(row=asm_opt_row, column=1, padx=5, pady=3, sticky="w")
+
+        asm_opt_row += 1
+        center_out_params_frame = ttk.Frame(final_assembly_options_frame)
+        center_out_params_frame.grid(row=asm_opt_row, column=0, columnspan=2, padx=5, pady=(0, 6), sticky="ew")
+        center_out_params_frame.columnconfigure(1, weight=1)
+
+        center_preview_label = ttk.Label(center_out_params_frame, text="")
+        center_preview_label.grid(row=0, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["p3_center_preview_label"] = center_preview_label
+        ttk.Spinbox(
+            center_out_params_frame,
+            from_=64,
+            to=1024,
+            increment=32,
+            textvariable=self.p3_center_preview_size_var,
+            width=8,
+        ).grid(row=0, column=1, padx=(8, 5), pady=2, sticky="w")
+        center_preview_hint = ttk.Label(center_out_params_frame, text="")
+        center_preview_hint.grid(row=0, column=2, padx=(8, 0), pady=2, sticky="w")
+        self.translatable_widgets["p3_center_preview_hint"] = center_preview_hint
+
+        center_overlap_label = ttk.Label(center_out_params_frame, text="")
+        center_overlap_label.grid(row=1, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["p3_center_overlap_label"] = center_overlap_label
+        ttk.Spinbox(
+            center_out_params_frame,
+            from_=0.0,
+            to=1.0,
+            increment=0.01,
+            textvariable=self.p3_center_overlap_var,
+            width=8,
+            format="%.2f",
+        ).grid(row=1, column=1, padx=(8, 5), pady=2, sticky="w")
+        center_overlap_hint = ttk.Label(center_out_params_frame, text="")
+        center_overlap_hint.grid(row=1, column=2, padx=(8, 0), pady=2, sticky="w")
+        self.translatable_widgets["p3_center_overlap_hint"] = center_overlap_hint
+
+        center_sky_label = ttk.Label(center_out_params_frame, text="")
+        center_sky_label.grid(row=2, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["p3_center_sky_label"] = center_sky_label
+        center_sky_frame = ttk.Frame(center_out_params_frame)
+        center_sky_frame.grid(row=2, column=1, padx=(8, 5), pady=2, sticky="w")
+        ttk.Spinbox(
+            center_sky_frame,
+            from_=0.0,
+            to=100.0,
+            increment=1.0,
+            textvariable=self.p3_center_sky_low_var,
+            width=5,
+            format="%.1f",
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Spinbox(
+            center_sky_frame,
+            from_=0.0,
+            to=100.0,
+            increment=1.0,
+            textvariable=self.p3_center_sky_high_var,
+            width=5,
+            format="%.1f",
+        ).pack(side=tk.LEFT)
+
+        center_clip_label = ttk.Label(center_out_params_frame, text="")
+        center_clip_label.grid(row=3, column=0, padx=0, pady=2, sticky="w")
+        self.translatable_widgets["p3_center_clip_label"] = center_clip_label
+        ttk.Spinbox(
+            center_out_params_frame,
+            from_=0.5,
+            to=10.0,
+            increment=0.1,
+            textvariable=self.p3_center_clip_sigma_var,
+            width=8,
+            format="%.1f",
+        ).grid(row=3, column=1, padx=(8, 5), pady=2, sticky="w")
+
+        asm_opt_row += 1
+
+        # --- Logging Options Frame ---
+        self.logging_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("gui_logging_title", "Logging"))
+        self.logging_frame.pack(fill=tk.X, pady=(0,10))
+        self.logging_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.logging_frame, text=self._tr("gui_logging_level", "Logging level:")).grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        # Display values localized, but store keys
+        level_display = [
+            self._tr("logging_level_error", "Error"),
+            self._tr("logging_level_warn", "Warn"),
+            self._tr("logging_level_info", "Info"),
+            self._tr("logging_level_debug", "Debug"),
+        ]
+        # Map key -> display
+        self._logging_level_display_map = dict(zip(self.logging_level_keys, level_display))
+        # Map display -> key
+        self._logging_level_reverse_map = {v: k for k, v in self._logging_level_display_map.items()}
+        self.logging_level_combo = ttk.Combobox(self.logging_frame, values=level_display, state="readonly", width=15)
+        # Set display according to current key
+        try:
+            self.logging_level_combo.set(self._logging_level_display_map.get(self.logging_level_var.get(), level_display[2]))
+        except Exception:
+            self.logging_level_combo.set(level_display[2])
+        def _on_logging_level_selected(event=None):
+            disp = self.logging_level_combo.get()
+            key = self._logging_level_reverse_map.get(disp, "INFO")
+            self.logging_level_var.set(key)
+        self.logging_level_combo.bind("<<ComboboxSelected>>", _on_logging_level_selected)
+        self.logging_level_combo.grid(row=0, column=1, sticky="w", padx=5, pady=3)
+
+        # --- Memmap Options Frame ---
         self.memmap_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("gui_memmap_title", "Options memmap (coadd)"))
         self.memmap_frame.pack(fill=tk.X, pady=(0,10))
         self.memmap_frame.columnconfigure(1, weight=1)
@@ -809,6 +1260,11 @@ class ZeMosaicGUI:
         button_bar = ttk.Frame(self.scrollable_content_frame)
         button_bar.pack(pady=15)
 
+        # New: Open Filter button (does not start processing)
+        self.open_filter_button = ttk.Button(button_bar, text="", command=self._open_filter_only)
+        self.open_filter_button.pack(side=tk.LEFT, padx=(0, 10), ipady=5)
+        self.translatable_widgets["open_filter_button"] = self.open_filter_button
+
         self.launch_button = ttk.Button(button_bar, text="", command=self._start_processing, style="Accent.TButton")
         self.launch_button.pack(side=tk.LEFT, padx=(0, 10), ipady=5)
         self.translatable_widgets["launch_button"] = self.launch_button
@@ -822,6 +1278,10 @@ class ZeMosaicGUI:
         if not ZEMOSAIC_WORKER_AVAILABLE:
             self.launch_button.config(state=tk.DISABLED)
             self.stop_button.config(state=tk.DISABLED)
+            try:
+                self.open_filter_button.config(state=tk.DISABLED)
+            except Exception:
+                pass
         try: style = ttk.Style(); style.configure("Accent.TButton", font=('Segoe UI', 10, 'bold'), padding=5)
         except tk.TclError: print("AVERT GUI: Style 'Accent.TButton' non disponible.")
 
@@ -843,13 +1303,40 @@ class ZeMosaicGUI:
 
         self.master_tile_count_label_widget = ttk.Label(time_display_subframe,textvariable=self.master_tile_count_var,font=("Segoe UI", 9, "bold"), width=12 )# Un peu plus large pour "XXX / XXX"    
         self.master_tile_count_label_widget.pack(side=tk.LEFT, padx=(0,5))
+
+        # Afficher aussi un compteur de fichiers bruts pour la Phase 1
+        files_text_label = ttk.Label(time_display_subframe, text=self._tr("files_text_label", "Files remaining:"))
+        files_text_label.pack(side=tk.LEFT, padx=(10,2))
+        self.translatable_widgets["files_text_label"] = files_text_label
+        self.file_count_label_widget = ttk.Label(time_display_subframe, textvariable=self.file_count_var, font=("Segoe UI", 9, "bold"), width=12)
+        self.file_count_label_widget.pack(side=tk.LEFT, padx=(0,5))
+        # Indicateur de phase courante
+        phase_text_label = ttk.Label(time_display_subframe, text=self._tr("phase_text_label", "Phase:"))
+        phase_text_label.pack(side=tk.LEFT, padx=(10,2))
+        self.translatable_widgets["phase_text_label"] = phase_text_label
+        self.phase_label_widget = ttk.Label(time_display_subframe, textvariable=self.phase_var, font=("Segoe UI", 9, "bold"))
+        self.phase_label_widget.pack(side=tk.LEFT, padx=(0,5))
         log_frame = ttk.LabelFrame(self.scrollable_content_frame, text="", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(5,5)); self.translatable_widgets["log_frame_title"] = log_frame
         self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=10, state=tk.DISABLED, font=("Consolas", 9))
+        # Scrollbar verticale (à droite)
         log_scrollbar_y_text = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        log_scrollbar_x_text = ttk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
+        # Sous-frame en bas pour accueillir la barre horizontale + le bouton Copier
+        log_bottom_frame = ttk.Frame(log_frame)
+        # Scrollbar horizontale (à gauche dans la sous-frame, prend tout l'espace disponible)
+        log_scrollbar_x_text = ttk.Scrollbar(log_bottom_frame, orient="horizontal", command=self.log_text.xview)
+        # Bouton pour copier le contenu du log dans le presse-papiers
+        copy_btn = ttk.Button(log_bottom_frame, text=self._tr("log_copy_button", "Copy"), command=self._copy_log_to_clipboard, width=8)
+        self.translatable_widgets["log_copy_button"] = copy_btn
+        # Lier les scrollbars au widget texte
         self.log_text.config(yscrollcommand=log_scrollbar_y_text.set, xscrollcommand=log_scrollbar_x_text.set)
-        log_scrollbar_y_text.pack(side=tk.RIGHT, fill=tk.Y); log_scrollbar_x_text.pack(side=tk.BOTTOM, fill=tk.X)
+        # Packing: d'abord la scrollbar verticale à droite, puis la sous-frame en bas,
+        # puis enfin la zone de texte qui occupe le reste.
+        log_scrollbar_y_text.pack(side=tk.RIGHT, fill=tk.Y)
+        # Dans la sous-frame du bas: la barre horizontale prend l'espace à gauche, le bouton à droite
+        log_bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        log_scrollbar_x_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        copy_btn.pack(side=tk.RIGHT, padx=(5,0))
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
 
@@ -870,7 +1357,7 @@ class ZeMosaicGUI:
             # print("DEBUG GUI: Root window non existante dans _update_ui_language.")
             return
 
-        self.root.title(self._tr("window_title", "ZeMosaic V2.0 - Hierarchical Mosaicker"))
+        self.root.title(self._tr("window_title", "ZeMosaic V2.9 - Hierarchical Mosaicker"))
 
         # Traduction des widgets standards (Labels, Buttons, Titres de Frames, Onglets etc.)
         for key, widget_info in self.translatable_widgets.items():
@@ -929,6 +1416,8 @@ class ZeMosaicGUI:
                     self.elapsed_time_var.set(self._tr("initial_elapsed_time", "00:00:00"))
                 except tk.TclError: pass
 
+        self._update_output_advanced_button_text()
+
         # S'assurer que l'état des paramètres de rejet est mis à jour (déjà correct)
         if hasattr(self, '_update_rejection_params_state'):
             try:
@@ -947,12 +1436,122 @@ class ZeMosaicGUI:
             return # Widgets pas encore prêts
 
         try:
-            if self.apply_master_tile_crop_var.get():
+            quality_enabled = bool(self.quality_crop_enabled_var.get()) if hasattr(self, 'quality_crop_enabled_var') else False
+        except tk.TclError:
+            quality_enabled = False
+
+        try:
+            if self.apply_master_tile_crop_var.get() and not quality_enabled:
                 self.crop_percent_spinbox.config(state=tk.NORMAL)
             else:
                 self.crop_percent_spinbox.config(state=tk.DISABLED)
         except tk.TclError:
             pass # Widget peut avoir été détruit
+
+    def _update_quality_crop_state(self, *args):
+        """Affiche ou masque le panneau avancé et gère l'état des champs qualité."""
+        if not hasattr(self, 'quality_crop_advanced_frame'):
+            return
+
+        try:
+            enabled = bool(self.quality_crop_enabled_var.get())
+        except tk.TclError:
+            enabled = False
+
+        try:
+            if enabled:
+                self.quality_crop_advanced_frame.grid()
+            else:
+                self.quality_crop_advanced_frame.grid_remove()
+        except tk.TclError:
+            pass
+
+        state = "normal" if enabled else "disabled"
+        for widget in getattr(self, "_quality_crop_inputs", []):
+            try:
+                widget.config(state=state)
+            except tk.TclError:
+                pass
+
+    def _toggle_output_advanced_options(self, *args):
+        if not hasattr(self, 'output_advanced_frame'):
+            return
+        try:
+            if not bool(self.save_final_uint16_var.get()):
+                return
+        except tk.TclError:
+            return
+
+        self._output_advanced_expanded = not getattr(self, "_output_advanced_expanded", False)
+        try:
+            if self._output_advanced_expanded:
+                self.output_advanced_frame.grid()
+            else:
+                self.output_advanced_frame.grid_remove()
+        except tk.TclError:
+            pass
+        self._update_output_advanced_button_text()
+
+    def _update_output_advanced_button_text(self):
+        if not hasattr(self, 'output_advanced_button'):
+            return
+        expanded = bool(getattr(self, "_output_advanced_expanded", False))
+        enabled = False
+        try:
+            enabled = bool(self.save_final_uint16_var.get())
+        except tk.TclError:
+            enabled = False
+        key = "output_advanced_hide" if expanded and enabled else "output_advanced_show"
+        default_text = "Advanced ▾" if expanded and enabled else "Advanced ▸"
+        try:
+            text = self._tr(key, default_text)
+        except Exception:
+            text = default_text
+        try:
+            self.output_advanced_button.config(text=text)
+        except tk.TclError:
+            pass
+
+    def _update_legacy_toggle_state(self, *args):
+        if not hasattr(self, 'legacy_rgb_cube_check'):
+            return
+        try:
+            enabled = bool(self.save_final_uint16_var.get())
+        except tk.TclError:
+            enabled = False
+
+        state = tk.NORMAL if enabled else tk.DISABLED
+        try:
+            self.legacy_rgb_cube_check.config(state=state)
+        except tk.TclError:
+            pass
+
+        try:
+            self.output_advanced_button.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        except tk.TclError:
+            pass
+
+        if not enabled:
+            if getattr(self, "_output_advanced_expanded", False):
+                try:
+                    self.output_advanced_frame.grid_remove()
+                except tk.TclError:
+                    pass
+            self._output_advanced_expanded = False
+            try:
+                self.legacy_rgb_cube_var.set(False)
+            except tk.TclError:
+                pass
+        else:
+            if getattr(self, "_output_advanced_expanded", False):
+                try:
+                    self.output_advanced_frame.grid()
+                except tk.TclError:
+                    pass
+
+        self._update_output_advanced_button_text()
+
+        self._update_crop_options_state()
 
     def _on_assembly_method_change(self, *args):
         method = self.final_assembly_method_var.get()
@@ -1087,6 +1686,199 @@ class ZeMosaicGUI:
         if dir_path: self.astap_data_dir_var.set(dir_path)
 
 
+    def _open_filter_only(self):
+        """Open the optional filter UI without starting the processing.
+
+        - Scans the current input folder for FITS files (recursively)
+        - Builds lightweight header items (path, WCS/shape/center when possible)
+        - Launches zemosaic_filter_gui.launch_filter_interface
+        - Applies any file moves performed by the filter; does NOT start worker
+        """
+        if self.is_processing:
+            messagebox.showwarning(self._tr("processing_in_progress_title"), self._tr("processing_already_running_warning"), parent=self.root)
+            return
+
+        input_dir = self.input_dir_var.get().strip()
+        if not (input_dir and os.path.isdir(input_dir)):
+            messagebox.showerror(self._tr("error_title"), self._tr("invalid_input_folder_error"), parent=self.root)
+            return
+
+        # Ensure the directory contains at least one FITS file without performing
+        # a full upfront crawl (which can freeze the UI on large trees).
+        has_fits = False
+        try:
+            for root_dir, _dirs, files in os.walk(input_dir):
+                for fn in files:
+                    if fn.lower().endswith((".fit", ".fits")):
+                        has_fits = True
+                        break
+                if has_fits:
+                    break
+        except Exception:
+            has_fits = False
+
+        if not has_fits:
+            messagebox.showwarning(
+                self._tr("error_title"),
+                self._tr("run_error_no_fits_found_input", "No FITS files found in input folder."),
+                parent=self.root,
+            )
+            return
+
+        # Import filter UI lazily and launch
+        try:
+            try:
+                from .zemosaic_filter_gui import launch_filter_interface
+            except Exception:
+                from zemosaic_filter_gui import launch_filter_interface
+        except Exception:
+            messagebox.showerror(self._tr("critical_error_title"), "Filter UI not available.", parent=self.root)
+            return
+
+        try:
+            # Pass current clustering parameters so the filter UI reflects GUI state
+            _initial_overrides = None
+            try:
+                _initial_overrides = {
+                    "cluster_panel_threshold": float(self.cluster_threshold_var.get()) if hasattr(self, 'cluster_threshold_var') else float(self.config.get("cluster_panel_threshold", 0.05)),
+                    "cluster_target_groups": int(self.cluster_target_groups_var.get()) if hasattr(self, 'cluster_target_groups_var') else int(self.config.get("cluster_target_groups", 0)),
+                    "cluster_orientation_split_deg": float(self.cluster_orientation_split_var.get()) if hasattr(self, 'cluster_orientation_split_var') else float(self.config.get("cluster_orientation_split_deg", 0.0)),
+                }
+            except Exception:
+                _initial_overrides = None
+            solver_cfg_payload = None
+            config_overrides = None
+            try:
+                astap_exe = self.astap_exe_path_var.get().strip()
+                astap_data = self.astap_data_dir_var.get().strip()
+                try:
+                    astap_radius = float(self.astap_search_radius_var.get())
+                except Exception:
+                    astap_radius = self.solver_settings.astap_search_radius_deg
+                try:
+                    astap_downsample = int(self.astap_downsample_var.get())
+                except Exception:
+                    astap_downsample = self.solver_settings.astap_downsample
+                try:
+                    astap_sensitivity = int(self.astap_sensitivity_var.get())
+                except Exception:
+                    astap_sensitivity = self.solver_settings.astap_sensitivity
+
+                self.solver_settings.astap_executable_path = astap_exe
+                self.solver_settings.astap_data_directory_path = astap_data
+                self.solver_settings.astap_search_radius_deg = astap_radius
+                self.solver_settings.astap_downsample = astap_downsample
+                self.solver_settings.astap_sensitivity = astap_sensitivity
+
+                solver_cfg_payload = asdict(self.solver_settings)
+
+                config_overrides = {
+                    "astap_executable_path": astap_exe,
+                    "astap_data_directory_path": astap_data,
+                    "astap_default_search_radius": astap_radius,
+                    "astap_default_downsample": astap_downsample,
+                    "astap_default_sensitivity": astap_sensitivity,
+                }
+                try:
+                    config_overrides.update({
+                        "auto_limit_frames_per_master_tile": bool(self.auto_limit_frames_var.get()),
+                        "max_raw_per_master_tile": int(self.max_raw_per_tile_var.get()),
+                        "apply_master_tile_crop": bool(self.apply_master_tile_crop_var.get()),
+                        "master_tile_crop_percent": float(self.master_tile_crop_percent_var.get()),
+                        "quality_crop_enabled": bool(self.quality_crop_enabled_var.get()),
+                        "quality_crop_band_px": int(self.quality_crop_band_var.get()),
+                        "quality_crop_k_sigma": float(self.quality_crop_ks_var.get()),
+                        "quality_crop_margin_px": int(self.quality_crop_margin_var.get()),
+                    })
+                except Exception:
+                    pass
+            except Exception:
+                solver_cfg_payload = asdict(self.solver_settings)
+                config_overrides = None
+
+            result = launch_filter_interface(
+                input_dir,
+                _initial_overrides,
+                stream_scan=True,
+                scan_recursive=True,
+                batch_size=200,
+                preview_cap=1500,
+                solver_settings_dict=solver_cfg_payload,
+                config_overrides=config_overrides,
+            )
+        except Exception as e:
+            self._log_message(f"[ZGUI] Filter UI error: {e}", level="WARN")
+            return
+
+        # Support both legacy (list) and new (list, accepted)
+        accepted = True; filtered_list = None; overrides = None
+        if isinstance(result, tuple) and len(result) >= 1:
+            filtered_list = result[0]
+            if len(result) >= 2:
+                try: accepted = bool(result[1])
+                except Exception: accepted = True
+            if len(result) >= 3:
+                try: overrides = result[2]
+                except Exception: overrides = None
+        else:
+            filtered_list = result
+
+        # Log a small message; do not start processing
+        if accepted:
+            try:
+                kept = len(filtered_list) if isinstance(filtered_list, list) else 0
+                total = None
+                if isinstance(overrides, dict):
+                    try:
+                        total = int(overrides.get("resolved_wcs_count"))
+                    except Exception:
+                        total = None
+                if total is None and isinstance(filtered_list, list):
+                    total = len(filtered_list)
+                self._log_message(self._tr("info", "Info"), level="INFO_DETAIL")
+                if total is not None:
+                    self._log_message(
+                        f"[ZGUI] Filter validated: kept {kept}/{total}. No processing started.",
+                        level="INFO_DETAIL",
+                    )
+                else:
+                    self._log_message(
+                        f"[ZGUI] Filter validated: kept {kept} files. No processing started.",
+                        level="INFO_DETAIL",
+                    )
+            except Exception:
+                pass
+            # Apply clustering overrides if provided
+            try:
+                if isinstance(overrides, dict):
+                    if 'cluster_panel_threshold' in overrides and hasattr(self, 'cluster_threshold_var'):
+                        self.cluster_threshold_var.set(float(overrides['cluster_panel_threshold']))
+                    if 'cluster_target_groups' in overrides and hasattr(self, 'cluster_target_groups_var'):
+                        self.cluster_target_groups_var.set(int(overrides['cluster_target_groups']))
+                    if 'cluster_orientation_split_deg' in overrides and hasattr(self, 'cluster_orientation_split_var'):
+                        self.cluster_orientation_split_var.set(float(overrides['cluster_orientation_split_deg']))
+                    # Persist to in-memory config so future opens keep it
+                    try:
+                        self.config["cluster_panel_threshold"] = float(self.cluster_threshold_var.get())
+                        self.config["cluster_target_groups"] = int(self.cluster_target_groups_var.get())
+                        self.config["cluster_orientation_split_deg"] = float(self.cluster_orientation_split_var.get())
+                    except Exception:
+                        pass
+                    try:
+                        # Nudge UI refresh
+                        if hasattr(self.root, 'update_idletasks'):
+                            self.root.update_idletasks()
+                    except Exception:
+                        pass
+                    self._log_message("[ZGUI] Applied clustering overrides from filter UI.", level="INFO_DETAIL")
+            except Exception:
+                pass
+        else:
+            # Mark cancelled to ensure GUI end-of-run messages behave consistently if used as pre-run stage
+            self._cancel_requested = True
+            self._log_message("log_key_processing_cancelled", level="WARN")
+
+
 
 # DANS zemosaic_gui.py
 # DANS la classe ZeMosaicGUI
@@ -1114,6 +1906,68 @@ class ZeMosaicGUI:
             elif message_key_or_raw == "CHRONO_STOP_REQUEST":
                 if self.root.winfo_exists(): self.root.after_idle(self._stop_gui_chrono)
                 is_control_message = True
+            # --- Overrides from filter UI launched in worker ---
+            elif message_key_or_raw.startswith("CLUSTER_OVERRIDE:"):
+                payload = message_key_or_raw.split(":", 1)[1]
+                # Expected format: panel=<float>;target=<int>
+                new_thr = None; new_tgt = None
+                try:
+                    parts = [p.strip() for p in payload.split(';') if p.strip()]
+                    for p in parts:
+                        if p.startswith("panel="):
+                            try:
+                                new_thr = float(p.split("=", 1)[1])
+                            except Exception:
+                                pass
+                        elif p.startswith("target="):
+                            try:
+                                new_tgt = int(p.split("=", 1)[1])
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                def _apply_cluster_overrides():
+                    try:
+                        if new_thr is not None and hasattr(self, 'cluster_threshold_var'):
+                            self.cluster_threshold_var.set(float(new_thr))
+                        if new_tgt is not None and hasattr(self, 'cluster_target_groups_var'):
+                            self.cluster_target_groups_var.set(int(new_tgt))
+                        # Persist in-memory config
+                        try:
+                            if new_thr is not None:
+                                self.config["cluster_panel_threshold"] = float(self.cluster_threshold_var.get())
+                            if new_tgt is not None:
+                                self.config["cluster_target_groups"] = int(self.cluster_target_groups_var.get())
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self.root, 'update_idletasks'):
+                                self.root.update_idletasks()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                if self.root.winfo_exists(): self.root.after_idle(_apply_cluster_overrides)
+                is_control_message = True
+            # --- Indicateur de phase courante ---
+            elif message_key_or_raw.startswith("PHASE_UPDATE:"):
+                phase_id = message_key_or_raw.split(":", 1)[1].strip()
+                def update_phase_label():
+                    try:
+                        phase_num = None
+                        if phase_id.isdigit():
+                            phase_num = int(phase_id)
+                        if phase_num is not None:
+                            phase_name = self._tr(f"phase_name_{phase_num}")
+                            display = self._tr("phase_display_format", "P{num} - {name}", num=phase_num, name=phase_name)
+                        else:
+                            display = str(phase_id)
+                        if hasattr(self.phase_var, 'set') and callable(self.phase_var.set):
+                            self.phase_var.set(display)
+                    except Exception:
+                        pass
+                if self.root.winfo_exists(): self.root.after_idle(update_phase_label)
+                is_control_message = True
             # --- AJOUT POUR INTERCEPTER MASTER_TILE_COUNT_UPDATE ---
             elif message_key_or_raw.startswith("MASTER_TILE_COUNT_UPDATE:"):
                 tile_count_string = message_key_or_raw.split(":", 1)[1]
@@ -1124,8 +1978,34 @@ class ZeMosaicGUI:
                             except tk.TclError: pass # Ignorer si fenêtre détruite
                     if self.root.winfo_exists(): self.root.after_idle(update_tile_count_label)
                 is_control_message = True
+            # --- Compteur de fichiers bruts (Phase 1) ---
+            elif message_key_or_raw.startswith("RAW_FILE_COUNT_UPDATE:"):
+                files_count_string = message_key_or_raw.split(":", 1)[1]
+                # Convert "X/N" to remaining = N - X if possible
+                remaining_display = files_count_string
+                try:
+                    cur, tot = files_count_string.split("/")
+                    cur_i, tot_i = int(cur.strip()), int(tot.strip())
+                    remain = max(0, tot_i - cur_i)
+                    remaining_display = str(remain)
+                except Exception:
+                    pass
+                if hasattr(self, 'file_count_var') and self.file_count_var:
+                    def update_files_count_label():
+                        if hasattr(self.file_count_var, 'set') and callable(self.file_count_var.set):
+                            try: self.file_count_var.set(remaining_display)
+                            except tk.TclError: pass
+                    if self.root.winfo_exists(): self.root.after_idle(update_files_count_label)
+                is_control_message = True
             # --- FIN AJOUT ---
         
+        # If worker signals cancellation, reflect it locally
+        try:
+            if isinstance(message_key_or_raw, str) and message_key_or_raw == "log_key_processing_cancelled":
+                self._cancel_requested = True
+        except Exception:
+            pass
+
         if is_control_message:
             return # Ne pas traiter plus loin ces messages de contrôle
 
@@ -1258,6 +2138,23 @@ class ZeMosaicGUI:
         self._chrono_after_id = None
         print("DEBUG GUI: Chronomètre arrêté.")
 
+    def _copy_log_to_clipboard(self):
+        try:
+            if not hasattr(self, 'log_text') or not self.log_text.winfo_exists():
+                return
+            content = self.log_text.get("1.0", tk.END)
+        except tk.TclError:
+            content = ""
+        content = (content or "").strip()
+        if not content:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            if hasattr(self.root, 'update'): self.root.update()
+        except Exception as e:
+            print(f"WARN GUI: clipboard copy failed: {e}")
+
     def on_worker_progress(self, stage: str, current: int, total: int):
         """Handle progress updates for a specific processing stage."""
         if stage not in self._stage_times:
@@ -1309,9 +2206,10 @@ class ZeMosaicGUI:
             return
 
         # 1. RÉCUPÉRER TOUTES les valeurs des variables Tkinter
+        skip_filter_ui_for_run = False
         input_dir = self.input_dir_var.get()
         output_dir = self.output_dir_var.get()
-        astap_exe = self.astap_exe_path_var.get() 
+        astap_exe = self.astap_exe_path_var.get()
         astap_data = self.astap_data_dir_var.get()
         
         try:
@@ -1319,7 +2217,9 @@ class ZeMosaicGUI:
             astap_downsample_val = self.astap_downsample_var.get()
             astap_sensitivity_val = self.astap_sensitivity_var.get()
             cluster_thresh_val = self.cluster_threshold_var.get()
-            
+            cluster_target_groups_val = self.cluster_target_groups_var.get()
+            cluster_orientation_split_val = self.cluster_orientation_split_var.get()
+
             stack_norm_method = self.stacking_normalize_method_var.get()
             stack_weight_method = self.stacking_weighting_method_var.get()
             stack_reject_algo = self.stacking_rejection_algorithm_var.get()
@@ -1328,11 +2228,12 @@ class ZeMosaicGUI:
             stack_winsor_limits_str = self.stacking_winsor_limits_str_var.get()
             stack_final_combine = self.stacking_final_combine_method_var.get()
 
+            poststack_equalize_rgb_val = self.poststack_equalize_rgb_var.get()
             apply_radial_weight_val = self.apply_radial_weight_var.get()
             radial_feather_fraction_val = self.radial_feather_fraction_var.get()
             min_radial_weight_floor_val = self.min_radial_weight_floor_var.get()
             radial_shape_power_val = self.config.get("radial_shape_power", 2.0) # Toujours depuis config pour l'instant
-            
+
             final_assembly_method_val = self.final_assembly_method_var.get()
             num_base_workers_gui_val = self.num_workers_var.get()
 
@@ -1340,6 +2241,11 @@ class ZeMosaicGUI:
             self.solver_settings.api_key = self.astrometry_api_key_var.get().strip()
             self.solver_settings.timeout = self.astrometry_timeout_var.get()
             self.solver_settings.downsample = self.astrometry_downsample_var.get()
+            self.solver_settings.astap_executable_path = astap_exe
+            self.solver_settings.astap_data_directory_path = astap_data
+            self.solver_settings.astap_search_radius_deg = astap_radius_val
+            self.solver_settings.astap_downsample = astap_downsample_val
+            self.solver_settings.astap_sensitivity = astap_sensitivity_val
             try:
                 self.solver_settings.save_default()
             except Exception:
@@ -1348,13 +2254,47 @@ class ZeMosaicGUI:
             # --- RÉCUPÉRATION DES NOUVELLES VALEURS POUR LE ROGNAGE ---
             apply_master_tile_crop_val = self.apply_master_tile_crop_var.get()
             master_tile_crop_percent_val = self.master_tile_crop_percent_var.get()
+            quality_crop_enabled_val = self.quality_crop_enabled_var.get()
+            try:
+                quality_crop_band_val = int(self.quality_crop_band_var.get())
+            except Exception:
+                quality_crop_band_val = int(self.config.get("quality_crop_band_px", 32))
+                self.quality_crop_band_var.set(quality_crop_band_val)
+            try:
+                quality_crop_k_sigma_val = float(self.quality_crop_ks_var.get())
+            except Exception:
+                quality_crop_k_sigma_val = float(self.config.get("quality_crop_k_sigma", 2.0))
+                self.quality_crop_ks_var.set(quality_crop_k_sigma_val)
+            try:
+                quality_crop_margin_val = int(self.quality_crop_margin_var.get())
+            except Exception:
+                quality_crop_margin_val = int(self.config.get("quality_crop_margin_px", 8))
+                self.quality_crop_margin_var.set(quality_crop_margin_val)
             # --- FIN RÉCUPÉRATION ROGNAGE ---
             
-        except tk.TclError as e: 
-            messagebox.showerror(self._tr("param_error_title"), 
-                                 self._tr("invalid_param_value_error", error=e), 
+        except tk.TclError as e:
+            messagebox.showerror(self._tr("param_error_title"),
+                                 self._tr("invalid_param_value_error", error=e),
                                  parent=self.root)
             return
+
+        # 3. Synchroniser les paramètres de stacking depuis l'UI vers la config en mémoire
+        try:
+            self.config["stacking_normalize_method"] = stack_norm_method
+            self.config["stacking_weighting_method"] = stack_weight_method
+            self.config["stacking_rejection_algorithm"] = stack_reject_algo
+            self.config["stacking_kappa_low"] = float(stack_kappa_low)
+            self.config["stacking_kappa_high"] = float(stack_kappa_high)
+            self.config["stacking_final_combine_method"] = stack_final_combine
+            self.config["poststack_equalize_rgb"] = bool(poststack_equalize_rgb_val)
+        except Exception:
+            pass
+
+        try:
+            # Certains widgets stockent encore les limites Winsor comme chaîne
+            self.config["stacking_winsor_limits"] = str(stack_winsor_limits_str)
+        except Exception:
+            pass
 
         # 2. VALIDATIONS (chemins, etc.)
         # ... (section de validation inchangée pour l'instant)
@@ -1368,17 +2308,33 @@ class ZeMosaicGUI:
             messagebox.showerror(self._tr("error_title"), self._tr("output_folder_creation_error", error=e), parent=self.root); return
         if not (astap_exe and os.path.isfile(astap_exe)): 
             messagebox.showerror(self._tr("error_title"), self._tr("invalid_astap_exe_error"), parent=self.root); return
-        if not (astap_data and os.path.isdir(astap_data)): 
+        if not (astap_data and os.path.isdir(astap_data)):
             if not messagebox.askokcancel(self._tr("astap_data_dir_title", "ASTAP Data Directory"),
-                                          self._tr("astap_data_dir_missing_or_invalid_continue_q", 
+                                          self._tr("astap_data_dir_missing_or_invalid_continue_q",
                                                    path=astap_data,
                                                    default_path=self.config.get("astap_data_directory_path","")),
                                           icon='warning', parent=self.root):
                 return
 
+        # 2bis. Choix utilisateur concernant l'ouverture du filtre
+        try:
+            wants_filter_window = messagebox.askyesno(
+                self._tr("filter_prompt_title", "Filter range and set clustering?"),
+                self._tr(
+                    "filter_prompt_message",
+                    "Do you want to open the filter window to adjust the range and clustering before processing?",
+                ),
+                parent=self.root,
+                icon='question',
+            )
+        except tk.TclError:
+            wants_filter_window = True
+        if wants_filter_window is False:
+            skip_filter_ui_for_run = True
+
 
         # 3. PARSING et VALIDATION des limites Winsor (inchangé)
-        parsed_winsor_limits = (0.05, 0.05) 
+        parsed_winsor_limits = (0.05, 0.05)
         if stack_reject_algo == "winsorized_sigma_clip":
             try:
                 low_str, high_str = stack_winsor_limits_str.split(',')
@@ -1395,6 +2351,10 @@ class ZeMosaicGUI:
         # Remise à zéro du compteur master-tiles
         if hasattr(self, "master_tile_count_var"):
             self.master_tile_count_var.set("")
+        if hasattr(self, "file_count_var"):
+            self.file_count_var.set("")
+        if hasattr(self, "phase_var"):
+            self.phase_var.set("")
         self.is_processing = True
         self._cancel_requested = False
         self.launch_button.config(state=tk.DISABLED)
@@ -1405,6 +2365,8 @@ class ZeMosaicGUI:
         self._log_message("CHRONO_START_REQUEST", None, "CHRONO_LEVEL")
         self._log_message("log_key_processing_started", level="INFO")
         # ... (autres logs d'info) ...
+        if skip_filter_ui_for_run:
+            self._log_message("log_filter_ui_skipped", level="INFO_DETAIL")
 
         # -- Gestion du dossier memmap par défaut --
         memmap_dir = self.mm_dir_var.get().strip()
@@ -1416,8 +2378,36 @@ class ZeMosaicGUI:
                 level="INFO",
             )
 
+        # Persist selected clustering threshold for next runs
+        try:
+            self.config["cluster_panel_threshold"] = float(cluster_thresh_val)
+            self.config["cluster_target_groups"] = int(cluster_target_groups_val)
+            self.config["cluster_orientation_split_deg"] = float(cluster_orientation_split_val)
+        except Exception:
+            pass
+
         self.config["winsor_worker_limit"] = self.winsor_workers_var.get()
+        self.config["winsor_max_frames_per_pass"] = self.winsor_max_frames_var.get()
         self.config["max_raw_per_master_tile"] = self.max_raw_per_tile_var.get()
+        self.config["intertile_photometric_match"] = bool(self.intertile_match_var.get())
+        self.config["intertile_preview_size"] = int(self.intertile_preview_size_var.get())
+        self.config["intertile_overlap_min"] = float(self.intertile_overlap_min_var.get())
+        self.config["intertile_sky_percentile"] = [
+            float(self.intertile_sky_low_var.get()),
+            float(self.intertile_sky_high_var.get()),
+        ]
+        self.config["intertile_robust_clip_sigma"] = float(self.intertile_clip_sigma_var.get())
+        self.config["use_auto_intertile"] = bool(self.use_auto_intertile_var.get())
+        self.config["center_out_normalization_p3"] = bool(self.center_out_normalization_var.get())
+        self.config["p3_center_preview_size"] = int(self.p3_center_preview_size_var.get())
+        self.config["p3_center_min_overlap_fraction"] = float(self.p3_center_overlap_var.get())
+        self.config["p3_center_sky_percentile"] = [
+            float(self.p3_center_sky_low_var.get()),
+            float(self.p3_center_sky_high_var.get()),
+        ]
+        self.config["p3_center_robust_clip_sigma"] = float(self.p3_center_clip_sigma_var.get())
+        # Persist logging level
+        self.config["logging_level"] = self.logging_level_var.get()
 
         self.config["use_gpu_phase5"] = self.use_gpu_phase5_var.get()
         sel = self.gpu_selector_var.get()
@@ -1428,20 +2418,50 @@ class ZeMosaicGUI:
                 self.config["gpu_id_phase5"] = idx
                 gpu_id = idx
                 break
+        self.config["save_final_as_uint16"] = bool(self.save_final_uint16_var.get())
+        self.config["legacy_rgb_cube"] = bool(self.legacy_rgb_cube_var.get())
         if ZEMOSAIC_CONFIG_AVAILABLE and zemosaic_config:
-            zemosaic_config.save_config(self.config)
+            try:
+                zemosaic_config.save_config(self.config)
+            except Exception:
+                pass
+
+        print(
+            f"[GUI] Stacking -> norm={self.config['stacking_normalize_method']}, "
+            f"weight={self.config['stacking_weighting_method']}, "
+            f"reject={self.config['stacking_rejection_algorithm']}, "
+            f"combine={self.config['stacking_final_combine_method']}, "
+            f"rgb_eq={self.config['poststack_equalize_rgb']}"
+        )
+
+        stack_ram_budget_val = 0.0
+        try:
+            stack_ram_budget_val = float(self.config.get("stack_ram_budget_gb", 0.0))
+        except Exception:
+            stack_ram_budget_val = 0.0
+        self.config["stack_ram_budget_gb"] = stack_ram_budget_val
+        self.config["apply_master_tile_crop"] = bool(apply_master_tile_crop_val)
+        self.config["master_tile_crop_percent"] = float(master_tile_crop_percent_val)
+        self.config["quality_crop_enabled"] = bool(quality_crop_enabled_val)
+        self.config["quality_crop_band_px"] = int(quality_crop_band_val)
+        self.config["quality_crop_k_sigma"] = float(quality_crop_k_sigma_val)
+        self.config["quality_crop_margin_px"] = int(quality_crop_margin_val)
 
         worker_args = (
             input_dir, output_dir, astap_exe, astap_data,
             astap_radius_val, astap_downsample_val, astap_sensitivity_val,
             cluster_thresh_val,
+            cluster_target_groups_val,
+            cluster_orientation_split_val,
+            stack_ram_budget_val,
             stack_norm_method,
             stack_weight_method,
             stack_reject_algo,
             stack_kappa_low,
             stack_kappa_high,
-            parsed_winsor_limits, 
+            parsed_winsor_limits,
             stack_final_combine,
+            bool(poststack_equalize_rgb_val),
             apply_radial_weight_val,
             radial_feather_fraction_val,
             radial_shape_power_val,
@@ -1451,25 +2471,53 @@ class ZeMosaicGUI:
             # --- NOUVEAUX ARGUMENTS POUR LE ROGNAGE ---
             apply_master_tile_crop_val,
             master_tile_crop_percent_val,
+            bool(quality_crop_enabled_val),
+            int(quality_crop_band_val),
+            float(quality_crop_k_sigma_val),
+            int(quality_crop_margin_val),
             self.save_final_uint16_var.get(),
+            self.legacy_rgb_cube_var.get(),
             self.use_memmap_var.get(),
             memmap_dir,
             self.cleanup_memmap_var.get(),
             self.config.get("assembly_process_workers", 0),
             self.auto_limit_frames_var.get(),
+            self.winsor_max_frames_var.get(),
             self.winsor_workers_var.get(),
             self.max_raw_per_tile_var.get(),
+            bool(self.intertile_match_var.get()),
+            int(self.intertile_preview_size_var.get()),
+            float(self.intertile_overlap_min_var.get()),
+            [
+                float(self.intertile_sky_low_var.get()),
+                float(self.intertile_sky_high_var.get()),
+            ],
+            float(self.intertile_clip_sigma_var.get()),
+            bool(self.use_auto_intertile_var.get()),
+            bool(self.center_out_normalization_var.get()),
+            [
+                float(self.p3_center_sky_low_var.get()),
+                float(self.p3_center_sky_high_var.get()),
+            ],
+            float(self.p3_center_clip_sigma_var.get()),
+            int(self.p3_center_preview_size_var.get()),
+            float(self.p3_center_overlap_var.get()),
             self.use_gpu_phase5_var.get(),
             gpu_id,
+            self.logging_level_var.get(),
             asdict(self.solver_settings)
             # --- FIN NOUVEAUX ARGUMENTS ---
         )
-        
+
+        worker_kwargs = {"solver_settings_dict": worker_args[-1]}
+        if skip_filter_ui_for_run:
+            worker_kwargs["skip_filter_ui"] = True
+
         self.progress_queue = multiprocessing.Queue()
         self.worker_process = multiprocessing.Process(
             target=run_hierarchical_mosaic_process,
             args=(self.progress_queue,) + worker_args[:-1],
-            kwargs={"solver_settings_dict": worker_args[-1]},
+            kwargs=worker_kwargs,
             daemon=True,
             name="ZeMosaicWorkerProcess",
         )
@@ -1544,6 +2592,12 @@ class ZeMosaicGUI:
                 if hasattr(self, "master_tile_count_var"):
                     try: self.master_tile_count_var.set("")
                     except tk.TclError: pass
+                if hasattr(self, "file_count_var"):
+                    try: self.file_count_var.set("")
+                    except tk.TclError: pass
+                if hasattr(self, "phase_var"):
+                    try: self.phase_var.set("")
+                    except tk.TclError: pass
                 self._cancel_requested = False
             else:
                 self._log_message("log_key_processing_finished", level="INFO")
@@ -1552,6 +2606,10 @@ class ZeMosaicGUI:
                 # Nettoyage du compteur master-tiles affiché
                 if hasattr(self, "master_tile_count_var"):
                     self.master_tile_count_var.set("")
+                if hasattr(self, "file_count_var"):
+                    self.file_count_var.set("")
+                if hasattr(self, "phase_var"):
+                    self.phase_var.set("")
                 output_dir_final = self.output_dir_var.get()
                 if output_dir_final and os.path.isdir(output_dir_final):
                     if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):

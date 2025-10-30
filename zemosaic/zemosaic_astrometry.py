@@ -1,4 +1,47 @@
-# zemosaic_astrometry.py
+﻿# zemosaic_astrometry.py
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║ ZeMosaic / ZeSeestarStacker Project                                  ║
+║                                                                      ║
+║ Auteur  : Tinystork, seigneur des couteaux à beurre (aka Tristan Nauleau)  
+║ Partenaire : J.A.R.V.I.S. (/ˈdʒɑːrvɪs/) — Just a Rather Very Intelligent System  
+║              (aka ChatGPT, Grand Maître du ciselage de code)         ║
+║                                                                      ║
+║ Licence : GNU General Public License v3.0 (GPL-3.0)                  ║
+║                                                                      ║
+║ Description :                                                        ║
+║   Ce programme a été forgé à la lueur des pixels et de la caféine,   ║
+║   dans le but noble de transformer des nuages de photons en art      ║
+║   astronomique. Si vous l’utilisez, pensez à dire “merci”,           ║
+║   à lever les yeux vers le ciel, ou à citer Tinystork et J.A.R.V.I.S.║
+║   (le karma des développeurs en dépend).                             ║
+║                                                                      ║
+║ Avertissement :                                                      ║
+║   Aucune IA ni aucun couteau à beurre n’a été blessé durant le       ║
+║   développement de ce code.                                          ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║ ZeMosaic / ZeSeestarStacker Project                                  ║
+║                                                                      ║
+║ Author  : Tinystork, Lord of the Butter Knives (aka Tristan Nauleau) ║
+║ Partner : J.A.R.V.I.S. (/ˈdʒɑːrvɪs/) — Just a Rather Very Intelligent System  
+║           (aka ChatGPT, Grand Master of Code Chiseling)              ║
+║                                                                      ║
+║ License : GNU General Public License v3.0 (GPL-3.0)                  ║
+║                                                                      ║
+║ Description:                                                         ║
+║   This program was forged under the sacred light of pixels and       ║
+║   caffeine, with the noble intent of turning clouds of photons into  ║
+║   astronomical art. If you use it, please consider saying “thanks,”  ║
+║   gazing at the stars, or crediting Tinystork and J.A.R.V.I.S. —     ║
+║   developer karma depends on it.                                     ║
+║                                                                      ║
+║ Disclaimer:                                                          ║
+║   No AIs or butter knives were harmed in the making of this code.    ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
 
 import os
 import numpy as np
@@ -17,24 +60,31 @@ import multiprocessing
 
 
 logger = logging.getLogger("ZeMosaicAstrometry")
-# ... (pas besoin de reconfigurer le logger ici s'il hérite du worker)
+# ... (pas besoin de reconfigurer le logger ici s'il hÃ©rite du worker)
 
 try:
     from astropy.io import fits
     from astropy.wcs import WCS as AstropyWCS, FITSFixedWarning 
     from astropy.utils.exceptions import AstropyWarning
-    from astropy import units as u # Nécessaire pour _update_fits_header_with_wcs_za
+    from astropy import units as u # NÃ©cessaire pour _update_fits_header_with_wcs_za
     ASTROPY_AVAILABLE_ASTROMETRY = True
     warnings.filterwarnings('ignore', category=FITSFixedWarning)
     warnings.filterwarnings('ignore', category=AstropyWarning)
 except ImportError:
-    logger.error("Astropy non installée. Certaines fonctionnalités de zemosaic_astrometry seront limitées.")
+    logger.error("Astropy non installÃ©e. Certaines fonctionnalitÃ©s de zemosaic_astrometry seront limitÃ©es.")
     ASTROPY_AVAILABLE_ASTROMETRY = False
     class AstropyWCS: pass
     class FITSFixedWarning(Warning): pass
     u = None
+    
+try:
+    # Optional import placed outside the main astropy try to avoid failing the module import
+    # if coordinates submodule is unavailable. We degrade gracefully to None.
+    from astropy.coordinates import SkyCoord as AstropySkyCoord
+except Exception:
+    AstropySkyCoord = None
 
-# --- Dépendances pour Astrometry.net web ---
+# --- DÃ©pendances pour Astrometry.net web ---
 ASTROQUERY_AVAILABLE_ASTROMETRY = False
 AstrometryNet = None
 try:
@@ -43,12 +93,12 @@ try:
     ASTROQUERY_AVAILABLE_ASTROMETRY = True
 except Exception:
     logger.warning(
-        "AstrometrySolver: astroquery non installée. Plate-solving web Astrometry.net désactivé."
+        "AstrometrySolver: astroquery non installÃ©e. Plate-solving web Astrometry.net dÃ©sactivÃ©."
     )
 
 
 def _log_memory_usage(progress_callback: callable, context_message: str = ""):
-    """Logue l'utilisation mémoire du processus courant."""
+    """Logue l'utilisation mÃ©moire du processus courant."""
     if not progress_callback or not callable(progress_callback):
         return
     try:
@@ -76,10 +126,108 @@ def _log_memory_usage(progress_callback: callable, context_message: str = ""):
         progress_callback(log_msg, None, "DEBUG")
     except Exception as e_mem_log:
         progress_callback(f"Erreur lors du logging mémoire ({context_message}): {e_mem_log}", None, "WARN")
+    
+
+
+def extract_center_from_header(original_fits_header) -> "AstropySkyCoord | None":
+    """Extract a SkyCoord center from a FITS header.
+
+    Reuses the same interpretation as used for ASTAP hints:
+    - Prefer CRVAL1/2 (degrees, WCS)
+    - Fallback to RA/DEC, OBJCTRA/OBJCTDEC, TELRA/TELDEC
+    - Handle HH:MM:SS formats for RA and DD:MM:SS for Dec
+    - Respect RAUNIT/CUNIT1 when RA is numeric (hours vs degrees)
+
+    Returns None if Astropy is unavailable or no valid coordinates are found.
+    """
+    if not (ASTROPY_AVAILABLE_ASTROMETRY and AstropySkyCoord and u):
+        return None
+    if original_fits_header is None:
+        return None
+
+    try:
+        def _safe_float(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        ra_candidates = [
+            original_fits_header.get("CRVAL1"),
+            original_fits_header.get("RA"),
+            original_fits_header.get("OBJCTRA"),
+            original_fits_header.get("TELRA"),
+        ]
+        dec_candidates = [
+            original_fits_header.get("CRVAL2"),
+            original_fits_header.get("DEC"),
+            original_fits_header.get("OBJCTDEC"),
+            original_fits_header.get("TELDEC"),
+        ]
+
+        crval1_val = original_fits_header.get("CRVAL1")
+        ra_val = next((v for v in ra_candidates if v is not None), None)
+        dec_val = next((v for v in dec_candidates if v is not None), None)
+
+        ra_deg = None
+        dec_deg = None
+
+        # RA handling (deg or hours)
+        if isinstance(ra_val, (int, float)):
+            try:
+                same_as_crval1 = (crval1_val is not None and float(ra_val) == float(crval1_val))
+            except Exception:
+                same_as_crval1 = False
+            if same_as_crval1:
+                ra_deg = float(ra_val)
+            else:
+                try:
+                    unit = (original_fits_header.get("RAUNIT") or original_fits_header.get("CUNIT1") or "").strip().lower()
+                except Exception:
+                    unit = ""
+                if unit.startswith("h"):
+                    ra_deg = float(ra_val) * 15.0
+                else:
+                    ra_deg = float(ra_val)
+        elif isinstance(ra_val, str):
+            s = ra_val.strip().lower().replace("h", ":").replace("m", ":").replace("s", "").replace(" ", ":")
+            parts = [p for p in s.split(":") if p != ""]
+            if 1 <= len(parts) <= 3 and all(p.replace(".", "", 1).lstrip("-+").isdigit() for p in parts):
+                hh = _safe_float(parts[0]) or 0.0
+                mm = _safe_float(parts[1]) or 0.0 if len(parts) > 1 else 0.0
+                ss = _safe_float(parts[2]) or 0.0 if len(parts) > 2 else 0.0
+                ra_deg = (hh + mm / 60.0 + ss / 3600.0) * 15.0
+            else:
+                val = _safe_float(ra_val)
+                if val is not None:
+                    ra_deg = float(val)
+
+        # Dec handling (always degrees)
+        if isinstance(dec_val, (int, float)):
+            dec_deg = float(dec_val)
+        elif isinstance(dec_val, str):
+            s = dec_val.strip().lower().replace("d", ":").replace(" ", ":")
+            parts = [p for p in s.split(":") if p != ""]
+            if 1 <= len(parts) <= 3 and all(p.replace(".", "", 1).lstrip("-+").isdigit() for p in parts):
+                dd = _safe_float(parts[0]) or 0.0
+                mm = _safe_float(parts[1]) or 0.0 if len(parts) > 1 else 0.0
+                ss = _safe_float(parts[2]) or 0.0 if len(parts) > 2 else 0.0
+                sign = -1.0 if str(parts[0]).strip().startswith("-") else 1.0
+                dec_deg = sign * (abs(dd) + mm / 60.0 + ss / 3600.0)
+            else:
+                val = _safe_float(dec_val)
+                if val is not None:
+                    dec_deg = float(val)
+
+        if ra_deg is not None and dec_deg is not None:
+            return AstropySkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+    except Exception:
+        return None
+    return None
 
 
 def _run_astap_subprocess(cmd_list: list, cwd: str, timeout_sec: int):
-    """Fonction exécutée dans un ProcessPoolExecutor pour lancer ASTAP."""
+    """Fonction exÃ©cutÃ©e dans un ProcessPoolExecutor pour lancer ASTAP."""
     return subprocess.run(
         cmd_list,
         stdout=subprocess.DEVNULL,
@@ -91,7 +239,7 @@ def _run_astap_subprocess(cmd_list: list, cwd: str, timeout_sec: int):
 
 
 def _calculate_pixel_scale_from_header(header: fits.Header, progress_callback: callable = None) -> float | None:
-    # ... (corps de la fonction inchangé, il semble correct)
+    # ... (corps de la fonction inchangÃ©, il semble correct)
     if not header:
         return None
     focal_len_mm = None
@@ -100,10 +248,10 @@ def _calculate_pixel_scale_from_header(header: fits.Header, progress_callback: c
     for key in focal_keys:
         if key in header and isinstance(header[key], (int, float)) and header[key] > 0:
             focal_len_mm = float(header[key])
-            if progress_callback: progress_callback(f"  ASTAP ScaleCalc: Trouvé {key}={focal_len_mm} mm", None, "DEBUG_DETAIL")
+            if progress_callback: progress_callback(f"  ASTAP ScaleCalc: TrouvÃ© {key}={focal_len_mm} mm", None, "DEBUG_DETAIL")
             break
     if focal_len_mm is None:
-        if progress_callback: progress_callback("  ASTAP ScaleCalc: FOCALLEN non trouvée ou invalide dans le header.", None, "DEBUG_DETAIL")
+        if progress_callback: progress_callback("  ASTAP ScaleCalc: FOCALLEN non trouvÃ©e ou invalide dans le header.", None, "DEBUG_DETAIL")
         return None
     pix_size_keys = ['XPIXSZ', 'PIXSIZE', 'PIXELSIZE', 'PIXSCAL1', 'SCALE']
     for key in pix_size_keys:
@@ -111,28 +259,28 @@ def _calculate_pixel_scale_from_header(header: fits.Header, progress_callback: c
             if key.upper() == 'PIXSCAL1':
                 unit_key = f"CUNIT{key[-1]}" if key[-1].isdigit() else None
                 if unit_key and unit_key in header and str(header[unit_key]).lower() in ['arcsec', 'asec', '"']:
-                    if progress_callback: progress_callback(f"  ASTAP ScaleCalc: Trouvé {key}={header[key]} arcsec/pix directement.", None, "DEBUG_DETAIL")
+                    if progress_callback: progress_callback(f"  ASTAP ScaleCalc: TrouvÃ© {key}={header[key]} arcsec/pix directement.", None, "DEBUG_DETAIL")
                     return float(header[key])
             pixel_size_um = float(header[key])
-            if progress_callback: progress_callback(f"  ASTAP ScaleCalc: Trouvé {key}={pixel_size_um} µm", None, "DEBUG_DETAIL")
+            if progress_callback: progress_callback(f"  ASTAP ScaleCalc: TrouvÃ© {key}={pixel_size_um} Âµm", None, "DEBUG_DETAIL")
             break
     if pixel_size_um is None:
-        if progress_callback: progress_callback("  ASTAP ScaleCalc: XPIXSZ (ou équivalent) non trouvé ou invalide.", None, "DEBUG_DETAIL")
+        if progress_callback: progress_callback("  ASTAP ScaleCalc: XPIXSZ (ou Ã©quivalent) non trouvÃ© ou invalide.", None, "DEBUG_DETAIL")
         return None
     try:
         calculated_scale_arcsec_pix = (pixel_size_um / focal_len_mm) * 206.264806
-        if progress_callback: progress_callback(f"  ASTAP ScaleCalc: Échelle calculée: {calculated_scale_arcsec_pix:.3f} arcsec/pix", None, "INFO_DETAIL")
+        if progress_callback: progress_callback(f"  ASTAP ScaleCalc: Ã‰chelle calculÃ©e: {calculated_scale_arcsec_pix:.3f} arcsec/pix", None, "INFO_DETAIL")
         return calculated_scale_arcsec_pix
     except ZeroDivisionError:
-        if progress_callback: progress_callback("  ASTAP ScaleCalc ERREUR: Division par zéro (FOCALLEN nulle ?).", None, "WARN")
+        if progress_callback: progress_callback("  ASTAP ScaleCalc ERREUR: Division par zÃ©ro (FOCALLEN nulle ?).", None, "WARN")
         return None
 
 def _parse_wcs_file_content_za(wcs_file_path, image_shape_hw, progress_callback=None):
-    # ... (corps de la fonction inchangé, il semble correct)
+    # ... (corps de la fonction inchangÃ©, il semble correct)
     filename_log = os.path.basename(wcs_file_path)
     if progress_callback: progress_callback(f"  ASTAP WCS Parse: Tentative parsing '{filename_log}' pour shape {image_shape_hw}", None, "DEBUG_DETAIL")
     if not (os.path.exists(wcs_file_path) and os.path.getsize(wcs_file_path) > 0):
-        if progress_callback: progress_callback(f"    ASTAP WCS Parse ERREUR: Fichier WCS '{filename_log}' non trouvé ou vide.", None, "WARN")
+        if progress_callback: progress_callback(f"    ASTAP WCS Parse ERREUR: Fichier WCS '{filename_log}' non trouvÃ© ou vide.", None, "WARN")
         return None
     if not ASTROPY_AVAILABLE_ASTROMETRY:
         if progress_callback: progress_callback("    ASTAP WCS Parse ERREUR: Astropy non disponible pour parser WCS.", None, "ERROR")
@@ -161,11 +309,11 @@ def _parse_wcs_file_content_za(wcs_file_path, image_shape_hw, progress_callback=
                 try:
                     wcs_obj.pixel_shape = (image_shape_hw[1], image_shape_hw[0])
                 except Exception as e_ps_parse:
-                    if progress_callback: progress_callback(f"    ASTAP WCS Parse AVERT: Échec set pixel_shape sur WCS parsé: {e_ps_parse}", None, "WARN")
-            if progress_callback: progress_callback(f"    ASTAP WCS Parse: Objet WCS parsé avec succès depuis '{filename_log}'.", None, "DEBUG_DETAIL")
+                    if progress_callback: progress_callback(f"    ASTAP WCS Parse AVERT: Ã‰chec set pixel_shape sur WCS parsÃ©: {e_ps_parse}", None, "WARN")
+            if progress_callback: progress_callback(f"    ASTAP WCS Parse: Objet WCS parsÃ© avec succÃ¨s depuis '{filename_log}'.", None, "DEBUG_DETAIL")
             return wcs_obj
         else:
-            if progress_callback: progress_callback(f"    ASTAP WCS Parse ERREUR: Échec création WCS valide/céleste depuis '{filename_log}'.", None, "WARN")
+            if progress_callback: progress_callback(f"    ASTAP WCS Parse ERREUR: Ã‰chec crÃ©ation WCS valide/cÃ©leste depuis '{filename_log}'.", None, "WARN")
             return None
     except Exception as e:
         if progress_callback: progress_callback(f"    ASTAP WCS Parse ERREUR: Exception lors du parsing WCS '{filename_log}': {e}", None, "ERROR")
@@ -378,11 +526,11 @@ def _update_fits_header_with_wcs_za(fits_header_to_update: fits.Header,
                                    solver_name="ASTAP_ZeMosaic", 
                                    progress_callback=None):
     if not (fits_header_to_update is not None and wcs_object_solution and wcs_object_solution.is_celestial):
-        if progress_callback: progress_callback("  ASTAP HeaderUpdate: MàJ header annulée: header/WCS invalide.", None, "WARN")
+        if progress_callback: progress_callback("  ASTAP HeaderUpdate: MÃ J header annulÃ©e: header/WCS invalide.", None, "WARN")
         return False 
-    if progress_callback: progress_callback(f"  ASTAP HeaderUpdate: MàJ header FITS avec solution WCS de {solver_name}...", None, "DEBUG_DETAIL")
+    if progress_callback: progress_callback(f"  ASTAP HeaderUpdate: MÃ J header FITS avec solution WCS de {solver_name}...", None, "DEBUG_DETAIL")
     if not ASTROPY_AVAILABLE_ASTROMETRY:
-        if progress_callback: progress_callback("  ASTAP HeaderUpdate ERREUR: Astropy non disponible pour MàJ header.", None, "ERROR")
+        if progress_callback: progress_callback("  ASTAP HeaderUpdate ERREUR: Astropy non disponible pour MÃ J header.", None, "ERROR")
         return False
     try:
         wcs_keys_to_remove = [
@@ -407,7 +555,7 @@ def _update_fits_header_with_wcs_za(fits_header_to_update: fits.Header,
         fits_header_to_update.update(new_wcs_header_cards)
         fits_header_to_update[f'{solver_name.upper()}_SOLVED'] = (True, f'{solver_name} solution')
         
-        if u is not None: # S'assurer que astropy.units est importé
+        if u is not None: # S'assurer que astropy.units est importÃ©
             try:
                 if hasattr(wcs_object_solution, 'proj_plane_pixel_scales') and callable(wcs_object_solution.proj_plane_pixel_scales):
                     scales_deg = wcs_object_solution.proj_plane_pixel_scales()
@@ -416,11 +564,11 @@ def _update_fits_header_with_wcs_za(fits_header_to_update: fits.Header,
             except Exception:
                 pass
             
-        if progress_callback: progress_callback("  ASTAP HeaderUpdate: Header FITS MàJ avec WCS.", None, "DEBUG_DETAIL")
+        if progress_callback: progress_callback("  ASTAP HeaderUpdate: Header FITS MÃ J avec WCS.", None, "DEBUG_DETAIL")
         return True
     except Exception as e_upd:
         if progress_callback: progress_callback(f"  ASTAP HeaderUpdate ERREUR: {e_upd}", None, "ERROR")
-        logger.error(f"Erreur MàJ header FITS avec WCS: {e_upd}", exc_info=True) # Log le traceback complet
+        logger.error(f"Erreur MÃ J header FITS avec WCS: {e_upd}", exc_info=True) # Log le traceback complet
         return False
 
 
@@ -439,19 +587,19 @@ def solve_with_astap(image_fits_path: str,
                      progress_callback: callable = None):
 
     if not ASTROPY_AVAILABLE_ASTROMETRY:
-        if progress_callback: progress_callback("ASTAP Solve ERREUR: Astropy non disponible, ASTAP solve annulé.", None, "ERROR")
+        if progress_callback: progress_callback("ASTAP Solve ERREUR: Astropy non disponible, ASTAP solve annulÃ©.", None, "ERROR")
         return None
 
     img_basename_log = os.path.basename(image_fits_path)
-    if progress_callback: progress_callback(f"ASTAP Solve: Début pour '{img_basename_log}'", None, "INFO_DETAIL")
-    logger.debug(f"ASTAP Solve params (entrée fonction): image='{img_basename_log}', radius={search_radius_deg}, "
+    if progress_callback: progress_callback(f"ASTAP Solve: DÃ©but pour '{img_basename_log}'", None, "INFO_DETAIL")
+    logger.debug(f"ASTAP Solve params (entrÃ©e fonction): image='{img_basename_log}', radius={search_radius_deg}, "
                  f"downsample={downsample_factor}, sensitivity={sensitivity}")
 
     if not (astap_exe_path and os.path.isfile(astap_exe_path)):
         if progress_callback: progress_callback(f"ASTAP Solve ERREUR: Chemin ASTAP exe invalide: '{astap_exe_path}'.", None, "ERROR")
         return None
     if not (astap_data_dir and os.path.isdir(astap_data_dir)):
-        if progress_callback: progress_callback(f"ASTAP Solve AVERT: Chemin ASTAP data non spécifié ou invalide: '{astap_data_dir}'. ASTAP pourrait ne pas trouver ses bases.", None, "WARN")
+        if progress_callback: progress_callback(f"ASTAP Solve AVERT: Chemin ASTAP data non spÃ©cifiÃ© ou invalide: '{astap_data_dir}'. ASTAP pourrait ne pas trouver ses bases.", None, "WARN")
     if not (image_fits_path and os.path.isfile(image_fits_path)):
         if progress_callback: progress_callback(f"ASTAP Solve ERREUR: Chemin image FITS invalide: '{image_fits_path}'.", None, "ERROR")
         return None
@@ -470,28 +618,28 @@ def solve_with_astap(image_fits_path: str,
         if os.path.exists(f_to_clean):
             try: os.remove(f_to_clean)
             except Exception as e_del_pre:
-                if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Échec nettoyage pré-ASTAP '{os.path.basename(f_to_clean)}': {e_del_pre}", None, "WARN")
+                if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Ã‰chec nettoyage prÃ©-ASTAP '{os.path.basename(f_to_clean)}': {e_del_pre}", None, "WARN")
     if os.path.exists(astap_log_file_path):
         try: os.remove(astap_log_file_path)
         except Exception as e_del_log_pre:
-            if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Échec nettoyage pré-ASTAP log '{os.path.basename(astap_log_file_path)}': {e_del_log_pre}", None, "WARN")
+            if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Ã‰chec nettoyage prÃ©-ASTAP log '{os.path.basename(astap_log_file_path)}': {e_del_log_pre}", None, "WARN")
 
     cmd_list_astap = [astap_exe_path, "-f", image_fits_path, "-log", "-wcs"]
     if astap_data_dir and os.path.isdir(astap_data_dir):
         cmd_list_astap.extend(["-d", astap_data_dir])
 
-    # Rétablit l’indication d’échelle ou FOV pour aider ASTAP
+    # RÃ©tablit lâ€™indication dâ€™Ã©chelle ou FOV pour aider ASTAP
     calculated_px_scale = _calculate_pixel_scale_from_header(original_fits_header, progress_callback)
     if calculated_px_scale and 0.01 < float(calculated_px_scale) < 50.0:
         cmd_list_astap.extend(["-pxscale", f"{float(calculated_px_scale):.4f}"])
         if progress_callback:
             progress_callback(
-                f"  ASTAP Solve: Utilisation -pxscale {float(calculated_px_scale):.4f} arcsec/pix (dérivé du header).",
+                f"  ASTAP Solve: Utilisation -pxscale {float(calculated_px_scale):.4f} arcsec/pix (dÃ©rivÃ© du header).",
                 None,
                 "DEBUG",
             )
     else:
-        # Blind solve: demande à ASTAP d’estimer le FOV automatiquement
+        # Blind solve: demande Ã  ASTAP dâ€™estimer le FOV automatiquement
         cmd_list_astap.extend(["-fov", "0"])
         if progress_callback:
             progress_callback(
@@ -504,15 +652,15 @@ def solve_with_astap(image_fits_path: str,
     # Gestion du downsampling (-z)
     if downsample_factor is not None and isinstance(downsample_factor, int) and downsample_factor >= 0:
         cmd_list_astap.extend(["-z", str(downsample_factor)])
-        if progress_callback: progress_callback(f"  ASTAP Solve: Utilisation -z {downsample_factor} (configuré).", None, "DEBUG")
+        if progress_callback: progress_callback(f"  ASTAP Solve: Utilisation -z {downsample_factor} (configurÃ©).", None, "DEBUG")
     else:
-        if progress_callback: progress_callback(f"  ASTAP Solve: Downsample non spécifié ou invalide ({downsample_factor}). ASTAP utilisera son défaut pour -z.", None, "DEBUG_DETAIL")
+        if progress_callback: progress_callback(f"  ASTAP Solve: Downsample non spÃ©cifiÃ© ou invalide ({downsample_factor}). ASTAP utilisera son dÃ©faut pour -z.", None, "DEBUG_DETAIL")
 
-    # Sensibilité: l’option "-sens" n’est pas documentée côté CLI ASTAP.
-    # Par sécurité, on ignore ce paramètre pour éviter un échec immédiat du binaire.
+    # SensibilitÃ©: lâ€™option "-sens" nâ€™est pas documentÃ©e cÃ´tÃ© CLI ASTAP.
+    # Par sÃ©curitÃ©, on ignore ce paramÃ¨tre pour Ã©viter un Ã©chec immÃ©diat du binaire.
     if sensitivity is not None and progress_callback:
         progress_callback(
-            f"  ASTAP Solve: Paramètre 'sensibilité' reçu ({sensitivity}) mais ignoré (option CLI non supportée).",
+            f"  ASTAP Solve: ParamÃ¨tre 'sensibilitÃ©' reÃ§u ({sensitivity}) mais ignorÃ© (option CLI non supportÃ©e).",
             None,
             "DEBUG_DETAIL",
         )
@@ -529,7 +677,7 @@ def solve_with_astap(image_fits_path: str,
             except Exception:
                 return None
 
-        # RA/DEC candidats (ordre de priorité)
+        # RA/DEC candidats (ordre de prioritÃ©)
         ra_candidates = [
             original_fits_header.get("CRVAL1"),
             original_fits_header.get("RA"),
@@ -551,7 +699,7 @@ def solve_with_astap(image_fits_path: str,
         ra_deg = None
         dec_deg = None
 
-        # Essaie d’interpréter RA
+        # Essaie dâ€™interprÃ©ter RA
         if isinstance(ra_val, (int, float)):
             # If value comes from CRVAL1 (WCS), it is degrees even if <= 24
             try:
@@ -586,7 +734,7 @@ def solve_with_astap(image_fits_path: str,
                 if val is not None:
                     ra_deg = float(val)
 
-        # Essaie d’interpréter DEC (toujours en degrés)
+        # Essaie dâ€™interprÃ©ter DEC (toujours en degrÃ©s)
         if isinstance(dec_val, (int, float)):
             dec_deg = float(dec_val)
         elif isinstance(dec_val, str):
@@ -620,14 +768,14 @@ def solve_with_astap(image_fits_path: str,
             cmd_list_astap.extend(["-ra", f"{ra_hours_hint:.6f}", "-spd", f"{spd_deg_hint:.6f}"])
             if progress_callback:
                 progress_callback(
-                    f"  ASTAP Solve: Hints -ra {ra_hours_hint:.6f} h, -spd {spd_deg_hint:.6f}° (depuis header).",
+                    f"  ASTAP Solve: Hints -ra {ra_hours_hint:.6f} h, -spd {spd_deg_hint:.6f}Â° (depuis header).",
                     None,
                     "DEBUG",
                 )
         else:
             if progress_callback:
                 progress_callback(
-                    "  ASTAP Solve: Hints RA/Dec absents ou invalides dans le header (résolution 'blind').",
+                    "  ASTAP Solve: Hints RA/Dec absents ou invalides dans le header (rÃ©solution 'blind').",
                     None,
                     "DEBUG_DETAIL",
                 )
@@ -640,7 +788,7 @@ def solve_with_astap(image_fits_path: str,
         cmd_list_astap.extend(["-r", str(search_radius_deg)])
         if progress_callback:
             progress_callback(
-                f"  ASTAP Solve: Utilisation -r {search_radius_deg}° (autour du hint RA/Dec).",
+                f"  ASTAP Solve: Utilisation -r {search_radius_deg}Â° (autour du hint RA/Dec).",
                 None,
                 "DEBUG",
             )
@@ -667,11 +815,11 @@ def solve_with_astap(image_fits_path: str,
         rc_astap = astap_process_result.returncode
         del astap_process_result
         gc.collect()
-        _log_memory_usage(progress_callback, "Après GC post-ASTAP")
+        _log_memory_usage(progress_callback, "AprÃ¨s GC post-ASTAP")
 
         if rc_astap == 0:
             if os.path.exists(expected_wcs_file_path) and os.path.getsize(expected_wcs_file_path) > 0:
-                if progress_callback: progress_callback(f"  ASTAP Solve: Résolution OK (code 0). Fichier WCS '{os.path.basename(expected_wcs_file_path)}' trouvé.", None, "INFO_DETAIL")
+                if progress_callback: progress_callback(f"  ASTAP Solve: RÃ©solution OK (code 0). Fichier WCS '{os.path.basename(expected_wcs_file_path)}' trouvÃ©.", None, "INFO_DETAIL")
                 img_height = original_fits_header.get('NAXIS2', 0)
                 img_width = original_fits_header.get('NAXIS1', 0)
                 if img_height == 0 or img_width == 0:
@@ -682,32 +830,32 @@ def solve_with_astap(image_fits_path: str,
                                 img_height = shape_from_file[-2]
                                 img_width = shape_from_file[-1]
                     except Exception as e_shape_read:
-                         if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Impossible de lire NAXIS1/2 du header ou du fichier FITS: {e_shape_read}. WCS parsing pourrait échouer.", None, "WARN")
+                         if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Impossible de lire NAXIS1/2 du header ou du fichier FITS: {e_shape_read}. WCS parsing pourrait Ã©chouer.", None, "WARN")
                 if img_height > 0 and img_width > 0:
                     # Utiliser le parseur robuste v2 (gestion encodage/CONTINUE)
                     wcs_solved_obj = _parse_wcs_file_content_za_v2(
                         expected_wcs_file_path, (img_height, img_width), progress_callback
                     )
                 else:
-                    if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: Dimensions image (NAXIS1/2) non trouvées pour '{img_basename_log}'. WCS non parsé.", None, "ERROR")
+                    if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: Dimensions image (NAXIS1/2) non trouvÃ©es pour '{img_basename_log}'. WCS non parsÃ©.", None, "ERROR")
                 if wcs_solved_obj and wcs_solved_obj.is_celestial:
                     astap_success = True
-                    if progress_callback: progress_callback(f"  ASTAP Solve: Objet WCS créé et céleste pour '{img_basename_log}'.", None, "INFO")
+                    if progress_callback: progress_callback(f"  ASTAP Solve: Objet WCS crÃ©Ã© et cÃ©leste pour '{img_basename_log}'.", None, "INFO")
                     if update_original_header_in_place and original_fits_header is not None:
                         if _update_fits_header_with_wcs_za(original_fits_header, wcs_solved_obj, progress_callback=progress_callback):
-                             if progress_callback: progress_callback(f"  ASTAP Solve: Header FITS original mis à jour avec WCS pour '{img_basename_log}'.", None, "DEBUG_DETAIL")
+                             if progress_callback: progress_callback(f"  ASTAP Solve: Header FITS original mis Ã  jour avec WCS pour '{img_basename_log}'.", None, "DEBUG_DETAIL")
                         else:
-                             if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Échec MàJ header FITS original avec WCS pour '{img_basename_log}'.", None, "WARN")
+                             if progress_callback: progress_callback(f"  ASTAP Solve AVERT: Ã‰chec MÃ J header FITS original avec WCS pour '{img_basename_log}'.", None, "WARN")
                 else:
-                    if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: WCS parsé non valide ou non céleste pour '{img_basename_log}'.", None, "ERROR")
+                    if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: WCS parsÃ© non valide ou non cÃ©leste pour '{img_basename_log}'.", None, "ERROR")
                     wcs_solved_obj = None
             else:
                 if progress_callback: progress_callback(f"  ASTAP Solve ERREUR: Code 0 mais fichier .wcs manquant/vide ('{os.path.basename(expected_wcs_file_path)}').", None, "ERROR")
         else:
-            error_msg = f"ASTAP Solve Échec (code {rc_astap}) pour '{img_basename_log}'."
+            error_msg = f"ASTAP Solve Ã‰chec (code {rc_astap}) pour '{img_basename_log}'."
             if rc_astap == 1: error_msg += " (No solution found)."
-            elif rc_astap == 2: error_msg += " (ASTAP FITS read error - vérifiez format/corruption)."
-            elif rc_astap == 10: error_msg += " (ASTAP database not found - vérifiez -d)."
+            elif rc_astap == 2: error_msg += " (ASTAP FITS read error - vÃ©rifiez format/corruption)."
+            elif rc_astap == 10: error_msg += " (ASTAP database not found - vÃ©rifiez -d)."
             if progress_callback: progress_callback(f"  {error_msg}", None, "WARN")
             logger.warning(error_msg)
 
@@ -715,37 +863,37 @@ def solve_with_astap(image_fits_path: str,
         if progress_callback: progress_callback(f"ASTAP Solve ERREUR: Timeout ({timeout_sec}s) pour '{img_basename_log}'.", None, "ERROR")
         logger.error(f"ASTAP command timed out for {img_basename_log}", exc_info=False)
     except FileNotFoundError:
-        if progress_callback: progress_callback(f"ASTAP Solve ERREUR: Exécutable ASTAP '{astap_exe_path}' non trouvé.", None, "ERROR")
+        if progress_callback: progress_callback(f"ASTAP Solve ERREUR: ExÃ©cutable ASTAP '{astap_exe_path}' non trouvÃ©.", None, "ERROR")
         logger.error(f"ASTAP executable not found at '{astap_exe_path}'.", exc_info=False)
     except Exception as e_astap_glob:
         if progress_callback: progress_callback(f"ASTAP Solve ERREUR Inattendue: {e_astap_glob}", None, "ERROR")
         logger.error(f"Unexpected error during ASTAP execution for {img_basename_log}: {e_astap_glob}", exc_info=True)
     finally:
-        if progress_callback: progress_callback(f"  ASTAP Solve: Nettoyage post-exécution (sauf log si échec) pour '{img_basename_log}'...", None, "DEBUG_DETAIL")
+        if progress_callback: progress_callback(f"  ASTAP Solve: Nettoyage post-exÃ©cution (sauf log si Ã©chec) pour '{img_basename_log}'...", None, "DEBUG_DETAIL")
         for f_clean_post in files_to_cleanup_by_astap: # .wcs, .ini
             if os.path.exists(f_clean_post):
                 try:
                     if f_clean_post == expected_wcs_file_path and astap_success and not update_original_header_in_place:
-                        if progress_callback: progress_callback(f"    ASTAP Clean: Conservation du .wcs: {os.path.basename(f_clean_post)} (succès, pas de MàJ header en place)", None, "DEBUG_DETAIL")
+                        if progress_callback: progress_callback(f"    ASTAP Clean: Conservation du .wcs: {os.path.basename(f_clean_post)} (succÃ¨s, pas de MÃ J header en place)", None, "DEBUG_DETAIL")
                         continue
                     os.remove(f_clean_post)
-                    if progress_callback: progress_callback(f"    ASTAP Clean: Fichier '{os.path.basename(f_clean_post)}' supprimé.", None, "DEBUG_DETAIL")
+                    if progress_callback: progress_callback(f"    ASTAP Clean: Fichier '{os.path.basename(f_clean_post)}' supprimÃ©.", None, "DEBUG_DETAIL")
                 except Exception as e_del_post:
-                    if progress_callback: progress_callback(f"    ASTAP Clean AVERT: Échec nettoyage '{os.path.basename(f_clean_post)}': {e_del_post}", None, "WARN")
+                    if progress_callback: progress_callback(f"    ASTAP Clean AVERT: Ã‰chec nettoyage '{os.path.basename(f_clean_post)}': {e_del_post}", None, "WARN")
 
         if astap_success and os.path.exists(astap_log_file_path):
             try:
                 os.remove(astap_log_file_path)
-                if progress_callback: progress_callback(f"    ASTAP Clean: Fichier log ASTAP '{os.path.basename(astap_log_file_path)}' supprimé (succès).", None, "DEBUG_DETAIL")
+                if progress_callback: progress_callback(f"    ASTAP Clean: Fichier log ASTAP '{os.path.basename(astap_log_file_path)}' supprimÃ© (succÃ¨s).", None, "DEBUG_DETAIL")
             except Exception as e_del_log_succ:
-                if progress_callback: progress_callback(f"    ASTAP Clean AVERT: Échec nettoyage log ASTAP (succès) '{os.path.basename(astap_log_file_path)}': {e_del_log_succ}", None, "WARN")
+                if progress_callback: progress_callback(f"    ASTAP Clean AVERT: Ã‰chec nettoyage log ASTAP (succÃ¨s) '{os.path.basename(astap_log_file_path)}': {e_del_log_succ}", None, "WARN")
         elif not astap_success and os.path.exists(astap_log_file_path):
-             if progress_callback: progress_callback(f"    ASTAP Clean: CONSERVATION du log ASTAP '{os.path.basename(astap_log_file_path)}' (échec solve).", None, "INFO_DETAIL")
+             if progress_callback: progress_callback(f"    ASTAP Clean: CONSERVATION du log ASTAP '{os.path.basename(astap_log_file_path)}' (Ã©chec solve).", None, "INFO_DETAIL")
 
         gc.collect()
 
     if wcs_solved_obj:
-        if progress_callback: progress_callback(f"ASTAP Solve: WCS trouvé pour {img_basename_log}.", None, "INFO_DETAIL")
+        if progress_callback: progress_callback(f"ASTAP Solve: WCS trouvÃ© pour {img_basename_log}.", None, "INFO_DETAIL")
     else:
         if progress_callback: progress_callback(f"ASTAP Solve: Pas de WCS final pour {img_basename_log}.", None, "WARN")
     return wcs_solved_obj
@@ -906,7 +1054,7 @@ def solve_with_astrometry_net(
 
     img_basename_log = os.path.basename(image_fits_path)
     if _pcb:
-        _pcb(f"WebANET: Début solving pour '{img_basename_log}'", "INFO_DETAIL")
+        _pcb(f"WebANET: DÃ©but solving pour '{img_basename_log}'", "INFO_DETAIL")
 
     ast = AstrometryNet()
     ast.api_key = api_key
@@ -916,7 +1064,7 @@ def solve_with_astrometry_net(
             original_timeout = getattr(ast, "TIMEOUT", None)
             ast.TIMEOUT = timeout_sec
             if _pcb:
-                _pcb(f"WebANET: Timeout configuré à {timeout_sec}s", "DEBUG")
+                _pcb(f"WebANET: Timeout configurÃ© Ã  {timeout_sec}s", "DEBUG")
         except Exception as e:
             if _pcb:
                 _pcb(f"WebANET: Erreur configuration timeout: {e}", "WARN")
@@ -929,7 +1077,7 @@ def solve_with_astrometry_net(
 
         if data is None:
             if _pcb:
-                _pcb("WebANET: Données image manquantes", "ERROR")
+                _pcb("WebANET: DonnÃ©es image manquantes", "ERROR")
             return None
 
         if not np.all(np.isfinite(data)):
@@ -1009,12 +1157,12 @@ def solve_with_astrometry_net(
                 solve_args["scale_upper"] = est_val * (1.0 + tol_val / 100.0)
                 if _pcb:
                     _pcb(
-                        f"WebANET: Échelle contraint [{solve_args['scale_lower']:.2f}-{solve_args['scale_upper']:.2f}] asec/pix",
+                        f"WebANET: Ã‰chelle contraint [{solve_args['scale_lower']:.2f}-{solve_args['scale_upper']:.2f}] asec/pix",
                         "DEBUG",
                     )
             except Exception as e:
                 if _pcb:
-                    _pcb(f"WebANET: Erreur config échelle: {e}", "WARN")
+                    _pcb(f"WebANET: Erreur config Ã©chelle: {e}", "WARN")
 
         if _pcb:
             _pcb("WebANET: Soumission du job...", "INFO")
@@ -1024,9 +1172,9 @@ def solve_with_astrometry_net(
 
         if _pcb:
             if wcs_header:
-                _pcb("WebANET: Solving RÉUSSI", "INFO")
+                _pcb("WebANET: Solving RÃ‰USSI", "INFO")
             else:
-                _pcb("WebANET: Solving ÉCHOUÉ", "WARN")
+                _pcb("WebANET: Solving Ã‰CHOUÃ‰", "WARN")
 
     except Exception as e:
         if _pcb:

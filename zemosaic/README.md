@@ -209,6 +209,7 @@ The configuration file exposes a few options to control memory consumption:
 - `auto_limit_frames_per_master_tile` – automatically split raw stacks based on available RAM.
 - `max_raw_per_master_tile` – manual cap on raw frames stacked per master tile (0 disables).
 - `winsor_worker_limit` – maximum parallel workers during the Winsorized rejection step.
+- `winsor_max_frames_per_pass` – maximum frames processed at once during Winsorized rejection (0 keeps previous behaviour).
 
 6 ▸ Quick CLI example
 ```bash

@@ -1,7 +1,53 @@
-# zemosaic_utils.py
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║ ZeMosaic / ZeSeestarStacker Project                                  ║
+║                                                                      ║
+║ Auteur  : Tinystork, seigneur des couteaux à beurre (aka Tristan Nauleau)  
+║ Partenaire : J.A.R.V.I.S. (/ˈdʒɑːrvɪs/) — Just a Rather Very Intelligent System  
+║              (aka ChatGPT, Grand Maître du ciselage de code)         ║
+║                                                                      ║
+║ Licence : GNU General Public License v3.0 (GPL-3.0)                  ║
+║                                                                      ║
+║ Description :                                                        ║
+║   Ce programme a été forgé à la lueur des pixels et de la caféine,   ║
+║   dans le but noble de transformer des nuages de photons en art      ║
+║   astronomique. Si vous l’utilisez, pensez à dire “merci”,           ║
+║   à lever les yeux vers le ciel, ou à citer Tinystork et J.A.R.V.I.S.║
+║   (le karma des développeurs en dépend).                             ║
+║                                                                      ║
+║ Avertissement :                                                      ║
+║   Aucune IA ni aucun couteau à beurre n’a été blessé durant le       ║
+║   développement de ce code.                                          ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║ ZeMosaic / ZeSeestarStacker Project                                  ║
+║                                                                      ║
+║ Author  : Tinystork, Lord of the Butter Knives (aka Tristan Nauleau) ║
+║ Partner : J.A.R.V.I.S. (/ˈdʒɑːrvɪs/) — Just a Rather Very Intelligent System  
+║           (aka ChatGPT, Grand Master of Code Chiseling)              ║
+║                                                                      ║
+║ License : GNU General Public License v3.0 (GPL-3.0)                  ║
+║                                                                      ║
+║ Description:                                                         ║
+║   This program was forged under the sacred light of pixels and       ║
+║   caffeine, with the noble intent of turning clouds of photons into  ║
+║   astronomical art. If you use it, please consider saying “thanks,”  ║
+║   gazing at the stars, or crediting Tinystork and J.A.R.V.I.S. —     ║
+║   developer karma depends on it.                                     ║
+║                                                                      ║
+║ Disclaimer:                                                          ║
+║   No AIs or butter knives were harmed in the making of this code.    ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+
 
 # --- Standard Library Imports ---
 import os
+import math
+import copy
+import logging
 import numpy as np
 # L'import de astropy.io.fits est géré ci-dessous pour définir le flag
 import cv2
@@ -15,7 +61,104 @@ import importlib.util
 GPU_AVAILABLE = importlib.util.find_spec("cupy") is not None
 map_coordinates = None  # Lazily imported when needed
 
+
+logger = logging.getLogger(__name__)
+
+# --- Lightweight CuPy helpers -------------------------------------------------
+def gpu_is_available() -> bool:
+    if not GPU_AVAILABLE:
+        return False
+    try:
+        import cupy as cp  # type: ignore
+        return bool(cp.is_available())
+    except Exception:
+        return False
+
+
+def ensure_cupy_pool_initialized(device_id: int | None = None) -> None:
+    """Idempotently enable CuPy device + memory pools.
+
+    - Sets the current device (optional).
+    - Enables a default device memory pool and a pinned host memory pool.
+    """
+    if not gpu_is_available():
+        return
+    try:
+        ensure_cupy_pool_initialized._done  # type: ignore[attr-defined]
+        return
+    except AttributeError:
+        pass
+    import cupy as cp  # type: ignore
+    try:
+        if device_id is not None:
+            cp.cuda.Device(int(device_id)).use()
+    except Exception:
+        # Ignore invalid ids; rely on current device
+        pass
+    try:
+        mp = cp.cuda.MemoryPool(cp.cuda.malloc)
+        cp.cuda.set_allocator(mp.malloc)
+    except Exception:
+        pass
+    try:
+        pmp = cp.cuda.PinnedMemoryPool()
+        cp.cuda.set_pinned_memory_allocator(pmp.malloc)
+    except Exception:
+        pass
+    ensure_cupy_pool_initialized._done = True  # type: ignore[attr-defined]
+
+
+def free_cupy_memory_pools() -> None:
+    """Release cached device and pinned host memory held by CuPy pools."""
+
+    if not gpu_is_available():
+        return
+    try:
+        import cupy as cp  # type: ignore
+    except Exception:
+        return
+    try:
+        pool = cp.get_default_memory_pool()
+        pool.free_all_blocks()
+    except Exception:
+        pass
+    try:
+        pinned_pool = cp.get_default_pinned_memory_pool()
+        pinned_pool.free_all_blocks()
+    except Exception:
+        pass
+
+
+def gpu_memory_sufficient(estimated_bytes: int, safety_fraction: float = 0.75) -> bool:
+    """Return True if the reported free GPU memory largely exceeds ``estimated_bytes``."""
+
+    if not gpu_is_available() or estimated_bytes <= 0:
+        return True
+    try:
+        import cupy as cp  # type: ignore
+        free_bytes, _ = cp.cuda.runtime.memGetInfo()
+        # Leave some headroom so we do not hit the allocator limit immediately
+        threshold = int(max(0, free_bytes * safety_fraction))
+        return estimated_bytes <= threshold
+    except Exception:
+        # If querying memory fails, err on the side of allowing execution
+        return True
+
+
+def _force_cpu_intertile() -> bool:
+    """Return True when GPU usage for intertile helpers is disabled via env."""
+
+    value = os.environ.get("ZEMOSAIC_FORCE_CPU_INTERTILE")
+    if value is None:
+        return False
+    value = value.strip().lower()
+    return value not in {"", "0", "false", "no", "off"}
+
 from reproject.mosaicking import reproject_and_coadd as cpu_reproject_and_coadd
+try:
+    from reproject import reproject_interp
+except Exception:
+    reproject_interp = None
 
 # --- Définition locale du flag ASTROPY_AVAILABLE et du module fits pour ce fichier ---
 ASTROPY_AVAILABLE_IN_UTILS = False
@@ -112,12 +255,996 @@ except ImportError:
         def getheader(filepath, ext=0):
             print(f"MOCK fits_module_for_utils.getheader CALLED for {filepath} (Astropy not found).")
             return MockFitsHeader()
-    
-    fits_module_for_utils = MockFitsModule()
-    print("AVERTISSEMENT (zemosaic_utils): Astropy (fits) non trouvé. Fonctionnalités FITS limitées/mockées.")
+
+
+def _merge_header_cards(target_header, source_header) -> None:
+    """Merge ``source_header`` into ``target_header`` while skipping NAXIS cards."""
+
+    if source_header is None:
+        return
+
+    try:
+        from astropy.io.fits import Header as FitsHeader  # type: ignore
+    except Exception:
+        FitsHeader = ()  # type: ignore
+
+    # Handle astropy Header explicitly to preserve comments
+    if FitsHeader and isinstance(source_header, FitsHeader):
+        for card in source_header.cards:
+            keyword = getattr(card, "keyword", None)
+            if not keyword:
+                continue
+            if str(keyword).upper().startswith("NAXIS"):
+                continue
+            target_header[keyword] = (card.value, card.comment)
+        return
+
+    # Generic mapping-like objects (dict, HeaderDict, etc.)
+    if hasattr(source_header, "items"):
+        try:
+            for key, value in source_header.items():
+                if str(key).upper().startswith("NAXIS"):
+                    continue
+                target_header[key] = value
+        except Exception:
+            pass
+        return
+
+    # Fallback: attempt direct ``update``
+    try:
+        target_header.update(source_header)
+    except Exception:
+        pass
+
+
+def write_final_fits_uint16_color_aware(
+    out_path: str,
+    final_img: "np.ndarray",
+    header: "fits_module_for_utils.Header | dict | None" = None,
+    *,
+    force_rgb_planes: bool,
+    legacy_rgb_cube: bool,
+    overwrite: bool = True,
+):
+    """Save final mosaic as uint16 FITS while preserving RGB colour planes."""
+
+    if not ASTROPY_AVAILABLE_IN_UTILS or fits_module_for_utils is None:
+        raise RuntimeError("Astropy FITS writer unavailable; cannot save uint16 mosaic.")
+
+    import numpy as np  # Local import for clarity inside helper
+
+    if final_img is None:
+        raise ValueError("final_img is None")
+
+    arr = np.asarray(final_img)
+    if arr.size == 0:
+        raise ValueError("final_img is empty")
+
+    fits_mod = fits_module_for_utils
+
+    # Normalize mono (H, W, 1) inputs
+    if arr.ndim == 3 and arr.shape[-1] == 1:
+        arr = arr[..., 0]
+
+    is_rgb = bool(force_rgb_planes and arr.ndim == 3 and arr.shape[-1] == 3)
+
+    if np.issubdtype(arr.dtype, np.floating):
+        arr_float = _ensure_float32_no_nan(arr)
+
+        finite_mask = np.isfinite(arr_float)
+        if not np.any(finite_mask):
+            u16 = np.zeros(arr_float.shape, dtype=np.uint16)
+        else:
+            finite_vals = arr_float[finite_mask]
+            vmin = float(np.nanmin(finite_vals))
+            vmax = float(np.nanmax(finite_vals))
+
+            if 0.0 <= vmin and vmax <= 1.0 + 1e-6:
+                scaled = np.clip(arr_float, 0.0, 1.0) * 65535.0 + 0.5
+                u16 = scaled.astype(np.uint16, copy=False)
+            elif 0.0 <= vmin and vmax <= 65535.0:
+                clipped = np.clip(arr_float, 0.0, 65535.0) + 0.5
+                u16 = clipped.astype(np.uint16, copy=False)
+            else:
+                u16 = _rescale_to_u16(arr_float)
+    elif arr.dtype != np.uint16:
+        u16 = arr.astype(np.uint16, copy=False)
+    else:
+        u16 = arr
+
+    i16 = (u16.astype(np.int32, copy=False) - 32768).astype(np.int16, copy=False)
+
+    if is_rgb:
+        data = np.moveaxis(i16, -1, 0)
+        primary_hdu = fits_mod.PrimaryHDU(data=data)
+        hdr = primary_hdu.header
+        _merge_header_cards(hdr, header)
+        hdr["ZEMORGB"] = (True, "RGB planes present")
+        hdr["CHANNELS"] = (3, "Number of color channels")
+    else:
+        primary_hdu = fits_mod.PrimaryHDU(data=i16)
+        hdr = primary_hdu.header
+        _merge_header_cards(hdr, header)
+        hdr["ZEMORGB"] = (False, "No separate RGB planes")
+        hdr["CHANNELS"] = (1, "Number of color channels")
+
+    hdr["ZEMO16"] = (True, "Saved as uint16 via int16 + BZERO")
+    hdr["ZEMOLEG"] = (bool(legacy_rgb_cube), "Legacy RGB cube mode")
+    hdr["BITPIX"] = 16
+    hdr["BSCALE"] = 1
+    hdr["BZERO"] = 32768
+    if "DATAMIN" in hdr:
+        del hdr["DATAMIN"]
+    if "DATAMAX" in hdr:
+        del hdr["DATAMAX"]
+
+    hdul = fits_mod.HDUList([primary_hdu])
+
+    try:
+        hdul.writeto(out_path, overwrite=overwrite, output_verify="fix")
+    finally:
+        if hasattr(hdul, "close"):
+            try:
+                hdul.close()
+            except Exception:
+                pass
 # --- Fin Définition locale ---
 
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+def _extract_luminance_plane(tile_array: np.ndarray) -> np.ndarray:
+    """Retourne une vue 2D (float32) utilisée pour les analyses photométriques."""
+
+    if tile_array.ndim == 2:
+        return tile_array.astype(np.float32, copy=False)
+    if tile_array.ndim == 3 and tile_array.shape[-1] > 1:
+        return tile_array.mean(axis=-1, dtype=np.float32)
+    if tile_array.ndim == 3:
+        return tile_array[..., 0].astype(np.float32, copy=False)
+    return tile_array.reshape(tile_array.shape[0], tile_array.shape[1]).astype(np.float32, copy=False)
+
+
+def estimate_overlap_pairs(
+    wcs_list,
+    shapes_hw,
+    final_output_wcs,
+    final_output_shape_hw,
+    min_overlap_fraction: float = 0.05,
+):
+    """Estime les couples de tuiles dont les empreintes WCS se chevauchent."""
+
+    if not wcs_list or not final_output_wcs:
+        return []
+    try:
+        final_w, final_h = int(final_output_shape_hw[1]), int(final_output_shape_hw[0])
+    except Exception:
+        final_h, final_w = 0, 0
+    try:
+        header = final_output_wcs.to_header()
+        crpix1 = float(header.get("CRPIX1", 0.0))
+        crpix2 = float(header.get("CRPIX2", 0.0))
+    except Exception:
+        header = None
+        crpix1 = crpix2 = 0.0
+
+    footprints = []
+    for idx, (wcs_obj, shape_hw) in enumerate(zip(wcs_list, shapes_hw)):
+        try:
+            if wcs_obj is None or not getattr(wcs_obj, "is_celestial", False):
+                footprints.append(None)
+                continue
+            h_i, w_i = int(shape_hw[0]), int(shape_hw[1])
+            if h_i <= 0 or w_i <= 0:
+                footprints.append(None)
+                continue
+            corners = np.array(
+                [[0.0, 0.0], [w_i - 1.0, 0.0], [0.0, h_i - 1.0], [w_i - 1.0, h_i - 1.0]],
+                dtype=np.float64,
+            )
+            world = wcs_obj.pixel_to_world(corners[:, 0], corners[:, 1])
+            px, py = final_output_wcs.world_to_pixel(world)
+            if px is None or py is None:
+                footprints.append(None)
+                continue
+            px = np.asarray(px, dtype=np.float64)
+            py = np.asarray(py, dtype=np.float64)
+            if not np.isfinite(px).any() or not np.isfinite(py).any():
+                footprints.append(None)
+                continue
+            x_min = float(np.nanmin(px))
+            x_max = float(np.nanmax(px))
+            y_min = float(np.nanmin(py))
+            y_max = float(np.nanmax(py))
+            if header is not None:
+                # Les CRPIX sont indexés à 1 ; limiter les bbox au champ final si possible.
+                x_min = max(x_min, -crpix1)
+                y_min = max(y_min, -crpix2)
+                if final_w > 0:
+                    x_max = min(x_max, final_w - crpix1)
+                if final_h > 0:
+                    y_max = min(y_max, final_h - crpix2)
+            if not np.isfinite([x_min, x_max, y_min, y_max]).all():
+                footprints.append(None)
+                continue
+            if x_max <= x_min or y_max <= y_min:
+                footprints.append(None)
+                continue
+            area = max((x_max - x_min) * (y_max - y_min), 1e-6)
+            footprints.append((x_min, x_max, y_min, y_max, area))
+        except Exception:
+            footprints.append(None)
+
+    overlaps = []
+    for i in range(len(footprints)):
+        box_i = footprints[i]
+        if box_i is None:
+            continue
+        for j in range(i + 1, len(footprints)):
+            box_j = footprints[j]
+            if box_j is None:
+                continue
+            x0 = max(box_i[0], box_j[0])
+            x1 = min(box_i[1], box_j[1])
+            y0 = max(box_i[2], box_j[2])
+            y1 = min(box_i[3], box_j[3])
+            if x1 <= x0 or y1 <= y0:
+                continue
+            overlap_area = (x1 - x0) * (y1 - y0)
+            min_area = min(box_i[4], box_j[4])
+            if min_area <= 0:
+                continue
+            if overlap_area / min_area < max(0.0, float(min_overlap_fraction)):
+                continue
+            x0_int = int(max(0, math.floor(x0)))
+            y0_int = int(max(0, math.floor(y0)))
+            x1_int = int(math.ceil(x1))
+            y1_int = int(math.ceil(y1))
+            if final_w > 0:
+                x1_int = min(x1_int, final_w)
+            if final_h > 0:
+                y1_int = min(y1_int, final_h)
+            if x1_int - x0_int < 4 or y1_int - y0_int < 4:
+                continue
+            overlaps.append(
+                {
+                    "i": i,
+                    "j": j,
+                    "bbox": (x0_int, x1_int, y0_int, y1_int),
+                    "weight": overlap_area,
+                }
+            )
+    return overlaps
+
+
+def robust_affine_fit(x_values: np.ndarray, y_values: np.ndarray, clip_sigma: float = 2.5):
+    """Ajuste robuste y ≈ a*x + b avec rejet sigma-clipping."""
+
+    if x_values.size < 16:
+        return None
+    x = x_values.astype(np.float64, copy=False)
+    y = y_values.astype(np.float64, copy=False)
+    mask = np.ones_like(x, dtype=bool)
+    clip_sigma = max(1.0, float(clip_sigma))
+    a_b = (1.0, 0.0)
+    for _ in range(6):
+        if mask.sum() < 8:
+            break
+        A = np.vstack([x[mask], np.ones(mask.sum(), dtype=np.float64)]).T
+        try:
+            sol, *_ = np.linalg.lstsq(A, y[mask], rcond=None)
+        except Exception:
+            return None
+        a_est, b_est = float(sol[0]), float(sol[1])
+        residuals = y - (a_est * x + b_est)
+        res_sel = residuals[mask]
+        sigma = np.std(res_sel)
+        a_b = (a_est, b_est)
+        if sigma <= 1e-6:
+            break
+        keep = np.abs(res_sel) <= clip_sigma * sigma
+        if keep.all():
+            break
+        new_mask = np.zeros_like(mask)
+        new_mask[np.flatnonzero(mask)[keep]] = True
+        if new_mask.sum() < 8:
+            break
+        mask = new_mask
+    return a_b
+
+
+def compute_sky_statistics(
+    image: np.ndarray | None,
+    low_percentile: float,
+    high_percentile: float,
+) -> dict[str, float] | None:
+    """Compute simple sky statistics using percentile-based limits."""
+
+    if image is None:
+        return None
+    arr = np.asarray(image, dtype=np.float64)
+    if arr.size == 0:
+        return None
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+
+    use_gpu = False
+    fallback_reason = ""
+    if _force_cpu_intertile():
+        fallback_reason = "env_override"
+    else:
+        try:
+            if gpu_is_available():
+                estimated_bytes = int(arr.nbytes * 2.0)
+                if gpu_memory_sufficient(estimated_bytes, safety_fraction=0.75):
+                    use_gpu = True
+                else:
+                    fallback_reason = f"insufficient_memory(est={estimated_bytes})"
+            else:
+                fallback_reason = "gpu_unavailable"
+        except Exception as exc:
+            fallback_reason = f"gpu_check_failed:{exc!r}"
+
+    if use_gpu:
+        try:
+            import cupy as cp  # type: ignore
+        except Exception as exc:
+            fallback_reason = f"gpu_import_failed:{exc!r}"
+            use_gpu = False
+        else:
+            ensure_cupy_pool_initialized()
+            arr_gpu = None
+            try:
+                logger.debug(
+                    "[Intertile][GPU] compute_sky_statistics using CuPy (N=%d, bytes=%d)",
+                    arr.size,
+                    arr.nbytes,
+                )
+                arr_gpu = cp.asarray(arr, dtype=cp.float32)
+                low = float(cp.asnumpy(cp.nanpercentile(arr_gpu, float(low_percentile))))
+                high = float(cp.asnumpy(cp.nanpercentile(arr_gpu, float(high_percentile))))
+                median = float(cp.asnumpy(cp.nanmedian(arr_gpu)))
+                return {"median": median, "low": low, "high": high}
+            except Exception as exc:
+                fallback_reason = f"gpu_error:{exc!r}"
+            finally:
+                if arr_gpu is not None:
+                    del arr_gpu
+                free_cupy_memory_pools()
+
+    if fallback_reason:
+        logger.debug("[Intertile][GPU] Fallback to CPU: reason=%s", fallback_reason)
+    low = float(np.nanpercentile(arr, float(low_percentile)))
+    high = float(np.nanpercentile(arr, float(high_percentile)))
+    median = float(np.nanmedian(arr))
+    return {"median": median, "low": low, "high": high}
+
+
+def estimate_sky_affine_to_ref(
+    samples_src: np.ndarray,
+    samples_ref: np.ndarray,
+    sky_low: float,
+    sky_high: float,
+    clip_sigma: float,
+):
+    """Estimate affine parameters matching ``samples_src`` onto ``samples_ref``."""
+
+    if samples_src is None or samples_ref is None:
+        return None
+    x = np.asarray(samples_src, dtype=np.float64).ravel()
+    y = np.asarray(samples_ref, dtype=np.float64).ravel()
+    if x.size == 0 or y.size == 0 or x.size != y.size:
+        return None
+    valid = np.isfinite(x) & np.isfinite(y)
+    if not np.any(valid):
+        return None
+    x = x[valid]
+    y = y[valid]
+    if x.size < 16:
+        return None
+    x_sel: np.ndarray | None = None
+    y_sel: np.ndarray | None = None
+    use_gpu = False
+    fallback_reason = ""
+    if _force_cpu_intertile():
+        fallback_reason = "env_override"
+    else:
+        try:
+            if gpu_is_available():
+                estimated_bytes = int((x.nbytes + y.nbytes) * 3.0)
+                if gpu_memory_sufficient(estimated_bytes, safety_fraction=0.75):
+                    use_gpu = True
+                else:
+                    fallback_reason = f"insufficient_memory(est={estimated_bytes})"
+            else:
+                fallback_reason = "gpu_unavailable"
+        except Exception as exc:
+            fallback_reason = f"gpu_check_failed:{exc!r}"
+
+    if use_gpu:
+        try:
+            import cupy as cp  # type: ignore
+        except Exception as exc:
+            fallback_reason = f"gpu_import_failed:{exc!r}"
+            use_gpu = False
+        else:
+            ensure_cupy_pool_initialized()
+            x_gpu = y_gpu = proxy_gpu = mask_gpu = None
+            try:
+                logger.debug(
+                    "[Intertile][GPU] estimate_sky_affine_to_ref using CuPy for percentiles (N=%d, bytes=%d)",
+                    x.size,
+                    x.nbytes + y.nbytes,
+                )
+                x_gpu = cp.asarray(x, dtype=cp.float32)
+                y_gpu = cp.asarray(y, dtype=cp.float32)
+                proxy_gpu = 0.5 * (x_gpu + y_gpu)
+                p_low = float(cp.asnumpy(cp.nanpercentile(proxy_gpu, float(sky_low))))
+                p_high = float(cp.asnumpy(cp.nanpercentile(proxy_gpu, float(sky_high))))
+                if not math.isfinite(p_low) or not math.isfinite(p_high):
+                    return None
+                if p_high <= p_low:
+                    p_low = float(cp.asnumpy(cp.nanmin(proxy_gpu)))
+                    p_high = float(cp.asnumpy(cp.nanmax(proxy_gpu)))
+                mask_gpu = (proxy_gpu >= p_low) & (proxy_gpu <= p_high)
+                x_sel = cp.asnumpy(x_gpu[mask_gpu])
+                y_sel = cp.asnumpy(y_gpu[mask_gpu])
+                if x_sel.size < 16:
+                    x_sel = cp.asnumpy(x_gpu)
+                    y_sel = cp.asnumpy(y_gpu)
+            except Exception as exc:
+                fallback_reason = f"gpu_error:{exc!r}"
+                x_sel = None
+                y_sel = None
+                use_gpu = False
+            finally:
+                if mask_gpu is not None:
+                    del mask_gpu
+                if proxy_gpu is not None:
+                    del proxy_gpu
+                if x_gpu is not None:
+                    del x_gpu
+                if y_gpu is not None:
+                    del y_gpu
+                free_cupy_memory_pools()
+
+    if not use_gpu:
+        if fallback_reason:
+            logger.debug("[Intertile][GPU] Fallback to CPU: reason=%s", fallback_reason)
+        proxy = 0.5 * (x + y)
+        try:
+            p_low = float(np.nanpercentile(proxy, float(sky_low)))
+            p_high = float(np.nanpercentile(proxy, float(sky_high)))
+        except Exception:
+            p_low = float(np.nanpercentile(proxy, 25.0))
+            p_high = float(np.nanpercentile(proxy, 75.0))
+        if not np.isfinite(p_low) or not np.isfinite(p_high):
+            return None
+        if p_high <= p_low:
+            p_low = float(np.nanmin(proxy))
+            p_high = float(np.nanmax(proxy))
+        sky_mask = (proxy >= p_low) & (proxy <= p_high)
+        x_sel = x[sky_mask]
+        y_sel = y[sky_mask]
+        if x_sel.size < 16:
+            x_sel = x
+            y_sel = y
+    fit = robust_affine_fit(x_sel, y_sel, clip_sigma=float(clip_sigma))
+    if fit is None:
+        return None
+    gain, offset = fit
+    if not (np.isfinite(gain) and np.isfinite(offset)):
+        return None
+
+    # --- Safe photometric fallback (visual stability only) ---
+    # Compute correlation between selected samples. If correlation is weak or
+    # fitted gain is non-positive, recompute a stable gain/offset from robust
+    # statistics to avoid negative-flux master tiles on weak datasets.
+    try:
+        corr = float(np.corrcoef(x_sel, y_sel)[0, 1])
+    except Exception:
+        corr = float("nan")
+
+    if float(gain) <= 0.0 or (not np.isfinite(corr)) or abs(corr) < 0.3:
+        src_med = float(np.nanmedian(x_sel))
+        ref_med = float(np.nanmedian(y_sel))
+        src_std = float(np.nanstd(x_sel))
+        ref_std = float(np.nanstd(y_sel))
+        if src_std > 1e-6:
+            safe_gain = max(1e-6, ref_std / src_std)
+        else:
+            safe_gain = 1.0
+        safe_gain = np.float32(safe_gain)
+        safe_offset = np.float32(ref_med - float(safe_gain) * src_med)
+
+        # Log explicit safeguard application for diagnostics
+        try:
+            logger.debug(
+                "Photometric safeguard applied (corr=%.3f, gain=%.3f, offset=%.3f, samples=%d)",
+                corr if np.isfinite(corr) else float("nan"),
+                float(safe_gain),
+                float(safe_offset),
+                int(x_sel.size),
+            )
+        except Exception:
+            pass
+
+        gain, offset = float(safe_gain), float(safe_offset)
+
+    return float(gain), float(offset), int(x_sel.size)
+
+
+def _rescale_wcs_for_preview(
+    wcs_obj,
+    original_shape_hw: tuple[int, int],
+    new_shape_hw: tuple[int, int],
+):
+    if not wcs_obj or not getattr(wcs_obj, "is_celestial", False):
+        return None
+    try:
+        preview_wcs = wcs_obj.deepcopy()
+    except Exception:
+        preview_wcs = copy.deepcopy(wcs_obj)
+    if preview_wcs is None:
+        return None
+    try:
+        orig_h, orig_w = map(float, original_shape_hw)
+        new_h, new_w = map(float, new_shape_hw)
+        if new_h <= 0 or new_w <= 0:
+            return None
+        scale_y = orig_h / new_h
+        scale_x = orig_w / new_w
+        if hasattr(preview_wcs, "wcs") and preview_wcs.wcs is not None:
+            if preview_wcs.wcs.crpix is not None and preview_wcs.wcs.crpix.size >= 2:
+                preview_wcs.wcs.crpix[0] = (float(preview_wcs.wcs.crpix[0]) - 0.5) / scale_x + 0.5
+                preview_wcs.wcs.crpix[1] = (float(preview_wcs.wcs.crpix[1]) - 0.5) / scale_y + 0.5
+            if preview_wcs.wcs.cd is not None:
+                preview_wcs.wcs.cd[0, :] *= scale_x
+                preview_wcs.wcs.cd[1, :] *= scale_y
+            elif preview_wcs.wcs.cdelt is not None:
+                preview_wcs.wcs.cdelt[0] *= scale_x
+                preview_wcs.wcs.cdelt[1] *= scale_y
+        try:
+            preview_wcs.pixel_shape = (int(round(new_w)), int(round(new_h)))
+        except Exception:
+            pass
+        return preview_wcs
+    except Exception:
+        return None
+
+
+def create_downscaled_luminance_preview(
+    image: np.ndarray,
+    wcs_obj,
+    preview_size: int = 256,
+) -> tuple[np.ndarray | None, object | None]:
+    """Return a luminance preview and adjusted WCS for quick overlap tests."""
+
+    if image is None:
+        return None, None
+    arr = np.asarray(image)
+    if arr.ndim == 3:
+        if arr.shape[2] == 1:
+            arr = arr[..., 0]
+        else:
+            arr = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim != 2:
+        arr = np.squeeze(arr)
+        if arr.ndim != 2:
+            return arr, None
+    arr = np.where(np.isfinite(arr), arr, np.nan)
+    h, w = arr.shape
+    preview = arr
+    preview_wcs = None
+    if preview_size and max(h, w) > preview_size:
+        scale = max(h, w) / float(preview_size)
+        new_w = max(8, int(round(w / scale)))
+        new_h = max(8, int(round(h / scale)))
+        preview = cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        preview = preview.astype(np.float32, copy=False)
+        preview_wcs = _rescale_wcs_for_preview(wcs_obj, (h, w), (new_h, new_w))
+    else:
+        preview = arr.astype(np.float32, copy=False)
+        if wcs_obj is not None:
+            preview_wcs = _rescale_wcs_for_preview(wcs_obj, (h, w), (h, w))
+    return preview, preview_wcs
+
+
+def solve_global_affine(num_tiles: int, pair_entries, anchor_index: int = 0):
+    """Résout les gains/offsets globaux à partir des couples (a,b)."""
+
+    if num_tiles <= 0:
+        return {}
+    if not pair_entries:
+        return {i: (1.0, 0.0) for i in range(num_tiles)}
+
+    anchor = int(max(0, min(anchor_index, num_tiles - 1)))
+    rows = []
+    rhs = []
+    for entry in pair_entries:
+        i = entry[0]
+        j = entry[1]
+        a_ij = float(entry[2])
+        b_ij = float(entry[3])
+        weight = max(1.0, float(entry[4]))
+        if not np.isfinite(a_ij) or abs(a_ij) < 1e-6:
+            continue
+        sqrt_w = math.sqrt(weight)
+        row_gain = np.zeros(2 * num_tiles, dtype=np.float64)
+        row_gain[i] = -sqrt_w
+        row_gain[j] = a_ij * sqrt_w
+        rows.append(row_gain)
+        rhs.append(0.0)
+
+        row_offset = np.zeros(2 * num_tiles, dtype=np.float64)
+        row_offset[num_tiles + i] = sqrt_w
+        row_offset[num_tiles + j] = -sqrt_w
+        row_offset[j] = -b_ij * sqrt_w
+        rows.append(row_offset)
+        rhs.append(0.0)
+
+    # Contraintes d'ancrage : gain=1, offset=0
+    row_anchor_gain = np.zeros(2 * num_tiles, dtype=np.float64)
+    row_anchor_gain[anchor] = 1.0
+    rows.append(row_anchor_gain)
+    rhs.append(1.0)
+
+    row_anchor_offset = np.zeros(2 * num_tiles, dtype=np.float64)
+    row_anchor_offset[num_tiles + anchor] = 1.0
+    rows.append(row_anchor_offset)
+    rhs.append(0.0)
+
+    if not rows:
+        return {i: (1.0, 0.0) for i in range(num_tiles)}
+
+    A = np.vstack(rows)
+    b = np.asarray(rhs, dtype=np.float64)
+    try:
+        sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    except Exception:
+        return {i: (1.0, 0.0) for i in range(num_tiles)}
+
+    gains = sol[:num_tiles]
+    offsets = sol[num_tiles:]
+    result = {}
+    for idx in range(num_tiles):
+        g = float(gains[idx])
+        o = float(offsets[idx])
+        if not np.isfinite(g) or abs(g) < 1e-6:
+            g = 1.0
+        if not np.isfinite(o):
+            o = 0.0
+        result[idx] = (g, o)
+    return result
+
+
+def compute_intertile_affine_calibration(
+    tile_data_with_wcs,
+    final_output_wcs,
+    final_output_shape_hw,
+    preview_size: int = 512,
+    min_overlap_fraction: float = 0.05,
+    sky_percentile: tuple[float, float] | list[float] = (30.0, 70.0),
+    robust_clip_sigma: float = 2.5,
+    use_auto_intertile: bool = False,
+    logger=None,
+    progress_callback=None,
+):
+    """Calcule des corrections affine (gain/offset) inter-tuiles avant reprojection."""
+
+    if tile_data_with_wcs is None or len(tile_data_with_wcs) < 2:
+        return {}
+    if reproject_interp is None or not ASTROPY_AVAILABLE_IN_UTILS:
+        return {}
+    try:
+        header_full = final_output_wcs.to_header()
+    except Exception:
+        return {}
+
+    try:
+        h_full = int(final_output_shape_hw[0])
+        w_full = int(final_output_shape_hw[1])
+    except Exception:
+        h_full = w_full = 0
+
+    sky_low, sky_high = 30.0, 70.0
+    try:
+        if isinstance(sky_percentile, (list, tuple)) and len(sky_percentile) >= 2:
+            sky_low = float(sky_percentile[0])
+            sky_high = float(sky_percentile[1])
+            if sky_low > sky_high:
+                sky_low, sky_high = sky_high, sky_low
+    except Exception:
+        sky_low, sky_high = 30.0, 70.0
+
+    wcs_list = [wcs for _data, wcs in tile_data_with_wcs]
+    shapes_hw = []
+    luminance_tiles = []
+    for data, _wcs in tile_data_with_wcs:
+        arr = np.asarray(data)
+        if arr.ndim == 3 and arr.shape[-1] == 0:
+            luminance_tiles.append(None)
+            shapes_hw.append((0, 0))
+            continue
+        luminance = _extract_luminance_plane(arr)
+        luminance_tiles.append(luminance)
+        shapes_hw.append((luminance.shape[0], luminance.shape[1]))
+
+    num_tiles = len(tile_data_with_wcs)
+
+    try:
+        preview_size = int(preview_size)
+    except Exception:
+        preview_size = 512
+    preview_size = max(128, preview_size)
+
+    try:
+        min_overlap_fraction = float(min_overlap_fraction)
+    except Exception:
+        min_overlap_fraction = 0.05
+    if not math.isfinite(min_overlap_fraction):
+        min_overlap_fraction = 0.05
+    if min_overlap_fraction < 0:
+        min_overlap_fraction = 0.0
+
+    def _log_intertile(message: str, level: str = "INFO") -> None:
+        prefixed = message if message.startswith("[Intertile]") else f"[Intertile] {message}"
+        level_upper = str(level).upper()
+        if logger is not None:
+            try:
+                if level_upper in {"WARN", "WARNING"}:
+                    logger.warning(prefixed)
+                elif level_upper in {"ERROR", "CRITICAL"}:
+                    logger.error(prefixed)
+                elif level_upper in {"DEBUG", "DEBUG_DETAIL"}:
+                    logger.debug(prefixed)
+                else:
+                    logger.info(prefixed)
+            except Exception:
+                pass
+        if progress_callback:
+            try:
+                progress_callback(prefixed, None, level_upper)
+            except Exception:
+                pass
+
+    if use_auto_intertile and num_tiles > 20:
+        tuned_preview = max(1024, preview_size)
+        tuned_overlap = min(min_overlap_fraction, 0.01)
+        preview_size = int(tuned_preview)
+        min_overlap_fraction = float(tuned_overlap)
+        _log_intertile(
+            f"Auto-tune enabled for {num_tiles} tiles — using preview={preview_size}, min_overlap={min_overlap_fraction:.4f}",
+            level="INFO",
+        )
+
+    base_min_overlap = float(min_overlap_fraction)
+
+    candidates: list[float] = []
+    seen_thresholds: set[float] = set()
+
+    def _add_candidate(value: float) -> None:
+        try:
+            val = float(value)
+        except Exception:
+            return
+        if not math.isfinite(val):
+            return
+        if val < 0:
+            val = 0.0
+        key = round(val, 6)
+        if key in seen_thresholds:
+            return
+        seen_thresholds.add(key)
+        candidates.append(val)
+
+    _add_candidate(base_min_overlap)
+    for fallback_threshold in (0.03, 0.02, 0.01):
+        if fallback_threshold < base_min_overlap - 1e-6:
+            _add_candidate(fallback_threshold)
+    if not candidates:
+        candidates.append(0.0)
+
+    overlaps = []
+    effective_min_overlap = base_min_overlap
+    for threshold in candidates:
+        overlaps = estimate_overlap_pairs(
+            wcs_list,
+            shapes_hw,
+            final_output_wcs,
+            (h_full, w_full),
+            min_overlap_fraction=threshold,
+        )
+        _log_intertile(
+            f"Overlap pairs at min_overlap={threshold:.4f}: {len(overlaps)}",
+            level="INFO",
+        )
+        if overlaps:
+            effective_min_overlap = threshold
+            if threshold + 1e-6 < base_min_overlap:
+                _log_intertile(
+                    f"Using relaxed min_overlap={threshold:.4f} (initial {base_min_overlap:.4f}).",
+                    level="INFO",
+                )
+            break
+
+    if not overlaps:
+        _log_intertile(
+            "No overlap pairs found after retries — applying GLOBAL fallback (median normalization).",
+            level="WARN",
+        )
+        try:
+            use_gpu = False
+            xp = np
+            cp = None
+            try:
+                import cupy as _cp  # type: ignore
+
+                if gpu_is_available():
+                    xp = _cp
+                    cp = _cp
+                    use_gpu = True
+                    _log_intertile(
+                        "CuPy GPU detected — normalization on GPU.",
+                        level="INFO_DETAIL",
+                    )
+            except Exception:
+                xp = np
+                use_gpu = False
+
+            medians = []
+            for data, _ in tile_data_with_wcs:
+                if data is None:
+                    continue
+                arr = xp.asarray(data, dtype=xp.float32)
+                med = float(xp.median(arr).get() if use_gpu else np.median(arr))
+                if np.isfinite(med) and med > 0:
+                    medians.append(med)
+
+            if not medians:
+                _log_intertile("No valid medians found for normalization.", level="WARN")
+                return {}
+
+            global_median = float(np.median(medians))
+            _log_intertile(
+                f"Global normalization median reference = {global_median:.4f}",
+                level="INFO_DETAIL",
+            )
+
+            new_tile_data = []
+            for data, wcs_obj in tile_data_with_wcs:
+                if data is None:
+                    new_tile_data.append((data, wcs_obj))
+                    continue
+                arr = xp.asarray(data, dtype=xp.float32)
+                med = float(xp.median(arr).get() if use_gpu else np.median(arr))
+                scale = (global_median / med) if med and np.isfinite(med) and med != 0 else 1.0
+                scaled = arr * scale
+                if use_gpu and cp is not None:
+                    scaled = cp.asnumpy(scaled)  # type: ignore
+                new_tile_data.append((scaled, wcs_obj))
+            tile_data_with_wcs[:] = new_tile_data
+
+            _log_intertile("Applied global normalization to all master tiles.", level="INFO")
+
+        except Exception as e_norm:
+            _log_intertile(f"Global normalization fallback failed: {e_norm}", level="ERROR")
+
+        return {}
+
+    min_overlap_fraction = effective_min_overlap
+    _log_intertile(
+        f"Using: preview={preview_size}, min_overlap={effective_min_overlap:.4f}, sky=({sky_low:.1f},{sky_high:.1f}), clip={robust_clip_sigma:.2f}, pairs={len(overlaps)}",
+        level="INFO",
+    )
+
+    try:
+        from astropy.wcs import WCS as _WCS
+    except Exception:
+        return {}
+
+    pair_entries = []
+    connectivity = np.zeros(len(tile_data_with_wcs), dtype=np.float64)
+    preview_size = max(128, int(preview_size))
+
+    for idx, overlap in enumerate(overlaps, 1):
+        i = overlap["i"]
+        j = overlap["j"]
+        bbox = overlap["bbox"]
+        weight = float(overlap.get("weight", 1.0))
+        if luminance_tiles[i] is None or luminance_tiles[j] is None:
+            continue
+        x0, x1, y0, y1 = bbox
+        sub_w = max(1, x1 - x0)
+        sub_h = max(1, y1 - y0)
+        header = header_full.copy()
+        header["NAXIS1"] = sub_w
+        header["NAXIS2"] = sub_h
+        if "CRPIX1" in header:
+            header["CRPIX1"] = float(header["CRPIX1"]) - x0
+        if "CRPIX2" in header:
+            header["CRPIX2"] = float(header["CRPIX2"]) - y0
+        try:
+            target_wcs = _WCS(header)
+        except Exception:
+            continue
+        try:
+            reproj_i, _ = reproject_interp(
+                (luminance_tiles[i], wcs_list[i]), target_wcs, shape_out=(sub_h, sub_w)
+            )
+            reproj_j, _ = reproject_interp(
+                (luminance_tiles[j], wcs_list[j]), target_wcs, shape_out=(sub_h, sub_w)
+            )
+        except Exception:
+            continue
+        if reproj_i is None or reproj_j is None:
+            continue
+        arr_i = np.asarray(reproj_i, dtype=np.float32)
+        arr_j = np.asarray(reproj_j, dtype=np.float32)
+        if arr_i.size == 0 or arr_j.size == 0:
+            continue
+        max_dim = max(arr_i.shape[0], arr_i.shape[1])
+        if max_dim > preview_size:
+            scale = preview_size / max_dim
+            new_w = max(8, int(round(arr_i.shape[1] * scale)))
+            new_h = max(8, int(round(arr_i.shape[0] * scale)))
+            arr_i = cv2.resize(arr_i, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            arr_j = cv2.resize(arr_j, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        valid = np.isfinite(arr_i) & np.isfinite(arr_j)
+        if not np.any(valid):
+            continue
+        sample_i = arr_i[valid]
+        sample_j = arr_j[valid]
+        if sample_i.size < 64:
+            continue
+        sky_proxy = 0.5 * (sample_i + sample_j)
+        try:
+            p_low = np.percentile(sky_proxy, sky_low)
+            p_high = np.percentile(sky_proxy, sky_high)
+        except Exception:
+            p_low = np.nanmin(sky_proxy)
+            p_high = np.nanmax(sky_proxy)
+        if not np.isfinite(p_low) or not np.isfinite(p_high):
+            continue
+        if p_high <= p_low:
+            p_low = np.nanmin(sky_proxy)
+            p_high = np.nanmax(sky_proxy)
+        mask = (sky_proxy >= p_low) & (sky_proxy <= p_high)
+        if mask.sum() < 32:
+            mask = np.ones_like(sky_proxy, dtype=bool)
+        x_samples = sample_i[mask]
+        y_samples = sample_j[mask]
+        fit = robust_affine_fit(x_samples, y_samples, clip_sigma=robust_clip_sigma)
+        if fit is None:
+            continue
+        a_ij, b_ij = fit
+        pair_entries.append((i, j, a_ij, b_ij, weight))
+        connectivity[i] += weight
+        connectivity[j] += weight
+        if progress_callback and idx % 5 == 0:
+            try:
+                progress_callback("phase5_intertile", idx, len(overlaps))
+            except Exception:
+                pass
+
+    if not pair_entries:
+        return {}
+
+    anchor = int(np.argmax(connectivity)) if np.any(connectivity > 0) else 0
+    solution = solve_global_affine(len(tile_data_with_wcs), pair_entries, anchor_index=anchor)
+    if progress_callback:
+        try:
+            progress_callback(
+                "Ensuring match_background=True for final coadd.",
+                None,
+                "DEBUG_DETAIL",
+            )
+        except Exception:
+            pass
+
+    return solution
 # Les filtres VerifyWarning sont maintenant dans le try/except d'Astropy ci-dessus.
 
 
@@ -624,24 +1751,39 @@ def stretch_auto_asifits_like(img_hwc_adu, p_low=0.5, p_high=99.8,
     Étirement type ASIFitsViewer avec asinh et auto balance RVB.
     Fallback vers du linéaire si dynamique trop faible.
     """
-    img = img_hwc_adu.astype(np.float32, copy=False)
-    out = np.empty_like(img)
+    # Keep everything strictly in float32 to avoid huge float64 temporaries on large mosaics
+    img = np.asarray(img_hwc_adu, dtype=np.float32)
+    out = np.empty_like(img, dtype=np.float32)
+
+    a32 = np.float32(asinh_a) if asinh_a is not None else np.float32(0.01)
+    inv_asinh_den = np.float32(1.0) / np.arcsinh(np.float32(1.0) / a32)
 
     for c in range(3):
         chan = img[..., c]
-        vmin, vmax = np.percentile(chan, [p_low, p_high])
-        if vmax - vmin < 1e-3:
-            out[..., c] = np.zeros_like(chan)
+        # percentile returns python floats/float64; cast to float32 to avoid upcasting chan
+        vmin_f64, vmax_f64 = np.percentile(chan, [p_low, p_high])
+        vmin = np.float32(vmin_f64)
+        vmax = np.float32(vmax_f64)
+        dv = vmax - vmin
+        if not np.isfinite(dv) or dv < np.float32(1e-3):
+            out[..., c].fill(0.0)
             continue
-        normed = np.clip((chan - vmin) / (vmax - vmin), 0, 1)
-        # stretch asinh
-        stretched = np.arcsinh(normed / asinh_a) / np.arcsinh(1 / asinh_a)
-        if np.nanmax(stretched) < 0.05:  # cas trop sombre
-            stretched = normed  # fallback linéaire
-        out[..., c] = stretched
+        # In-place normalize into out[..., c] to avoid an extra full-size array
+        dst = out[..., c]
+        np.subtract(chan, vmin, out=dst, dtype=np.float32)
+        np.divide(dst, dv, out=dst)
+        np.clip(dst, 0.0, 1.0, out=dst)
+        # asinh stretch in-place, keeping float32
+        # tmp = arcsinh(dst / a32) * inv_arcsinh(1/a)
+        np.divide(dst, a32, out=dst)
+        np.arcsinh(dst, out=dst)
+        dst *= inv_asinh_den
+        if not np.isfinite(np.nanmax(dst)) or np.nanmax(dst) < np.float32(0.05):
+            # fallback to linear (already in dst)
+            pass
 
     if apply_wb:
-        avg_per_chan = np.mean(out, axis=(0, 1))
+        avg_per_chan = np.mean(out, axis=(0, 1)).astype(np.float32)
         norm = np.max(avg_per_chan)
         if norm > 0:
             avg_per_chan /= norm
@@ -650,7 +1792,7 @@ def stretch_auto_asifits_like(img_hwc_adu, p_low=0.5, p_high=99.8,
         for c in range(3):
             denom = avg_per_chan[c]
             if denom > 1e-8:
-                out[..., c] /= denom
+                out[..., c] = (out[..., c] / np.float32(denom)).astype(np.float32, copy=False)
 
     return np.clip(out, 0, 1)
 
@@ -811,12 +1953,220 @@ def save_numpy_to_fits(image_data: np.ndarray, header, output_path: str, *, axis
 
 
 
+def _ensure_float32_no_nan(arr: np.ndarray) -> np.ndarray:
+    """Return a float32 view/copy of ``arr`` with NaN/Inf replaced by zero."""
+
+    arr_float = arr.astype(np.float32, copy=False)
+    if not np.all(np.isfinite(arr_float)):
+        arr_float = arr_float.copy()
+        np.nan_to_num(arr_float, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return arr_float
+
+
+def _rescale_to_u16(arr: np.ndarray) -> np.ndarray:
+    """Scale float32 ``arr`` to the full uint16 range [0, 65535]."""
+
+    finite_mask = np.isfinite(arr)
+    if not np.any(finite_mask):
+        return np.zeros(arr.shape, dtype=np.uint16)
+
+    finite_values = arr[finite_mask]
+    vmin = float(np.nanmin(finite_values))
+    vmax = float(np.nanmax(finite_values))
+
+    if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or vmax <= vmin:
+        return np.zeros(arr.shape, dtype=np.uint16)
+
+    scale = 65535.0 / (vmax - vmin)
+    result = np.zeros(arr.shape, dtype=np.float32)
+    result[finite_mask] = (arr[finite_mask] - vmin) * scale
+    np.clip(result, 0.0, 65535.0, out=result)
+    return result.astype(np.uint16)
+
+
+def _to_int16_with_bzero(u16_arr: np.ndarray) -> np.ndarray:
+    """Convert ``uint16`` samples to FITS-compliant int16 with ``BZERO=32768``."""
+
+    shifted = u16_arr.astype(np.int32, copy=False) - 32768
+    return np.clip(shifted, -32768, 32767).astype(np.int16, copy=False)
+
+
+def _prepare_int16_header(base_header, width: int, height: int, *, extname: str | None = None):
+    """Return a header for a 2-D int16 image with BSCALE/BZERO metadata."""
+
+    header = base_header.copy()
+    for key in (
+        "SIMPLE",
+        "BITPIX",
+        "NAXIS",
+        "NAXIS1",
+        "NAXIS2",
+        "NAXIS3",
+        "NAXIS4",
+        "NAXIS5",
+        "BSCALE",
+        "BZERO",
+        "EXTEND",
+        "XTENSION",
+        "CHECKSUM",
+        "DATASUM",
+        "PCOUNT",
+        "GCOUNT",
+        "CTYPE3",
+        "CTYPE4",
+    ):
+        if key in header:
+            del header[key]
+
+    for key in ("DATAMIN", "DATAMAX"):
+        if key in header:
+            del header[key]
+
+    if extname:
+        header["EXTNAME"] = extname
+    elif "EXTNAME" in header:
+        del header["EXTNAME"]
+
+    header["BITPIX"] = 16
+    header["BSCALE"] = 1
+    header["BZERO"] = 32768
+    header["NAXIS"] = 2
+    header["NAXIS1"] = int(width)
+    header["NAXIS2"] = int(height)
+    return header
+
+
+def _update_dataminmax(header, data: np.ndarray) -> None:
+    """Set ``DATAMIN``/``DATAMAX`` cards to match the stored integer range."""
+
+    for key in ("DATAMIN", "DATAMAX"):
+        if key in header:
+            del header[key]
+    try:
+        raw_min = int(np.nanmin(data))
+        raw_max = int(np.nanmax(data))
+    except ValueError:
+        raw_min = raw_max = 0
+    header["DATAMIN"] = raw_min
+    header["DATAMAX"] = raw_max
+
+
+def _build_rgb_luminance_hdus(
+    img_hwc: np.ndarray,
+    base_header,
+    fits_module,
+    log_fn,
+):
+    """Create a luminance primary HDU and R/G/B extensions."""
+
+    height, width, _ = img_hwc.shape
+    r_plane, g_plane, b_plane = np.moveaxis(img_hwc, -1, 0)
+
+    luminance = (0.2126 * r_plane + 0.7152 * g_plane + 0.0722 * b_plane).astype(
+        np.float32, copy=False
+    )
+
+    u16_l = _rescale_to_u16(luminance)
+    i16_l = _to_int16_with_bzero(u16_l)
+    header_primary = _prepare_int16_header(base_header, width, height)
+    _update_dataminmax(header_primary, i16_l)
+    primary_hdu = fits_module.PrimaryHDU(data=i16_l, header=header_primary)
+    primary_hdu.header['BSCALE'] = 1
+    primary_hdu.header['BZERO'] = 32768
+    log_fn(
+        f"  SAVE_DEBUG: Luminance primary range [{np.min(i16_l)}, {np.max(i16_l)}]",
+        "WARN",
+    )
+
+    extensions = []
+    for name, plane in (("R", r_plane), ("G", g_plane), ("B", b_plane)):
+        u16_plane = _rescale_to_u16(plane)
+        i16_plane = _to_int16_with_bzero(u16_plane)
+        header_plane = _prepare_int16_header(base_header, width, height, extname=name)
+        _update_dataminmax(header_plane, i16_plane)
+        image_hdu = fits_module.ImageHDU(data=i16_plane, header=header_plane, name=name)
+        image_hdu.header['BSCALE'] = 1
+        image_hdu.header['BZERO'] = 32768
+        log_fn(
+            f"  SAVE_DEBUG: Channel {name} range [{np.min(i16_plane)}, {np.max(i16_plane)}]",
+            "WARN",
+        )
+        extensions.append(image_hdu)
+
+    return primary_hdu, extensions
+
+
+def _build_legacy_rgb_cube_hdu(
+    img_hwc: np.ndarray,
+    base_header,
+    fits_module,
+    log_fn,
+):
+    """Return a legacy RGB cube PrimaryHDU (channels-first)."""
+
+    height, width, channels = img_hwc.shape
+    planes = np.moveaxis(img_hwc, -1, 0)
+    scaled_planes = []
+    for name, plane in zip(("R", "G", "B"), planes):
+        u16_plane = _rescale_to_u16(plane)
+        i16_plane = _to_int16_with_bzero(u16_plane)
+        log_fn(
+            f"  SAVE_DEBUG: Legacy plane {name} range [{np.min(i16_plane)}, {np.max(i16_plane)}]",
+            "WARN",
+        )
+        scaled_planes.append(i16_plane)
+
+    cube_i16 = np.stack(scaled_planes, axis=0)
+    header = _prepare_int16_header(base_header, width, height)
+    header["NAXIS"] = 3
+    header["NAXIS3"] = int(channels)
+    header["CTYPE3"] = ("RGB", "Color Format")
+    header["EXTNAME"] = "RGB"
+    _update_dataminmax(header, cube_i16)
+    log_fn(
+        f"  SAVE_DEBUG: Legacy cube range [{np.min(cube_i16)}, {np.max(cube_i16)}]",
+        "WARN",
+    )
+    legacy_hdu = fits_module.PrimaryHDU(data=cube_i16, header=header)
+    legacy_hdu.header['BSCALE'] = 1
+    legacy_hdu.header['BZERO'] = 32768
+    return legacy_hdu
+
+
+def _build_generic_cube_hdu(
+    img_hwc: np.ndarray,
+    base_header,
+    fits_module,
+    log_fn,
+):
+    """Fallback: scale and save an arbitrary multi-channel cube."""
+
+    height, width, channels = img_hwc.shape
+    u16_data = _rescale_to_u16(img_hwc)
+    i16_data = _to_int16_with_bzero(u16_data)
+    data_to_write = np.moveaxis(i16_data, -1, 0)
+    header = _prepare_int16_header(base_header, width, height)
+    header["NAXIS"] = 3
+    header["NAXIS3"] = int(channels)
+    _update_dataminmax(header, data_to_write)
+    log_fn(
+        f"  SAVE_DEBUG: Generic cube range [{np.min(data_to_write)}, {np.max(data_to_write)}]",
+        "WARN",
+    )
+    generic_hdu = fits_module.PrimaryHDU(data=data_to_write, header=header)
+    generic_hdu.header['BSCALE'] = 1
+    generic_hdu.header['BZERO'] = 32768
+    return generic_hdu
+
+
+
 
 def save_fits_image(image_data: np.ndarray,
                     output_path: str,
                     header = None,  # Type hint peut être plus flexible: fits_module_for_utils.Header() | dict
                     overwrite: bool = True,
                     save_as_float: bool = False,
+                    legacy_rgb_cube: bool = False,
                     progress_callback: callable = None,
                     axis_order: str = "HWC"):
     """
@@ -871,123 +2221,636 @@ def save_fits_image(image_data: np.ndarray,
             except KeyError: pass
 
     data_to_write_temp = None
+    hdus_to_write = []
+    primary_hdu_object = None
     if save_as_float:
-        data_to_write_temp = image_data.astype(np.float32)
-        final_header_to_write['BITPIX'] = -32
-        final_header_to_write['BSCALE'] = 1.0
-        final_header_to_write['BZERO'] = 0.0
-        _log_util_save(f"  SAVE_DEBUG: (Float) data_to_write_temp: Range [{np.nanmin(data_to_write_temp):.3g}, {np.nanmax(data_to_write_temp):.3g}], IsFinite: {np.all(np.isfinite(data_to_write_temp))}", "WARN")
-    else:
-        min_in, max_in = np.nanmin(image_data), np.nanmax(image_data)
-        image_normalized_01 = np.zeros_like(image_data, dtype=np.float32)
-        if np.isfinite(min_in) and np.isfinite(max_in) and (max_in > min_in + 1e-9):
-            image_normalized_01 = (image_data.astype(np.float32) - min_in) / (max_in - min_in)
-        elif np.any(np.isfinite(image_data)): image_normalized_01 = np.full_like(image_data, 0.5, dtype=np.float32)
-        
-        image_clipped_01 = np.clip(image_normalized_01, 0.0, 1.0)
-        data_to_write_temp = (image_clipped_01 * 65535.0).astype(np.uint16)
-        final_header_to_write['BITPIX'] = 16; final_header_to_write['BSCALE'] = 1; final_header_to_write['BZERO'] = 32768
-        _log_util_save(f"  SAVE_DEBUG: (Uint16) data_to_write_temp: Range [{np.min(data_to_write_temp)}, {np.max(data_to_write_temp)}]", "WARN")
-
-    data_for_hdu_cxhxw = None
-    is_color = data_to_write_temp.ndim == 3 and data_to_write_temp.shape[-1] == 3
-    if is_color:
-        axis_order_upper = str(axis_order).upper()
-        if axis_order_upper == 'HWC':
-            h, w, c = data_to_write_temp.shape
-            data_for_hdu_cxhxw = np.moveaxis(data_to_write_temp, -1, 0)
-        elif axis_order_upper == 'CHW':
-            c, h, w = data_to_write_temp.shape
-            data_for_hdu_cxhxw = data_to_write_temp
+        # Avoid an extra full-size copy if already float32 (important for huge mosaics)
+        if isinstance(image_data, np.ndarray) and image_data.dtype == np.float32:
+            data_to_write_temp = image_data
         else:
-            _log_util_save(f"Axis order '{axis_order}' non reconnu, utilisation 'HWC'", "WARN")
-            h, w, c = data_to_write_temp.shape
-            data_for_hdu_cxhxw = np.moveaxis(data_to_write_temp, -1, 0)
-        final_header_to_write['NAXIS'] = 3
-        final_header_to_write['NAXIS1'] = w
-        final_header_to_write['NAXIS2'] = h
-        final_header_to_write['NAXIS3'] = c
-        if 'CTYPE3' not in final_header_to_write:
-            final_header_to_write['CTYPE3'] = ('RGB', 'Color Format')
-        if 'EXTNAME' not in final_header_to_write:
-            final_header_to_write['EXTNAME'] = 'RGB'
-    else: # HW (ou déjà CxHxW, par exemple une carte de couverture)
-        if data_to_write_temp.ndim == 2: # Cas explicite HW pour monochrome
-            data_for_hdu_cxhxw = data_to_write_temp
-            final_header_to_write['NAXIS'] = 2; final_header_to_write['NAXIS1'] = data_to_write_temp.shape[1]
-            final_header_to_write['NAXIS2'] = data_to_write_temp.shape[0]
-            if 'NAXIS3' in final_header_to_write: del final_header_to_write['NAXIS3']
-            if 'CTYPE3' in final_header_to_write: del final_header_to_write['CTYPE3']
-        else: # Si ce n'est ni HWC ni HW, on suppose que c'est déjà dans le bon format pour HDU (ex: couverture CxHxW)
-            data_for_hdu_cxhxw = data_to_write_temp 
-            # Dans ce cas, on espère que le header contient déjà les bonnes infos NAXIS, ou Astropy les déduira.
-            _log_util_save(f"SAVE_DEBUG: Shape data_to_write_temp non HWC ni HW standard: {data_to_write_temp.shape}. Passage direct à HDU.", "DEBUG_DETAIL")
+            data_to_write_temp = image_data.astype(np.float32, copy=False)
 
-    
-    _log_util_save(f"SAVE_DEBUG: Données PRÊTES pour HDU (data_for_hdu_cxhxw) - Shape: {data_for_hdu_cxhxw.shape}, Dtype: {data_for_hdu_cxhxw.dtype}, Range: [{np.nanmin(data_for_hdu_cxhxw):.3g}, {np.nanmax(data_for_hdu_cxhxw):.3g}], IsFinite: {np.all(np.isfinite(data_for_hdu_cxhxw))}", "WARN")
-        
-    hdul = None 
-    primary_hdu_object = None # Pour pouvoir del primary_hdu.data
+        # Ensure a zero floor for better viewer auto-stretch (ASI FITS View, etc.).
+        # Some viewers expect the black level to be at 0. If our mosaic carries a
+        # positive offset (e.g. min ~ 300–500 ADU), auto-stretch may miss the true
+        # background. Shift the baseline so the global finite minimum maps to 0.
+        try:
+            finite_min = float(np.nanmin(data_to_write_temp))
+            if np.isfinite(finite_min) and finite_min > 0.0:
+                _log_util_save(
+                    f"  SAVE_DEBUG: Positive baseline detected (min={finite_min:.3f}). Shifting to zero.",
+                    "INFO_DETAIL",
+                )
+                # Avoid mutating the caller's array when we didn't already make a copy
+                if data_to_write_temp is image_data:
+                    data_to_write_temp = data_to_write_temp.copy()
+                data_to_write_temp -= np.float32(finite_min)
+                # Guard against any numerical underflow
+                data_to_write_temp = np.maximum(data_to_write_temp, 0.0)
+        except Exception as _e_minshift:
+            # Non-fatal: keep original values if anything goes wrong
+            pass
+
+        # For float images keep the header simple; many viewers rely on missing BSCALE/BZERO
+        final_header_to_write['BITPIX'] = -32
+        if 'BSCALE' in final_header_to_write: del final_header_to_write['BSCALE']
+        if 'BZERO' in final_header_to_write: del final_header_to_write['BZERO']
+        # Several viewers misinterpret DATAMIN/DATAMAX on float images for their
+        # initial auto-stretch. Historically our best compatibility came from NOT
+        # writing these two cards for BITPIX=-32. Ensure they are absent.
+        if 'DATAMIN' in final_header_to_write: del final_header_to_write['DATAMIN']
+        if 'DATAMAX' in final_header_to_write: del final_header_to_write['DATAMAX']
+        _log_util_save(f"  SAVE_DEBUG: (Float) data_to_write_temp: Range [{np.nanmin(data_to_write_temp):.3g}, {np.nanmax(data_to_write_temp):.3g}], IsFinite: {np.all(np.isfinite(data_to_write_temp))}", "WARN")
+
+        axis_order_upper = str(axis_order).upper()
+        if data_to_write_temp.ndim == 3:
+            if axis_order_upper == 'HWC':
+                data_for_primary = np.moveaxis(data_to_write_temp, -1, 0)
+            elif axis_order_upper == 'CHW':
+                data_for_primary = data_to_write_temp
+            else:
+                _log_util_save(f"Axis order '{axis_order}' non reconnu, utilisation 'HWC'", "WARN")
+                data_for_primary = np.moveaxis(data_to_write_temp, -1, 0)
+        else:
+            data_for_primary = data_to_write_temp
+
+        _log_util_save(
+            f"SAVE_DEBUG: Données PRÊTES (float) - Shape: {data_for_primary.shape}, Dtype: {data_for_primary.dtype}, Range: [{np.nanmin(data_for_primary):.3g}, {np.nanmax(data_for_primary):.3g}], IsFinite: {np.all(np.isfinite(data_for_primary))}",
+            "WARN",
+        )
+
+        header_float = final_header_to_write.copy()
+        header_float['BITPIX'] = -32
+        if 'BSCALE' in header_float:
+            del header_float['BSCALE']
+        if 'BZERO' in header_float:
+            del header_float['BZERO']
+        if 'DATAMIN' in header_float:
+            del header_float['DATAMIN']
+        if 'DATAMAX' in header_float:
+            del header_float['DATAMAX']
+
+        if data_to_write_temp.ndim == 3:
+            if axis_order_upper == 'HWC':
+                h, w, c = image_data.shape
+            elif axis_order_upper == 'CHW':
+                c, h, w = image_data.shape
+            else:
+                h, w, c = image_data.shape
+            header_float['NAXIS'] = 3
+            header_float['NAXIS1'] = int(w)
+            header_float['NAXIS2'] = int(h)
+            header_float['NAXIS3'] = int(c)
+            if 'CTYPE3' not in header_float:
+                header_float['CTYPE3'] = ('RGB', 'Color Format')
+            if 'EXTNAME' not in header_float:
+                header_float['EXTNAME'] = 'RGB'
+        else:
+            header_float['NAXIS'] = 2
+            header_float['NAXIS1'] = int(data_for_primary.shape[1])
+            header_float['NAXIS2'] = int(data_for_primary.shape[0])
+            if 'NAXIS3' in header_float:
+                del header_float['NAXIS3']
+            if 'CTYPE3' in header_float:
+                del header_float['CTYPE3']
+            if 'EXTNAME' in header_float:
+                del header_float['EXTNAME']
+
+        primary_hdu_object = current_fits_module.PrimaryHDU(data=data_for_primary, header=header_float)
+        hdus_to_write.append(primary_hdu_object)
+    else:
+        axis_order_upper = str(axis_order).upper()
+        if image_data.ndim == 2:
+            sanitized = _ensure_float32_no_nan(image_data)
+            u16_plane = _rescale_to_u16(sanitized)
+            i16_plane = _to_int16_with_bzero(u16_plane)
+            header_primary = _prepare_int16_header(final_header_to_write, sanitized.shape[1], sanitized.shape[0])
+            _update_dataminmax(header_primary, i16_plane)
+            primary_hdu_object = current_fits_module.PrimaryHDU(data=i16_plane, header=header_primary)
+            primary_hdu_object.header['BSCALE'] = 1
+            primary_hdu_object.header['BZERO'] = 32768
+            hdus_to_write.append(primary_hdu_object)
+            _log_util_save(
+                f"  SAVE_DEBUG: Monochrome int16 range [{np.min(i16_plane)}, {np.max(i16_plane)}]",
+                "WARN",
+            )
+        elif image_data.ndim == 3:
+            if axis_order_upper == 'CHW':
+                img_hwc = np.moveaxis(image_data, 0, -1)
+            elif axis_order_upper == 'HWC':
+                img_hwc = image_data
+            else:
+                _log_util_save(f"Axis order '{axis_order}' non reconnu, utilisation 'HWC'", "WARN")
+                img_hwc = image_data
+
+            img_hwc = _ensure_float32_no_nan(img_hwc)
+            channels = img_hwc.shape[-1]
+            if channels == 3:
+                if legacy_rgb_cube:
+                    primary_hdu_object = _build_legacy_rgb_cube_hdu(
+                        img_hwc, final_header_to_write, current_fits_module, _log_util_save
+                    )
+                    hdus_to_write.append(primary_hdu_object)
+                else:
+                    primary_hdu_object, plane_hdus = _build_rgb_luminance_hdus(
+                        img_hwc, final_header_to_write, current_fits_module, _log_util_save
+                    )
+                    hdus_to_write.append(primary_hdu_object)
+                    hdus_to_write.extend(plane_hdus)
+            else:
+                _log_util_save(
+                    f"SAVE_DEBUG: Canaux={channels} (non-RGB). Utilisation du mode cube générique.",
+                    "WARN",
+                )
+                primary_hdu_object = _build_generic_cube_hdu(
+                    img_hwc, final_header_to_write, current_fits_module, _log_util_save
+                )
+                hdus_to_write.append(primary_hdu_object)
+        else:
+            _log_util_save(
+                f"ERREUR: Dimensions d'image non supportées pour '{base_output_filename}' : {image_data.shape}",
+                "ERROR",
+            )
+            return
+
+        if hdus_to_write:
+            primary_data = hdus_to_write[0].data
+            _log_util_save(
+                f"SAVE_DEBUG: Données PRÊTES (int16) - Shape: {primary_data.shape}, Dtype: {primary_data.dtype}, Range: [{np.min(primary_data)} - {np.max(primary_data)}]",
+                "WARN",
+            )
+
+    if not hdus_to_write:
+        _log_util_save(
+            f"ERREUR: Aucun HDU généré pour '{base_output_filename}'. Sauvegarde annulée.",
+            "ERROR",
+        )
+        return
+
+    hdul = None
     try:
-        _log_util_save(f"SAVE_DEBUG: AVANT PrimaryHDU - data_for_hdu_cxhxw - Min: {np.nanmin(data_for_hdu_cxhxw)}, Max: {np.nanmax(data_for_hdu_cxhxw)}, Mean: {np.nanmean(data_for_hdu_cxhxw)}, Std: {np.nanstd(data_for_hdu_cxhxw)}, Dtype: {data_for_hdu_cxhxw.dtype}, Finite: {np.all(np.isfinite(data_for_hdu_cxhxw))}", "ERROR")
-        
-        primary_hdu_object = current_fits_module.PrimaryHDU(data=data_for_hdu_cxhxw, header=final_header_to_write)
-        
-        _log_util_save(f"SAVE_DEBUG: APRÈS PrimaryHDU - primary_hdu.data - Min: {np.nanmin(primary_hdu_object.data)}, Max: {np.nanmax(primary_hdu_object.data)}, Mean: {np.nanmean(primary_hdu_object.data)}, Dtype: {primary_hdu_object.data.dtype}, Finite: {np.all(np.isfinite(primary_hdu_object.data))}", "ERROR")
-        
-        hdul = current_fits_module.HDUList([primary_hdu_object])
+        primary_for_log = primary_hdu_object or hdus_to_write[0]
+        primary_data = getattr(primary_for_log, 'data', None)
+        if primary_data is not None:
+            _log_util_save(
+                f"SAVE_DEBUG: AVANT écriture - Min: {np.nanmin(primary_data)}, Max: {np.nanmax(primary_data)}, Mean: {np.nanmean(primary_data)}, Std: {np.nanstd(primary_data)}, Dtype: {primary_data.dtype}, Finite: {np.all(np.isfinite(primary_data))}",
+                "ERROR",
+            )
+
+        hdul = current_fits_module.HDUList(hdus_to_write)
         _log_util_save(f"Écriture vers '{base_output_filename}' (overwrite={overwrite})...", "DEBUG_DETAIL")
-        
-        hdul.writeto(output_path, overwrite=overwrite, checksum=True, output_verify='exception') 
+
+        hdul.writeto(output_path, overwrite=overwrite, checksum=True, output_verify='exception')
         _log_util_save(f"Sauvegarde FITS vers '{base_output_filename}' RÉUSSIE.", "INFO")
 
     except Exception as e_write:
         _log_util_save(f"ERREUR CRITIQUE lors sauvegarde FITS '{base_output_filename}': {type(e_write).__name__} - {e_write}", "ERROR")
-        if progress_callback: _log_util_save(f"  [ZU SaveFITS TRACEBACK] {traceback.format_exc(limit=3)}", "ERROR")
+        if progress_callback:
+            _log_util_save(f"  [ZU SaveFITS TRACEBACK] {traceback.format_exc(limit=3)}", "ERROR")
     finally:
         if hdul is not None and hasattr(hdul, 'close'):
-            try: hdul.close()
-            except Exception: pass
-        
+            try:
+                hdul.close()
+            except Exception:
+                pass
+
         # Nettoyage explicite pour aider le GC
         if 'data_to_write_temp' in locals() and data_to_write_temp is not None:
             del data_to_write_temp
-        if 'data_for_hdu_cxhxw' in locals() and data_for_hdu_cxhxw is not None:
-            del data_for_hdu_cxhxw
         if primary_hdu_object is not None and hasattr(primary_hdu_object, 'data') and primary_hdu_object.data is not None:
-             del primary_hdu_object.data 
+            del primary_hdu_object.data
         if primary_hdu_object is not None:
-             del primary_hdu_object
+            del primary_hdu_object
+        if 'hdus_to_write' in locals():
+            del hdus_to_write
         if 'hdul' in locals() and hdul is not None:
             del hdul
         gc.collect() # gc doit être importé en haut du fichier zemosaic_utils.py
 
 
 def gpu_assemble_final_mosaic_reproject_coadd(*args, **kwargs):
-    """GPU accelerated final mosaic assembly (reproject & coadd).
+    """Deprecated placeholder kept for compatibility.
 
-    This is a placeholder implementation. A full version would mirror the
-    NumPy implementation using CuPy arrays and CUDA kernels while minimizing
-    data transfers between host and device.
+    The worker now routes GPU usage via ``assemble_final_mosaic_reproject_coadd(..., use_gpu=True)``.
+    This function remains for backward compatibility and will raise to signal callers to switch.
     """
-    raise NotImplementedError("GPU implementation not available")
+    raise NotImplementedError(
+        "Call assemble_final_mosaic_reproject_coadd(use_gpu=True) from the worker instead."
+    )
 
 
 def gpu_assemble_final_mosaic_incremental(*args, **kwargs):
-    """GPU accelerated incremental mosaic assembly placeholder."""
-    raise NotImplementedError("GPU implementation not available")
+    """Deprecated placeholder for incremental GPU path.
+
+    Use the CPU incremental assembly; reprojection dominates and remains CPU-bound for now.
+    """
+    raise NotImplementedError(
+        "Incremental GPU path is not implemented; use CPU incremental assembly."
+    )
 
 
-def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
-    """Simplified GPU implementation using CuPy."""
-    import cupy as cp
-    data_gpu = [cp.asarray(d) for d in data_list]
-    mosaic_gpu = cp.zeros(shape_out, dtype=cp.float32)
-    weight_gpu = cp.zeros(shape_out, dtype=cp.float32)
-    for img in data_gpu:
-        # Placeholder for GPU interpolation logic
+def gpu_reproject_and_coadd_impl(data_list, wcs_list, shape_out, **kwargs):
+    """CuPy-accelerated reprojection and mean coaddition for a single channel.
+
+    Notes
+    - Expects ``data_list`` as list of 2D NumPy arrays (single-channel tiles).
+    - ``wcs_list`` should be a list of WCS objects (or headers convertible to WCS).
+    - ``output_projection`` in ``kwargs`` must be a WCS or a FITS header for the final mosaic grid.
+    - ``match_background`` (or legacy ``match_bg``) subtracts tile median before sampling.
+    - Coverage is returned in [0, 1] as the fraction of inputs contributing per pixel.
+    - Implementation is chunked in rows to limit GPU memory usage.
+    """
+    # Import lazily to avoid importing cupy when GPU is not used
+    import cupy as cp  # type: ignore
+    from cupyx.scipy.ndimage import map_coordinates  # type: ignore
+    ensure_cupy_pool_initialized()
+    try:
+        from astropy.wcs import WCS as _WCS
+    except Exception:
+        _WCS = None
+
+    # Resolve final WCS from header or WCS instance
+    output_projection = kwargs.get("output_projection")
+    if output_projection is None:
+        raise ValueError("gpu_reproject_and_coadd requires 'output_projection' (WCS or header)")
+    if _WCS is not None and not hasattr(output_projection, "pixel_to_world"):
+        try:
+            output_wcs = _WCS(output_projection)
+        except Exception as e:
+            raise ValueError(f"Invalid output_projection for WCS: {e}")
+    else:
+        output_wcs = output_projection
+
+    H, W = int(shape_out[0]), int(shape_out[1])
+    n_inputs = len(data_list)
+    if len(wcs_list) != n_inputs:
+        raise ValueError("data_list and wcs_list must have the same length")
+
+    # Determine background match flag from either name
+    match_background = bool(kwargs.get("match_background", kwargs.get("match_bg", False)))
+
+    # Optional parameters for local overlap estimation (defaults align with CPU intent)
+    bg_preview_size = int(kwargs.get("bg_preview_size", 512))
+    bg_preview_size = max(128, min(4096, int(bg_preview_size)))
+    sky_low, sky_high = 30.0, 70.0
+    try:
+        sp = kwargs.get("intertile_sky_percentile")
+        if isinstance(sp, (list, tuple)) and len(sp) >= 2:
+            sky_low = float(sp[0]); sky_high = float(sp[1])
+            if sky_low > sky_high:
+                sky_low, sky_high = sky_high, sky_low
+    except Exception:
         pass
-    return cp.asnumpy(mosaic_gpu), cp.asnumpy(weight_gpu)
+    try:
+        robust_clip_sigma = float(kwargs.get("intertile_robust_clip_sigma", 2.5))
+    except Exception:
+        robust_clip_sigma = 2.5
+
+    float32_bytes = np.dtype(np.float32).itemsize
+
+    # Optional precomputed per-tile affine corrections (gain, offset)
+    tile_affine = kwargs.get("tile_affine_corrections", None)
+    if isinstance(tile_affine, (list, tuple)) and len(tile_affine) == n_inputs:
+        try:
+            # Normalize into list[(float,float)]
+            tile_affine = [
+                (
+                    float(g) if np.isfinite(g) else 1.0,
+                    float(o) if np.isfinite(o) else 0.0,
+                )
+                for (g, o) in tile_affine
+            ]
+        except Exception:
+            tile_affine = None
+
+    # If an affine (gain/offset) is provided and is non-trivial for any tile,
+    # disable additional background matching to avoid double-offset correction.
+    try:
+        if tile_affine is not None:
+            has_nontrivial_affine = any((g != 1.0) or (o != 0.0) for (g, o) in tile_affine)
+            if has_nontrivial_affine and match_background:
+                import logging
+                logging.getLogger(__name__).debug(
+                    "[GPU Reproj] Disabling match_background because tile_affine_corrections are provided."
+                )
+                match_background = False
+    except Exception:
+        pass
+
+    # When affine corrections are present, align per-tile medians to a global median
+    # computed after applying the affine. This mirrors the CPU path where tiles are
+    # effectively brought to a common baseline before coaddition.
+    tile_scale_factors: list[float] | None = None
+    try:
+        if tile_affine is not None:
+            med_list: list[float] = []
+            for idx_tile, img_np in enumerate(data_list):
+                try:
+                    g, o = tile_affine[idx_tile]
+                except Exception:
+                    g, o = 1.0, 0.0
+                try:
+                    arr32 = np.asarray(img_np, dtype=np.float32)
+                    # median of affine-applied values on CPU for robustness
+                    med = float(np.nanmedian(arr32 * g + o))
+                except Exception:
+                    med = float("nan")
+                med_list.append(med)
+
+            # Compute global median of tile medians
+            try:
+                finite_meds = [m for m in med_list if np.isfinite(m)]
+                global_median = float(np.nanmedian(finite_meds)) if finite_meds else 0.0
+            except Exception:
+                global_median = 0.0
+
+            # Build multiplicative scale to anchor each tile to the common median
+            tile_scale_factors = []
+            for m in med_list:
+                if np.isfinite(m) and abs(m) > 1e-8:
+                    tile_scale_factors.append(float(global_median / m))
+                else:
+                    tile_scale_factors.append(1.0)
+            try:
+                import logging
+                logging.getLogger(__name__).debug(
+                    "[GPU Reproj] Applied median renormalization: global_median=%.6g",
+                    global_median,
+                )
+            except Exception:
+                pass
+    except Exception:
+        tile_scale_factors = None
+    
+    # Estimate the minimum amount of memory required just for the accumulators.
+    accumulator_bytes = 2 * H * W * float32_bytes
+    # Leave some breathing room for temporary buffers; require at least double the
+    # accumulator footprint to avoid triggering the CuPy allocator hard limit.
+    if not gpu_memory_sufficient(int(accumulator_bytes * 2.5), safety_fraction=0.8):
+        raise RuntimeError("Insufficient GPU memory for reprojection accumulators")
+
+    # Prepare output accumulators on GPU
+    mosaic_sum_gpu = cp.zeros((H, W), dtype=cp.float32)
+    weight_sum_gpu = cp.zeros((H, W), dtype=cp.float32)
+    tile_offsets: list[float] = [0.0] * n_inputs
+
+    # Row-chunking to bound memory; tune based on device memory
+    rows_per_chunk = int(kwargs.get("rows_per_chunk", 64))
+    rows_per_chunk = max(32, min(rows_per_chunk, H))
+
+    # Dynamically cap the chunk size based on available GPU memory.
+    max_chunk_bytes = kwargs.get("max_chunk_bytes")
+    if max_chunk_bytes is None:
+        # Default soft cap that will be tightened against free VRAM below.
+        max_chunk_bytes = 128 * 1024 * 1024
+    try:
+        free_bytes, _ = cp.cuda.runtime.memGetInfo()
+        safe_target = max(16 * 1024 * 1024, int(free_bytes * 0.25))
+        max_chunk_bytes = int(min(max_chunk_bytes, safe_target))
+    except Exception:
+        max_chunk_bytes = int(max_chunk_bytes)
+    bytes_per_row_estimate = max(1, W * float32_bytes * 8)
+    adaptive_rows = max(1, max_chunk_bytes // bytes_per_row_estimate)
+    rows_per_chunk = max(32, min(rows_per_chunk, adaptive_rows, H))
+
+    # Build an x-grid once (NumPy on CPU) and reuse
+    x_grid = cp.asarray(cp.arange(W, dtype=cp.float32))  # cp.arange works well; stays on GPU when meshed
+
+    # If requested, estimate per-tile additive offsets from overlaps on a coarse grid
+    if match_background and reproject_interp is not None and ASTROPY_AVAILABLE_IN_UTILS and n_inputs >= 2:
+        try:
+            from astropy.wcs import WCS as _WCS
+            # Derive a reduced-resolution WCS for coarse reprojection
+            header_full = output_wcs.to_header() if hasattr(output_wcs, "to_header") else output_wcs
+            # Compute aspect-preserving coarse shape
+            h_full = int(H); w_full = int(W)
+            max_dim = max(h_full, w_full)
+            scale = max(1, int(round(max_dim / float(bg_preview_size))))
+            hc = max(16, int(round(h_full / float(scale))))
+            wc = max(16, int(round(w_full / float(scale))))
+            header = header_full.copy()
+            # Adjust NAXIS and CRPIX to maintain geometry
+            header["NAXIS1"] = wc
+            header["NAXIS2"] = hc
+            if "CRPIX1" in header:
+                header["CRPIX1"] = float(header["CRPIX1"]) / scale
+            if "CRPIX2" in header:
+                header["CRPIX2"] = float(header["CRPIX2"]) / scale
+            coarse_wcs = _WCS(header)
+
+            # Coarse reprojection for each tile (CPU reproject for robustness)
+            coarse_imgs: list[np.ndarray] = []
+            coarse_masks: list[np.ndarray] = []
+            for arr_np, wcs_in in zip(data_list, wcs_list):
+                try:
+                    arr32 = np.asarray(arr_np, dtype=np.float32)
+                    reproj, footprint = reproject_interp((arr32, wcs_in), coarse_wcs, shape_out=(hc, wc))
+                    img_c = np.asarray(reproj, dtype=np.float32)
+                    m = np.asarray(footprint > 0, dtype=bool)
+                    # Erode mask to avoid edge bias and ringing
+                    def _erode_bool(mask: np.ndarray, iterations: int = 2) -> np.ndarray:
+                        it = max(1, int(iterations))
+                        out = mask.astype(bool, copy=True)
+                        for _ in range(it):
+                            pad = np.pad(out, 1, constant_values=False)
+                            nb = pad[0:-2, 0:-2] & pad[0:-2, 1:-1] & pad[0:-2, 2:] & \
+                                 pad[1:-1, 0:-2] & pad[1:-1, 1:-1] & pad[1:-1, 2:] & \
+                                 pad[2:  , 0:-2] & pad[2:  , 1:-1] & pad[2:  , 2:]
+                            out = nb
+                        return out
+                    # 2 iterations on coarse grid is inexpensive and robust
+                    m = _erode_bool(m, iterations=2)
+                    coarse_imgs.append(img_c)
+                    coarse_masks.append(m)
+                except Exception:
+                    coarse_imgs.append(np.zeros((hc, wc), dtype=np.float32))
+                    coarse_masks.append(np.zeros((hc, wc), dtype=bool))
+
+            # Build pairwise equations a_j - a_i ~= median(delta_ij in sky region)
+            rows = []  # each row: (-1 at i, +1 at j)
+            rhs = []   # median differences
+            weights = []  # weight by overlap pixels
+            pair_count = 0
+            diffs_abs = []
+            for i in range(n_inputs):
+                for j in range(i + 1, n_inputs):
+                    m = coarse_masks[i] & coarse_masks[j]
+                    if not np.any(m):
+                        continue
+                    vi = coarse_imgs[i][m]
+                    vj = coarse_imgs[j][m]
+                    if vi.size < 64:
+                        continue
+                    # Select sky-like subset via percentiles on the mid value
+                    sky_proxy = 0.5 * (vi + vj)
+                    try:
+                        p_lo = np.nanpercentile(sky_proxy, sky_low)
+                        p_hi = np.nanpercentile(sky_proxy, sky_high)
+                        mask_sky = (sky_proxy >= p_lo) & (sky_proxy <= p_hi)
+                        if np.count_nonzero(mask_sky) >= 32:
+                            vi = vi[mask_sky]; vj = vj[mask_sky]
+                    except Exception:
+                        pass
+                    if vi.size < 16:
+                        continue
+                    diff = (vj - vi)
+                    # Robust center with sigma clip
+                    d_med = float(np.nanmedian(diff))
+                    try:
+                        d_std = float(np.nanstd(diff))
+                        if np.isfinite(d_std) and d_std > 0 and robust_clip_sigma > 0:
+                            keep = np.abs(diff - d_med) <= (robust_clip_sigma * d_std)
+                            if np.count_nonzero(keep) >= 8:
+                                diff = diff[keep]
+                                d_med = float(np.nanmedian(diff))
+                    except Exception:
+                        pass
+                    w = max(1.0, float(diff.size))
+                    row = np.zeros(n_inputs, dtype=np.float64)
+                    row[i] = -1.0; row[j] = 1.0
+                    rows.append(row)
+                    rhs.append(d_med)
+                    weights.append(w)
+                    diffs_abs.append(abs(d_med))
+                    pair_count += 1
+
+            if rows:
+                A = np.vstack(rows)
+                b = np.asarray(rhs, dtype=np.float64)
+                w = np.sqrt(np.asarray(weights, dtype=np.float64))
+                Aw = A * w[:, None]
+                bw = b * w
+                # Anchor first tile to zero to resolve degeneracy
+                reg = np.zeros((1, n_inputs)); reg[0, 0] = 1.0
+                Aw = np.vstack([Aw, reg])
+                bw = np.concatenate([bw, np.array([0.0])])
+                try:
+                    sol, *_ = np.linalg.lstsq(Aw, bw, rcond=None)
+                    tile_offsets = [float(x) for x in sol]
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "[GPU Reproj] Overlap pairs=%d, median|delta|=%.4g; offsets per tile: %s",
+                        int(pair_count),
+                        (float(np.median(diffs_abs)) if diffs_abs else 0.0),
+                        ", ".join(f"{v:+.4g}" for v in tile_offsets),
+                    )
+                except Exception:
+                    tile_offsets = [0.0] * n_inputs
+        except Exception:
+            # Fallback: leave offsets at zero; final baseline handling below keeps output stable
+            pass
+
+    # Iterate over tiles
+    for idx_tile, (img_np, tile_wcs) in enumerate(zip(data_list, wcs_list)):
+        # Basic input validation and convert to float32 without NaN side-effects
+        img = cp.asarray(img_np.astype("float32", copy=False))
+
+        # Apply precomputed gain/offset if provided (GPU path parity with CPU intertile match)
+        if tile_affine is not None:
+            try:
+                g, o = tile_affine[idx_tile]
+                if g != 1.0:
+                    img = img * cp.float32(g)
+                if o != 0.0:
+                    img = img + cp.float32(o)
+            except Exception:
+                pass
+
+        # After affine, optionally scale tile to align its median to the global median
+        if tile_scale_factors is not None:
+            try:
+                s = tile_scale_factors[idx_tile]
+                if s != 1.0 and np.isfinite(s):
+                    img = img * cp.float32(s)
+            except Exception:
+                pass
+        if match_background:
+            # Subtract overlap-derived additive offset if available; otherwise fallback to tile median
+            offset_val = 0.0
+            try:
+                offset_val = float(tile_offsets[idx_tile])
+            except Exception:
+                offset_val = 0.0
+            if offset_val == 0.0:
+                try:
+                    offset_val = float(cp.nanmedian(img).get())
+                except Exception:
+                    offset_val = 0.0
+            if offset_val != 0.0:
+                img = img - cp.float32(offset_val)
+
+        # Valid mask (1 for finite pixels, 0 otherwise); used for coverage and weighted mean
+        mask = cp.isfinite(img).astype(cp.float32)
+        img = cp.nan_to_num(img, copy=False, nan=0.0)
+
+        # Precompute per-tile: nothing yet; mapping is per-chunk
+        for r0 in range(0, H, rows_per_chunk):
+            r1 = min(H, r0 + rows_per_chunk)
+            # CPU grid for WCS conversion (faster on CPU for WCS than pushing to GPU)
+            # y in [r0, r1), x in [0, W)
+            y = cp.arange(r0, r1, dtype=cp.float32)
+            # Mesh on GPU for map_coordinates usage later
+            yy = y[:, None]
+            xx = x_grid[None, :]
+
+            # Convert output (x, y) -> world -> input (x_in, y_in) using CPU WCS
+            # Fetch to CPU minimal arrays (NumPy) for WCS; then back to GPU as coords
+            y_cpu = cp.asnumpy(yy)
+            x_cpu = cp.asnumpy(xx)
+            try:
+                # Astropy WCS expects x, y order
+                ra, dec = output_wcs.wcs_pix2world(x_cpu, y_cpu, 0)
+                x_in, y_in = tile_wcs.wcs_world2pix(ra, dec, 0)
+            except Exception:
+                # If any WCS conversion fails, skip this chunk for this tile
+                continue
+
+            x_in_gpu = cp.asarray(x_in, dtype=cp.float32)
+            y_in_gpu = cp.asarray(y_in, dtype=cp.float32)
+
+            # Build validity mask for in-bounds coordinates
+            h_in, w_in = img.shape
+            valid = (
+                (x_in_gpu >= -0.5)
+                & (x_in_gpu <= (w_in - 0.5))
+                & (y_in_gpu >= -0.5)
+                & (y_in_gpu <= (h_in - 0.5))
+            )
+
+            # Sample image and mask at mapped coordinates (bilinear, constant outside)
+            coords = cp.stack([y_in_gpu, x_in_gpu], axis=0)
+            sampled = map_coordinates(img, coords, order=1, mode="constant", cval=0.0)
+            sampled_mask = map_coordinates(mask, coords, order=1, mode="constant", cval=0.0)
+
+            # Zero out contributions where coords are outside or mask ~ 0
+            sampled = sampled * sampled_mask * valid.astype(cp.float32)
+            sampled_mask = sampled_mask * valid.astype(cp.float32)
+
+            # Accumulate
+            mosaic_sum_gpu[r0:r1, :] += sampled
+            weight_sum_gpu[r0:r1, :] += sampled_mask
+
+    # Finalize: mean combine where weight > 0
+    eps = cp.float32(1e-6)
+    mosaic_gpu = cp.where(weight_sum_gpu > eps, mosaic_sum_gpu / cp.maximum(weight_sum_gpu, eps), 0.0)
+    coverage_gpu = cp.clip(weight_sum_gpu / float(max(1, n_inputs)), 0.0, 1.0)
+
+    # Restore a sensible brightness baseline for FITS output when background matching.
+    # Use the 0.1 percentile guard like before to avoid negative baselines.
+    if match_background:
+        try:
+            p01 = float(cp.percentile(mosaic_gpu, 0.1).get())
+            if p01 < 0:
+                mosaic_gpu = mosaic_gpu - cp.float32(p01)
+        except Exception:
+            pass
+
+
+    # Move back to CPU
+    try:
+        return cp.asnumpy(mosaic_gpu).astype("float32"), cp.asnumpy(coverage_gpu).astype("float32")
+    finally:
+        free_cupy_memory_pools()
 
 
 def reproject_and_coadd_wrapper(
@@ -998,54 +2861,234 @@ def reproject_and_coadd_wrapper(
     cpu_function=None,
     **kwargs,
 ):
-    if use_gpu and GPU_AVAILABLE:
+    """Dispatch to GPU or CPU reproject+coadd.
+
+    - GPU path: uses ``gpu_reproject_and_coadd`` (CuPy). Falls back to CPU on any error.
+    - CPU path: calls astropy-reproject's ``reproject_and_coadd``.
+    """
+    if use_gpu and gpu_is_available():
         try:
-            return gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs)
+            return gpu_reproject_and_coadd_impl(data_list, wcs_list, shape_out, **kwargs)
         except Exception as e:  # pragma: no cover - GPU failures
             import logging
-
             logging.getLogger(__name__).warning(
-                "GPU reprojection failed (%s), fallback CPU", e
+                "GPU reprojection failed (%s), falling back to CPU", e
             )
     if cpu_function is None:
         cpu_function = cpu_reproject_and_coadd
+    # Remove GPU-only extras before CPU call to avoid unexpected kwargs
+    gpu_only = {
+        "bg_preview_size",
+        "intertile_sky_percentile",
+        "intertile_robust_clip_sigma",
+        "rows_per_chunk",
+        "max_chunk_bytes",
+        # New GPU-only hints
+        "tile_affine_corrections",
+    }
+    cpu_kwargs = {k: v for k, v in kwargs.items() if k not in gpu_only}
     inputs = list(zip(data_list, wcs_list))
-    output_proj = kwargs.pop("output_projection")
-    return cpu_function(inputs, output_proj, shape_out, **kwargs)
+    output_proj = cpu_kwargs.pop("output_projection")
+    return cpu_function(inputs, output_proj, shape_out, **cpu_kwargs)
 
 
 
 def gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs):
-    """Simplified GPU version of ``reproject_and_coadd``.
+    """Alias that forwards to the main GPU implementation.
 
-    Parameters match :func:`reproject_and_coadd_wrapper` but operate on CuPy
-    arrays. The implementation here is schematic and should be replaced with a
-    real CUDA accelerated routine.
+    Some import sites may reference this name; keep it as a thin wrapper.
     """
-    import cupy as cp
-    data_gpu = [cp.asarray(d) for d in data_list]
-    mosaic_gpu = cp.zeros(shape_out, dtype=cp.float32)
-    weight_gpu = cp.zeros(shape_out, dtype=cp.float32)
-    for img in data_gpu:
-        # Placeholder for GPU interpolation step
-        pass
-    return cp.asnumpy(mosaic_gpu), cp.asnumpy(weight_gpu)
+    return gpu_reproject_and_coadd_impl(data_list, wcs_list, shape_out, **kwargs)
 
 
 def reproject_and_coadd_wrapper(data_list, wcs_list, shape_out, use_gpu=False, cpu_func=None, **kwargs):
-    """Dispatch to CPU or GPU ``reproject_and_coadd`` depending on availability."""
-    if use_gpu and GPU_AVAILABLE:
+    """Dispatch to CPU or GPU ``reproject_and_coadd`` depending on availability (duplicate alias)."""
+    if use_gpu and gpu_is_available():
         try:
-            return gpu_reproject_and_coadd(data_list, wcs_list, shape_out, **kwargs)
-        except Exception as e:  # pragma: no cover - GPU errors
+            return gpu_reproject_and_coadd_impl(data_list, wcs_list, shape_out, **kwargs)
+        except Exception as e:  # pragma: no cover
             import logging
             logging.getLogger(__name__).warning(
-                "GPU reprojection failed (%s), fallback CPU", e
+                "GPU reprojection failed (%s), falling back to CPU", e
             )
     input_pairs = list(zip(data_list, wcs_list))
     output_projection = kwargs.pop("output_projection", None)
     func = cpu_func or cpu_reproject_and_coadd
-    return func(input_pairs, output_projection, shape_out, **kwargs)
+    gpu_only = {
+        "bg_preview_size",
+        "intertile_sky_percentile",
+        "intertile_robust_clip_sigma",
+        "rows_per_chunk",
+        "max_chunk_bytes",
+        # New GPU-only hints
+        "tile_affine_corrections",
+    }
+    cpu_kwargs = {k: v for k, v in kwargs.items() if k not in gpu_only}
+    return func(input_pairs, output_projection, shape_out, **cpu_kwargs)
+
+
+# --- GPU Percentiles, Hot-Pixels, and Background Map -------------------------
+def _percentiles_gpu(arr2d: np.ndarray, p_low: float, p_high: float) -> tuple[float, float]:
+    """Compute two percentiles on GPU; fall back to CPU if CuPy unavailable."""
+    if not gpu_is_available():
+        lo, hi = np.percentile(arr2d, [p_low, p_high])
+        return float(lo), float(hi)
+    import cupy as cp  # type: ignore
+    ensure_cupy_pool_initialized()
+    a = cp.asarray(arr2d)
+    lo = cp.percentile(a, p_low)
+    hi = cp.percentile(a, p_high)
+    return float(lo), float(hi)
+
+
+def detect_and_correct_hot_pixels_gpu(image,
+                                      threshold: float = 3.0,
+                                      neighborhood_size: int = 5,
+                                      progress_callback=None):
+    """GPU version of hot-pixel correction using median and local variance.
+
+    Works on HW or HWC images (float32 recommended). Falls back to CPU on error.
+    """
+    try:
+        if not gpu_is_available():
+            raise RuntimeError("GPU not available")
+        import cupy as cp  # type: ignore
+        from cupyx.scipy.ndimage import median_filter, uniform_filter  # type: ignore
+        ensure_cupy_pool_initialized()
+
+        if image is None:
+            return None
+        img = np.asarray(image, dtype=np.float32)
+        if img.ndim == 2:
+            img = img[:, :, None]
+        h, w, c = img.shape
+        k = int(neighborhood_size) if neighborhood_size % 2 == 1 else int(neighborhood_size + 1)
+        k = max(3, k)
+
+        estimated_bytes = img.size * np.dtype(np.float32).itemsize * 6
+        if not gpu_memory_sufficient(int(estimated_bytes), safety_fraction=0.7):
+            raise RuntimeError("GPU hot-pixel filter: insufficient memory")
+
+        out = np.empty_like(img, dtype=np.float32)
+        for ch in range(c):
+            g = cp.asarray(img[..., ch])
+            med = median_filter(g, size=k, mode="reflect")
+            mean = uniform_filter(g, size=k)
+            mean_sq = uniform_filter(g * g, size=k)
+            var = cp.maximum(mean_sq - mean * mean, 0.0)
+            std = cp.sqrt(var)
+            # floor the std to avoid zero-division; choose a small epsilon relative to dynamic range
+            eps = cp.maximum(1e-5, 1e-5 * cp.nanmax(cp.abs(g)))
+            std = cp.maximum(std, eps)
+            hot = g > (med + threshold * std)
+            g_corr = cp.where(hot, med, g)
+            out[..., ch] = cp.asnumpy(g_corr.astype(cp.float32))
+
+        if out.shape[2] == 1:
+            out = out[..., 0]
+        return out
+    except Exception:
+        # Fallback to CPU implementation
+        return detect_and_correct_hot_pixels(image, threshold=threshold,
+                                             neighborhood_size=neighborhood_size,
+                                             progress_callback=progress_callback)
+    finally:
+        free_cupy_memory_pools()
+
+
+def estimate_background_map_gpu(image,
+                                method: str = "gaussian",
+                                sigma: float = 32.0,
+                                progress_callback=None) -> np.ndarray:
+    """Compute a smooth background map on GPU and return it on CPU.
+
+    - method: currently supports 'gaussian' (cupyx.scipy.ndimage.gaussian_filter)
+    - sigma: Gaussian sigma in pixels; typical 16–64 for wide background.
+    """
+    try:
+        if not gpu_is_available():
+            raise RuntimeError("GPU not available")
+        import cupy as cp  # type: ignore
+        from cupyx.scipy.ndimage import gaussian_filter  # type: ignore
+        ensure_cupy_pool_initialized()
+
+        img = np.asarray(image, dtype=np.float32)
+        is_color = img.ndim == 3 and img.shape[-1] == 3
+        estimated_bytes = img.size * np.dtype(np.float32).itemsize * (4 if is_color else 3)
+        if not gpu_memory_sufficient(int(estimated_bytes), safety_fraction=0.7):
+            raise RuntimeError("GPU background estimation: insufficient memory")
+        if not is_color:
+            g = cp.asarray(img)
+            bg = gaussian_filter(g, sigma=float(sigma))
+            return cp.asnumpy(bg.astype(cp.float32))
+        else:
+            bg = np.empty_like(img, dtype=np.float32)
+            for ch in range(3):
+                g = cp.asarray(img[..., ch])
+                b = gaussian_filter(g, sigma=float(sigma))
+                bg[..., ch] = cp.asnumpy(b.astype(cp.float32))
+            return bg
+    except Exception:
+        # CPU fallback using OpenCV Gaussian blur as a coarse approximation
+        try:
+            k = max(3, int(2 * round(float(sigma) * 1.5) + 1))
+            if image.ndim == 2:
+                return cv2.GaussianBlur(image.astype(np.float32), (k, k), sigmaX=float(sigma))
+            else:
+                out = np.empty_like(image, dtype=np.float32)
+                for ch in range(image.shape[-1]):
+                    out[..., ch] = cv2.GaussianBlur(image[..., ch].astype(np.float32), (k, k), sigmaX=float(sigma))
+                return out
+        except Exception:
+            # As a last resort, return zeros so subtraction is a no-op
+            return np.zeros_like(image, dtype=np.float32)
+    finally:
+        free_cupy_memory_pools()
+
+
+def stretch_auto_asifits_like_gpu(img_hwc_adu,
+                                  p_low: float = 0.5,
+                                  p_high: float = 99.8,
+                                  asinh_a: float = 0.01,
+                                  apply_wb: bool = True) -> np.ndarray:
+    """GPU variant of stretch_auto_asifits_like; falls back to CPU on error."""
+    try:
+        if not gpu_is_available():
+            raise RuntimeError("GPU not available")
+        import cupy as cp  # type: ignore
+        ensure_cupy_pool_initialized()
+        img = np.asarray(img_hwc_adu, dtype=np.float32)
+        out = np.empty_like(img, dtype=np.float32)
+        estimated_bytes = img.size * np.dtype(np.float32).itemsize * 4
+        if not gpu_memory_sufficient(int(estimated_bytes), safety_fraction=0.7):
+            raise RuntimeError("GPU stretch: insufficient memory")
+        for c in range(3):
+            chan = cp.asarray(img[..., c])
+            vmin = cp.percentile(chan, p_low)
+            vmax = cp.percentile(chan, p_high)
+            if float(vmax - vmin) < 1e-3:
+                out[..., c] = 0.0
+                continue
+            normed = cp.clip((chan - vmin) / cp.maximum(vmax - vmin, 1e-6), 0, 1)
+            stretched = cp.arcsinh(normed / asinh_a) / cp.arcsinh(1.0 / asinh_a)
+            if float(cp.nanmax(stretched)) < 0.05:
+                stretched = normed
+            out[..., c] = cp.asnumpy(stretched.astype(cp.float32))
+        if apply_wb:
+            avg = out.mean(axis=(0, 1))
+            m = float(np.max(avg)) if np.all(np.isfinite(avg)) else 0.0
+            if m > 0:
+                avg /= m
+            else:
+                avg = np.ones_like(avg)
+            for c in range(3):
+                d = float(avg[c]) if np.isfinite(avg[c]) and avg[c] > 1e-8 else 1.0
+                out[..., c] = out[..., c] / d
+        return np.clip(out, 0, 1).astype(np.float32)
+    except Exception:
+        return stretch_auto_asifits_like(img_hwc_adu, p_low=p_low, p_high=p_high, asinh_a=asinh_a, apply_wb=apply_wb)
+    finally:
+        free_cupy_memory_pools()
 
 
 
