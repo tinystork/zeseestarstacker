@@ -729,6 +729,11 @@ class SeestarStackerGUI:
                     self.batch_size.set(0)
         except tk.TclError:
             pass
+        # Refresh Add Folder availability if a run is ongoing
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
 
     def _on_batch_size_changed(self, *args):
         """Toggle boring-thread mode when the batch size equals 1."""
@@ -2098,6 +2103,10 @@ class SeestarStackerGUI:
             state=tk.NORMAL,
         )
         self.add_files_button.pack(side=tk.RIGHT, padx=5, pady=5, ipady=2)
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
         self.show_folders_button = ttk.Button(
             control_frame,
             text="View Inputs",
@@ -2172,6 +2181,45 @@ class SeestarStackerGUI:
             command=lambda: self.preview_manager.zoom_fit(),
         )
         self.zoom_fit_button.pack(side=tk.LEFT, padx=5)
+        # Preview resolution cycle button (1, 1/2, 1/3, 1/4)
+        try:
+            initial_factor = int(getattr(self.queued_stacker, "preview_downsample_factor", 2))
+        except Exception:
+            initial_factor = 2
+        self._preview_res_factors = [1, 2, 3, 4]
+        # Find index of the initial factor; default to 2 if not found
+        self._preview_res_idx = (
+            self._preview_res_factors.index(initial_factor)
+            if initial_factor in self._preview_res_factors
+            else 1
+        )
+
+        def _make_res_label(f: int) -> str:
+            return f"Res 1/{f}" if f > 1 else "Res 1/1"
+
+        self.preview_res_button = ttk.Button(
+            zoom_btn_frame,
+            text=_make_res_label(self._preview_res_factors[self._preview_res_idx]),
+            command=lambda: self._cycle_preview_resolution(),
+            width=10,
+        )
+        self.preview_res_button.pack(side=tk.LEFT, padx=(15, 5))
+
+        # Rotate buttons next to zoom/res controls
+        self.rotate_left_button = ttk.Button(
+            zoom_btn_frame,
+            text=self.tr("rotate_left", default="Rotate Left"),
+            command=lambda: self.preview_manager.rotate_left(),
+            width=12,
+        )
+        self.rotate_left_button.pack(side=tk.LEFT, padx=(5, 5))
+        self.rotate_right_button = ttk.Button(
+            zoom_btn_frame,
+            text=self.tr("rotate_right", default="Rotate Right"),
+            command=lambda: self.preview_manager.rotate_right(),
+            width=12,
+        )
+        self.rotate_right_button.pack(side=tk.LEFT, padx=5)
         self.histogram_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 5))
         control_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(5, 0))
         self.preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 5))
@@ -2185,6 +2233,32 @@ class SeestarStackerGUI:
         self._on_apply_batch_feathering_changed()
         self._update_low_wht_mask_options_state()
         self._update_bn_options_state()
+
+    def _cycle_preview_resolution(self):
+        """Cycle preview downsample factor among 1, 2, 3, 4 and refresh preview."""
+        try:
+            # Advance index cyclically
+            self._preview_res_idx = (self._preview_res_idx + 1) % len(self._preview_res_factors)
+            factor = self._preview_res_factors[self._preview_res_idx]
+            # Update button label
+            self.preview_res_button.config(text=(f"Res 1/{factor}" if factor > 1 else "Res 1/1"))
+            # Tell backend and request a refresh
+            if hasattr(self, "queued_stacker") and self.queued_stacker:
+                setter = getattr(self.queued_stacker, "set_preview_downsample_factor", None)
+                refresher = getattr(self.queued_stacker, "refresh_preview", None)
+                try:
+                    if callable(setter):
+                        setter(factor)
+                except Exception:
+                    pass
+                try:
+                    if callable(refresher):
+                        refresher()
+                except Exception:
+                    pass
+        except Exception:
+            # Silent fail to avoid breaking UI if anything unexpected happens
+            pass
         self._update_cb_options_state()
         self._update_crop_options_state()
         self._update_master_tile_crop_state()
@@ -2466,6 +2540,11 @@ class SeestarStackerGUI:
             self.reproject_coadd_var.set(False)
         self.stack_final_combine_var.set(key)
         self._toggle_kappa_visibility()
+        # Update Add Folder enable/disable promptly if processing
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
 
     #################################################################################################################################
 
@@ -2778,7 +2857,7 @@ class SeestarStackerGUI:
     #############################################################################################################################
 
     def _show_input_folder_list(self):
-        """Displays the list of input folders in a simple pop-up window."""
+        """Displays a unified view of input folders (main, current, queued, staged)."""
 
         main_folder = self.input_path.get()
 
@@ -2790,32 +2869,46 @@ class SeestarStackerGUI:
         # Always add the main input folder first
         folder_list.append(os.path.abspath(main_folder))
 
+        # Build a unified view of additional folders
         additional_folders = []
-        # Get additional folders based on processing state
+        current_proc = None
         if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker:
             try:
-                # Safely access the list using the lock
                 with self.queued_stacker.folders_lock:
-                    # Get a copy to avoid issues if modified during iteration
                     additional_folders = list(self.queued_stacker.additional_folders)
+                    if getattr(self.queued_stacker, "current_folder", None):
+                        current_proc = self.queued_stacker.current_folder
             except Exception as e:
                 print(f"Error accessing queued stacker folders: {e}")
-                # Proceed without additional folders from backend if error occurs
-        else:
-            # Get folders added before processing started
-            additional_folders = self.additional_folders_to_process
+                # Continue with what we have
+
+        # Always append any GUI-staged folders not yet flushed to backend
+        for f in getattr(self, "additional_folders_to_process", []) or []:
+            if f not in additional_folders:
+                additional_folders.append(f)
 
         # Add absolute paths of additional folders
         for folder in additional_folders:
             abs_path = os.path.abspath(folder)
-            if abs_path not in folder_list:  # Avoid duplicates if added strangely
+            if abs_path not in folder_list:  # Avoid duplicates
                 folder_list.append(abs_path)
 
         # --- Format the text ---
-        if len(folder_list) == 1:
+        header_lines = []
+        if current_proc:
+            try:
+                header_lines.append(
+                    f"  Current (processing):\n    {os.path.abspath(current_proc)}\n"
+                )
+            except Exception:
+                pass
+
+        if len(folder_list) == 1 and not additional_folders:
             display_text = f"{self.tr('input_folder')}\n  {folder_list[0]}"
         else:
             display_text = f"{self.tr('input_folder')} (Main):\n  {folder_list[0]}\n\n"
+            if header_lines:
+                display_text += "".join(header_lines) + "\n"
             display_text += f"{self.tr('Additional:')} ({len(folder_list) - 1})\n"
             for i, folder in enumerate(folder_list[1:], 1):
                 display_text += f"  {i}. {folder}\n"
@@ -3109,6 +3202,8 @@ class SeestarStackerGUI:
             "reset_expert_button": "reset_expert_button",
             "zoom_100_button": "zoom_100_button",
             "zoom_fit_button": "zoom_fit_button",
+            "rotate_left": "rotate_left_button",
+            "rotate_right": "rotate_right_button",
         }
         for key, attr_name in buttons_keys.items():
             self.widgets_to_translate[key] = getattr(self, attr_name, None)
@@ -3339,7 +3434,8 @@ class SeestarStackerGUI:
         if not self.processing:
             self.remaining_files_var.set(self.tr("no_files_waiting"))
             default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-            self.aligned_files_var.set(default_aligned_fmt.format(count="--"))
+            # Afficher 0 à l'ouverture pour plus de clarté
+            self.aligned_files_var.set(default_aligned_fmt.format(count=0))
             self.remaining_time_var.set("--:--:--")
         else:  # Ensure static labels are translated if processing
             if hasattr(self, "remaining_static_label"):
@@ -3611,8 +3707,15 @@ class SeestarStackerGUI:
                 self.current_preview_hist_data = preview_hist.copy()
                 self.current_stack_header = stack_header.copy() if stack_header else None
                 self.preview_img_count = img_count
-                if getattr(self, "preview_total_imgs", 0) == 0:
-                    self.preview_total_imgs = total_imgs
+                # Toujours refléter un nouveau total si le backend l'a recalculé
+                self.preview_total_imgs = total_imgs
+                try:
+                    if hasattr(self, "queued_stacker") and hasattr(self.queued_stacker, "get_estimated_total_images"):
+                        _est_total = int(self.queued_stacker.get_estimated_total_images())
+                        if _est_total and _est_total > int(self.preview_total_imgs or 0):
+                            self.preview_total_imgs = _est_total
+                except Exception:
+                    pass
                 self.preview_current_batch = current_batch
                 self.preview_total_batches = total_batches
                 self.refresh_preview(recalculate_histogram=True)
@@ -3628,8 +3731,15 @@ class SeestarStackerGUI:
         self.current_preview_hist_data = preview_hist.copy()
         self.current_stack_header = stack_header.copy() if stack_header else None
         self.preview_img_count = img_count
-        if getattr(self, "preview_total_imgs", 0) == 0:
-            self.preview_total_imgs = total_imgs
+        # Toujours refléter un nouveau total si le backend l'a recalculé
+        self.preview_total_imgs = total_imgs
+        try:
+            if hasattr(self, "queued_stacker") and hasattr(self.queued_stacker, "get_estimated_total_images"):
+                _est_total = int(self.queued_stacker.get_estimated_total_images())
+                if _est_total and _est_total > int(self.preview_total_imgs or 0):
+                    self.preview_total_imgs = _est_total
+        except Exception:
+            pass
         self.preview_current_batch = current_batch
         self.preview_total_batches = total_batches
 
@@ -4139,13 +4249,35 @@ class SeestarStackerGUI:
     # --- NOUVELLE MÉTHODE pour gérer la requête d'ajout ---
     def handle_add_folder_request(self, folder_path):
         """
-        Gère une requête d'ajout de dossier, en l'ajoutant soit à la liste
-        pré-démarrage, soit en appelant le backend si le traitement est actif.
+        Gère une requête d'ajout de dossier. En mode traitement:
+        - si le backend n'a pas encore démarré, on 'stage' le dossier côté GUI
+          puis on le 'flush' automatiquement dès que le worker démarre.
+        - si le backend tourne déjà, on délègue immédiatement au backend.
+        En dehors du traitement, on alimente la liste pré‑démarrage.
         """
         abs_folder = os.path.abspath(folder_path)
 
-        if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
-            # Traitement actif : appeler le backend
+        if self.processing and hasattr(self, "queued_stacker"):
+            # Backend pas encore prêt ? On stage et on flush à l'initialisation.
+            if not self.queued_stacker.is_running():
+                if abs_folder not in self.additional_folders_to_process:
+                    self.additional_folders_to_process.append(abs_folder)
+                    self.update_progress_gui(
+                        f"ⓘ Dossier en attente de démarrage backend: {os.path.basename(abs_folder)}",
+                        None,
+                    )
+                    self.update_additional_folders_display()
+                else:
+                    messagebox.showinfo(
+                        self.tr("info"),
+                        self.tr(
+                            "Folder already added",
+                            default="Folder already added to the list.",
+                        ),
+                    )
+                return
+
+            # Traitement actif et backend opérationnel : appeler le backend
             add_success = self.queued_stacker.add_folder(abs_folder)
             if not add_success:
                 messagebox.showwarning(
@@ -4156,23 +4288,24 @@ class SeestarStackerGUI:
                     ),
                 )
             # La mise à jour de l'affichage se fera via callback "folder_count_update" du backend
+            return
+
+        # Traitement non actif : ajouter à la liste pré‑démarrage
+        if abs_folder not in self.additional_folders_to_process:
+            self.additional_folders_to_process.append(abs_folder)
+            self.update_progress_gui(
+                f"ⓘ Dossier ajouté pour prochain traitement: {os.path.basename(abs_folder)}",
+                None,
+            )
+            self.update_additional_folders_display()
         else:
-            # Traitement non actif : ajouter à la liste pré-démarrage
-            if abs_folder not in self.additional_folders_to_process:
-                self.additional_folders_to_process.append(abs_folder)
-                self.update_progress_gui(
-                    f"ⓘ Dossier ajouté pour prochain traitement: {os.path.basename(abs_folder)}",
-                    None,
-                )
-                self.update_additional_folders_display()  # Mettre à jour l'affichage UI
-            else:
-                messagebox.showinfo(
-                    self.tr("info"),
-                    self.tr(
-                        "Folder already added",
-                        default="Folder already added to the list.",
-                    ),
-                )
+            messagebox.showinfo(
+                self.tr("info"),
+                self.tr(
+                    "Folder already added",
+                    default="Folder already added to the list.",
+                ),
+            )
 
     def _track_processing_progress(self):
         """Monitors the QueuedStacker worker thread and updates GUI stats."""
@@ -4184,12 +4317,27 @@ class SeestarStackerGUI:
         # ``queued_stacker.is_running()`` would still be False.  Poll until the
         # worker is running or ``self.processing`` gets cleared (e.g. because the
         # backend failed to start).
+        # Attente du vrai démarrage backend ET flush des dossiers stagés
         while (
             self.processing
             and hasattr(self, "queued_stacker")
             and not self.queued_stacker.is_running()
         ):
             time.sleep(0.1)
+
+        # Le backend vient de démarrer: transférer les dossiers stagés côté GUI
+        try:
+            if self.processing and hasattr(self, "queued_stacker") and self.queued_stacker.is_running():
+                staged = list(self.additional_folders_to_process)
+                if staged:
+                    self.additional_folders_to_process.clear()
+                    for f in staged:
+                        try:
+                            self.queued_stacker.add_folder(f)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
         while self.processing and hasattr(self, "queued_stacker"):
             try:
@@ -4207,7 +4355,14 @@ class SeestarStackerGUI:
                 q_stacker = self.queued_stacker
                 processed = q_stacker.processed_files_count
                 aligned = q_stacker.aligned_files_count
-                total_queued = q_stacker.files_in_queue
+                # Prefer a robust total that includes queued + processed + pending additional folders
+                try:
+                    if hasattr(q_stacker, "get_estimated_total_images"):
+                        total_queued = int(q_stacker.get_estimated_total_images())
+                    else:
+                        total_queued = int(q_stacker.files_in_queue)
+                except Exception:
+                    total_queued = int(getattr(q_stacker, "files_in_queue", 0) or 0)
 
                 if self.global_start_time and processed > 0:
                     elapsed = time.monotonic() - self.global_start_time
@@ -4282,8 +4437,14 @@ class SeestarStackerGUI:
                 and isinstance(getattr(qs, "processed_files_count", None), int)
             ):
 
-                remaining = max(0, qs.files_in_queue - qs.processed_files_count)
-                total = qs.files_in_queue
+                try:
+                    if hasattr(qs, "get_estimated_total_images"):
+                        total = int(qs.get_estimated_total_images())
+                    else:
+                        total = int(qs.files_in_queue)
+                except Exception:
+                    total = int(getattr(qs, "files_in_queue", 0) or 0)
+                remaining = max(0, total - int(qs.processed_files_count))
                 self.remaining_files_var.set(f"{remaining}/{total}")
             else:
                 # Données indisponibles : on affiche un placeholder neutre
@@ -4302,15 +4463,52 @@ class SeestarStackerGUI:
         qs = getattr(self, "queued_stacker", None)
         if self.processing and qs and qs.is_running():
             lock = getattr(qs, "folders_lock", None)
-            if lock and lock.acquire(blocking=False):
+            if lock and lock.acquire(timeout=0.15):
                 try:
-                    count = len(qs.additional_folders)
+                    # Unifier la vue: backend + dossiers stagés côté GUI
+                    current = set(os.path.abspath(p) for p in getattr(qs, "additional_folders", []) or [])
+                    staged = [
+                        os.path.abspath(p)
+                        for p in (getattr(self, "additional_folders_to_process", []) or [])
+                        if p
+                    ]
+                    for p in staged:
+                        if p not in current:
+                            current.add(p)
+                    count = len(current)
                 finally:
                     lock.release()
             else:
-                return
+                try:
+                    # Fallback non bloquant: lire un cliché et calculer tout de même
+                    current = [
+                        os.path.abspath(p)
+                        for p in (getattr(qs, "additional_folders", []) or [])
+                    ]
+                    staged = [
+                        os.path.abspath(p)
+                        for p in (getattr(self, "additional_folders_to_process", []) or [])
+                        if p
+                    ]
+                    union_abs = []
+                    for p in current + staged:
+                        if p not in union_abs:
+                            union_abs.append(p)
+                    count = len(union_abs)
+                except Exception:
+                    # Dernier recours: garder la valeur courante de count
+                    pass
         else:
-            count = len(self.additional_folders_to_process)
+            # En dehors du traitement: n'afficher que les dossiers en attente GUI (unicité)
+            try:
+                staged = [
+                    os.path.abspath(p)
+                    for p in (self.additional_folders_to_process or [])
+                    if p
+                ]
+                count = len(set(staged))
+            except Exception:
+                count = len(self.additional_folders_to_process)
 
         try:
             if count == 0:
@@ -4804,6 +5002,76 @@ class SeestarStackerGUI:
         if state == tk.DISABLED:
             self._update_drizzle_options_state()
 
+        # Mettre à jour l'état du bouton "Add Folder" selon les conditions courantes
+        try:
+            self.update_add_folder_button_state()
+        except Exception:
+            pass
+
+    def update_add_folder_button_state(self):
+        """Active ou grise le bouton Add Folder selon les conditions courantes.
+
+        Désactive si un traitement est en cours (self.processing == True) ET
+        (reprojection entre lots active OU mode boring thread actif). Sinon, active.
+        Ajoute/retire une infobulle pédagogique lorsqu'il est désactivé.
+        """
+        try:
+            btn = getattr(self, "add_files_button", None)
+            if not btn or not hasattr(btn, "winfo_exists") or not btn.winfo_exists():
+                return
+
+            # État de traitement en cours
+            run_active = bool(getattr(self, "processing", False))
+
+            # Reprojection active: prioriser la variable UI si disponible
+            reproject_active = False
+            try:
+                reproject_active = bool(self.reproject_between_batches_var.get())
+            except Exception:
+                reproject_active = bool(getattr(self.settings, "reproject_between_batches", False))
+
+            # Mode boring thread actif
+            threaded_boring = False
+            try:
+                threaded_boring = bool(self.boring_thread_var.get())
+            except Exception:
+                threaded_boring = bool(getattr(self.settings, "boring_thread_mode", False))
+
+            disable_btn = run_active and (reproject_active or threaded_boring)
+
+            try:
+                btn.config(state=(tk.DISABLED if disable_btn else tk.NORMAL))
+            except tk.TclError:
+                pass
+
+            # Gérer l'infobulle dynamique
+            if not hasattr(self, "tooltips"):
+                self.tooltips = {}
+            tt_key = "tooltip_add_files_button_disabled_dynamic"
+            if disable_btn:
+                if tt_key not in self.tooltips:
+                    try:
+                        self.tooltips[tt_key] = ToolTip(
+                            btn,
+                            lambda: self.tr(
+                                "tooltip_add_folder_disabled",
+                                default="Ajout désactivé : reprojection ou mode Boring actif",
+                            ),
+                        )
+                    except Exception:
+                        pass
+            else:
+                tooltip = self.tooltips.pop(tt_key, None)
+                if tooltip:
+                    try:
+                        tooltip.hidetip()
+                        tooltip.unschedule()
+                    except Exception:
+                        pass
+        except Exception:
+            # Sécurité: ignorer toute erreur ici pour ne pas bloquer l'UI
+            pass
+
     def _debounce_resize(self, event=None):
         if self._after_id_resize:
             try:
@@ -5209,8 +5477,37 @@ class SeestarStackerGUI:
         # --- CODE EXISTANT (garde intact le reste) ------------------------------
         # Gérer le message spécial pour le compteur de dossiers (inchangé)
         if isinstance(message, str) and message.startswith("folder_count_update:"):
+            # Use the count provided by the backend event to avoid race conditions
             try:
-                self.root.after_idle(self.update_additional_folders_display)
+                parts = message.split(":", 1)
+                backend_count = int(parts[1]) if len(parts) == 2 else 0
+            except Exception:
+                backend_count = 0
+
+            # If some folders are still staged on the GUI side, include them
+            try:
+                staged = [p for p in (getattr(self, "additional_folders_to_process", []) or []) if p]
+                staged_count = len(set(os.path.abspath(p) for p in staged))
+            except Exception:
+                staged_count = 0
+
+            total_count = backend_count + staged_count
+
+            try:
+                if total_count <= 0:
+                    self.additional_folders_var.set(self.tr("no_additional_folders"))
+                elif total_count == 1:
+                    self.additional_folders_var.set(self.tr("1 additional folder"))
+                else:
+                    self.additional_folders_var.set(
+                        self.tr("{count} additional folders", default="{count} add. folders").format(count=total_count)
+                    )
+            except tk.TclError:
+                pass
+
+            # Also refresh the remaining counter; this is cheap and keeps UI consistent
+            try:
+                self.root.after_idle(self.update_remaining_files)
             except tk.TclError:
                 pass
             return
@@ -5782,6 +6079,12 @@ class SeestarStackerGUI:
                 self.open_output_button.config(state=tk.NORMAL if can_open_output_final else tk.DISABLED)
             if hasattr(self, "remaining_time_var"):
                 self.remaining_time_var.set("00:00:00")
+            # Remettre le compteur Aligned à 0 en fin de traitement (demande utilisateur)
+            try:
+                default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
+                self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+            except Exception:
+                pass
             self.additional_folders_to_process = []
             self.update_additional_folders_display()
             self.update_remaining_files()
@@ -6367,11 +6670,34 @@ class SeestarStackerGUI:
         self.time_per_image = 0
         self.global_start_time = time.monotonic()
         self.batches_processed_for_preview_refresh = 0
+        # Do not reset the aligned counter here; keep last value until backend updates.
+        # This avoids a confusing flash to 0 right when pressing Start.
         default_aligned_fmt = self.tr("aligned_files_label_format", default="Aligned: {count}")
-        self.aligned_files_var.set(default_aligned_fmt.format(count=0))
+        # self.aligned_files_var.set(default_aligned_fmt.format(count=0))  # moved to end-of-processing
+
+        # Capture GUI-staged additional folders
         folders_to_pass_to_backend = list(self.additional_folders_to_process)
+        # Mettre à jour le label Additional localement sans recalcul global pour éviter un flash à 0
+        try:
+            _staged_unique = []
+            for p in (folders_to_pass_to_backend or []):
+                ap = os.path.abspath(p)
+                if ap not in _staged_unique:
+                    _staged_unique.append(ap)
+            _count = len(_staged_unique)
+            if _count <= 0:
+                self.additional_folders_var.set(self.tr("no_additional_folders"))
+            elif _count == 1:
+                self.additional_folders_var.set(self.tr("1 additional folder"))
+            else:
+                self.additional_folders_var.set(
+                    self.tr("{count} additional folders", default="{count} add. folders").format(count=_count)
+                )
+        except Exception:
+            pass
+        # Maintenant vider la liste stagée (évite doublons quand le backend va consommer initial_additional_folders)
         self.additional_folders_to_process = []
-        self.update_additional_folders_display()
+        # Ne PAS rappeler update_additional_folders_display ici pour éviter de repasser à 0
         self._set_parameter_widgets_state(tk.DISABLED)
         if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
             self.stop_button.config(state=tk.NORMAL)
@@ -6386,6 +6712,24 @@ class SeestarStackerGUI:
             self.status_text.insert(tk.END, f"--- {self.tr('stacking_start')} ---\n")
             self.status_text.config(state=tk.DISABLED)
         print("DEBUG (GUI start_processing): Phase 3 - Initialisation état de traitement GUI OK.")
+
+        # Estimer et afficher immédiatement le total d'images (évite le passage par "No files waiting")
+        try:
+            def _count_fits_in_folder(folder: str) -> int:
+                try:
+                    if not folder or not os.path.isdir(folder):
+                        return 0
+                    return sum(1 for f in os.listdir(folder) if f.lower().endswith((".fit", ".fits")))
+                except Exception:
+                    return 0
+
+            est_total = _count_fits_in_folder(self.settings.input_folder)
+            for f in folders_to_pass_to_backend:
+                est_total += _count_fits_in_folder(f)
+            if est_total > 0:
+                self.remaining_files_var.set(f"{est_total}/{est_total}")
+        except Exception:
+            pass
 
         # --- 4. Synchronisation et Validation des Settings ---
         print("DEBUG (GUI start_processing): Phase 4 - Synchronisation et validation des Settings...")
@@ -6442,6 +6786,14 @@ class SeestarStackerGUI:
                         self.gui_event_queue.put(_apply_valid)
                     else:
                         self.root.after(0, _apply_valid)
+                raw_match_bg = getattr(
+                    self.settings, "match_background_for_final", None
+                )
+                if raw_match_bg is None:
+                    match_background_for_final = None
+                else:
+                    match_background_for_final = bool(raw_match_bg)
+
                 backend_kwargs = {
                     "input_dir": self.settings.input_folder,
                     "output_dir": self.settings.output_folder,
@@ -6522,6 +6874,7 @@ class SeestarStackerGUI:
                     "preserve_linear_output": self.settings.preserve_linear_output,
                     "reproject_between_batches": self.settings.reproject_between_batches,
                     "reproject_coadd_final": self.settings.reproject_coadd_final,
+                    "match_background_for_final": match_background_for_final,
                 }
 
                 if self.settings.batch_size == 1 and not special_single:

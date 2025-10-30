@@ -5,6 +5,7 @@ from astropy.io import fits
 import importlib.util
 import sys
 from pathlib import Path
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -524,6 +525,448 @@ def test_freeze_reference_wcs(monkeypatch, tmp_path):
     assert np.allclose(obj.reference_wcs_object.wcs.crval, [0, 0])
 
 
+def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.autotuner = None
+    obj.freeze_reference_wcs = True
+    obj.reproject_coadd_final = True
+    obj.reproject_between_batches = False
+    obj.drizzle_active_session = False
+    obj.batch_size = 0
+    obj.current_folder = str(tmp_path)
+    obj.output_folder = str(tmp_path)
+    obj.queue = qm.Queue()
+    obj.additional_folders = []
+
+    # Create a minimal FITS file for reference
+    from astropy.io import fits
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    ref_path = tmp_path / "ref.fits"
+    fits.writeto(ref_path, data, hdr, overwrite=True)
+
+    # Dummy aligner providing reference image and header
+    class DummyAligner:
+        def __init__(self):
+            self.stop_processing = False
+            self.reference_image_path = None
+            self.correct_hot_pixels = False
+            self.hot_pixel_threshold = 0.0
+            self.neighborhood_size = 0
+            self.bayer_pattern = "GRBG"
+
+        def _get_reference_image(self, folder, files, output_folder):
+            hdr_local = fits.getheader(os.path.join(folder, files[0]))
+            temp_dir = os.path.join(output_folder, "temp_processing")
+            os.makedirs(temp_dir, exist_ok=True)
+            out_path = os.path.join(temp_dir, "reference_image.fit")
+            fits.writeto(out_path, np.zeros((4, 4), dtype=np.float32), hdr_local, overwrite=True)
+            self.reference_image_path = out_path
+            return np.zeros((4, 4, 3), dtype=np.float32), hdr_local
+
+    obj.aligner = DummyAligner()
+
+    def fake_add_files(folder):
+        obj.queue.put(str(ref_path))
+        obj.all_input_filepaths = [str(ref_path)]
+        obj.files_in_queue = 1
+        return 1
+
+    obj._add_files_to_queue = fake_add_files
+
+    class DummySolver:
+        def solve(
+            self,
+            path,
+            hdr,
+            settings,
+            update_header_with_solution=False,
+            batch_size=None,
+            final_combine=None,
+        ):
+            return wcs
+
+    obj.astrometry_solver = DummySolver()
+
+    called = {"grid": False}
+
+    def fake_prepare():
+        obj.reference_wcs_object = wcs
+        obj.reference_shape = (4, 4)
+        obj.reference_header_for_wcs = wcs.to_header(relax=True)
+        called["grid"] = True
+        return True
+
+    monkeypatch.setattr(obj, "_prepare_global_reprojection_grid", fake_prepare)
+
+    obj._worker = lambda: None
+
+    ok = obj.start_processing(str(tmp_path), str(tmp_path), batch_size=0, reproject_coadd_final=True)
+
+    assert ok
+    assert called["grid"]
+    assert obj.stack_final_combine == "reproject_coadd"
+
+
+def test_start_processing_bs0_defaults_to_reproject_coadd(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.autotuner = None
+    obj.freeze_reference_wcs = True
+    obj.reproject_coadd_final = False
+    obj.reproject_between_batches = False
+    obj.drizzle_active_session = False
+    obj.batch_size = 0
+    obj.current_folder = str(tmp_path)
+    obj.output_folder = str(tmp_path)
+    obj.queue = qm.Queue()
+    obj.additional_folders = []
+
+    from astropy.io import fits
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    ref_path = tmp_path / "ref.fits"
+    fits.writeto(ref_path, data, hdr, overwrite=True)
+
+    class DummyAligner:
+        def __init__(self):
+            self.stop_processing = False
+            self.reference_image_path = None
+            self.correct_hot_pixels = False
+            self.hot_pixel_threshold = 0.0
+            self.neighborhood_size = 0
+            self.bayer_pattern = "GRBG"
+
+        def _get_reference_image(self, folder, files, output_folder):
+            hdr_local = fits.getheader(os.path.join(folder, files[0]))
+            temp_dir = os.path.join(output_folder, "temp_processing")
+            os.makedirs(temp_dir, exist_ok=True)
+            out_path = os.path.join(temp_dir, "reference_image.fit")
+            fits.writeto(out_path, np.zeros((4, 4), dtype=np.float32), hdr_local, overwrite=True)
+            self.reference_image_path = out_path
+            return np.zeros((4, 4, 3), dtype=np.float32), hdr_local
+
+    obj.aligner = DummyAligner()
+
+    def fake_add_files(folder):
+        obj.queue.put(str(ref_path))
+        obj.all_input_filepaths = [str(ref_path)]
+        obj.files_in_queue = 1
+        return 1
+
+    obj._add_files_to_queue = fake_add_files
+
+    class DummySolver:
+        def solve(
+            self,
+            path,
+            hdr,
+            settings,
+            update_header_with_solution=False,
+            batch_size=None,
+            final_combine=None,
+        ):
+            return wcs
+
+    obj.astrometry_solver = DummySolver()
+
+    def fake_prepare():
+        obj.reference_wcs_object = wcs
+        obj.reference_shape = (4, 4)
+        obj.reference_header_for_wcs = wcs.to_header(relax=True)
+        return True
+
+    monkeypatch.setattr(obj, "_prepare_global_reprojection_grid", fake_prepare)
+
+    obj._worker = lambda: None
+
+    ok = obj.start_processing(str(tmp_path), str(tmp_path), batch_size=0)
+
+    assert ok
+    assert obj.reproject_coadd_final is True
+    assert obj.stack_final_combine == "reproject_coadd"
+
+
+def test_bs0_reproject_disables_inter_batch(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+    import os
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.autotuner = None
+    obj.freeze_reference_wcs = False
+    obj.reproject_coadd_final = False
+    obj.reproject_between_batches = True
+    obj.drizzle_active_session = False
+    obj.batch_size = 0
+    obj.current_folder = str(tmp_path)
+    obj.output_folder = str(tmp_path)
+    obj.queue = qm.Queue()
+    obj.additional_folders = []
+    obj.stack_final_combine = "mean"
+
+    from astropy.io import fits
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    ref_path = tmp_path / "ref.fits"
+    fits.writeto(ref_path, data, hdr, overwrite=True)
+
+    class DummyAligner:
+        def __init__(self):
+            self.stop_processing = False
+            self.reference_image_path = None
+            self.correct_hot_pixels = False
+            self.hot_pixel_threshold = 0.0
+            self.neighborhood_size = 0
+            self.bayer_pattern = "GRBG"
+
+        def _get_reference_image(self, folder, files, output_folder):
+            hdr_local = fits.getheader(os.path.join(folder, files[0]))
+            temp_dir = os.path.join(output_folder, "temp_processing")
+            os.makedirs(temp_dir, exist_ok=True)
+            out_path = os.path.join(temp_dir, "reference_image.fit")
+            fits.writeto(out_path, np.zeros((4, 4), dtype=np.float32), hdr_local, overwrite=True)
+            self.reference_image_path = out_path
+            return np.zeros((4, 4, 3), dtype=np.float32), hdr_local
+
+    obj.aligner = DummyAligner()
+
+    def fake_add_files(folder):
+        obj.queue.put(str(ref_path))
+        obj.all_input_filepaths = [str(ref_path)]
+        obj.files_in_queue = 1
+        return 1
+
+    obj._add_files_to_queue = fake_add_files
+
+    class DummySolver:
+        def solve(
+            self,
+            path,
+            hdr,
+            settings,
+            update_header_with_solution=False,
+            batch_size=None,
+            final_combine=None,
+        ):
+            return wcs
+
+    obj.astrometry_solver = DummySolver()
+
+    def fake_prepare():
+        obj.reference_wcs_object = wcs
+        obj.reference_shape = (4, 4)
+        obj.reference_header_for_wcs = wcs.to_header(relax=True)
+        return True
+
+    monkeypatch.setattr(obj, "_prepare_global_reprojection_grid", fake_prepare)
+
+    obj._worker = lambda: None
+
+    ok = obj.start_processing(
+        str(tmp_path),
+        str(tmp_path),
+        batch_size=0,
+        reproject_coadd_final=True,
+        reproject_between_batches=True,
+    )
+
+    assert ok
+    assert obj.reproject_between_batches is False
+    assert obj.freeze_reference_wcs is True
+    assert obj.stack_final_combine == "reproject_coadd"
+
+
+def test_reproject_coadd_skips_solver_when_wcs_present(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+    import os
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.autotuner = None
+    obj.freeze_reference_wcs = True
+    obj.reproject_coadd_final = True
+    obj.reproject_between_batches = False
+    obj.batch_size = 0
+    obj.current_folder = str(tmp_path)
+    obj.output_folder = str(tmp_path)
+    obj.queue = qm.Queue()
+    obj.additional_folders = []
+
+    wcs = make_wcs(shape=(4, 4))
+    hdr = wcs.to_header()
+    data = np.zeros((4, 4), dtype=np.float32)
+    paths = []
+    for i in range(2):
+        p = tmp_path / f"f{i}.fits"
+        fits.writeto(p, data, hdr, overwrite=True)
+        paths.append(p)
+
+    class DummyAligner:
+        def __init__(self):
+            self.stop_processing = False
+            self.reference_image_path = None
+            self.correct_hot_pixels = False
+            self.hot_pixel_threshold = 0.0
+            self.neighborhood_size = 0
+            self.bayer_pattern = "GRBG"
+
+        def _get_reference_image(self, folder, files, output_folder):
+            temp_dir = os.path.join(output_folder, "temp_processing")
+            os.makedirs(temp_dir, exist_ok=True)
+            out_path = os.path.join(temp_dir, "reference_image.fit")
+            fits.writeto(out_path, data, hdr, overwrite=True)
+            hdr_local = fits.getheader(out_path)
+            self.reference_image_path = out_path
+            return np.dstack([data] * 3), hdr_local
+
+    obj.aligner = DummyAligner()
+
+    def fake_add_files(folder):
+        for p in paths:
+            obj.queue.put(str(p))
+        obj.all_input_filepaths = [str(p) for p in paths]
+        obj.files_in_queue = len(paths)
+        return len(paths)
+
+    obj._add_files_to_queue = fake_add_files
+
+    def fail_solver(*a, **k):
+        raise AssertionError("solver should not be called")
+
+    monkeypatch.setattr(obj, "_run_astap_and_update_header", fail_solver)
+
+    class DummySolver:
+        def solve(
+            self,
+            path,
+            hdr,
+            settings,
+            update_header_with_solution=False,
+            batch_size=None,
+            final_combine=None,
+        ):
+            return wcs
+
+    obj.astrometry_solver = DummySolver()
+
+    ok = obj.start_processing(
+        str(tmp_path), str(tmp_path), batch_size=0, reproject_coadd_final=True
+    )
+    assert ok
+
+
 def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
     sys.path.insert(0, str(ROOT))
     import importlib
@@ -952,6 +1395,30 @@ def _prepare_qm_env(monkeypatch, tmp_path, batch_size):
     ]
 
 
+def test_reproject_classic_batches_keeps_match_bg_for_bs0(monkeypatch, tmp_path):
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {}
+
+    def fake_reproject_and_coadd(*a, **k):
+        captured["match_background"] = k.get("match_background")
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches(batch_files)
+
+    assert captured.get("match_background") is True
+
+
 def test_reproject_classic_batches_disables_match_bg_for_bs1(monkeypatch, tmp_path):
     obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=1)
     import seestar.enhancement.reproject_utils as ru
@@ -1070,4 +1537,236 @@ def test_reproject_classic_batches_skips_unsolved(monkeypatch, tmp_path):
     ])
 
     assert counts == []
+
+
+def test_reproject_classic_batches_forces_reference_wcs_bs0(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT))
+    import importlib
+    import types
+
+    if "seestar.gui" not in sys.modules:
+        seestar_pkg = types.ModuleType("seestar")
+        seestar_pkg.__path__ = [str(ROOT / "seestar")]
+        gui_pkg = types.ModuleType("seestar.gui")
+        gui_pkg.__path__ = []
+        settings_mod = types.ModuleType("seestar.gui.settings")
+
+        class DummySettingsManager:
+            pass
+
+        settings_mod.SettingsManager = DummySettingsManager
+        hist_mod = types.ModuleType("seestar.gui.histogram_widget")
+        hist_mod.HistogramWidget = object
+        gui_pkg.settings = settings_mod
+        gui_pkg.histogram_widget = hist_mod
+        seestar_pkg.gui = gui_pkg
+        sys.modules["seestar"] = seestar_pkg
+        sys.modules["seestar.gui"] = gui_pkg
+        sys.modules["seestar.gui.settings"] = settings_mod
+        sys.modules["seestar.gui.histogram_widget"] = hist_mod
+
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+
+    obj = qm.SeestarQueuedStacker()
+    obj.update_progress = lambda *a, **k: None
+    obj.freeze_reference_wcs = True
+    obj.reproject_between_batches = False
+    obj.reproject_coadd_final = True
+    obj.drizzle_active_session = False
+    obj.batch_size = 0
+    obj.reference_wcs_object = make_wcs(shape=(4, 4))
+    obj.reference_header_for_wcs = obj.reference_wcs_object.to_header(relax=True)
+    obj.reference_shape = (4, 4)
+
+    # Create two classic batch files with different WCS headers
+    data = np.zeros((3, 4, 4), dtype=np.float32)
+    hdr1 = make_wcs(shape=(4, 4)).to_header()
+    hdr2 = make_wcs(shape=(4, 4)).to_header()
+    hdr2["CRVAL1"] += 10  # shift to ensure headers differ
+    sci1 = tmp_path / "b1.fits"
+    sci2 = tmp_path / "b2.fits"
+    fits.writeto(sci1, data, hdr1, overwrite=True)
+    fits.writeto(sci2, data, hdr2, overwrite=True)
+    wht1 = tmp_path / "b1_wht.fits"
+    wht2 = tmp_path / "b2_wht.fits"
+    fits.writeto(wht1, np.ones((4, 4), dtype=np.float32), overwrite=True)
+    fits.writeto(wht2, np.ones((4, 4), dtype=np.float32), overwrite=True)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    captured: list[list] = []
+
+    def fake_reproject_and_coadd(data_list, *a, **k):
+        captured.append([w for _, w in data_list])
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        return np.zeros(k.get("shape_out"), dtype=np.float32), np.ones(k.get("shape_out"), dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+    monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
+
+    obj._reproject_classic_batches([
+        (str(sci1), [str(wht1)]),
+        (str(sci2), [str(wht2)]),
+    ])
+
+    # reproject_and_coadd is called once per channel; every wcs should be the reference
+    assert captured
+    for w_list in captured:
+        assert all(w is obj.reference_wcs_object for w in w_list)
+
+
+def test_reproject_classic_batches_bs0_fallback_to_local(monkeypatch, tmp_path):
+    import os
+
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    obj.reproject_coadd_final = True
+    obj.reference_header_for_wcs = obj.reference_wcs_object.to_header(relax=True)
+    obj.reference_shape = (4, 4)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {"astropy_calls": 0}
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        if os.environ.get("REPROJECT_FORCE_LOCAL") == "1":
+            return (
+                np.full(shape_out, 5.0, dtype=np.float32),
+                np.ones(shape_out, dtype=np.float32),
+            )
+        captured["astropy_calls"] += 1
+        return (
+            np.zeros(shape_out, dtype=np.float32),
+            np.zeros(shape_out, dtype=np.float32),
+        )
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+
+    saved = {}
+
+    def fake_save_final_stack(*args, drizzle_final_sci_data=None, drizzle_final_wht_data=None, **kwargs):
+        saved["data"] = drizzle_final_sci_data
+        saved["cov"] = drizzle_final_wht_data
+
+    monkeypatch.setattr(obj, "_save_final_stack", fake_save_final_stack)
+
+    obj._reproject_classic_batches_zm(batch_files)
+
+    assert captured["astropy_calls"] > 0
+    assert "data" in saved
+    assert np.nanmax(saved["data"]) > 1.0
+    assert np.all(saved["cov"] > 0)
+    assert os.environ.get("REPROJECT_FORCE_LOCAL") != "1"
+
+
+def test_reproject_classic_batches_bs0_detects_low_range_blank(monkeypatch, tmp_path):
+    import os
+
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    obj.reproject_coadd_final = True
+    obj.reference_header_for_wcs = obj.reference_wcs_object.to_header(relax=True)
+    obj.reference_shape = (4, 4)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    captured = {"astropy_calls": 0}
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        if os.environ.get("REPROJECT_FORCE_LOCAL") == "1":
+            return (
+                np.full(shape_out, 3.0, dtype=np.float32),
+                np.ones(shape_out, dtype=np.float32),
+            )
+        captured["astropy_calls"] += 1
+        blank = np.full(shape_out, 5e-6, dtype=np.float32)
+        return blank, np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+
+    saved = {}
+
+    def fake_save_final_stack(*args, drizzle_final_sci_data=None, drizzle_final_wht_data=None, **kwargs):
+        saved["data"] = drizzle_final_sci_data
+        saved["cov"] = drizzle_final_wht_data
+
+    monkeypatch.setattr(obj, "_save_final_stack", fake_save_final_stack)
+
+    obj._reproject_classic_batches_zm(batch_files)
+
+    assert captured["astropy_calls"] > 0
+    assert "data" in saved
+    assert np.nanmax(saved["data"]) > 1.0
+    assert np.all(saved["cov"] > 0)
+    assert os.environ.get("REPROJECT_FORCE_LOCAL") != "1"
+
+
+def test_reproject_classic_batches_bs0_rescales_near_white(monkeypatch, tmp_path):
+    import os
+
+    obj, batch_files = _prepare_qm_env(monkeypatch, tmp_path, batch_size=0)
+    obj.reproject_coadd_final = True
+
+    shape = (64, 64)
+    ref_wcs = make_wcs(shape=shape)
+    obj.reference_wcs_object = ref_wcs
+    obj.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+    obj.reference_shape = shape
+
+    base = np.linspace(0.005, 0.05, num=shape[0] * shape[1], dtype=np.float32).reshape(shape)
+    rgb = np.stack([base, base * 1.1, base * 0.9], axis=0)
+    hdr = make_wcs(shape=shape).to_header()
+    for sci_path, wht_paths in batch_files:
+        fits.writeto(sci_path, rgb, hdr, overwrite=True)
+        fits.writeto(wht_paths[0], np.ones(shape, dtype=np.float32), overwrite=True)
+
+    import seestar.enhancement.reproject_utils as ru
+
+    def fake_reproject_and_coadd(*a, **k):
+        shape_out = k.get("shape_out")
+        yy = np.linspace(0.0, 1.0, shape_out[0], dtype=np.float32)
+        xx = np.linspace(0.0, 1.0, shape_out[1], dtype=np.float32)
+        grid = 0.994 + 0.002 * ((yy[:, None] + xx[None, :]) / 2.0)
+        return grid.astype(np.float32), np.ones(shape_out, dtype=np.float32)
+
+    def fake_reproject_interp(*a, **k):
+        shape_out = k.get("shape_out")
+        return np.zeros(shape_out, dtype=np.float32), np.ones(shape_out, dtype=np.float32)
+
+    monkeypatch.setattr(ru, "reproject_and_coadd", fake_reproject_and_coadd)
+    monkeypatch.setattr(ru, "reproject_interp", fake_reproject_interp)
+
+    saved = {}
+
+    def fake_save_final_stack(*args, drizzle_final_sci_data=None, drizzle_final_wht_data=None, **kwargs):
+        saved["data"] = drizzle_final_sci_data
+        saved["cov"] = drizzle_final_wht_data
+
+    monkeypatch.setattr(obj, "_save_final_stack", fake_save_final_stack)
+
+    obj._reproject_classic_batches_zm(batch_files)
+
+    assert os.environ.get("REPROJECT_FORCE_LOCAL") != "1"
+    assert "data" in saved and "cov" in saved
+    data = saved["data"]
+    cov = saved["cov"]
+    assert data is not None and cov is not None
+    assert float(np.nanmax(data)) < 0.5
+    assert float(np.nanmax(data) - np.nanmin(data)) > 1e-3
+    assert np.all(np.isfinite(data))
+    assert np.all(cov > 0)
 

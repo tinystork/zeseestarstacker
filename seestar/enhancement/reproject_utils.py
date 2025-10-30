@@ -17,6 +17,11 @@ try:  # Prefer the reference implementation when available
 except Exception:  # pragma: no cover - gracefully handle absence of reproject
     _astropy_reproject_and_coadd = None
 
+try:  # Background matching helpers (may be unavailable on older versions)
+    from reproject.mosaicking.background import solve_corrections_sgd as _solve_corrections_sgd
+except Exception:  # pragma: no cover - optional dependency
+    _solve_corrections_sgd = None
+
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.io import fits
@@ -29,6 +34,7 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 import numpy as np
+import cv2
 
 try:  # optional core helper
     from seestar.core.reprojection_utils import collect_headers as _collect_headers
@@ -37,13 +43,35 @@ except Exception:  # pragma: no cover
 
 
 def sanitize_header_for_wcs(hdr):
+    # Ensure CONTINUE are strings so astropy accepts the header
     for k, v in list(hdr.items()):
         if k == "CONTINUE":
             hdr[k] = str(v)
+    # Drop verbose cards that can confuse parsers
     while "HISTORY" in hdr:
         del hdr["HISTORY"]
     while "COMMENT" in hdr:
         del hdr["COMMENT"]
+
+    # Ensure "-SIP" suffix when SIP coefficients are present
+    try:
+        has_sip = any(k in hdr for k in ("A_ORDER", "B_ORDER"))
+        if not has_sip:
+            for k in list(hdr.keys()):
+                uk = k.upper()
+                if uk.startswith("A_") or uk.startswith("B_") or uk.startswith("AP_") or uk.startswith("BP_"):
+                    has_sip = True
+                    break
+        if has_sip:
+            for key in ("CTYPE1", "CTYPE2"):
+                if key not in hdr:
+                    continue
+                val = str(hdr.get(key, ""))
+                if "-SIP" not in val.upper():
+                    hdr[key] = f"{val}-SIP"
+    except Exception:
+        pass
+
     return hdr
 
 
@@ -104,9 +132,10 @@ def compute_final_output_grid(headers, auto_rotate=True):
     for hdr in headers:
         try:
             hdr = sanitize_header_for_wcs(hdr)
-            w = WCS(hdr, naxis=2)
             h = int(hdr.get("NAXIS2"))
             w_pix = int(hdr.get("NAXIS1"))
+            w = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(w, h, w_pix)
             wcs_list.append(w)
             shapes.append((h, w_pix))
         except Exception:
@@ -127,6 +156,74 @@ def subtract_sigma_clipped_median(img, min_valid: int = 1024):
     return img - med_val, med_val
 
 
+def _estimate_background_corrections(images, footprints):
+    """Estimate additive corrections to match image backgrounds.
+
+    Parameters
+    ----------
+    images : list of ndarray
+        Reprojected images converted to ``float`` arrays.
+    footprints : list of ndarray
+        Corresponding footprints indicating valid pixels (> 0).
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Additive corrections to subtract from each image so their
+        backgrounds align. ``None`` when no correction can be computed.
+    """
+
+    n_images = len(images)
+    if n_images <= 1:
+        return None
+
+    offsets = np.full((n_images, n_images), np.nan, dtype=np.float64)
+    for i in range(n_images):
+        fp_i = footprints[i]
+        arr_i = images[i]
+        for j in range(i + 1, n_images):
+            mask = (fp_i > 0) & (footprints[j] > 0)
+            if not np.any(mask):
+                continue
+            diff = arr_i[mask] - images[j][mask]
+            if diff.size == 0:
+                continue
+            diff = diff[np.isfinite(diff)]
+            if diff.size == 0:
+                continue
+            median = float(np.nanmedian(diff))
+            if not np.isfinite(median):
+                continue
+            offsets[i, j] = median
+            offsets[j, i] = -median
+
+    if not np.isfinite(offsets).any():
+        return None
+
+    if _solve_corrections_sgd is not None:
+        try:
+            corrections = np.asarray(_solve_corrections_sgd(offsets), dtype=np.float64)
+        except Exception:  # pragma: no cover - solver edge-cases depend on version
+            logger.warning("Background matching solver failed", exc_info=True)
+            return None
+    else:  # pragma: no cover - fallback when solver unavailable
+        corrections = np.zeros(n_images, dtype=np.float64)
+        ref = 0
+        for idx in range(1, n_images):
+            if np.isfinite(offsets[idx, ref]):
+                corrections[idx] = offsets[idx, ref]
+            elif np.isfinite(offsets[ref, idx]):
+                corrections[idx] = -offsets[ref, idx]
+
+    if not np.isfinite(corrections).any():
+        return None
+
+    mean_corr = float(np.nanmean(corrections[np.isfinite(corrections)]))
+    corrections = corrections - mean_corr
+    corrections[~np.isfinite(corrections)] = 0.0
+    return corrections
+
+
 def _subtract_sky_median(image, nsig=3.0, maxiters=5, min_valid: int = 1024):
     mask = np.isfinite(image)
     if int(np.count_nonzero(mask)) < int(min_valid):
@@ -137,25 +234,162 @@ def _subtract_sky_median(image, nsig=3.0, maxiters=5, min_valid: int = 1024):
     return image - med_val
 
 
+def _luminance_view(arr: np.ndarray) -> np.ndarray:
+    """Return a float32 luminance projection for RGB or grayscale arrays."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 3:
+        chw_layout = arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4)
+        if chw_layout:
+            channels = arr.shape[0]
+            r = arr[0]
+            g = arr[1] if channels > 1 else arr[0]
+            b = arr[2] if channels > 2 else arr[0]
+            return 0.299 * r + 0.587 * g + 0.114 * b
+        if arr.shape[2] >= 3:
+            return (
+                0.299 * arr[..., 0]
+                + 0.587 * arr[..., 1]
+                + 0.114 * arr[..., 2]
+            )
+        return arr[..., 0]
+    return arr.astype(np.float32, copy=False)
 
-class ReprojectCoaddResult:
-    def __init__(self, image, weight, wcs):
-        self.image = image
-        self.weight = weight
-        self.wcs = wcs
-
-    def __iter__(self):
-        yield self.image
-        yield self.weight
 
 
-def _estimate_mem_gb(shape_out, n_maps=2):
-    h, w = int(shape_out[0]), int(shape_out[1])
-    bytes_total = h * w * 4 * n_maps
-    return bytes_total / (1024**3)
+def _sigma_clipped_median(values: np.ndarray, sigma: float = 3.0, maxiters: int = 5) -> float:
+    if values.size == 0:
+        return float('nan')
+    clipped = sigma_clip(values, sigma=sigma, maxiters=maxiters)
+    med = np.nanmedian(clipped.filled(np.nan))
+    return float(med) if np.isfinite(med) else float('nan')
 
 
-# [B1-COADD-FIX] Garantir une image 2D pour la reprojection
+
+def compute_overlap_median_ratio(
+    ref_img: np.ndarray,
+    new_img: np.ndarray,
+    ref_wht: np.ndarray | None = None,
+    new_wht: np.ndarray | None = None,
+    *,
+    min_overlap: int = 1024,
+    sigma: float = 3.0,
+    maxiters: int = 5,
+    use_percentile_ratio: bool = True,
+    percentile: float = 90.0,
+) -> Tuple[Optional[float], Optional[float], int, float, float]:
+    """Estimate multiplicative scale so ``new_img`` matches ``ref_img``."""
+    ref_lum = _luminance_view(ref_img)
+    new_lum = _luminance_view(new_img)
+
+    mask = np.isfinite(ref_lum) & np.isfinite(new_lum)
+    mask &= ref_lum > 0
+    mask &= new_lum > 0
+
+    if ref_wht is not None:
+        ref_w = np.asarray(ref_wht, dtype=np.float32)
+        if ref_w.ndim == 3:
+            ref_w = np.mean(ref_w, axis=2)
+        mask &= ref_w > 0
+    if new_wht is not None:
+        new_w = np.asarray(new_wht, dtype=np.float32)
+        if new_w.ndim == 3:
+            new_w = np.mean(new_w, axis=2)
+        mask &= new_w > 0
+
+    overlap = int(np.count_nonzero(mask))
+    if overlap < int(min_overlap):
+        return None, None, overlap, float("nan"), float("nan")
+
+    ref_vals = ref_lum[mask]
+    new_vals = new_lum[mask]
+    if ref_vals.size == 0 or new_vals.size == 0:
+        return None, None, overlap, float("nan"), float("nan")
+
+    ref_med = _sigma_clipped_median(ref_vals, sigma=sigma, maxiters=maxiters)
+    new_med = _sigma_clipped_median(new_vals, sigma=sigma, maxiters=maxiters)
+
+    if use_percentile_ratio:
+        if (not np.isfinite(ref_med)) or ref_med <= 0:
+            ref_med = float(np.nanpercentile(ref_vals, percentile))
+        if (not np.isfinite(new_med)) or new_med <= 0 or abs(new_med) < 1e-6:
+            new_med = float(np.nanpercentile(new_vals, percentile))
+
+    if not np.isfinite(ref_med) or not np.isfinite(new_med) or abs(new_med) < 1e-6:
+        return None, None, overlap, float(ref_med), float(new_med)
+
+    offset = float(ref_med - new_med)
+    scale = abs(float(ref_med / new_med))
+    scale = float(np.clip(scale, 0.2, 5.0))
+
+    return scale, offset, overlap, float(ref_med), float(new_med)
+
+
+def estimate_background_2d(
+    image: np.ndarray,
+    wht: np.ndarray | None = None,
+    *,
+    downsample: int = 4,
+) -> np.ndarray:
+    """Estimate a smooth 2D background model for ``image``."""
+    arr = np.asarray(image, dtype=np.float32)
+    weight_2d = None
+    if wht is not None:
+        weight = np.asarray(wht, dtype=np.float32)
+        if weight.ndim == 3:
+            weight_2d = np.mean(weight, axis=2)
+        else:
+            weight_2d = weight
+
+    def _estimate(channel: np.ndarray) -> np.ndarray:
+        mask = np.isfinite(channel)
+        if weight_2d is not None:
+            mask &= weight_2d > 0
+        if int(np.count_nonzero(mask)) < 64:
+            return np.zeros_like(channel, dtype=np.float32)
+
+        valid = channel[mask]
+        median = float(np.nanmedian(valid)) if valid.size else 0.0
+        std = float(np.nanstd(valid)) if valid.size else 0.0
+        if not np.isfinite(std):
+            std = 0.0
+
+        work = channel.copy()
+        if std > 0:
+            high_mask = mask & (channel > median + 3.0 * std)
+            work[high_mask] = median
+        work[~mask] = median
+
+        h, w = work.shape
+        if downsample > 1:
+            small_w = max(1, w // downsample)
+            small_h = max(1, h // downsample)
+            small = cv2.resize(work, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        else:
+            small = work
+
+        ksize = max(3, int(min(small.shape) * 0.25))
+        if ksize % 2 == 0:
+            ksize += 1
+        blurred = cv2.GaussianBlur(small, (ksize, ksize), 0)
+        if downsample > 1:
+            blurred = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        upper = np.nanpercentile(blurred, 95.0)
+        if np.isfinite(upper):
+            np.clip(blurred, None, upper, out=blurred)
+        if std > 0:
+            lower = median - 5.0 * std
+            np.clip(blurred, lower, None, out=blurred)
+        return blurred.astype(np.float32, copy=False)
+
+    if arr.ndim == 3:
+        bg = np.zeros_like(arr, dtype=np.float32)
+        for c in range(arr.shape[2]):
+            bg[..., c] = _estimate(arr[..., c])
+        return bg
+    return _estimate(arr)
+
+
 def _ensure_2d(img: np.ndarray) -> np.ndarray:  # [B1-COADD-FIX]
     """
     Force une image 2D. Si HWC (RGB), lever si cette fonction est appelée
@@ -286,6 +520,11 @@ def reproject_and_coadd(
         raise ValueError("No compatible input WCS for reprojection")
 
     use_astropy = _astropy_reproject_and_coadd is not None
+    # Allow forcing the local accumulator to avoid astropy's internal
+    # normalization/background steps which may be undesirable for some
+    # pipelines (e.g. classic reproject of already stacked batches).
+    if str(os.environ.get("REPROJECT_FORCE_LOCAL", "0")) == "1":
+        use_astropy = False
 
     if use_astropy:
         mem_threshold = float(os.environ.get("REPROJECT_MEM_THRESHOLD_GB", "8"))
@@ -327,6 +566,10 @@ def reproject_and_coadd(
     kept = 0  # [B1-COADD-FIX]
     total = 0  # [B1-COADD-FIX]
 
+    reproj_images = []
+    reproj_footprints = []
+    reproj_weights = []
+
     for (img, wcs_in), weight in zip(filtered_pairs, filtered_weights):
         total += 1  # [B1-COADD-FIX]
         img2d = _ensure_2d(np.asarray(img))  # [B1-COADD-FIX]
@@ -338,6 +581,9 @@ def reproject_and_coadd(
             return_footprint=True,
             **kwargs,
         )  # [B1-COADD-FIX]
+
+        proj_img = np.asarray(proj_img, dtype=np.float64)
+        footprint = np.asarray(footprint, dtype=np.float64)
 
         proj_img = np.nan_to_num(
             proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
@@ -359,7 +605,7 @@ def reproject_and_coadd(
                 pass
 
         if weight is None:  # [B1-COADD-FIX]
-            weight_proj = footprint  # [B1-COADD-FIX]
+            weight_proj = footprint.copy()  # [B1-COADD-FIX]
         elif np.isscalar(weight):  # [B1-COADD-FIX]
             weight_proj = footprint * float(weight)  # [B1-COADD-FIX]
         else:
@@ -373,26 +619,52 @@ def reproject_and_coadd(
                 return_footprint=True,
                 **kwargs,
             )  # [B1-COADD-FIX]
-            weight_proj = w_reproj * w_fp  # [B1-COADD-FIX]
+            weight_proj = np.asarray(w_reproj * w_fp, dtype=np.float64)  # [B1-COADD-FIX]
 
         weight_proj = np.nan_to_num(
             weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
         )  # [B1-COADD-FIX]
 
         if np.any(footprint > 0):  # [B1-COADD-FIX]
-            proj_img = np.nan_to_num(
-                proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
-            )
-            weight_proj = np.nan_to_num(
-                weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
-            )
-            sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
-            cov_image += weight_proj  # [B1-COADD-FIX]
-            kept += 1  # [B1-COADD-FIX]
+            reproj_images.append(proj_img)
+            reproj_footprints.append(footprint)
+            reproj_weights.append(weight_proj)
         else:
             logger.debug("[B1-COADD-FIX] Skipped entry (zero footprint).")  # [B1-COADD-FIX]
 
-        del proj_img, footprint, weight_proj  # [B1-COADD-FIX]
+    corrections = None
+    if match_background and reproj_images:
+        corrections = _estimate_background_corrections(reproj_images, reproj_footprints)
+        if corrections is None:
+            logger.info("Background matching requested but no corrections were computed.")
+        else:
+            logger.debug(
+                "Applying background corrections: min=%.6g max=%.6g",
+                float(np.nanmin(corrections)),
+                float(np.nanmax(corrections)),
+            )
+
+    for idx, (proj_img, footprint, weight_proj) in enumerate(
+        zip(reproj_images, reproj_footprints, reproj_weights)
+    ):
+        if corrections is not None and idx < len(corrections):
+            corr = corrections[idx]
+            if np.isfinite(corr):
+                proj_img = proj_img - corr
+        proj_img = np.nan_to_num(
+            proj_img, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )
+        weight_proj = np.nan_to_num(
+            weight_proj, nan=0.0, posinf=0.0, neginf=0.0, copy=False
+        )
+        if np.any(weight_proj > 0):
+            sum_image += proj_img * weight_proj  # [B1-COADD-FIX]
+            cov_image += weight_proj  # [B1-COADD-FIX]
+            kept += 1  # [B1-COADD-FIX]
+
+        reproj_images[idx] = None
+        reproj_footprints[idx] = None
+        reproj_weights[idx] = None
 
     out = np.divide(
         sum_image,
@@ -403,6 +675,7 @@ def reproject_and_coadd(
     np.nan_to_num(out, copy=False, nan=0.0, posinf=0.0, neginf=0.0)  # [B1-COADD-FIX]
 
     try:
+        valid = cov_image > 0
         logger.info(
             "[B1-COADD-FIX] coadd stats: kept=%d/%d, cov>0=%d, cov_sum=%.3f, sum_min=%.3g, sum_max=%.3g",
             kept,
@@ -982,4 +1255,6 @@ __all__ = [
     "reproject_interp",
     "reproject_and_coadd_from_paths",
     "streaming_reproject_and_coadd",
+    "estimate_background_2d",
+    "compute_overlap_median_ratio",
 ]

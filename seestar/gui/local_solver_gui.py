@@ -785,6 +785,12 @@ class LocalSolverSettingsWindow(tk.Toplevel):
                 self.parent_gui.reproject_between_batches_var.set(reproject_batches)
             except Exception:
                 pass
+        # Refresh Add Folder button state in the main GUI if available
+        try:
+            if hasattr(self.parent_gui, 'update_add_folder_button_state'):
+                self.parent_gui.update_add_folder_button_state()
+        except Exception:
+            pass
 
         self.parent_gui.settings.astrometry_solve_field_dir = astrometry_dir
 

@@ -12,6 +12,7 @@ import tempfile
 import glob
 import uuid
 import multiprocessing
+import threading
 from typing import Callable
 from types import SimpleNamespace
 
@@ -144,6 +145,84 @@ except Exception:
     ZEMOSAIC_CONFIG_AVAILABLE = False
 
 import importlib.util
+
+# Global semaphore to throttle concurrent *.npy cache reads in Phase 3
+_CACHE_IO_SEMAPHORE = threading.Semaphore(2 if os.name == 'nt' else 4)
+
+# --- Basic IO throughput probing helpers (Windows-friendly, OS-agnostic) ---
+def _measure_sequential_read_mbps(file_path: str, bytes_to_read: int = 16 * 1024 * 1024, block_size: int = 1 * 1024 * 1024) -> float | None:
+    """Measure approximate sequential read speed on a single file.
+
+    Returns MB/s or None on failure. Uses small sizes to avoid long stalls.
+    """
+    try:
+        if not (file_path and os.path.exists(file_path)):
+            return None
+        size_target = max(block_size, bytes_to_read)
+        read_total = 0
+        t0 = time.perf_counter()
+        with open(file_path, 'rb', buffering=0) as f:
+            while read_total < size_target:
+                chunk = f.read(min(block_size, size_target - read_total))
+                if not chunk:
+                    break
+                read_total += len(chunk)
+        dt = max(1e-6, time.perf_counter() - t0)
+        return (read_total / (1024 * 1024)) / dt
+    except Exception:
+        return None
+
+
+def _measure_sequential_write_mbps(dir_path: str, bytes_to_write: int = 16 * 1024 * 1024, block_size: int = 1 * 1024 * 1024) -> float | None:
+    """Measure approximate sequential write speed in a directory.
+
+    Writes and deletes a small temporary file. Returns MB/s or None on failure.
+    """
+    try:
+        if not (dir_path and os.path.isdir(dir_path)):
+            return None
+        import uuid as _uuid
+        tmp_path = os.path.join(dir_path, f"_zemosaic_io_probe_{_uuid.uuid4().hex}.bin")
+        size_target = max(block_size, bytes_to_write)
+        data = os.urandom(block_size)
+        written_total = 0
+        t0 = time.perf_counter()
+        with open(tmp_path, 'wb', buffering=0) as f:
+            while written_total < size_target:
+                to_write = min(block_size, size_target - written_total)
+                f.write(data[:to_write])
+                written_total += to_write
+            try:
+                f.flush(); os.fsync(f.fileno())
+            except Exception:
+                pass
+        dt = max(1e-6, time.perf_counter() - t0)
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return (written_total / (1024 * 1024)) / dt
+    except Exception:
+        return None
+
+
+def _categorize_io_speed(mbps: float | None) -> str:
+    """Rough IO category string based on MB/s; conservative thresholds.
+
+    very_slow: < 60 MB/s (typical USB HDD or spinning disk behind a hub)
+    slow:      < 120 MB/s
+    medium:    < 220 MB/s
+    fast:      >= 220 MB/s
+    """
+    if mbps is None or mbps <= 0:
+        return "unknown"
+    if mbps < 60:
+        return "very_slow"
+    if mbps < 120:
+        return "slow"
+    if mbps < 220:
+        return "medium"
+    return "fast"
 
 def gpu_is_available() -> bool:
     """Return True if CuPy and a CUDA device are available."""
@@ -416,33 +495,8 @@ def solve_with_ansvr(
         return None
 
 
-def _prepare_image_for_astap(data: np.ndarray, force_lum: bool = False) -> np.ndarray:
-    """Normalize image layout for ASTAP.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        Raw image data.
-    force_lum : bool
-        If True and ``data`` is 3-D, the channels are averaged to produce a mono image.
-
-    Returns
-    -------
-    np.ndarray
-        Array formatted in CHW order or 2-D monochrome.
-    """
-
-    if force_lum and data.ndim == 3:
-        return data.mean(axis=0).astype(data.dtype)
-    if data.ndim == 2:
-        return data
-    if data.ndim == 3 and data.shape[-1] in (3, 4):
-        return np.moveaxis(data, -1, 0)
-    if data.ndim == 3 and data.shape[0] in (3, 4):
-        return data
-    if data.ndim == 3:
-        return data.sum(axis=0)
-    return data
+# Note: Ancienne fonction _prepare_image_for_astap supprimée. Les images sont
+# passées à ASTAP telles quelles pour la résolution (pas de conversion mono).
 
 
 def reproject_tile_to_mosaic(tile_path: str, tile_wcs, mosaic_wcs, mosaic_shape_hw,
@@ -897,6 +951,10 @@ def get_wcs_and_pretreat_raw_file(
     # --- Résolution WCS ---
     _pcb_local(f"  Résolution WCS pour '{filename}'...", lvl="DEBUG_DETAIL")
     wcs_brute = None
+    # Évite d'écrire le header FITS si le WCS est déjà présent dans le fichier d'origine.
+    # Nous ne réécrivons le header que si un solver externe (ASTAP/ASTROMETRY/ANSVR)
+    # a effectivement injecté/ajusté des clés WCS dans header_orig.
+    should_write_header_back = False
     if ASTROPY_AVAILABLE and WCS: # S'assurer que WCS est bien l'objet d'Astropy
         try:
             wcs_from_header = WCS(header_orig, naxis=2, relax=True) # Utiliser WCS d'Astropy
@@ -904,6 +962,8 @@ def get_wcs_and_pretreat_raw_file(
                (hasattr(wcs_from_header.wcs,'cdelt') or hasattr(wcs_from_header.wcs,'cd') or hasattr(wcs_from_header.wcs,'pc')):
                 wcs_brute = wcs_from_header
                 _pcb_local(f"    WCS trouvé dans header FITS de '{filename}'.", lvl="DEBUG_DETAIL")
+                # WCS déjà présent => pas besoin de réécrire le header
+                should_write_header_back = False
         except Exception as e_wcs_hdr:
             _pcb_local("getwcs_warn_header_wcs_read_failed", lvl="WARN", filename=filename, error=str(e_wcs_hdr))
             wcs_brute = None
@@ -915,79 +975,23 @@ def get_wcs_and_pretreat_raw_file(
         lvl="DEBUG_DETAIL",
     )
     if wcs_brute is None and ZEMOSAIC_ASTROMETRY_AVAILABLE and zemosaic_astrometry:
-        tempdir_solver = tempfile.mkdtemp(prefix="solver_")
-        basename = os.path.splitext(filename)[0]
-        temp_fits = os.path.join(tempdir_solver, f"{basename}_minimal.fits")
         try:
-            force_lum = bool((solver_settings or {}).get("force_lum", False))
-            img_norm = _prepare_image_for_astap(img_data_raw_adu, force_lum=force_lum)
-            zemosaic_utils.save_numpy_to_fits(img_norm, header_orig, temp_fits, axis_order="CHW")
-        except Exception as e_tmp_write:
-            _pcb_local("getwcs_error_astap_tempfile_write_failed", lvl="ERROR", filename=filename, error=str(e_tmp_write))
-            logger.error(f"Erreur écriture FITS temporaire solver pour {filename}:", exc_info=True)
-            del img_data_raw_adu
-            gc.collect()
-            try:
-                shutil.rmtree(tempdir_solver)
-            except Exception:
-                pass
-            wcs_brute = None
-        else:
-            try:
-                if solver_choice_effective == "ASTROMETRY":
-                    _pcb_local("GetWCS: using ASTROMETRY", lvl="DEBUG")
-                    wcs_brute = solve_with_astrometry(
-                        temp_fits,
-                        header_orig,
-                        solver_settings or {},
-                        progress_callback,
-                    )
-                    if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
-                        _pcb_local("Astrometry failed; fallback to ASTAP", lvl="INFO")
-                        _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
-                        wcs_brute = zemosaic_astrometry.solve_with_astap(
-                            image_fits_path=temp_fits,
-                            original_fits_header=header_orig,
-                            astap_exe_path=astap_exe_path,
-                            astap_data_dir=astap_data_dir,
-                            search_radius_deg=astap_search_radius,
-                            downsample_factor=astap_downsample,
-                            sensitivity=astap_sensitivity,
-                            timeout_sec=astap_timeout_seconds,
-                            update_original_header_in_place=True,
-                            progress_callback=progress_callback,
-                        )
-                    if wcs_brute:
-                        _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
-                elif solver_choice_effective == "ANSVR":
-                    _pcb_local("GetWCS: using ANSVR", lvl="DEBUG")
-                    wcs_brute = solve_with_ansvr(
-                        temp_fits,
-                        header_orig,
-                        solver_settings or {},
-                        progress_callback,
-                    )
-                    if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
-                        _pcb_local("Ansvr failed; fallback to ASTAP", lvl="INFO")
-                        _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
-                        wcs_brute = zemosaic_astrometry.solve_with_astap(
-                            image_fits_path=temp_fits,
-                            original_fits_header=header_orig,
-                            astap_exe_path=astap_exe_path,
-                            astap_data_dir=astap_data_dir,
-                            search_radius_deg=astap_search_radius,
-                            downsample_factor=astap_downsample,
-                            sensitivity=astap_sensitivity,
-                            timeout_sec=astap_timeout_seconds,
-                            update_original_header_in_place=True,
-                            progress_callback=progress_callback,
-                        )
-                    if wcs_brute:
-                        _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
-                else:
-                    _pcb_local("GetWCS: using ASTAP", lvl="DEBUG")
+            # Utiliser directement le fichier original sans conversion mono ni FITS minimal
+            input_for_solver = file_path
+
+            if solver_choice_effective == "ASTROMETRY":
+                _pcb_local("GetWCS: using ASTROMETRY", lvl="DEBUG")
+                wcs_brute = solve_with_astrometry(
+                    input_for_solver,
+                    header_orig,
+                    solver_settings or {},
+                    progress_callback,
+                )
+                if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
+                    _pcb_local("Astrometry failed; fallback to ASTAP", lvl="INFO")
+                    _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
                     wcs_brute = zemosaic_astrometry.solve_with_astap(
-                        image_fits_path=temp_fits,
+                        image_fits_path=input_for_solver,
                         original_fits_header=header_orig,
                         astap_exe_path=astap_exe_path,
                         astap_data_dir=astap_data_dir,
@@ -998,22 +1002,67 @@ def get_wcs_and_pretreat_raw_file(
                         update_original_header_in_place=True,
                         progress_callback=progress_callback,
                     )
-                    if wcs_brute:
-                        _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
-                    else:
-                        _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
-            except Exception as e_solver_call:
-                _pcb_local("getwcs_error_astap_exception", lvl="ERROR", filename=filename, error=str(e_solver_call))
-                logger.error(f"Erreur solver pour {filename}", exc_info=True)
-                wcs_brute = None
-            finally:
-                del img_data_raw_adu
-                gc.collect()
-                try:
-                    os.remove(temp_fits)
-                    os.rmdir(tempdir_solver)
-                except Exception:
-                    pass
+                # Si un solver a réussi, le header_orig a potentiellement été mis à jour
+                if wcs_brute:
+                    should_write_header_back = True
+                if wcs_brute:
+                    _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
+            elif solver_choice_effective == "ANSVR":
+                _pcb_local("GetWCS: using ANSVR", lvl="DEBUG")
+                wcs_brute = solve_with_ansvr(
+                    input_for_solver,
+                    header_orig,
+                    solver_settings or {},
+                    progress_callback,
+                )
+                if not wcs_brute and astap_paths_valid(astap_exe_path, astap_data_dir):
+                    _pcb_local("Ansvr failed; fallback to ASTAP", lvl="INFO")
+                    _pcb_local("GetWCS: using ASTAP (fallback)", lvl="DEBUG")
+                    wcs_brute = zemosaic_astrometry.solve_with_astap(
+                        image_fits_path=input_for_solver,
+                        original_fits_header=header_orig,
+                        astap_exe_path=astap_exe_path,
+                        astap_data_dir=astap_data_dir,
+                        search_radius_deg=astap_search_radius,
+                        downsample_factor=astap_downsample,
+                        sensitivity=astap_sensitivity,
+                        timeout_sec=astap_timeout_seconds,
+                        update_original_header_in_place=True,
+                        progress_callback=progress_callback,
+                    )
+                # Si ANSVR/ASTAP réussit, le header a été mis à jour par le solver
+                if wcs_brute:
+                    should_write_header_back = True
+                if wcs_brute:
+                    _pcb_local("getwcs_info_astrometry_solved", lvl="INFO_DETAIL", filename=filename)
+            else:
+                _pcb_local("GetWCS: using ASTAP", lvl="DEBUG")
+                wcs_brute = zemosaic_astrometry.solve_with_astap(
+                    image_fits_path=input_for_solver,
+                    original_fits_header=header_orig,
+                    astap_exe_path=astap_exe_path,
+                    astap_data_dir=astap_data_dir,
+                    search_radius_deg=astap_search_radius,
+                    downsample_factor=astap_downsample,
+                    sensitivity=astap_sensitivity,
+                    timeout_sec=astap_timeout_seconds,
+                    update_original_header_in_place=True,
+                    progress_callback=progress_callback,
+                )
+                # ASTAP a potentiellement mis à jour le header_orig
+                if wcs_brute:
+                    should_write_header_back = True
+                if wcs_brute:
+                    _pcb_local("getwcs_info_astap_solved", lvl="INFO_DETAIL", filename=filename)
+                else:
+                    _pcb_local("getwcs_warn_astap_failed", lvl="WARN", filename=filename)
+        except Exception as e_solver_call:
+            _pcb_local("getwcs_error_astap_exception", lvl="ERROR", filename=filename, error=str(e_solver_call))
+            logger.error(f"Erreur solver pour {filename}", exc_info=True)
+            wcs_brute = None
+        finally:
+            del img_data_raw_adu
+            gc.collect()
     elif wcs_brute is None: # Ni header, ni ASTAP n'a fonctionné ou n'était dispo
         _pcb_local("getwcs_warn_no_wcs_source_available_or_failed", lvl="WARN", filename=filename)
         # Action de déplacement sera gérée par le check suivant
@@ -1036,7 +1085,9 @@ def get_wcs_and_pretreat_raw_file(
         
         if wcs_brute and wcs_brute.is_celestial: # Re-vérifier après la tentative de set_pixel_shape
             _pcb_local("getwcs_info_pretreatment_wcs_ok", lvl="DEBUG", filename=filename)
-            _write_header_to_fits(file_path, header_orig, _pcb_local)
+            # Écriture du header uniquement si un solver a réellement mis à jour le header
+            if should_write_header_back:
+                _write_header_to_fits(file_path, header_orig, _pcb_local)
             return img_data_processed_adu, wcs_brute, header_orig, hp_mask_path
         # else: tombe dans le bloc de déplacement ci-dessous
 
@@ -1125,6 +1176,12 @@ def create_master_tile(
             zconfig = SimpleNamespace()
     else:
         zconfig = SimpleNamespace()
+    # Provide a generic alias for GPU usage so Phase 3 can honor the same toggle.
+    try:
+        if not hasattr(zconfig, 'use_gpu') and hasattr(zconfig, 'use_gpu_phase5'):
+            setattr(zconfig, 'use_gpu', getattr(zconfig, 'use_gpu_phase5'))
+    except Exception:
+        pass
     func_id_log_base = "mastertile"
 
     pcb_tile(f"{func_id_log_base}_info_creation_started_from_cache", prog=None, lvl="INFO", 
@@ -1181,12 +1238,26 @@ def create_master_tile(
         # pcb_tile(f"    {func_id_log_base}_{tile_id}_Img{i}: Lecture cache '{os.path.basename(cached_image_file_path)}'", prog=None, lvl="DEBUG_VERY_DETAIL")
         
         try:
-            img_data_adu = np.load(cached_image_file_path) 
+            # Throttle concurrent cache reads and use memory-mapped load to reduce RAM spikes
+            with _CACHE_IO_SEMAPHORE:
+                img_data_adu = np.load(cached_image_file_path, allow_pickle=False, mmap_mode='r') 
             if not (isinstance(img_data_adu, np.ndarray) and img_data_adu.dtype == np.float32 and img_data_adu.ndim == 3 and img_data_adu.shape[-1] == 3):
                 pcb_tile(f"{func_id_log_base}_warn_invalid_cached_data", prog=None, lvl="WARN", filename=os.path.basename(cached_image_file_path), 
                          shape=img_data_adu.shape if hasattr(img_data_adu, 'shape') else 'N/A', 
                          dtype=img_data_adu.dtype if hasattr(img_data_adu, 'dtype') else 'N/A', tile_id=tile_id)
                 del img_data_adu; gc.collect(); continue
+            # Ensure writable, C-contiguous buffers (astroalign may require writeable arrays)
+            try:
+                need_copy = False
+                if not getattr(img_data_adu, 'flags', None):
+                    need_copy = True
+                else:
+                    if (not img_data_adu.flags.writeable) or (not img_data_adu.flags.c_contiguous):
+                        need_copy = True
+                if need_copy:
+                    img_data_adu = np.array(img_data_adu, dtype=np.float32, copy=True, order='C')
+            except Exception:
+                img_data_adu = np.array(img_data_adu, dtype=np.float32, copy=True, order='C')
             
             tile_images_data_HWC_adu.append(img_data_adu)
             # Stocker le dict de header, pas l'objet fits.Header, car c'est ce qui est dans raw_file_info
@@ -2490,6 +2561,75 @@ def run_hierarchical_mosaic(
     _log_memory_usage(progress_callback, "Fin Phase 2"); pcb("run_info_phase2_finished", prog=current_global_progress, lvl="INFO", num_groups=num_seestar_stacks_to_process)
 
 
+    # --- IO-aware adaptation (bench read speed on cache + write speed on output) ---
+    io_read_mbps, io_write_mbps = None, None
+    io_read_cat, io_write_cat = "unknown", "unknown"
+    try:
+        sample_cache_for_read = None
+        # Try to pick a representative cached image path from the first group
+        if seestar_stack_groups and seestar_stack_groups[0]:
+            sample_cache_for_read = seestar_stack_groups[0][0].get('path_preprocessed_cache')
+        if sample_cache_for_read and os.path.exists(sample_cache_for_read):
+            io_read_mbps = _measure_sequential_read_mbps(sample_cache_for_read)
+            io_read_cat = _categorize_io_speed(io_read_mbps)
+        # Write speed on output folder
+        if output_folder and os.path.isdir(output_folder):
+            io_write_mbps = _measure_sequential_write_mbps(output_folder)
+            io_write_cat = _categorize_io_speed(io_write_mbps)
+        pcb(
+            f"IO_BENCH: read {io_read_mbps:.1f} MB/s ({io_read_cat}), write {io_write_mbps:.1f} MB/s ({io_write_cat})"
+            if (io_read_mbps is not None and io_write_mbps is not None)
+            else f"IO_BENCH: read={io_read_mbps}, write={io_write_mbps}"
+            ,
+            prog=None,
+            lvl="DEBUG",
+        )
+    except Exception as e_io_bench:
+        pcb(f"IO_BENCH: failed ({e_io_bench})", prog=None, lvl="WARN")
+
+    # Derive conservative caps from read speed (dominant in Phase 3) on Windows/slow disks
+    io_ph3_cap = None
+    io_cache_read_slots = None
+    new_winsor_limit = winsor_worker_limit
+    if os.name == 'nt':
+        if io_read_cat == "very_slow":
+            io_ph3_cap = 1
+            io_cache_read_slots = 1
+            new_winsor_limit = min(new_winsor_limit, 1)
+        elif io_read_cat == "slow":
+            io_ph3_cap = 2
+            io_cache_read_slots = 1
+            new_winsor_limit = min(new_winsor_limit, 1)
+        elif io_read_cat == "medium":
+            io_ph3_cap = 3
+            io_cache_read_slots = 2
+            new_winsor_limit = min(new_winsor_limit, 2)
+        elif io_read_cat == "fast":
+            io_ph3_cap = 4
+            io_cache_read_slots = 2
+            # Keep winsor limit as computed
+        # Apply winsor limit adjustment if changed
+        if new_winsor_limit != winsor_worker_limit:
+            pcb(
+                f"IO_ADAPT: winsor_worker_limit reduced {winsor_worker_limit} -> {new_winsor_limit} due to IO ({io_read_cat})",
+                prog=None,
+                lvl="INFO_DETAIL",
+            )
+            winsor_worker_limit = new_winsor_limit
+        # Adjust cache IO semaphore (controls concurrent npy reads)
+        try:
+            if io_cache_read_slots and io_cache_read_slots > 0:
+                global _CACHE_IO_SEMAPHORE
+                _CACHE_IO_SEMAPHORE = threading.Semaphore(int(io_cache_read_slots))
+                pcb(
+                    f"IO_ADAPT: cache read slots set to {io_cache_read_slots}",
+                    prog=None,
+                    lvl="INFO_DETAIL",
+                )
+        except Exception:
+            pass
+
+
 
     # --- Phase 3 (Création Master Tuiles) ---
     base_progress_phase3 = current_global_progress
@@ -2511,6 +2651,22 @@ def run_hierarchical_mosaic(
         num_seestar_stacks_to_process,
         ALIGNMENT_PHASE_WORKER_RATIO,
     )
+    # On Windows, cap Phase 3 concurrency to reduce I/O + CPU contention
+    if os.name == 'nt':
+        actual_num_workers_ph3 = max(1, min(actual_num_workers_ph3, 4))
+    # Apply IO-based cap if available
+    try:
+        if io_ph3_cap is not None:
+            prev_workers = actual_num_workers_ph3
+            actual_num_workers_ph3 = max(1, min(actual_num_workers_ph3, int(io_ph3_cap)))
+            if actual_num_workers_ph3 != prev_workers:
+                pcb(
+                    f"IO_ADAPT: Phase 3 workers {prev_workers} -> {actual_num_workers_ph3} due to IO ({io_read_cat})",
+                    prog=None,
+                    lvl="INFO_DETAIL",
+                )
+    except Exception:
+        pass
     pcb(
         f"WORKERS_PHASE3: Utilisation de {actual_num_workers_ph3} worker(s). (Base: {effective_base_workers}, Ratio {ALIGNMENT_PHASE_WORKER_RATIO*100:.0f}%, Groupes: {num_seestar_stacks_to_process})",
         prog=None,
@@ -3027,6 +3183,10 @@ def run_hierarchical_mosaic_process(
         level = cb_args[2] if len(cb_args) > 2 else cb_kwargs.pop("level", "INFO")
         if "lvl" in cb_kwargs:
             level = cb_kwargs.pop("lvl")
+        # Only forward user-facing or control messages to the GUI queue
+        lvl_str = str(level).upper() if isinstance(level, str) else "INFO"
+        if lvl_str not in {"INFO", "WARN", "ERROR", "SUCCESS", "ETA_LEVEL", "CHRONO_LEVEL"}:
+            return
         progress_queue.put((message_key_or_raw, progress_value, level, cb_kwargs))
 
     full_args = args[:8] + (queue_callback,) + args[8:]

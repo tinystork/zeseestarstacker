@@ -1238,6 +1238,7 @@ class SettingsManager:
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
         # Default final combination method
         defaults_dict["stack_final_combine"] = "mean"
+        defaults_dict["match_background_for_final"] = None
         defaults_dict["max_hq_mem_gb"] = 8
         defaults_dict["stack_method"] = "kappa_sigma"
         defaults_dict["correct_hot_pixels"] = True
@@ -1425,13 +1426,28 @@ class SettingsManager:
                 )
 
             try:
-                self.batch_size = int(self.batch_size)
-                if self.batch_size < 0:
-                    original = self.batch_size
+                requested_batch_size = int(self.batch_size)
+                final_combine_raw = str(
+                    getattr(self, "stack_final_combine", "")
+                ).strip().lower()
+                allow_mode_zero = bool(getattr(self, "reproject_coadd_final", False))
+                if not allow_mode_zero and final_combine_raw == "reproject_coadd":
+                    allow_mode_zero = True
+
+                if requested_batch_size == 0 and allow_mode_zero:
                     self.batch_size = 0
                     messages.append(
-                        f"Taille Lot ({original}) ajusté à {self.batch_size} (auto)"
+                        "Taille Lot 0 conservée pour le mode Reproject&Coadd (lot unique en mémoire)."
                     )
+                elif requested_batch_size <= 0:
+                    messages.append(
+                        "Taille Lot (<=0) interprétée comme mode Auto "
+                        "(estimation dynamique de la taille de lot)."
+                    )
+                    # on force une sentinelle négative si le QM attend <0 pour Auto
+                    self.batch_size = -1
+                else:
+                    self.batch_size = requested_batch_size
             except (ValueError, TypeError):
                 original = self.batch_size
                 self.batch_size = defaults_fallback["batch_size"]

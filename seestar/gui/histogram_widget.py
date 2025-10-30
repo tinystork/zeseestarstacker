@@ -9,6 +9,14 @@ import matplotlib
 matplotlib.use('TkAgg') # Explicitly use TkAgg backend for compatibility
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
+try:
+    # Prefer Matplotlib's functional axis scale if available
+    from matplotlib.scale import FuncScale  # Matplotlib >=3.3
+    _HAS_FUNCSCALE = True
+except Exception:
+    FuncScale = None
+    _HAS_FUNCSCALE = False
 import traceback
 import concurrent.futures, time
 import threading
@@ -39,7 +47,9 @@ class HistogramWidget(ttk.Frame):
         # When True, the X axis range is preserved across batches
         self.freeze_x_range = False
         # When True, the Y axis range is preserved across batches
-        self.freeze_y_range = True
+        # Default changed to False so Y auto-rescales on each new stack
+        # to keep the signal fully visible in the histogram.
+        self.freeze_y_range = False
         self._stored_ylim = None
 
         # When True, the X axis scale is preserved across batches
@@ -59,6 +69,14 @@ class HistogramWidget(ttk.Frame):
 
         self._last_hist_req = 0.0
         self._hist_future = None
+
+        # Display parameters (look-and-feel only)
+        # - X scale: 'linear' or 'asinh' (non-linear to expand shadows)
+        self.x_scale_mode = 'asinh'
+        # - Strength of the non-linear transform; higher expands low end more
+        self.x_scale_strength = 6.0
+        # - Line smoothing window in bins (odd integer); 0/1 disables smoothing
+        self.smooth_window_bins = 5
 
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('button_release_event', self._on_release)
@@ -85,6 +103,60 @@ class HistogramWidget(ttk.Frame):
         self.ax.yaxis.label.set_color('lightgray'); self.ax.xaxis.label.set_color('lightgray')
         self.ax.yaxis.label.set_fontsize(8); self.ax.xaxis.label.set_fontsize(8)
         self.figure.subplots_adjust(left=0.12, right=0.98, bottom=0.18, top=0.95)
+
+    # ---- X-axis scaling helpers (linear or non-linear) ----
+    def _apply_x_scale(self):
+        """Apply the requested x-axis scale. Uses a non-linear asinh mapping
+        when x_scale_mode is 'asinh' and FuncScale is available. Mapping is
+        anchored to current data range so interaction semantics remain in data
+        units. Falls back to linear if FuncScale is unavailable."""
+        try:
+            if self.x_scale_mode != 'asinh' or not _HAS_FUNCSCALE:
+                self.ax.set_xscale('linear')
+                return
+            xmin = float(self.data_min_for_current_plot)
+            xmax = float(self.data_max_for_current_plot)
+            span = max(xmax - xmin, 1e-12)
+            k = max(self.x_scale_strength, 1e-6) / span
+
+            def _forward(x):
+                import numpy as _np
+                x = _np.asarray(x)
+                return _np.arcsinh((x - xmin) * k)
+
+            def _inverse(y):
+                import numpy as _np
+                y = _np.asarray(y)
+                return xmin + _np.sinh(y) / k
+
+            self.ax.set_xscale(FuncScale(self.ax, (_forward, _inverse)))
+        except Exception as _xscale_err:
+            # Fallback to linear on any issue
+            print(f"WARN HistogramWidget: _apply_x_scale fallback to linear due to: {_xscale_err}")
+            try:
+                self.ax.set_xscale('linear')
+            except Exception:
+                pass
+
+    def _format_x_tick(self, x, _pos=None):
+        """Human-friendly tick formatter for ADU or 0-1 data."""
+        try:
+            # Decide format based on global range
+            rng = self.data_max_for_current_plot - self.data_min_for_current_plot
+            if rng <= 2.0 and self.data_max_for_current_plot <= 2.015:
+                # 0-1 like range
+                if rng < 0.1:
+                    return f"{x:.3f}"
+                elif rng < 1.0:
+                    return f"{x:.2f}"
+                else:
+                    return f"{x:.1f}"
+            # ADU-like large range
+            if x >= 10000:
+                return f"{x/1000:.0f}k"
+            return f"{x:.0f}"
+        except Exception:
+            return f"{x:.3g}"
 
     def update_histogram(self, data_for_analysis):
         """Version async : lance le calcul dans le pool, puis revient
@@ -287,11 +359,20 @@ class HistogramWidget(ttk.Frame):
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
 
+            self._apply_x_scale()
             self.ax.set_ylim(1, 10)
+            self._apply_x_scale()
             self.ax.set_yscale('log')
-            if self.freeze_y_range and self._stored_ylim is None:
-                self._stored_ylim = self.ax.get_ylim()
-            self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})"); self.ax.set_ylabel("Nbre Pixels (log)")
+            try:
+                self.ax.xaxis.set_major_formatter(FuncFormatter(self._format_x_tick))
+            except Exception:
+                pass
+            try:
+                self.ax.xaxis.set_major_formatter(FuncFormatter(self._format_x_tick))
+            except Exception:
+                pass
+            self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.1f}-{current_plot_max_x:.1f})")
+            self.ax.set_ylabel("Nbre Pixels (log)")
             self.ax.text(0.5, 0.5, "Aucune donnée", color="gray", ha='center', va='center', transform=self.ax.transAxes)
             print(f"  -> Affichage 'Aucune donnée'. Xlim réglé sur [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}].")
 
@@ -308,61 +389,78 @@ class HistogramWidget(ttk.Frame):
             for i, hist_counts in enumerate(hist_data_details_to_plot['hists']):
                 counts_for_plotting = hist_counts + 1 
                 if counts_for_plotting.size == bin_centers.size:
-                    self.ax.plot(bin_centers, counts_for_plotting, color=hist_data_details_to_plot['colors'][i], alpha=0.85, drawstyle='steps-mid', linewidth=1.0)
+                    self.ax.plot(
+                        bin_centers,
+                        counts_for_plotting,
+                        color=hist_data_details_to_plot['colors'][i],
+                        alpha=0.95,
+                        linewidth=1.25,
+                        antialiased=True,
+                    )
                     all_pixel_counts_for_ylim.extend(hist_counts) 
                 else: print(f"Warn HistoWidget.plot_histogram: Discrépance taille histo pour canal {i}")
             
-            target_top_y_limit = 100 
+            # Adaptive Y top (log scale) to avoid clipping while staying stable
+            # Compute directly from display counts to guarantee headroom
+            display_max = 0.0
+            for hist_counts in hist_data_details_to_plot['hists']:
+                if isinstance(hist_counts, np.ndarray) and hist_counts.size:
+                    display_max = max(display_max, float(np.max(hist_counts) + 1.0))
+
+            target_top_y_limit = 100.0
+            desired_top = None
             if all_pixel_counts_for_ylim:
-                 all_pixel_counts_np = np.array(all_pixel_counts_for_ylim)
-                 counts_greater_than_zero = all_pixel_counts_np[all_pixel_counts_np > 0]
+                all_pixel_counts_np = np.array(all_pixel_counts_for_ylim)
+                counts_greater_than_zero = all_pixel_counts_np[all_pixel_counts_np > 0]
+                if counts_greater_than_zero.size > 0:
+                    max_actual_count = float(np.max(counts_greater_than_zero))
+                    # Robust percentile headroom; works for both 0-1 and ADU ranges
+                    p99 = float(np.percentile(counts_greater_than_zero, 99))
+                    # Ensure top comfortably above the tallest visible bin
+                    desired_top = max(100.0, p99 * 2.5, max_actual_count * 1.40, display_max * 1.40)
+            if desired_top is None:
+                desired_top = max(100.0, display_max * 1.40)
 
-                 if counts_greater_than_zero.size > 0:
-                    is_data_01_like_range = (self.data_max_for_current_plot - self.data_min_for_current_plot) <= 2.0 and \
-                                           self.data_min_for_current_plot >= -0.1 and \
-                                           self.data_max_for_current_plot <= 2.015 
+            current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8
+            desired_top = max(desired_top, current_ylim_bottom + 10.0)
 
-                    if is_data_01_like_range:
-                        print(f"  -> Données [0,1]-like détectées pour calcul Ylim (plage X: {self.data_max_for_current_plot - self.data_min_for_current_plot:.3f})")
-                        
-                        p98_counts = np.percentile(counts_greater_than_zero, 98)
-                        max_actual_count = np.max(counts_greater_than_zero)
-                        
-                        target_top_y_limit = p98_counts * 3.0 
-                        target_top_y_limit = max(500, target_top_y_limit) 
-                        target_top_y_limit = min(target_top_y_limit, max_actual_count * 1.2) 
-                        
-                        if p98_counts < 100 and max_actual_count > p98_counts : 
-                            target_top_y_limit = max(target_top_y_limit, max_actual_count * 0.5, 500)
-                        
-                        target_top_y_limit = max(target_top_y_limit, 100) 
-
-                        print(f"    -> Ylim (0-1 data): p98_counts={p98_counts:.0f}, max_actual_count={max_actual_count:.0f}, target_top_y={target_top_y_limit:.0f}")
-                    else: # Données ADU ou plage plus large
-                        percentile_99_5_y = np.percentile(counts_greater_than_zero, 99.5)
-                        target_top_y_limit = max(10, percentile_99_5_y * 1.5)
-                        print(f"    -> Ylim (ADU data): percentile_99_5_y={percentile_99_5_y:.0f}, target_top_y={target_top_y_limit:.0f}")
-                 else: 
-                    print(f"    -> Aucun compte > 0 pour Ylim, utilisation défaut.")
-            
-            current_ylim_bottom = self.ax.get_ylim()[0] if self.ax.get_ylim() else 0.8 # Fallback si ylim non défini
-            target_top_y_limit = max(target_top_y_limit, current_ylim_bottom + 10)
+            # Respect freeze_y_range but expand if we would clip
             if not self.freeze_y_range or self._stored_ylim is None:
-                self.ax.set_ylim(bottom=0.8, top=target_top_y_limit)
-                self._stored_ylim = self.ax.get_ylim()
+                new_ylim = (0.8, desired_top)
+                self.ax.set_ylim(new_ylim)
+                self._stored_ylim = new_ylim
             else:
+                ymin, ymax = self._stored_ylim
+                if desired_top > ymax * 0.98 or desired_top < ymax * 0.55:
+                    ymax = desired_top
+                    self._stored_ylim = (0.8, ymax)
                 self.ax.set_ylim(self._stored_ylim)
             self.ax.set_yscale('log')
-            print(f"  -> Ylim recalculé et appliqué: (0.8, {target_top_y_limit:.2f})")
+            print(f"  -> Ylim appliqué: {self.ax.get_ylim()}")
 
             self.ax.set_xlabel(f"Niveau ({current_plot_min_x:.2f}-{current_plot_max_x:.2f})"); self.ax.set_ylabel("Nbre Pixels (log)")
 
+            # X-axis handling: preserve user zoom, but EXPAND if new data exceeds it
             if was_x_zoomed_and_relevant:
-                self.ax.set_xlim(xlim_before_plot)
-                print(f"  -> Zoom X utilisateur restauré. Xlim: {xlim_before_plot}")
+                x0, x1 = xlim_before_plot
+                desired_min, desired_max = float(current_plot_min_x), float(current_plot_max_x)
+                eps = 1e-9 * max(desired_max - desired_min, 1.0)
+                if x0 > desired_min + eps:
+                    x0 = desired_min
+                if x1 < desired_max - eps:
+                    x1 = desired_max
+                self.ax.set_xlim(x0, x1)
+                print(f"  -> Zoom X restauré/étendu: ({x0:.4g}, {x1:.4g})")
             elif self.freeze_x_range and self._stored_xlim is not None:
-                self.ax.set_xlim(self._stored_xlim)
-                print(f"  -> Xlim gelé restauré: {self._stored_xlim}")
+                x0, x1 = self._stored_xlim
+                desired_min, desired_max = float(current_plot_min_x), float(current_plot_max_x)
+                eps = 1e-9 * max(desired_max - desired_min, 1.0)
+                if x0 > desired_min + eps:
+                    x0 = desired_min
+                if x1 < desired_max - eps:
+                    x1 = desired_max
+                self.ax.set_xlim(x0, x1)
+                print(f"  -> Xlim gelé restauré/étendu: ({x0:.4g}, {x1:.4g})")
             else:
                 self.ax.set_xlim(current_plot_min_x, current_plot_max_x)
                 print(f"  -> Xlim initialisé à la plage des données: [{current_plot_min_x:.4g}, {current_plot_max_x:.4g}]")
@@ -412,7 +510,7 @@ class HistogramWidget(ttk.Frame):
             print(f"ERREUR HistoWidget.plot_histogram: {e}"); traceback.print_exc(limit=2)
             try: 
                 self._configure_plot_style()
-                self.ax.set_xlim(0,1); self.ax.set_ylim(1,10); self.ax.set_yscale('log')
+                self.ax.set_xlim(0,1); self.ax.set_ylim(1,10); self._apply_x_scale(); self.ax.set_yscale('log')
                 if self.freeze_x_range:
                     self._stored_xlim = self.ax.get_xlim()
                 self.ax.text(0.5, 0.5, "Erreur Histogramme", color="red", ha='center', va='center', transform=self.ax.transAxes)
@@ -602,6 +700,7 @@ class HistogramWidget(ttk.Frame):
     def reset_histogram_view(self):
         try:
             self.ax.set_xlim(0.0, 1.0)
+            self._apply_x_scale()
             if self.freeze_x_range:
                 self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw()

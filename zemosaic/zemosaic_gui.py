@@ -214,7 +214,6 @@ class ZeMosaicGUI:
         self.astrometry_api_key_var = tk.StringVar(value=self.solver_settings.api_key)
         self.astrometry_timeout_var = tk.IntVar(value=self.solver_settings.timeout)
         self.astrometry_downsample_var = tk.IntVar(value=self.solver_settings.downsample)
-        self.force_lum_var = tk.BooleanVar(value=self.solver_settings.force_lum)
         
         self.is_processing = False
         self.worker_process = None
@@ -533,8 +532,7 @@ class ZeMosaicGUI:
         ttk.Label(params_frame, text="").grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["panel_clustering_threshold_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
         ttk.Spinbox(params_frame, from_=0.01, to=5.0, increment=0.01, textvariable=self.cluster_threshold_var, width=8, format="%.2f").grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
         param_row_idx += 1
-        ttk.Label(params_frame, text=self._tr("force_lum_label", "Convert to Luminance (mono):")).grid(row=param_row_idx, column=0, padx=5, pady=3, sticky="w"); self.translatable_widgets["force_lum_label"] = params_frame.grid_slaves(row=param_row_idx,column=0)[0]
-        ttk.Checkbutton(params_frame, variable=self.force_lum_var).grid(row=param_row_idx, column=1, padx=5, pady=3, sticky="w")
+        # Removed: Force Luminance option (images are sent to ASTAP as-is)
 
         # --- Solver Selection Frame ---
         solver_frame = ttk.LabelFrame(self.scrollable_content_frame, text=self._tr("solver_frame_title", "Plate Solver"), padding="10")
@@ -756,7 +754,8 @@ class ZeMosaicGUI:
 
         gpu_chk = ttk.Checkbutton(
             final_assembly_options_frame,
-            text=self._tr("use_gpu_phase5", "Use NVIDIA GPU for Phase 5"),
+            # Keep translation key for backward compatibility, update default text
+            text=self._tr("use_gpu_phase5", "Use NVIDIA GPU"),
             variable=self.use_gpu_phase5_var,
         )
         gpu_chk.grid(row=asm_opt_row, column=0, sticky="w", padx=5, pady=3, columnspan=2)
@@ -805,11 +804,24 @@ class ZeMosaicGUI:
         self._on_assembly_method_change()
         
 
-        # --- Launch Button, Progress Bar, Log Frame ---
-        self.launch_button = ttk.Button(self.scrollable_content_frame, text="", command=self._start_processing, style="Accent.TButton")
-        # ... (contenu launch_button, progress_info_frame, log_frame) ...
-        self.launch_button.pack(pady=15, ipady=5); self.translatable_widgets["launch_button"] = self.launch_button
-        if not ZEMOSAIC_WORKER_AVAILABLE: self.launch_button.config(state=tk.DISABLED)
+        # --- Launch + Stop Buttons, Progress Bar, Log Frame ---
+        # Container to keep buttons centered side-by-side
+        button_bar = ttk.Frame(self.scrollable_content_frame)
+        button_bar.pack(pady=15)
+
+        self.launch_button = ttk.Button(button_bar, text="", command=self._start_processing, style="Accent.TButton")
+        self.launch_button.pack(side=tk.LEFT, padx=(0, 10), ipady=5)
+        self.translatable_widgets["launch_button"] = self.launch_button
+
+        # Stop button: immediate termination of worker process
+        self.stop_button = ttk.Button(button_bar, text="", command=self._stop_processing)
+        self.stop_button.pack(side=tk.LEFT, ipady=5)
+        self.stop_button.config(state=tk.DISABLED)
+        self.translatable_widgets["stop_button"] = self.stop_button
+
+        if not ZEMOSAIC_WORKER_AVAILABLE:
+            self.launch_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.DISABLED)
         try: style = ttk.Style(); style.configure("Accent.TButton", font=('Segoe UI', 10, 'bold'), padding=5)
         except tk.TclError: print("AVERT GUI: Style 'Accent.TButton' non disponible.")
 
@@ -858,7 +870,7 @@ class ZeMosaicGUI:
             # print("DEBUG GUI: Root window non existante dans _update_ui_language.")
             return
 
-        self.root.title(self._tr("window_title", "ZeMosaic - Hierarchical Mosaicker"))
+        self.root.title(self._tr("window_title", "ZeMosaic V2.0 - Hierarchical Mosaicker"))
 
         # Traduction des widgets standards (Labels, Buttons, Titres de Frames, Onglets etc.)
         for key, widget_info in self.translatable_widgets.items():
@@ -1119,7 +1131,8 @@ class ZeMosaicGUI:
 
         # --- Préparation du contenu textuel du log ---
         # Niveaux pour lesquels on essaie de traduire `message_key_or_raw` comme une clé
-        user_facing_levels = ["INFO", "WARN", "ERROR", "SUCCESS"] 
+        # Inclure aussi CRITICAL/INFO_DETAIL/DEBUG_DETAIL car le worker envoie des clés pour ces niveaux
+        user_facing_levels = ["INFO", "WARN", "ERROR", "SUCCESS", "CRITICAL", "INFO_DETAIL", "DEBUG_DETAIL"] 
         
         # S'assurer que level est une chaîne pour la comparaison
         current_level_str = str(level).upper() if isinstance(level, str) else "INFO"
@@ -1159,7 +1172,7 @@ class ZeMosaicGUI:
         
         # --- Détermination du tag de couleur ---
         tag_name = None
-        if current_level_str == "ERROR": tag_name = "error_log"
+        if current_level_str in ("ERROR", "CRITICAL"): tag_name = "error_log"
         elif current_level_str == "WARN": tag_name = "warn_log"
         elif current_level_str == "SUCCESS": tag_name = "success_log"
         elif current_level_str == "DEBUG_DETAIL": tag_name = "debug_detail_log"
@@ -1327,7 +1340,6 @@ class ZeMosaicGUI:
             self.solver_settings.api_key = self.astrometry_api_key_var.get().strip()
             self.solver_settings.timeout = self.astrometry_timeout_var.get()
             self.solver_settings.downsample = self.astrometry_downsample_var.get()
-            self.solver_settings.force_lum = bool(self.force_lum_var.get())
             try:
                 self.solver_settings.save_default()
             except Exception:
@@ -1384,7 +1396,10 @@ class ZeMosaicGUI:
         if hasattr(self, "master_tile_count_var"):
             self.master_tile_count_var.set("")
         self.is_processing = True
+        self._cancel_requested = False
         self.launch_button.config(state=tk.DISABLED)
+        if hasattr(self, 'stop_button') and self.stop_button.winfo_exists():
+            self.stop_button.config(state=tk.NORMAL)
         self.log_text.config(state=tk.NORMAL); self.log_text.delete(1.0, tk.END); self.log_text.config(state=tk.DISABLED)
         
         self._log_message("CHRONO_START_REQUEST", None, "CHRONO_LEVEL")
@@ -1475,12 +1490,18 @@ class ZeMosaicGUI:
                     self.worker_process.terminate()
             return
 
+        has_more = False
         if self.progress_queue:
-            while True:
+            # Process a limited number of messages per tick to keep UI responsive
+            max_messages = 200
+            start_time = time.monotonic()
+            processed = 0
+            while processed < max_messages:
                 try:
                     msg_key, prog, lvl, kwargs = self.progress_queue.get_nowait()
                 except Exception:
                     break
+                processed += 1
                 if msg_key == "STAGE_PROGRESS":
                     stage, cur, tot = prog, lvl, kwargs.get('total', 0)
                     self.on_worker_progress(stage, cur, tot)
@@ -1491,39 +1512,94 @@ class ZeMosaicGUI:
                         self.worker_process = None
                     continue
                 self._log_message(msg_key, prog, lvl, **kwargs)
+                # Time-slice: avoid monopolizing Tk thread
+                if time.monotonic() - start_time > 0.03:
+                    has_more = True
+                    break
+            else:
+                if processed >= max_messages:
+                    has_more = True
 
-        if self.worker_process and self.worker_process.is_alive():
+        if (self.worker_process and self.worker_process.is_alive()) or has_more:
             self.root.after(100, self._poll_worker_queue)
             return
 
+        # Finalize according to run outcome (completed or user-cancelled)
         self._log_message("CHRONO_STOP_REQUEST", None, "CHRONO_LEVEL")
         self.is_processing = False
         if hasattr(self, 'launch_button') and self.launch_button.winfo_exists():
             self.launch_button.config(state=tk.NORMAL)
+        if hasattr(self, 'stop_button') and self.stop_button.winfo_exists():
+            self.stop_button.config(state=tk.DISABLED)
+
         if self.root.winfo_exists():
-            self._log_message("log_key_processing_finished", level="INFO")
-            final_message = self._tr("msg_processing_completed")
-            messagebox.showinfo(self._tr("dialog_title_completed"), final_message, parent=self.root)
-            # Nettoyage du compteur master-tiles affiché
-            if hasattr(self, "master_tile_count_var"):
-                self.master_tile_count_var.set("")
-            output_dir_final = self.output_dir_var.get()
-            if output_dir_final and os.path.isdir(output_dir_final):
-                if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):
-                    try:
-                        if os.name == 'nt':
-                            os.startfile(output_dir_final)
-                        elif sys.platform == 'darwin':
-                            subprocess.Popen(['open', output_dir_final])
-                        else:
-                            subprocess.Popen(['xdg-open', output_dir_final])
-                    except Exception as e_open_dir:
-                        self._log_message(self._tr("log_key_error_opening_folder", error=e_open_dir), level="ERROR")
-                        messagebox.showerror(
-                            self._tr("error_title"),
-                            self._tr("error_cannot_open_folder", error=e_open_dir),
-                            parent=self.root,
-                        )
+            if getattr(self, "_cancel_requested", False):
+                # Cancellation path: no completion dialog, just log and reset ETA/tiles
+                self._log_message("log_key_processing_cancelled", level="WARN")
+                try:
+                    self.eta_var.set(self._tr("initial_eta_value", "--:--:--"))
+                    self.elapsed_time_var.set(self._tr("initial_elapsed_time", "00:00:00"))
+                except tk.TclError:
+                    pass
+                if hasattr(self, "master_tile_count_var"):
+                    try: self.master_tile_count_var.set("")
+                    except tk.TclError: pass
+                self._cancel_requested = False
+            else:
+                self._log_message("log_key_processing_finished", level="INFO")
+                final_message = self._tr("msg_processing_completed")
+                messagebox.showinfo(self._tr("dialog_title_completed"), final_message, parent=self.root)
+                # Nettoyage du compteur master-tiles affiché
+                if hasattr(self, "master_tile_count_var"):
+                    self.master_tile_count_var.set("")
+                output_dir_final = self.output_dir_var.get()
+                if output_dir_final and os.path.isdir(output_dir_final):
+                    if messagebox.askyesno(self._tr("q_open_output_folder_title"), self._tr("q_open_output_folder_msg", folder=output_dir_final), parent=self.root):
+                        try:
+                            if os.name == 'nt':
+                                os.startfile(output_dir_final)
+                            elif sys.platform == 'darwin':
+                                subprocess.Popen(['open', output_dir_final])
+                            else:
+                                subprocess.Popen(['xdg-open', output_dir_final])
+                        except Exception as e_open_dir:
+                            self._log_message(self._tr("log_key_error_opening_folder", error=e_open_dir), level="ERROR")
+                            messagebox.showerror(
+                                self._tr("error_title"),
+                                self._tr("error_cannot_open_folder", error=e_open_dir),
+                                parent=self.root,
+                            )
+
+    def _stop_processing(self):
+        """Immediately stop the running processing by terminating the worker."""
+        if not self.is_processing:
+            return
+        self._cancel_requested = True
+        try:
+            if self.worker_process and self.worker_process.is_alive():
+                self.worker_process.terminate()
+                try:
+                    self.worker_process.join(timeout=0.5)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            self.worker_process = None
+        # UI reset occurs in the next poll tick; trigger a quick poll
+        if hasattr(self.root, 'after') and self.root.winfo_exists():
+            self.root.after(50, self._poll_worker_queue)
+        # Proactively disable stop and re-enable launch to feel immediate
+        try:
+            self.stop_button.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        try:
+            self.launch_button.config(state=tk.NORMAL)
+        except Exception:
+            pass
+        # Log cancellation intent right away
+        self._log_message("log_key_processing_cancelled", level="WARN")
                         
     def _on_closing(self):
         if self.is_processing:

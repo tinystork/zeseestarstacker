@@ -49,6 +49,48 @@ def _sanitize_continue_as_string(header: fits.Header) -> None:
             header[k] = str(v)
 
 
+def _ensure_sip_suffix(header: fits.Header) -> None:
+    """Ensure CTYPE cards carry a "-SIP" suffix when SIP coefficients exist.
+
+    Astropy emits an informational message and may behave inconsistently when
+    SIP distortion keywords (e.g. ``A_ORDER``, ``B_ORDER`` or ``A_0_2``) are
+    present but the projection types in ``CTYPE1``/``CTYPE2`` miss the
+    required "-SIP" suffix (e.g. ``RA---TAN`` → ``RA---TAN-SIP``).
+
+    This helper mutates the provided header in-place to append "-SIP" to both
+    axes when SIP terms are detected and the suffix is missing. It is a
+    no-op when SIP terms are absent or the suffix is already present.
+    """
+    try:
+        # Detect SIP presence via common keywords
+        has_sip = any(k in header for k in ("A_ORDER", "B_ORDER"))
+        if not has_sip:
+            # Also check for individual coefficient cards
+            for k in list(header.keys()):
+                uk = k.upper()
+                if uk.startswith("A_") or uk.startswith("B_") or uk.startswith("AP_") or uk.startswith("BP_"):
+                    has_sip = True
+                    break
+        if not has_sip:
+            return
+
+        for key in ("CTYPE1", "CTYPE2"):
+            if key not in header:
+                continue
+            val = str(header.get(key, ""))
+            uval = val.upper()
+            # Append only once and only for TAN-like celestial projections
+            if "-SIP" not in uval:
+                # Keep original value and simply append the suffix
+                try:
+                    header[key] = f"{val}-SIP"
+                except Exception:
+                    pass
+    except Exception:
+        # Best-effort; avoid breaking the pipeline on exotic headers
+        return
+
+
 def inject_sanitized_wcs(header: fits.Header, src) -> fits.Header | None:
     """Inject a sanitized WCS into ``header`` from various sources.
 
@@ -106,6 +148,7 @@ def inject_sanitized_wcs(header: fits.Header, src) -> fits.Header | None:
                 continue
 
         _sanitize_continue_as_string(header)
+        _ensure_sip_suffix(header)
         return header
     except Exception:
         return None

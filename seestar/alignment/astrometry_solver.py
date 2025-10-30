@@ -725,6 +725,11 @@ class AstrometrySolver:
                     self._log(f"LocalAnsvr: Résolution RÉUSSIE pour '{base_img_name_for_log}'. Fichier solution: '{os.path.basename(output_fits_path)}'.", "INFO")
                     try:
                         with fits.open(output_fits_path,memmap=False) as h_sol: solved_header=h_sol[0].header
+                        # Sanitize header and ensure CTYPE has "-SIP" if SIP terms exist
+                        try:
+                            sanitize_header_for_wcs(solved_header)
+                        except Exception:
+                            pass
                         with warnings.catch_warnings(): warnings.simplefilter("ignore",FITSFixedWarning); wcs_object=WCS(solved_header,naxis=2)
                         if wcs_object and wcs_object.is_celestial:
                             nx=solved_header.get('NAXIS1',fits_header.get('NAXIS1') if fits_header else None) 
@@ -1223,6 +1228,10 @@ class AstrometrySolver:
         solved_wcs_object = None
         try:
             if isinstance(wcs_solution_header_text, fits.Header):
+                try:
+                    sanitize_header_for_wcs(wcs_solution_header_text)
+                except Exception:
+                    pass
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", FITSFixedWarning)
                     solved_wcs_object = WCS(wcs_solution_header_text)

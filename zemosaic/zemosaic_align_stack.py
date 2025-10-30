@@ -1,6 +1,7 @@
 # zemosaic_align_stack.py
 
 import numpy as np
+import os
 import importlib.util
 
 GPU_AVAILABLE = importlib.util.find_spec("cupy") is not None
@@ -164,22 +165,91 @@ def gpu_stack_linear(frames, *, sigma=3.0):
     return cp.asnumpy(result.astype(cp.float32)), float(rejected)
 
 
-def stack_winsorized_sigma_clip(frames, zconfig=None, **kwargs):
-    """Wrapper calling GPU or CPU winsorized sigma clip."""
-    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
-    if use_gpu and GPU_AVAILABLE:
+def stack_winsorized_sigma_clip(frames, weights=None, zconfig=None, **kwargs):
+    """
+    Wrapper calling GPU or CPU winsorized sigma clip, with robust GPU guards.
+
+    - La voie GPU ignore les `weights` (non supportés).
+    - Si la voie GPU échoue ou produit une sortie suspecte, fallback CPU.
+    - La voie CPU accepte `weights` en mot-clé si fournis.
+    """
+    # --- validations légères d'entrée ---
+    if frames is None:
+        raise ValueError("frames is None")
+    import numpy as _np
+    frames_list = list(frames)
+    if not frames_list:
+        raise ValueError("frames is empty")
+    sample = _np.asarray(frames_list[0])
+    if sample.ndim not in (2, 3):
+        raise ValueError(f"each frame must be (H,W) or (H,W,C); got shape {sample.shape}")
+    # Harmonize shapes for GPU path: drop mismatched frames early
+    frames_list = [f for f in frames_list if _np.asarray(f).shape == sample.shape]
+    if len(frames_list) < 3:
+        _internal_logger.warning("Winsorized clip needs >=3 images; forcing CPU.")
+        use_gpu = False
+    else:
+        # Accept either a generic 'use_gpu' flag or legacy 'use_gpu_phase5'
+        if zconfig:
+            use_gpu = bool(getattr(zconfig, 'use_gpu', getattr(zconfig, 'use_gpu_phase5', False)))
+        else:
+            use_gpu = False
+
+    # --- GPU path (poids ignorés) ---
+    if use_gpu and GPU_AVAILABLE and callable(globals().get("gpu_stack_winsorized", None)):
         try:
-            return gpu_stack_winsorized(frames, **kwargs)
-        except Exception:
-            _internal_logger.warning("GPU winsorized clip failed, fallback CPU", exc_info=True)
-    if cpu_stack_winsorized:
-        return cpu_stack_winsorized(frames, **kwargs)
-    raise RuntimeError("CPU stack_winsorized function unavailable")
+            if weights is not None:
+                _internal_logger.warning("GPU winsorized clip: 'weights' not supported; ignoring provided weights.")
+            gpu_out = gpu_stack_winsorized(frames_list, **kwargs)
+
+            # --- validations de sortie GPU ---
+            if gpu_out is None:
+                raise RuntimeError("GPU returned None")
+            # Support both (image, rejected_pct) and image-only returns
+            if isinstance(gpu_out, (list, tuple)) and len(gpu_out) >= 1:
+                _gpu_img = gpu_out[0]
+                _gpu_rej = float(gpu_out[1]) if len(gpu_out) > 1 else 0.0
+            else:
+                _gpu_img = gpu_out
+                _gpu_rej = 0.0
+            gpu_out = _np.asarray(_gpu_img)
+            # Sortie attendue: même champs spatiaux que frames_np sans l’axe N
+            exp_shape = sample.shape  # (H,W) ou (H,W,C)
+            if gpu_out.shape != exp_shape:
+                raise RuntimeError(f"GPU returned shape {gpu_out.shape}, expected {exp_shape}")
+            if not _np.any(_np.isfinite(gpu_out)):
+                raise RuntimeError("GPU output has no finite values")
+            # tolérance: > 90% de pixels finis
+            finite_ratio = _np.isfinite(gpu_out).mean()
+            if finite_ratio < 0.9:
+                raise RuntimeError(f"GPU output has too many NaN/Inf (finite_ratio={finite_ratio:.2%})")
+
+            return gpu_out.astype(_np.float32, copy=False), float(_gpu_rej)
+
+        except Exception as e:
+            _internal_logger.warning(
+                f"GPU winsorized clip failed or looked invalid → fallback CPU: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+
+    # --- CPU path ---
+    if not callable(globals().get("cpu_stack_winsorized", None)):
+        raise RuntimeError("CPU stack_winsorized function unavailable")
+
+    if weights is not None:
+        kwargs["weights"] = weights  # mot-clé seulement
+
+    return cpu_stack_winsorized(frames_list, **kwargs)
 
 
 def stack_kappa_sigma_clip(frames, zconfig=None, **kwargs):
-    """Wrapper calling GPU or CPU kappa-sigma clip."""
-    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    """Wrapper calling GPU or CPU kappa-sigma clip.
+
+    Honors a generic ``use_gpu`` flag on ``zconfig`` if present, otherwise
+    falls back to the legacy ``use_gpu_phase5`` flag used by the GUI.
+    """
+    use_gpu = (getattr(zconfig, 'use_gpu', getattr(zconfig, 'use_gpu_phase5', False))
+               if zconfig else False)
     if use_gpu and GPU_AVAILABLE:
         try:
             return gpu_stack_kappa(frames, **kwargs)
@@ -191,8 +261,13 @@ def stack_kappa_sigma_clip(frames, zconfig=None, **kwargs):
 
 
 def stack_linear_fit_clip(frames, zconfig=None, **kwargs):
-    """Wrapper calling GPU or CPU linear fit clip."""
-    use_gpu = getattr(zconfig, 'use_gpu_phase5', False) if zconfig else False
+    """Wrapper calling GPU or CPU linear fit clip.
+
+    Honors a generic ``use_gpu`` flag on ``zconfig`` if present, otherwise
+    falls back to the legacy ``use_gpu_phase5`` flag used by the GUI.
+    """
+    use_gpu = (getattr(zconfig, 'use_gpu', getattr(zconfig, 'use_gpu_phase5', False))
+               if zconfig else False)
     if use_gpu and GPU_AVAILABLE:
         try:
             return gpu_stack_linear(frames, **kwargs)
@@ -1080,13 +1155,15 @@ def parallel_rejwinsor(channels, limits, max_workers, progress_callback=None):
 
     results = [None] * len(args_list)
 
-    # Avoid spawning a new process pool when already running inside a
-    # multiprocessing worker as this would raise "daemonic processes are not
-    # allowed to have children". In that case fallback to threads.
+    # Avoid ProcessPool on Windows to prevent heavy memory duplication and startup overhead
     parent_is_daemon = multiprocessing.current_process().daemon
-    Executor = ThreadPoolExecutor if parent_is_daemon else ProcessPoolExecutor
+    use_threads = parent_is_daemon or (os.name == 'nt')
+    Executor = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
 
-    with Executor(max_workers=max_workers) as exe:
+    # Clamp workers to number of channels
+    eff_workers = max(1, min(int(max_workers or 1), len(args_list)))
+
+    with Executor(max_workers=eff_workers) as exe:
         futures = {exe.submit(_apply_winsor_single, a): i for i, a in enumerate(args_list)}
         total = len(futures)
         done = 0
@@ -1178,11 +1255,11 @@ def _reject_outliers_winsorized_sigma_clip(
             orig_channels = [stacked_array_NHDWC[..., idx].astype(np.float32, copy=False)
                              for idx in range(stacked_array_NHDWC.shape[-1])]
 
-            def prog_cb(done, total):
-                _pcb("reject_winsor_info_channel_progress", lvl="INFO_DETAIL", channel=done)
+            def prog_cb(event, done, total):
+                _pcb("reject_winsor_info_channel_progress", lvl="INFO_DETAIL", channel=done, total=total)
                 if progress_callback:
                     try:
-                        progress_callback("stack_winsorized", done, total)
+                        progress_callback(event, done, total)
                     except Exception:
                         pass
 
@@ -1338,8 +1415,19 @@ def stack_aligned_images(
     ``winsor_max_workers`` permet de paralléliser la phase de Winsorisation lors
     du rejet Winsorized Sigma Clip.
     """
-    _pcb = lambda msg_key, prog=None, lvl="INFO_DETAIL", **kwargs: \
-        progress_callback(msg_key, prog, lvl, **kwargs) if progress_callback else _internal_logger.debug(f"PCB_FALLBACK_{lvl}_{prog}: {msg_key} {kwargs}")
+    # Wrapper: demote very verbose internal logs so they don't flood the GUI
+    def _pcb(msg_key, prog=None, lvl="INFO_DETAIL", **kwargs):
+        level = lvl
+        try:
+            if isinstance(msg_key, str) and msg_key.startswith("STACK_IMG"):
+                if isinstance(level, str) and level.upper() in ("ERROR", "INFO"):
+                    level = "DEBUG_DETAIL"
+        except Exception:
+            pass
+        if progress_callback:
+            return progress_callback(msg_key, prog, level, **kwargs)
+        else:
+            return _internal_logger.debug(f"PCB_FALLBACK_{level}_{prog}: {msg_key} {kwargs}")
 
     _pcb("STACK_IMG_ENTRY: Début stack_aligned_images.", lvl="ERROR") # Log d'entrée
 
@@ -1661,3 +1749,130 @@ def stack_aligned_images(
 
 
 
+
+# --- CPU fallback implementation appended (in case Seestar stack methods are unavailable) ---
+def _cpu_stack_winsorized_fallback(
+    frames,
+    *,
+    kappa: float = 3.0,
+    winsor_limits: tuple[float, float] = (0.05, 0.05),
+    apply_rewinsor: bool = True,
+    weights=None,
+    winsor_max_workers: int = 1,
+    progress_callback=None,
+):
+    """
+    CPU fallback for winsorized sigma-clip stacking.
+
+    Parameters
+    ----------
+    frames : array-like
+        Stack of frames (N,H,W) or (N,H,W,C).
+    kappa : float
+        Sigma threshold used for clipping (both lower/upper).
+    winsor_limits : (float, float)
+        Fractions for lower and upper winsorization on axis 0.
+    apply_rewinsor : bool
+        If True, replace rejected pixels with winsorized values before averaging.
+    weights : array-like or None
+        Optional per-frame weights. Accepts shapes (N,), (N,1,1[,1]) or (N,H,W[,C]).
+    winsor_max_workers : int
+        Parallelism hint for winsor steps (passed through to helper).
+    progress_callback : callable or None
+        Optional progress logger.
+
+    Returns
+    -------
+    (np.ndarray, float)
+        Stacked image (H,W[,C]) as float32 and rejected percentage.
+    """
+    # Normalize and validate input frames without forcing a ragged ndarray
+    frames_list = []
+    first_shape = None
+    dropped = 0
+    for f in frames:
+        a = np.asarray(f, dtype=np.float32)
+        if first_shape is None:
+            first_shape = a.shape
+        if a.shape != first_shape:
+            dropped += 1
+            if progress_callback:
+                try:
+                    progress_callback("stack_winsorized_warn_mismatched_shape_dropped", dropped, 0)
+                except Exception:
+                    pass
+            else:
+                _internal_logger.warning(
+                    f"Winsorized fallback: frame dropped due to shape mismatch."
+                    f" expected {first_shape}, got {a.shape}"
+                )
+            continue
+        frames_list.append(a)
+
+    if not frames_list:
+        raise ValueError("No frames with consistent shape to stack in CPU winsorized fallback")
+
+    if len(frames_list) < len(list(frames)):
+        _internal_logger.warning(
+            f"Winsorized fallback: using {len(frames_list)} frames; dropped {len(list(frames)) - len(frames_list)} mismatched."
+        )
+
+    arr = np.stack(frames_list, axis=0)
+    if arr.ndim not in (3, 4):
+        raise ValueError(f"frames must be (N,H,W) or (N,H,W,C); got shape {arr.shape}")
+
+    # Compute reject mask and rewinsorized data using existing helper
+    data_with_nans, keep_mask = _reject_outliers_winsorized_sigma_clip(
+        stacked_array_NHDWC=arr,
+        winsor_limits_tuple=winsor_limits,
+        sigma_low=kappa,
+        sigma_high=kappa,
+        progress_callback=progress_callback,
+        max_workers=winsor_max_workers,
+        apply_rewinsor=apply_rewinsor,
+    )
+
+    # Compute rejection percentage
+    total = keep_mask.size
+    kept = np.count_nonzero(keep_mask)
+    rejected_pct = 100.0 * float(total - kept) / float(total) if total else 0.0
+
+    # Weighted or unweighted combine along axis 0
+    if weights is None:
+        stacked = np.nanmean(data_with_nans, axis=0)
+    else:
+        w = np.asarray(weights, dtype=np.float32)
+        # Normalize weight shape to broadcast over (N,H/W[,C])
+        if w.ndim == 1 and w.shape[0] == arr.shape[0]:
+            # reshape to (N,1,1[,1])
+            extra_dims = (1,) * (arr.ndim - 1)
+            w = w.reshape((arr.shape[0],) + extra_dims)
+        # If weights do not align to arr shape except for axis 0, attempt broadcast
+        try:
+            bw = np.broadcast_to(w, data_with_nans.shape).astype(np.float32, copy=False)
+        except Exception:
+            raise ValueError(
+                f"weights shape {w.shape} not compatible with frames shape {arr.shape}"
+            )
+        # Zero-out weights where value is NaN to exclude rejected pixels when apply_rewinsor=False
+        mask_finite = np.isfinite(data_with_nans)
+        bw = np.where(mask_finite, bw, 0.0)
+        num = np.nansum(bw * data_with_nans, axis=0)
+        den = np.sum(bw, axis=0)
+        # Avoid division by zero: fallback to nanmean of original frames where den==0
+        with np.errstate(invalid="ignore", divide="ignore"):
+            stacked = np.where(den > 0, num / den, np.nan)
+        # Fill any remaining NaNs with simple nanmean across original frames
+        if np.any(~np.isfinite(stacked)):
+            stacked_fallback = np.nanmean(arr, axis=0)
+            stacked = np.where(np.isfinite(stacked), stacked, stacked_fallback)
+
+    return stacked.astype(np.float32), float(rejected_pct)
+
+# Bind fallback if seestar CPU implementation is unavailable
+try:
+    cpu_stack_winsorized
+except NameError:
+    cpu_stack_winsorized = None
+if cpu_stack_winsorized is None:
+    cpu_stack_winsorized = _cpu_stack_winsorized_fallback
