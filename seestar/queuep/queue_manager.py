@@ -94,7 +94,6 @@ from ..core.background import (
 from ..core.drizzle_utils import drizzle_finalize
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
-    reproject_and_combine,
 )
 from ..core.normalization import (
     _normalize_images_linear_fit,
@@ -117,12 +116,6 @@ _last_drz_prev = 0.0
 _MAX_PREVIEW_SIDE_PX = 1000
 _QM_LAST_GUI_PUSH = 0.0  # horodatage du dernier push
 _QM_DEBOUNCE = 0.20  # secondes mini entre deux messages GUI
-
-# ----------------------------------------------------------------------
-# Type aliases
-# ----------------------------------------------------------------------
-
-tBatchFiles = List[Tuple[str, List[str]]]
 
 # ----------------------------------------------------------------------
 # Pool size helper for CPU reprojection
@@ -154,20 +147,9 @@ def _reproject_worker(
     shape_out: tuple,
     use_gpu: bool = False,
 ):
+    """Worker function used by the process pool for reprojection."""
 
-    """Reproject a FITS image onto ``ref_wcs_header``.
-
-    The input file's WCS is read from its header so that reprojection is
-    performed in the correct coordinate system.
-
-    """
-
-    with fits.open(fits_path, memmap=False) as hdul:
-        data = hdul[0].data
-        try:
-            input_wcs = WCS(hdul[0].header)
-        except Exception:
-            input_wcs = None
+    data = fits.getdata(fits_path, memmap=False)
 
     if use_gpu:
         import cupy as cp
@@ -191,7 +173,7 @@ def _reproject_worker(
         from seestar.enhancement.reproject_utils import reproject_interp
 
         reproj, footprint = reproject_interp(
-            (data, input_wcs), WCS(ref_wcs_header), shape_out, parallel=False
+            (data, None), WCS(ref_wcs_header), shape_out, parallel=False
         )
 
     return reproj.astype(np.float32), footprint.astype(np.float32)
@@ -873,6 +855,7 @@ class SeestarQueuedStacker:
         logger.debug(
             "Quality pool started with %d workers", self.quality_executor._max_workers
         )
+        self.gui_event_queue = Queue()
         # Cache pour les grilles d'indices afin de ne pas
         # recalculer ``np.indices`` à chaque image.
         self._indices_cache: dict[tuple[int, int], np.ndarray] = {}
@@ -1080,10 +1063,6 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
                 )
-                if self.reproject_coadd_final and not self.freeze_reference_wcs:
-                    # Ensure final reprojection uses the same orientation as the
-                    # reference frame when combining with reproject_and_coadd
-                    self.freeze_reference_wcs = True
             except Exception:
                 logger.debug(
                     "  -> Impossible de lire reproject_between_batches depuis settings. Valeur par défaut utilisée."
@@ -2469,18 +2448,7 @@ class SeestarQueuedStacker:
         scale_factor : float, optional
             Drizzle scale factor to apply to the output grid. The final pixel
             scale of the mosaic is divided by this factor. Defaults to ``1.0``.
-        auto_rotate : bool, optional
-            If ``True`` the output grid is allowed to rotate to minimize the
-            final canvas size similar to ZeMosaic's behaviour.
         """
-
-
-        if self.freeze_reference_wcs and self.reference_wcs_object is not None:
-            return self.reference_wcs_object, (
-                int(self.reference_header_for_wcs["NAXIS2"]),
-                int(self.reference_header_for_wcs["NAXIS1"]),
-            )
-
 
         num_wcs = len(all_input_wcs_list)
         logger.debug(
@@ -2601,8 +2569,6 @@ class SeestarQueuedStacker:
                 target_res_deg_per_pix,
             )
 
-
-
         return out_wcs, out_shape_hw
 
     ###########################################################################################################################################################
@@ -2696,51 +2662,36 @@ class SeestarQueuedStacker:
             )
             return False
 
-        if self.reference_wcs_object is None or not self.freeze_reference_wcs:
-            if (
-                len(wcs_list) == 1
-                and self.reproject_between_batches
-                and not self.is_mosaic_run
-            ):
-                # When doing classic stacking with reprojection of a single
-                # file, use the dynamic bounding-box logic to avoid cropping.
-                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
-                    wcs_list,
-                    header_list,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-                )
-            elif len(wcs_list) == 1:
-                ref_wcs = wcs_list[0]
-                ref_shape = ref_wcs.pixel_shape
-            else:
-                ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
-                    wcs_list,
-                    header_list,
-                    scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
-                )
-                if ref_wcs is None:
-                    self.update_progress(
-                        "❌ Échec du calcul de la grille de sortie globale.", "ERROR"
-                    )
-                    return False
-
-            # Freeze this grid for all following batches
-            self.reference_wcs_object = ref_wcs
-            self.reference_shape = ref_shape
-            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
-            self.ref_wcs_header = self.reference_header_for_wcs
-            self.freeze_reference_wcs = True
-        else:
-            ref_wcs = self.reference_wcs_object
-            ref_shape = (
-                int(self.reference_header_for_wcs["NAXIS2"]),
-                int(self.reference_header_for_wcs["NAXIS1"]),
+        if (
+            len(wcs_list) == 1
+            and self.reproject_between_batches
+            and not self.is_mosaic_run
+        ):
+            # When doing classic stacking with reprojection of a single
+            # file, use the dynamic bounding-box logic to avoid cropping.
+            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                wcs_list,
+                header_list,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
             )
+        elif len(wcs_list) == 1:
+            ref_wcs = wcs_list[0]
+            ref_shape = ref_wcs.pixel_shape
+        else:
+            ref_wcs, ref_shape = self._calculate_final_mosaic_grid(
+                wcs_list,
+                header_list,
+                scale_factor=self.drizzle_scale if self.drizzle_active_session else 1.0,
+            )
+            if ref_wcs is None:
+                self.update_progress(
+                    "❌ Échec du calcul de la grille de sortie globale.", "ERROR"
+                )
+                return False
 
         self.reference_wcs_object = ref_wcs
         self.reference_shape = ref_shape
-        if self.reference_header_for_wcs is None:
-            self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
+        self.reference_header_for_wcs = ref_wcs.to_header(relax=True)
         self.ref_wcs_header = self.reference_header_for_wcs
         try:
             self.reference_wcs_object.pixel_shape = (
@@ -3799,20 +3750,9 @@ class SeestarQueuedStacker:
                                     logger.debug(
                                         f"    DEBUG _worker (iter {iteration_count}): Mode Drizzle Standard actif pour '{file_name_for_log}'."
                                     )
-                                    try:
-                                        sig = inspect.signature(self._save_drizzle_input_temp)
-                                        if len(sig.parameters) >= 3:
-                                            temp_driz_file_path = self._save_drizzle_input_temp(
-                                                aligned_data, header_orig, matrix_M_val
-                                            )
-                                        else:
-                                            temp_driz_file_path = self._save_drizzle_input_temp(
-                                                aligned_data, header_orig
-                                            )
-                                    except Exception:
-                                        temp_driz_file_path = self._save_drizzle_input_temp(
-                                            aligned_data, header_orig, matrix_M_val
-                                        )
+                                    temp_driz_file_path = self._save_drizzle_input_temp(
+                                        aligned_data, header_orig
+                                    )
                                     if temp_driz_file_path:
                                         current_batch_items_with_masks_for_stack_batch.append(
                                             temp_driz_file_path
@@ -5696,6 +5636,26 @@ class SeestarQueuedStacker:
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
 
+            zoom_pct = getattr(self, "zoom_percent", 0)
+            if isinstance(zoom_pct, (int, float)) and zoom_pct > 0:
+                factor = 1.0 + zoom_pct / 100.0
+                try:
+                    h, w = prepared_img_after_initial_proc.shape[:2]
+                    resized = cv2.resize(
+                        prepared_img_after_initial_proc,
+                        None,
+                        fx=factor,
+                        fy=factor,
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                    center = (resized.shape[1] // 2, resized.shape[0] // 2)
+                    prepared_img_after_initial_proc = cv2.getRectSubPix(
+                        resized,
+                        patchSize=(w, h),
+                        center=center,
+                    )
+                except Exception as e_zoom:
+                    logger.warning(f"Zoom ROI désactivé (erreur : {e_zoom})")
 
             if self.correct_hot_pixels:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
@@ -6242,6 +6202,118 @@ class SeestarQueuedStacker:
 
     ##############################################################################################################################################
 
+    # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
+
+    def _save_drizzle_input_temp(self, aligned_data, header):
+        """
+        Sauvegarde une image alignée (HxWx3 float32) dans le dossier temp Drizzle,
+        en transposant en CxHxW et en INJECTANT l'OBJET WCS DE RÉFÉRENCE stocké
+        dans le header sauvegardé.
+        Les données `aligned_data` doivent être dans la plage ADU finale souhaitée.
+        """
+        if self.drizzle_temp_dir is None:
+            self.update_progress("❌ Erreur interne: Dossier temp Drizzle non défini.")
+            return None
+        os.makedirs(self.drizzle_temp_dir, exist_ok=True)
+        if aligned_data.ndim != 3 or aligned_data.shape[2] != 3:
+            self.update_progress(
+                f"❌ Erreur interne: _save_drizzle_input_temp attend HxWx3, reçu {aligned_data.shape}"
+            )
+            return None
+        if self.reference_wcs_object is None:
+            self.update_progress(
+                "❌ Erreur interne: Objet WCS de référence non disponible pour sauvegarde temp."
+            )
+            return None
+
+        try:
+            # Utiliser un nom de fichier qui inclut le nom original pour le débogage du header EXPTIME
+            original_filename_stem = "unknown_orig"
+            if header and "_SRCFILE" in header:
+                original_filename_stem = os.path.splitext(header["_SRCFILE"][0])[0]
+
+            temp_filename = f"aligned_input_{self.aligned_files_count:05d}_{original_filename_stem}.fits"
+            temp_filepath = os.path.join(self.drizzle_temp_dir, temp_filename)
+
+            data_to_save = np.moveaxis(aligned_data, -1, 0).astype(
+                np.float32
+            )  # Doit être ADU ici
+
+            # ---- DEBUG: Vérifier le range de ce qui est sauvegardé ----
+            logger.debug(
+                f"    DEBUG QM [_save_drizzle_input_temp]: Sauvegarde FITS temp '{temp_filename}'. data_to_save (CxHxW) Range Ch0: [{np.min(data_to_save[0]):.4g}, {np.max(data_to_save[0]):.4g}]"
+            )
+            # ---- FIN DEBUG ----
+
+            header_to_save = header.copy() if header else fits.Header()
+
+            # Effacer WCS potentiellement incorrect du header original
+            keys_to_remove = [
+                "PC1_1",
+                "PC1_2",
+                "PC2_1",
+                "PC2_2",
+                "CD1_1",
+                "CD1_2",
+                "CD2_1",
+                "CD2_2",
+                "CRPIX1",
+                "CRPIX2",
+                "CRVAL1",
+                "CRVAL2",
+                "CTYPE1",
+                "CTYPE2",
+                "CUNIT1",
+                "CUNIT2",
+                "CDELT1",
+                "CDELT2",
+                "CROTA2",
+                "EQUINOX",
+                "RADESYS",
+            ]  # RADESYS aussi car WCS ref l'aura
+            for key in keys_to_remove:
+                if key in header_to_save:
+                    try:
+                        del header_to_save[key]
+                    except KeyError:
+                        pass
+
+            ref_wcs_header = self.reference_wcs_object.to_header(relax=True)
+            header_to_save.update(ref_wcs_header)
+
+            header_to_save["NAXIS"] = 3
+            header_to_save["NAXIS1"] = aligned_data.shape[1]
+            header_to_save["NAXIS2"] = aligned_data.shape[0]
+            header_to_save["NAXIS3"] = 3
+            if "CTYPE3" not in header_to_save:
+                header_to_save["CTYPE3"] = "CHANNEL"
+
+            # Assurer BITPIX = -32 pour float32
+            header_to_save["BITPIX"] = -32
+            if "BSCALE" in header_to_save:
+                del header_to_save["BSCALE"]
+            if "BZERO" in header_to_save:
+                del header_to_save["BZERO"]
+
+            hdu = fits.PrimaryHDU(data=data_to_save, header=header_to_save)
+            hdul = fits.HDUList([hdu])
+            hdul.writeto(
+                temp_filepath, overwrite=True, checksum=False, output_verify="ignore"
+            )
+            hdul.close()
+            return temp_filepath
+
+        except Exception as e:
+            temp_filename_for_error = (
+                f"aligned_input_{self.aligned_files_count:05d}.fits"  # Générique
+            )
+            self.update_progress(
+                f"❌ Erreur sauvegarde fichier temp Drizzle {temp_filename_for_error}: {e}"
+            )
+            traceback.print_exc(limit=2)
+            return None
+
+    ###########################################################################################################################
 
     def _process_incremental_drizzle_batch(
         self,
@@ -8912,105 +8984,34 @@ class SeestarQueuedStacker:
         final_stacked = stacked_np
         final_wht = wht_2d
         np.nan_to_num(final_wht, copy=False)
-        input_wcs = None
-        try:
-            input_wcs = WCS(header, naxis=2)
-        except Exception:
-            pass
 
-        # Potential WCS present on the incoming header (e.g. from drizzle)
-        input_wcs = None
-        try:
-            input_wcs = WCS(header, naxis=2)
-        except Exception:
-            pass
 
-        # Crop the stacked tile before solving so the WCS corresponds
-        # to the final data saved on disk.
-        if (
-            getattr(self, "apply_master_tile_crop", False)
-            and getattr(self, "master_tile_crop_percent_decimal", 0.0) > 0
-        ):
-            try:
-                cp = self.master_tile_crop_percent_decimal
-                dh = int(final_stacked.shape[0] * cp)
-                dw = int(final_stacked.shape[1] * cp)
-                if dh > 0 or dw > 0:
-                    end_h = -dh if dh != 0 else None
-                    end_w = -dw if dw != 0 else None
-                    final_stacked = final_stacked[dh:end_h, dw:end_w, :]
-                    final_wht = final_wht[dh:end_h, dw:end_w]
-                    header["CRPIX1"] = header.get("CRPIX1", 0) - dw
-                    header["CRPIX2"] = header.get("CRPIX2", 0) - dh
-                    header["NAXIS1"] = final_stacked.shape[1]
-                    header["NAXIS2"] = final_stacked.shape[0]
-            except Exception:
-                pass
-
-        # Update WCS object after potential cropping adjustments
-        try:
-            input_wcs = WCS(header, naxis=2)
-        except Exception:
-            input_wcs = None
-
-        # Save the batch to disk before solving so the WCS can be written
-        # directly to the final FITS file.
-        data_cxhxw = np.moveaxis(final_stacked, -1, 0)
-        header["NAXIS"] = 3
-        header["NAXIS1"] = data_cxhxw.shape[2]
-        header["NAXIS2"] = data_cxhxw.shape[1]
-        header["NAXIS3"] = data_cxhxw.shape[0]
-        header["CTYPE3"] = "RGB"
-        header["EXTNAME"] = "RGB"
-        header["BITPIX"] = -32
-        header["SIMPLE"] = True
-        try:
-            header["CHNAME1"] = "R"
-            header["CHNAME2"] = "G"
-            header["CHNAME3"] = "B"
-        except Exception:
-            pass
-
-        fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
-            sci_fits, overwrite=True, output_verify="ignore"
+        solve_needed = (
+            self.solve_batches
+            or self.reproject_between_batches
+            or self.reproject_coadd_final
         )
-
-        for ch_i in range(final_stacked.shape[2]):
-            wht_path = os.path.join(
-                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
+        if solve_needed:
+            # Always attempt to solve the intermediate batch with ASTAP so that a
+            # valid WCS is present on each stacked batch file. This is required for
+            # the optional inter-batch reprojection step (performed on stacked batches).
+            # When solving fails we fall back to the reference header WCS if available.
+            luminance = (
+                stacked_np[..., 0] * 0.299
+                + stacked_np[..., 1] * 0.587
+                + stacked_np[..., 2] * 0.114
+            ).astype(np.float32)
+            tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+            tmp.close()
+            fits.PrimaryHDU(data=luminance, header=header).writeto(
+                tmp.name, overwrite=True, output_verify="ignore"
             )
-            fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                wht_path, overwrite=True, output_verify="ignore"
-            )
-            wht_paths.append(wht_path)
-
-        if self.solve_batches:
-            solved_ok = self._run_astap_and_update_header(sci_fits)
+            solved_ok = self._run_astap_and_update_header(tmp.name)
             if solved_ok:
                 solved_hdr = fits.getheader(tmp.name)
                 header.update(solved_hdr)
             else:
                 if self.reference_header_for_wcs is not None:
-                    if (
-                        input_wcs is not None
-                        and self.reference_wcs_object is not None
-                        and self.reference_shape is not None
-                    ):
-                        try:
-                            final_stacked = reproject_to_reference_wcs(
-                                final_stacked,
-                                input_wcs,
-                                self.reference_wcs_object,
-                                self.reference_shape,
-                            )
-                            final_wht = reproject_to_reference_wcs(
-                                final_wht,
-                                input_wcs,
-                                self.reference_wcs_object,
-                                self.reference_shape,
-                            )
-                        except Exception:
-                            pass
                     header.update(
                         {
                             k: self.reference_header_for_wcs[k]
@@ -9034,9 +9035,7 @@ class SeestarQueuedStacker:
                     header["NAXIS1"] = stacked_np.shape[1]
                     header["NAXIS2"] = stacked_np.shape[0]
                 else:
-                    os.remove(sci_fits)
-                    for p in wht_paths:
-                        os.remove(p)
+                    os.remove(tmp.name)
                     return None, None
             os.remove(tmp.name)
         else:
@@ -9061,47 +9060,78 @@ class SeestarQueuedStacker:
                         if k in self.reference_header_for_wcs
                     }
                 )
-                header["NAXIS1"] = final_stacked.shape[1]
-                header["NAXIS2"] = final_stacked.shape[0]
-                data_cxhxw = np.moveaxis(final_stacked, -1, 0)
-                fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
-                    sci_fits, overwrite=True, output_verify="ignore"
-                )
-                for i, wht_path in enumerate(wht_paths):
-                    fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                        wht_path, overwrite=True, output_verify="ignore"
-                    )
+                header["NAXIS1"] = stacked_np.shape[1]
+                header["NAXIS2"] = stacked_np.shape[0]
 
+        final_stacked = stacked_np
+        final_wht = wht_2d
+        np.nan_to_num(final_wht, copy=False)
+
+        if (
+            getattr(self, "apply_master_tile_crop", False)
+            and getattr(self, "master_tile_crop_percent_decimal", 0.0) > 0
+        ):
+            try:
+                cp = self.master_tile_crop_percent_decimal
+                dh = int(final_stacked.shape[0] * cp)
+                dw = int(final_stacked.shape[1] * cp)
+                if dh > 0 or dw > 0:
+                    end_h = -dh if dh != 0 else None
+                    end_w = -dw if dw != 0 else None
+                    final_stacked = final_stacked[dh:end_h, dw:end_w, :]
+                    final_wht = final_wht[dh:end_h, dw:end_w]
+                    header["CRPIX1"] = header.get("CRPIX1", 0) - dw
+                    header["CRPIX2"] = header.get("CRPIX2", 0) - dh
+                    header["NAXIS1"] = final_stacked.shape[1]
+                    header["NAXIS2"] = final_stacked.shape[0]
+            except Exception:
+                pass
+
+        data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+        header["NAXIS"] = 3
+        header["NAXIS1"] = data_cxhxw.shape[2]
+        header["NAXIS2"] = data_cxhxw.shape[1]
+        header["NAXIS3"] = data_cxhxw.shape[0]
+        header["CTYPE3"] = "RGB"
+        header["EXTNAME"] = "RGB"
+        header["BITPIX"] = -32
+        header["SIMPLE"] = True
+        try:
+            header["CHNAME1"] = "R"
+            header["CHNAME2"] = "G"
+            header["CHNAME3"] = "B"
+        except Exception:
+            pass
+
+        fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+            sci_fits, overwrite=True, output_verify="ignore"
+        )
+        for ch_i in range(final_stacked.shape[2]):
+            wht_path = os.path.join(
+                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
+            )
+            fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
+                wht_path, overwrite=True, output_verify="ignore"
+            )
+            wht_paths.append(wht_path)
 
         if self.reproject_coadd_final:
             self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
 
         return sci_fits, wht_paths
 
-    def _reproject_classic_batches(self, batch_files: tBatchFiles) -> None:
-        """Reproject saved *classic* batches to a common grid and merge them.
+    def _reproject_classic_batches(self, batch_files):
+        """Reproject saved classic batches to a common grid using reproject_and_coadd."""
 
-        This variant first aligns **every batch** onto ``self.reference_wcs_object``
-        (when provided), ensuring that the subsequent call to
-        :pyfunc:`reproject_and_coadd` only has to *combine* images that are already
-        pixel‑perfectly registered.  This reproduces the behaviour of the simple
-        « Reproject » mode and prevents the blur previously observed in
-        « Reproject + Co‑add ».
-        """
-
-        from seestar.enhancement.reproject_utils import (
-            reproject_and_coadd,
-            reproject_interp,
+        from seestar.core.incremental_reprojection import (
+            reproject_and_coadd_batch,
         )
+        from seestar.enhancement.reproject_utils import reproject_interp
 
-        # --- 1. Containers -------------------------------------------------------
-        channel_arrays_wcs = [[] for _ in range(3)]  # per‑channel data + WCS pairs
-        channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
-        wcs_for_grid: List[WCS] = []
+        wcs_for_grid = []
         headers_for_grid = []
 
         for sci_path, wht_paths in batch_files:
-            # 2.1 Load science cube + WCS
             try:
                 with fits.open(sci_path, memmap=False) as hdul:
                     data_cxhxw = hdul[0].data.astype(np.float32)
@@ -9129,37 +9159,16 @@ class SeestarQueuedStacker:
             except Exception:
                 coverage = np.ones((h, w), dtype=np.float32)
 
-            # ------------------------------------------------------------------
-            # 2.3 **NEW** – project the *whole batch* onto the reference WCS
-            # ------------------------------------------------------------------
-            if self.reference_wcs_object is not None:
-                tgt_h, tgt_w = (
-                    self.reference_wcs_object.pixel_shape[1],
-                    self.reference_wcs_object.pixel_shape[0],
-                ) if self.reference_wcs_object.pixel_shape is not None else (h, w)
-
-                # Science image (3‑channels)
-                img_hwc = reproject_to_reference_wcs(
-                    np.moveaxis(data_cxhxw, 0, -1),  # CxHxW ➜ HxWxC
-                    batch_wcs,
-                    self.reference_wcs_object,
-                    (tgt_h, tgt_w),
-                )
-
-                # Weight map – single channel, same helper works
-                coverage = reproject_to_reference_wcs(
-                    coverage,
-                    batch_wcs,
-                    self.reference_wcs_object,
-                    (tgt_h, tgt_w),
-                )
-
-                batch_wcs = self.reference_wcs_object  # Subsequent code must use it
-            else:
-                # Fall back: keep original orientation
+            if (
+                data_cxhxw.ndim == 3
+                and data_cxhxw.shape[0] in (1, 3)
+                and data_cxhxw.shape[-1] != data_cxhxw.shape[0]
+            ):
                 img_hwc = np.moveaxis(data_cxhxw, 0, -1)
-
-            # 2.4 Feed per‑channel lists -------------------------------------
+            else:
+                img_hwc = data_cxhxw
+                if img_hwc.ndim == 2:
+                    img_hwc = img_hwc[..., np.newaxis]
             wcs_for_grid.append(batch_wcs)
             headers_for_grid.append(hdr)
 
@@ -9195,28 +9204,62 @@ class SeestarQueuedStacker:
             )
             return
 
-        # --- 5. Combine per‑channel stacks --------------------------------------
-        final_channels = []
-        final_cov = None
-        for ch in range(3):
-            sci, cov = reproject_and_coadd(
-                channel_arrays_wcs[ch],
-                output_projection=out_wcs,
-                shape_out=out_shape,
-                input_weights=channel_footprints[ch],
-                reproject_function=reproject_interp,
-                combine_function="mean",
-                match_background=True,
-            )
-            final_channels.append(sci.astype(np.float32))
-            if final_cov is None:
-                final_cov = cov.astype(np.float32)
+        # Validate output shape against the WCS to avoid orientation issues
+        if out_wcs.pixel_shape is not None:
+            expected_hw = (out_wcs.pixel_shape[1], out_wcs.pixel_shape[0])
+            if out_shape != expected_hw:
+                if out_shape == expected_hw[::-1]:
+                    self.update_progress(
+                        "⚠️ Final grid shape transposée, correction automatique.",
+                        "WARN",
+                    )
+                    out_shape = expected_hw
+                else:
+                    self.update_progress(
+                        "❌ Shape finale incohérente avec WCS.pixel_shape.",
+                        "ERROR",
+                    )
+                    return
 
-        # --- 6. Store results on the instance -----------------------------------
-        self.current_stack = np.stack(final_channels, axis=-1)
-        self.current_coverage = final_cov
+        images = []
+        headers = []
+        for sci_path, _wht_paths in batch_files:
+            try:
+                with fits.open(sci_path, memmap=False) as hdul:
+                    data_cxhxw = hdul[0].data.astype(np.float32)
+                    hdr = hdul[0].header
+                if (
+                    data_cxhxw.ndim == 3
+                    and data_cxhxw.shape[0] in (1, 3)
+                    and data_cxhxw.shape[-1] != data_cxhxw.shape[0]
+                ):
+                    img_hwc = np.moveaxis(data_cxhxw, 0, -1)
+                else:
+                    img_hwc = data_cxhxw
+                    if img_hwc.ndim == 2:
+                        img_hwc = img_hwc[..., np.newaxis]
+                images.append(img_hwc)
+                headers.append(hdr)
+            except Exception:
+                continue
 
-        # Caller will take care of saving the FITS file / updating GUI, etc.
+        if not images:
+            return
+
+        final_img_hwc, final_cov = reproject_and_coadd_batch(
+            images,
+            headers,
+            out_wcs,
+            out_shape,
+        )
+        if final_img_hwc is None or final_cov is None:
+            return
+        self._save_final_stack(
+            "_classic_reproject",
+            drizzle_final_sci_data=final_img_hwc,
+            drizzle_final_wht_data=final_cov,
+            preserve_linear_output=True,
+        )
 
     def _crop_to_reference_wcs(self, img_hwc, cov_hw, mosaic_wcs):
         """Crop a mosaic to the current reference WCS if available."""
@@ -9267,19 +9310,18 @@ class SeestarQueuedStacker:
             return img_hwc, cov_hw, mosaic_wcs
 
     def _reproject_classic_batches_zm(self, batch_files):
-        """Reproject and coadd classic batches without ZeMosaic."""
+        """Attempt reproject&coadd using ZeMosaic. Return True if successful."""
         try:
-            from seestar.enhancement.mosaic_utils import (
-                assemble_final_mosaic_with_reproject_coadd,
-            )
+            from zemosaic import zemosaic_worker
         except Exception as e:
-            self.update_progress(f"⚠️ assemble_final_mosaic_with_reproject_coadd indisponible: {e}", "WARN")
+            self.update_progress(f"⚠️ ZeMosaic indisponible: {e}", "WARN")
+            return False
+        if not hasattr(zemosaic_worker, "assemble_final_mosaic_with_reproject_coadd"):
             return False
 
         master_tiles = []
         wcs_list = []
         headers = []
-        weight_maps = []
         for sci_path, _wht_paths in batch_files:
             try:
                 hdr = fits.getheader(sci_path, memmap=False)
@@ -9287,16 +9329,17 @@ class SeestarQueuedStacker:
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 wcs.pixel_shape = (w, h)
+
+                wcs.array_shape = (h, w)
+                try:
+                    wcs.wcs.naxis1 = w
+                    wcs.wcs.naxis2 = h
+                except Exception:
+                    pass
+
                 master_tiles.append((str(sci_path), wcs))
                 wcs_list.append(wcs)
                 headers.append(hdr)
-                try:
-                    cov = fits.getdata(_wht_paths[0]).astype(np.float32)
-                    np.nan_to_num(cov, copy=False)
-                    cov *= make_radial_weight_map(h, w)
-                except Exception:
-                    cov = np.ones((h, w), dtype=np.float32)
-                weight_maps.append(cov)
             except Exception as e:
                 self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
 
@@ -9332,15 +9375,22 @@ class SeestarQueuedStacker:
                     return False
 
         try:
-            data_hwc, cov_hw = assemble_final_mosaic_with_reproject_coadd(
+            data_hwc, cov_hw = zemosaic_worker.assemble_final_mosaic_with_reproject_coadd(
                 master_tile_fits_with_wcs_list=master_tiles,
                 final_output_wcs=out_wcs,
                 final_output_shape_hw=out_shape,
+                progress_callback=lambda m, p=None, lvl=None, **kw: self.update_progress(
+                    f"   {m}", p
+                ),
+                n_channels=3,
                 match_bg=True,
-                weight_arrays=weight_maps,
+                apply_crop=getattr(self, "apply_master_tile_crop", False),
+                crop_percent=getattr(self, "master_tile_crop_percent_decimal", 0.0)
+                * 100.0,
+                use_gpu=False,
             )
         except Exception as e:
-            self.update_progress(f"⚠️ Échec assemble_final_mosaic_with_reproject_coadd: {e}", "WARN")
+            self.update_progress(f"⚠️ Échec ZeMosaic: {e}", "WARN")
             return False
 
         if data_hwc is None:
@@ -10647,11 +10697,12 @@ class SeestarQueuedStacker:
         local_solver_preference="none",
         move_stacked=False,
         partial_save_interval=1,
+        zoom_percent=0,
         *,
         save_as_float32=False,
         preserve_linear_output=False,
-        reproject_between_batches=None,
-        reproject_coadd_final=None,
+        reproject_between_batches=False,
+        reproject_coadd_final=False,
     ):
         logger.debug(
             f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!"
@@ -10892,11 +10943,9 @@ class SeestarQueuedStacker:
             f"    [OutputFormat] self.reproject_coadd_final (attribut d'instance) mis à : {self.reproject_coadd_final} (depuis argument {reproject_coadd_final})"
         )
 
-        # Disable solving of intermediate batches when reprojection is active
-        # and the reference WCS should remain fixed.
-        self.solve_batches = not (
-            self.reproject_between_batches and self.freeze_reference_wcs
-        )
+        # Always solve intermediate batches when reprojection is requested so
+        # that a valid WCS is available for each stacked batch.
+        self.solve_batches = True
 
         # Determine if we should keep the original input frame size when
         # reprojection between batches is enabled (to avoid changing the
@@ -11440,124 +11489,6 @@ class SeestarQueuedStacker:
             "DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Fin."
         )  # Version Log
         return True
-
-    ###############################################################################################################################################
-
-    def _save_drizzle_input_temp(self, aligned_data, header, tf=None):
-        """
-        Sauvegarde une image alignée (HxWx3 float32) dans le dossier temp Drizzle,
-        en transposant en CxHxW et en INJECTANT l'OBJET WCS DE RÉFÉRENCE stocké
-        dans le header sauvegardé.
-
-        Args:
-            aligned_data (np.ndarray): Données alignées (HxWx3 float32, 0-1).
-            header (fits.Header): Header FITS ORIGINAL (pour métadonnées non-WCS).
-            tf (array-like, optional): Matrice de transformation affine 2x3
-                appliquée par ``cv2.warpAffine``.
-
-        Returns:
-            str or None: Chemin complet du fichier sauvegardé, ou None en cas d'erreur.
-        """
-        # Vérifications initiales
-        if self.drizzle_temp_dir is None:
-            self.update_progress("❌ Erreur interne: Dossier temp Drizzle non défini.")
-            return None
-        os.makedirs(self.drizzle_temp_dir, exist_ok=True)
-        if aligned_data.ndim != 3 or aligned_data.shape[2] != 3:
-            self.update_progress(
-                f"❌ Erreur interne: _save_drizzle_input_temp attend HxWx3, reçu {aligned_data.shape}"
-            )
-            return None
-        # --- VÉRIFIER SI L'OBJET WCS DE RÉFÉRENCE EST DISPONIBLE ---
-        if self.reference_wcs_object is None:
-            self.update_progress(
-                "❌ Erreur interne: Objet WCS de référence non disponible pour sauvegarde temp."
-            )
-            return None
-        # --- FIN VÉRIFICATION ---
-
-        try:
-            temp_filename = f"aligned_input_{self.aligned_files_count:05d}.fits"
-            temp_filepath = os.path.join(self.drizzle_temp_dir, temp_filename)
-
-            # --- Préparer les données : Transposer HxWxC -> CxHxW ---
-            data_to_save = np.moveaxis(aligned_data, -1, 0).astype(np.float32)
-
-            # --- Préparer le header ---
-            header_to_save = header.copy() if header else fits.Header()
-
-            # --- EFFACER l'ancien WCS potentiellement invalide ---
-            keys_to_remove = [
-                "PC1_1",
-                "PC1_2",
-                "PC2_1",
-                "PC2_2",
-                "CD1_1",
-                "CD1_2",
-                "CD2_1",
-                "CD2_2",
-                "CRPIX1",
-                "CRPIX2",
-                "CRVAL1",
-                "CRVAL2",
-                "CTYPE1",
-                "CTYPE2",
-                "CUNIT1",
-                "CUNIT2",
-                "CDELT1",
-                "CDELT2",
-                "CROTA2",
-            ]
-            for key in keys_to_remove:
-                if key in header_to_save:
-                    del header_to_save[key]
-
-            # --- INJECTER le WCS de l'OBJET WCS de référence ---
-            ref_wcs_header = self.reference_wcs_object.to_header(relax=True)
-            header_to_save.update(ref_wcs_header)
-
-            # --- Mettre à jour NAXIS pour CxHxW ---
-            header_to_save["NAXIS"] = 3
-            header_to_save["NAXIS1"] = aligned_data.shape[1]  # Width
-            header_to_save["NAXIS2"] = aligned_data.shape[0]  # Height
-            header_to_save["NAXIS3"] = 3  # Channels
-            if "CTYPE3" not in header_to_save:
-                header_to_save["CTYPE3"] = "CHANNEL"
-
-            # --- Sauvegarde ---
-            hdu = fits.PrimaryHDU(data=data_to_save, header=header_to_save)
-            hdul = fits.HDUList([hdu])
-            if tf is not None:
-                try:
-                    from astropy.wcs import WCS
-                    import numpy as np
-
-                    a, b = tf[0, 0], tf[1, 0]
-                    tx, ty = tf[0, 2], tf[1, 2]
-                    w = WCS(hdul[0].header)
-                    R = np.array([[a, -b], [b, a]])
-                    w.pixel_scale_matrix = w.pixel_scale_matrix @ R
-                    w.wcs.crpix -= [tx, ty]
-                    hdul[0].header.update(w.to_header())
-                except Exception:
-                    pass
-            hdul.writeto(
-                temp_filepath, overwrite=True, checksum=False, output_verify="ignore"
-            )
-            hdul.close()
-
-            # logger.debug(f"   -> Temp Drizzle sauvegardé ({os.path.basename(temp_filepath)}) avec WCS Ref Obj.") # DEBUG
-            return temp_filepath
-
-        except Exception as e:
-            temp_filename_for_error = (
-                f"aligned_input_{self.aligned_files_count:05d}.fits"
-            )
-            self.update_progress(
-                f"❌ Erreur sauvegarde fichier temp Drizzle {temp_filename_for_error}: {e}"
-            )
-            traceback.print_exc(limit=2)
-            return None
 
     ################################################################################################################################################
 
