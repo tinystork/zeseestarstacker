@@ -5121,12 +5121,17 @@ class SeestarStackerGUI:
 
             # ZeMosaic is now a separately installed/managed ZeSoftware
             # product.  Launch its console entry point when available,
-            # falling back to the module form.
-            zemosaic_exe = shutil.which("zemosaic")
-            if zemosaic_exe:
-                cmd = [zemosaic_exe]
-            else:
-                cmd = [sys.executable, "-m", "zemosaic"]
+            # falling back to the module form, and fail gracefully with a
+            # clear message when the product is not installed.
+            cmd = analyzer_launch.detect_zemosaic_command()
+            if cmd is None:
+                self.logger.warning("ZeMosaic not found; refusing to launch.")
+                messagebox.showerror(
+                    self.tr("error", default="Error"),
+                    self.tr("zemosaic_not_found"),
+                    parent=self.root,
+                )
+                return
             subprocess.Popen(cmd, env=env)
             self.logger.info("ZeMosaic launched successfully")
         except Exception as e:

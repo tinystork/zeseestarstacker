@@ -297,6 +297,7 @@ EN_TRANSLATIONS = {
     "cancel": "Cancel",
     "ok": "OK",
     "mosaic_window_create_error": "Could not open Mosaic settings window.",
+    "zemosaic_not_found": "ZeMosaic was not found.\nPlease install the ZeMosaic product to use mosaic mode.",
     "mosaic_mode_enabled_log": "Mosaic mode ENABLED.",
     "mosaic_mode_disabled_log": "Mosaic mode DISABLED.",
     "mosaic_drizzle_options_frame": "Mosaic Drizzle Options",

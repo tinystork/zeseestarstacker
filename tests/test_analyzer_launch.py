@@ -21,17 +21,17 @@ sys.modules["seestar_analyzer_launch"] = analyzer_launch
 spec.loader.exec_module(analyzer_launch)
 
 
-def _set_entry_point(monkeypatch, exe):
+def _set_entry_point(monkeypatch, exe, product="zeanalyser"):
     monkeypatch.setattr(
-        shutil, "which", lambda name: exe if name == "zeanalyser" else None
+        shutil, "which", lambda name: exe if name == product else None
     )
 
 
-def _set_module_present(monkeypatch, present):
+def _set_module_present(monkeypatch, present, product="zeanalyser"):
     monkeypatch.setattr(
         importlib.util,
         "find_spec",
-        lambda name: object() if (present and name == "zeanalyser") else None,
+        lambda name: object() if (present and name == product) else None,
     )
 
 
@@ -150,3 +150,25 @@ def test_consume_command_file_without_reference_deletes_file(tmp_path):
 
     assert ref is None
     assert not cmd_file.exists()
+
+
+def test_detect_zemosaic_prefers_entry_point(monkeypatch):
+    _set_entry_point(monkeypatch, "/usr/bin/zemosaic", product="zemosaic")
+    _set_module_present(monkeypatch, False, product="zemosaic")
+    assert analyzer_launch.detect_zemosaic_command() == ["/usr/bin/zemosaic"]
+
+
+def test_detect_zemosaic_falls_back_to_module(monkeypatch):
+    _set_entry_point(monkeypatch, None, product="zemosaic")
+    _set_module_present(monkeypatch, True, product="zemosaic")
+    assert analyzer_launch.detect_zemosaic_command() == [
+        sys.executable,
+        "-m",
+        "zemosaic",
+    ]
+
+
+def test_detect_zemosaic_returns_none_when_absent(monkeypatch):
+    _set_entry_point(monkeypatch, None, product="zemosaic")
+    _set_module_present(monkeypatch, False, product="zemosaic")
+    assert analyzer_launch.detect_zemosaic_command() is None

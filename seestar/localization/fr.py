@@ -319,6 +319,7 @@ FR_TRANSLATIONS = {
     "cancel": "Annuler",
     "ok": "OK",
     "mosaic_window_create_error": "Impossible d'ouvrir la fenêtre d'options Mosaïque.",
+    "zemosaic_not_found": "ZeMosaic est introuvable.\nVeuillez installer le produit ZeMosaic pour utiliser le mode mosaïque.",
     "mosaic_mode_enabled_log": "Mode mosaïque ACTIVÉ.",
     "mosaic_mode_disabled_log": "Mode mosaïque DÉSACTIVÉ.",
     "mosaic_drizzle_options_frame": "Options Drizzle Mosaïque",

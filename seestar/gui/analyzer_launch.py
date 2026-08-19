@@ -1,9 +1,16 @@
-"""Launch helpers for the standalone ZeAnalyser product.
+"""Launch helpers for the standalone ZeSoftware products.
 
-ZeAnalyser is a separately installed/managed ZeSoftware product.  It is
-discovered at runtime (it is *not* a declared dependency of ZeSeestarStacker)
-through its console entry point ``zeanalyser`` or, failing that, the module
-form ``python -m zeanalyser``.
+ZeAnalyser and ZeMosaic are separately installed/managed ZeSoftware
+products.  They are discovered at runtime (they are *not* declared
+dependencies of ZeSeestarStacker) through their console entry points
+(``zeanalyser``, ``zemosaic``) or, failing that, the module form
+(``python -m zeanalyser``, ``python -m zemosaic``).
+
+The ZeAnalyser reference-return protocol (env var
+``ZEANALYSER_COMMAND_FILE``, ``REFERENCE=``/``TIMESTAMP=`` file format) is a
+public process contract documented in the ZeAnalyser repository:
+``docs/zeanalyser_process_contract.md`` (protocol v1, locked by
+``tests/test_process_contract.py``).
 
 This module deliberately avoids importing OpenCV / Pillow / Tkinter so it can
 be exercised in minimal environments (the test suite loads it by file path,
@@ -21,9 +28,30 @@ ANALYZER_ENTRY_POINT = "zeanalyser"
 ANALYZER_MODULE = "zeanalyser"
 COMMAND_FILE_ENV_VAR = "ZEANALYSER_COMMAND_FILE"
 
+# ZeMosaic product discovery (mirror of the ZeAnalyser detection below).
+ZEMOSAIC_ENTRY_POINT = "zemosaic"
+ZEMOSAIC_MODULE = "zemosaic"
+
 # The modern ZeAnalyser command-file protocol writes ``REFERENCE=<path>`` and
 # ``TIMESTAMP=<...>`` lines.  We only care about the reference here.
 _REFERENCE_LINE_RE = re.compile(r"^REFERENCE=(.*)$")
+
+
+def detect_zemosaic_command():
+    """Return the base launch command for ZeMosaic, or ``None`` if absent.
+
+    Mirrors :func:`detect_analyzer_command`: prefers the ``zemosaic``
+    console entry point and falls back to ``python -m zemosaic`` when the
+    module is importable.  Returns ``None`` when ZeMosaic is not installed,
+    so the caller can degrade gracefully instead of launching a subprocess
+    that would fail with a confusing ModuleNotFoundError.
+    """
+    exe = shutil.which(ZEMOSAIC_ENTRY_POINT)
+    if exe:
+        return [exe]
+    if importlib.util.find_spec(ZEMOSAIC_MODULE) is not None:
+        return [sys.executable, "-m", ZEMOSAIC_MODULE]
+    return None
 
 
 def detect_analyzer_command():
