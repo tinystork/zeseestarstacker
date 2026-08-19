@@ -10,6 +10,7 @@ import traceback
 import platform  # For finding fonts
 import os
 import threading
+import importlib.resources
 
 # Import stretch/color tools using the package structure
 try:
@@ -86,9 +87,13 @@ class PreviewManager:
         self.bg_pil_image = None # Holds the PIL Image for the background
         self.tk_bg_img = None    # Holds the Tkinter PhotoImage for the background
         try:
-            # IMPORTANT: Replace this with the ACTUAL path to YOUR background image file!
-            # Example: bg_image_path = "assets/background.png"
-            bg_image_path = 'icon/back.png'
+            # Package-aware lookup: resolve the icon inside the installed
+            # ``seestar`` package instead of relying on the current working
+            # directory (broken when launched from another directory or from
+            # a ZeAlfie-managed runtime slot).
+            bg_image_path = str(
+                importlib.resources.files("seestar").joinpath("icon", "back.png")
+            )
 
             if os.path.exists(bg_image_path):
                 # Load the background image using Pillow

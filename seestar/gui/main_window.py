@@ -10,7 +10,8 @@ import math
 import os
 import csv
 import platform  # NOUVEL import
-import subprocess, shutil, sys
+import subprocess, sys
+import importlib.resources
 
 # Import psutil lazily for automatic chunk size estimation
 try:
@@ -229,7 +230,13 @@ class SeestarStackerGUI:
         )
 
         try:
-            icon_path = "icon/icon.png"
+            # Package-aware lookup: resolve the icon inside the installed
+            # ``seestar`` package instead of relying on the current working
+            # directory (broken when launched from another directory or from
+            # a ZeAlfie-managed runtime slot).
+            icon_path = str(
+                importlib.resources.files("seestar").joinpath("icon", "icon.png")
+            )
             if os.path.exists(icon_path):
                 icon_image = Image.open(icon_path)
                 self.tk_icon = ImageTk.PhotoImage(icon_image)
@@ -2075,14 +2082,6 @@ class SeestarStackerGUI:
             state=tk.DISABLED,
         )
         self.analyze_folder_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
-        # Launch the external ZeMosaic application instead of the built-in
-        # mosaic settings window when the "Mosaic..." button is clicked.
-        self.mosaic_options_button = ttk.Button(
-            control_frame,
-            text="Mosaic...",
-            command=self.run_zemosaic,
-        )
-        self.mosaic_options_button.pack(side=tk.LEFT, padx=5, pady=5, ipady=2)
         self.local_solver_button = ttk.Button(
             control_frame,
             text=self.tr("local_solver_button_text", default="Local Solvers..."),
@@ -3104,7 +3103,6 @@ class SeestarStackerGUI:
             "open_output_button_text": "open_output_button",
             "analyze_folder_button": "analyze_folder_button",
             "local_solver_button_text": "local_solver_button",
-            "Mosaic...": "mosaic_options_button",
             "reset_expert_button": "reset_expert_button",
             "zoom_100_button": "zoom_100_button",
             "zoom_fit_button": "zoom_fit_button",
@@ -5093,58 +5091,6 @@ class SeestarStackerGUI:
                 return
         else:
             self._save_settings_and_destroy()
-
-    def run_zemosaic(self):
-        """Launch the ZeMosaic application in a separate process."""
-        self.logger.info("run_zemosaic called. Launching ZeMosaic...")
-        try:
-            env = os.environ.copy()
-            if self.settings.use_third_party_solver:
-                if getattr(self.settings, "astap_path", ""):
-                    env["ZEMOSAIC_ASTAP_PATH"] = str(self.settings.astap_path)
-                if getattr(self.settings, "astap_data_dir", ""):
-                    env["ZEMOSAIC_ASTAP_DATA_DIR"] = str(self.settings.astap_data_dir)
-                if getattr(self.settings, "local_ansvr_path", ""):
-                    env["ZEMOSAIC_LOCAL_ANSVR_PATH"] = str(self.settings.local_ansvr_path)
-                if getattr(self.settings, "astrometry_api_key", ""):
-                    env["ZEMOSAIC_ASTROMETRY_API_KEY"] = str(self.settings.astrometry_api_key)
-                if getattr(self.settings, "astrometry_solve_field_dir", ""):
-                    env["ZEMOSAIC_ASTROMETRY_DIR"] = str(self.settings.astrometry_solve_field_dir)
-                if getattr(self.settings, "local_solver_preference", ""):
-                    env["ZEMOSAIC_LOCAL_SOLVER_PREFERENCE"] = str(self.settings.local_solver_preference)
-            if self.settings.use_third_party_solver:
-                try:
-                    radius_val = float(getattr(self.settings, "astap_search_radius", 0))
-                    env["ZEMOSAIC_ASTAP_SEARCH_RADIUS"] = str(radius_val)
-                except Exception:
-                    pass
-
-            # ZeMosaic is now a separately installed/managed ZeSoftware
-            # product.  Launch its console entry point when available,
-            # falling back to the module form, and fail gracefully with a
-            # clear message when the product is not installed.
-            cmd = analyzer_launch.detect_zemosaic_command()
-            if cmd is None:
-                self.logger.warning("ZeMosaic not found; refusing to launch.")
-                messagebox.showerror(
-                    self.tr("error", default="Error"),
-                    self.tr("zemosaic_not_found"),
-                    parent=self.root,
-                )
-                return
-            subprocess.Popen(cmd, env=env)
-            self.logger.info("ZeMosaic launched successfully")
-        except Exception as e:
-            self.logger.error(f"Failed to launch ZeMosaic: {e}")
-            messagebox.showerror(
-                self.tr("error", default="Error"),
-                self.tr(
-                    "mosaic_window_create_error",
-                    default="Could not open Mosaic settings window.",
-                )
-                + f"\n{e}",
-                parent=self.root,
-            )
 
     def _open_mosaic_settings_window(self):
         """Open the Mosaic settings window inside the main GUI."""
