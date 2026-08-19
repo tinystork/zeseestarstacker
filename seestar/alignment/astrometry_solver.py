@@ -14,7 +14,7 @@ import shutil  # Pour trouver les exécutables
 import gc
 import logging
 import platform
-from zemosaic import zemosaic_config
+from seestar.core.solver_config import get_astap_default_search_radius
 try:  # Allow running as a standalone module in tests
     from ..core.image_processing import sanitize_header_for_wcs
 except Exception:  # pragma: no cover
@@ -29,9 +29,9 @@ if not logger.hasHandlers():
     logger.addHandler(logging.NullHandler())
 
 # Default search radius in degrees used by ASTAP when no value is provided
-# through solver settings. Loaded from ``zemosaic_config`` so tests and
+# through solver settings. Loaded from ``seestar.core.solver_config`` so tests and
 # documentation stay in sync with application defaults.
-ASTAP_DEFAULT_SEARCH_RADIUS = zemosaic_config.get_astap_default_search_radius()
+ASTAP_DEFAULT_SEARCH_RADIUS = get_astap_default_search_radius()
 
 
 def resolve_astap_executable(path: str) -> str:

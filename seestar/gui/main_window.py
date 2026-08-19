@@ -29,7 +29,6 @@ import time
 import tkinter as tk
 import traceback
 import re
-from pathlib import Path
 from tkinter import font as tkFont
 from tkinter import messagebox, ttk
 from queue import Empty
@@ -38,7 +37,7 @@ import numpy as np
 from astropy.io import fits
 from PIL import Image, ImageTk
 
-from zemosaic import zemosaic_config
+from seestar.core.solver_config import load_config
 
 from ..queuep.queue_manager import (
     GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG as APP_VERSION,
@@ -284,8 +283,8 @@ class SeestarStackerGUI:
 
         # Load shared configuration used by mosaic and solver settings dialogs
         try:
-            self.config = zemosaic_config.load_config()
-            self.logger.info("DEBUG (GUI __init__): Configuration chargée depuis zemosaic_config.")
+            self.config = load_config()
+            self.logger.info("DEBUG (GUI __init__): Configuration chargée depuis seestar.core.solver_config.")
         except Exception as e:
             self.logger.error(f"Error loading configuration: {e}")
             self.config = {}
@@ -5190,11 +5189,8 @@ class SeestarStackerGUI:
 
     def run_zemosaic(self):
         """Launch the ZeMosaic application in a separate process."""
-        self.logger.info("run_zemosaic called. Launching run_zemosaic.py...")
+        self.logger.info("run_zemosaic called. Launching ZeMosaic...")
         try:
-            # Ensure imports inside run_zemosaic work even if the GUI was
-            # started from another directory by using the project root as cwd
-            project_root = Path(__file__).resolve().parents[2]
             env = os.environ.copy()
             if self.settings.use_third_party_solver:
                 if getattr(self.settings, "astap_path", ""):
@@ -5216,19 +5212,18 @@ class SeestarStackerGUI:
                 except Exception:
                     pass
 
-            # Directly execute the run_zemosaic.py script located in the
-            # ``zemosaic`` directory of the project. Using the explicit file
-            # path avoids issues with module lookups when the application is
-            # bundled or executed from a different working directory.
-            run_zemosaic_path = project_root / "zemosaic" / "run_zemosaic.py"
-            subprocess.Popen(
-                [sys.executable, str(run_zemosaic_path)],
-                cwd=str(project_root),
-                env=env,
-            )
-            self.logger.info("run_zemosaic.py launched successfully")
+            # ZeMosaic is now a separately installed/managed ZeSoftware
+            # product.  Launch its console entry point when available,
+            # falling back to the module form.
+            zemosaic_exe = shutil.which("zemosaic")
+            if zemosaic_exe:
+                cmd = [zemosaic_exe]
+            else:
+                cmd = [sys.executable, "-m", "zemosaic"]
+            subprocess.Popen(cmd, env=env)
+            self.logger.info("ZeMosaic launched successfully")
         except Exception as e:
-            self.logger.error(f"Failed to launch run_zemosaic.py: {e}")
+            self.logger.error(f"Failed to launch ZeMosaic: {e}")
             messagebox.showerror(
                 self.tr("error", default="Error"),
                 self.tr(

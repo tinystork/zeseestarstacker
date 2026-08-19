@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os  # Pour les opérations sur les chemins
 import platform
-from zemosaic import zemosaic_config
+from seestar.core.solver_config import load_config, save_config
 from .ui_utils import ToolTip
 
 class LocalSolverSettingsWindow(tk.Toplevel):
@@ -31,7 +31,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         # Load fallback config if the parent GUI lacks one
         if not hasattr(self.parent_gui, "config"):
             try:
-                self.parent_gui.config = zemosaic_config.load_config()
+                self.parent_gui.config = load_config()
             except Exception:
                 self.parent_gui.config = {}
         self.withdraw()  # Cacher pendant la configuration
@@ -805,8 +805,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         if hasattr(self.parent_gui, 'cluster_threshold_var'):
             self.parent_gui.cluster_threshold_var.set(float(cluster_threshold))
         try:
-            from zemosaic import zemosaic_config
-            zemosaic_config.save_config(self.parent_gui.config)
+            save_config(self.parent_gui.config)
         except Exception:
             pass
 

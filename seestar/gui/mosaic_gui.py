@@ -717,8 +717,8 @@ class MosaicSettingsWindow(tk.Toplevel):
         if hasattr(self.parent_gui, 'cluster_threshold_var'):
             self.parent_gui.cluster_threshold_var.set(float(cluster_threshold))
         try:
-            from zemosaic import zemosaic_config
-            zemosaic_config.save_config(self.parent_gui.config)
+            from seestar.core.solver_config import save_config
+            save_config(self.parent_gui.config)
         except Exception:
             pass
         

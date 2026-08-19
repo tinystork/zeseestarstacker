@@ -51,3 +51,7 @@ seestar_settings.json
 
 # === Fichiers de sauvegarde log ===
 seestar.txt
+# === Artefacts de build Python ===
+build/
+dist/
+*.egg-info/

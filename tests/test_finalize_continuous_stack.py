@@ -20,11 +20,6 @@ def test_finalize_continuous_stack_crops(tmp_path, monkeypatch):
         sys.modules["seestar"] = seestar_pkg
         sys.modules["seestar.gui"] = gui_pkg
         sys.modules["seestar.gui.settings"] = settings_mod
-        zmod = types.ModuleType("zemosaic")
-        zmod.zemosaic_config = types.SimpleNamespace(
-            get_astap_default_search_radius=lambda: 0
-        )
-        sys.modules.setdefault("zemosaic", zmod)
 
     from seestar.queuep.queue_manager import SeestarQueuedStacker
 

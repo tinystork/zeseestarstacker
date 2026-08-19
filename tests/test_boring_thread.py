@@ -27,11 +27,6 @@ if "seestar.gui" not in sys.modules:
     sys.modules["seestar.gui.settings"] = settings_mod
     sys.modules["seestar.gui.histogram_widget"] = hist_mod
 
-    zmod = types.ModuleType("zemosaic")
-    zmod.zemosaic_config = types.SimpleNamespace(
-        get_astap_default_search_radius=lambda: 0
-    )
-    sys.modules.setdefault("zemosaic", zmod)
 
 mw = importlib.import_module("seestar.gui.main_window")
 bs = importlib.import_module("seestar.gui.boring_stack")
