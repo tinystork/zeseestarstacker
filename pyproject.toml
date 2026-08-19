@@ -40,7 +40,6 @@ dependencies = [
     "packaging",
     "reproject",
     "tqdm",
-    "rasterio",
     "drizzle",
     "bottleneck",
     "threadpoolctl",

@@ -1,13 +1,15 @@
 # ---------------------------------------------------------------------------
 # Seestar Stacker - Requirements
 # ---------------------------------------------------------------------------
-# Core CPU Libraries for the main Seestar Stacker GUI application
-# (Tested with Python 3.8+, NumPy 1.x/2.x)
+# Runtime dependencies for the ZeSeestarStacker GUI application.
+# The authoritative dependency list lives in pyproject.toml (used for the
+# ZeAlfie-managed wheel); this file mirrors it for standalone checkouts.
+# (Tested with Python 3.10+, NumPy 1.x/2.x)
 # ---------------------------------------------------------------------------
 
 # --- Core Scientific Libraries ---
 numpy                    # Fundamental numerical operations
-scipy                    # Scientific library (dependency for skimage, maybe acstools)
+scipy                    # Scientific library (dependency for skimage)
 astropy                  # Core astronomy package (includes ccdproc)
 astroquery               # Required for Astrometry.net plate solving
 
@@ -22,30 +24,21 @@ ccdproc # Ajouté pour la combinaison kappa-sigma robuste via ccdproc.combine
 # --- Drizzle & Related (STScI) ---
 # Note: Drizzle dependencies can be complex. This might pull in stwcs, etc.
 drizzle # Ajouté pour le moteur drizzle 'cdrizzle.tdriz'
-photoutils #stack enhancement
 photutils
-rasterio
 # --- GUI & Utilities ---
 matplotlib       # Plotting (Histogram)
 tqdm             # Progress bars (used by backend?)
-astroutils
 packaging
 reproject
-shapely
-tk
-zarr>=2
 psutil>=5.9
 
 # --- Optional Dependencies ---
-acstools          # For satellite trail detection (Uncomment if needed)
 bottleneck        # Optional: fast nan functions used in stack_methods
-fsspec            # Optional: zemosaic worker file-system abstraction
 threadpoolctl     # Optional: control of BLAS threadpools
 # cupy-cuda11x==12.2.0     # For GPU acceleration (EXAMPLE! VERSION MUST MATCH YOUR CUDA TOOLKIT!)
 #                          # Replace '11x' with your CUDA major version (e.g., 11x, 12x)
                            # Check available versions: https://pypi.org/project/cupy-cuda11x/
                            # Uncomment and adjust if you have a compatible NVIDIA GPU and CUDA installed.
-wmi                      # for zemosaic gpu support (windows only)
 
 # ---------------------------------------------------------------------------
 # NOTES ON NUMPY 2.x COMPATIBILITY (IMPORTANT!)
