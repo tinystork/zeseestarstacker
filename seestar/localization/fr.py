@@ -305,6 +305,12 @@ FR_TRANSLATIONS = {
     "weighting_enabled": "Activée",  # Valeur pour WGHT_ON=True
     "weighting_disabled": "Désactivée",  # Valeur pour WGHT_ON=False
     "drizzle_wht_threshold_label": "Seuil WHT%:",
+    # --- Lancement de l'analyseur (ZeAnalyser) ---
+    "analyzer_launch_error_title": "Erreur de lancement de l'analyseur",
+    "analyzer_script_not_found": "Script de l'analyseur introuvable :\n{path}\nVeuillez vérifier l'installation.",
+    "analyzer_launch_failed": "Échec du lancement de ZeAnalyser :\n{error}",
+    "analyzer_launched": "Analyseur de dossier lancé.",
+    "analyzer_not_found": "ZeAnalyser est introuvable.\nVeuillez installer le produit ZeAnalyser pour utiliser l'analyse de dossier.",
     # --- Mosaïque ---
     "Mosaic...": "Mosaïque...",
     "mosaic_settings_title": "Options Mosaïque",

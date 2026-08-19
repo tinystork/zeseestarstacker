@@ -44,15 +44,6 @@
 |       |-- icon.png
 |       |-- back.png
 |
-|-- beforehand/                        <-- Module/Dossier de l'analyseur
-|   |-- __init__.py
-|   |-- analyse_gui.py
-|   |-- analyse_logic.py
-|   |-- zone.py
-|   |-- snr_module.py
-|   |-- trail_module.py
-|   |-- sat_trail.py
-|
 |-- main.py                            <-- Point d'entrée principal pour LANCER l'application GUI
 |-- seestar_settings.json              <-- Fichier de configuration utilisateur
 |-- README.md                          <-- (Fichier standard, recommandé)

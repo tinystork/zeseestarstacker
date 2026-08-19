@@ -14949,7 +14949,7 @@ class SeestarQueuedStacker:
             self.reproject_between_batches = bool(reproject_between_batches)
         # When inter-batch reprojection is requested we typically want to keep
         # the reference WCS stable. If the caller did not explicitly set
-        # ``freeze_reference_wcs`` beforehand, enable it automatically so that
+        # ``freeze_reference_wcs`` in advance, enable it automatically so that
         # intermediate batches are not solved again.
         if self.reproject_between_batches and not self.freeze_reference_wcs:
             self.freeze_reference_wcs = True

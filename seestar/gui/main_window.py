@@ -45,6 +45,7 @@ from ..queuep.queue_manager import (
 
 from .ui_utils import ToolTip
 from .boring_stack import read_paths
+from . import analyzer_launch
 
 
 logger = logging.getLogger(__name__)
@@ -2549,10 +2550,11 @@ class SeestarStackerGUI:
 
     def _launch_folder_analyzer(self):
         """
-        Détermine le chemin du fichier de commande, lance le script analyse_gui.py
-        en lui passant ce chemin, et démarre la surveillance du fichier.
+        Lance le produit standalone ZeAnalyser (s'il est installé) sur le dossier
+        d'entrée courant, en lui transmettant le fichier de commande temporaire via
+        la variable d'environnement ZEANALYSER_COMMAND_FILE, puis surveille ce
+        fichier pour récupérer la référence recommandée.
         """
-        print("DEBUG (GUI): Entrée dans _launch_folder_analyzer.")  # <-- AJOUTÉ DEBUG
         input_folder = self.input_path.get()
 
         # 1. Validation du dossier d'entrée (inchangé)
@@ -2563,106 +2565,57 @@ class SeestarStackerGUI:
             messagebox.showerror(self.tr("error"), f"{self.tr('input_folder_invalid')}:\n{input_folder}")
             return
 
-        # --- MODIFIÉ : Détermination du chemin du fichier de commande ---
-        # 2. Déterminer un chemin sûr pour le fichier de commande
+        # 2. Déterminer un chemin sûr pour le fichier de commande (tempfile + PID)
         try:
-            # Utiliser tempfile pour obtenir le répertoire temporaire système
             temp_dir = tempfile.gettempdir()
-            # Créer un sous-dossier spécifique à l'application pour éviter les conflits
             app_temp_dir = os.path.join(temp_dir, "seestar_stacker_comm")
             os.makedirs(app_temp_dir, exist_ok=True)
-            # Nom du fichier de commande (relativement unique)
-            # On pourrait ajouter un PID ou timestamp pour plus de robustesse si plusieurs instances tournent
             command_filename = f"analyzer_stack_command_{os.getpid()}.txt"
-            self.analyzer_command_file_path = os.path.join(
-                app_temp_dir, command_filename
-            )  # <-- Stocker le chemin dans l'instance
-            print(f"DEBUG (GUI): Chemin fichier commande défini: {self.analyzer_command_file_path}")  # <-- AJOUTÉ DEBUG
-
-            # --- Nettoyer ancien fichier de commande s'il existe (sécurité) ---
+            self.analyzer_command_file_path = os.path.join(app_temp_dir, command_filename)
             if os.path.exists(self.analyzer_command_file_path):
-                print(
-                    f"DEBUG (GUI): Suppression ancien fichier commande existant: {self.analyzer_command_file_path}"
-                )  # <-- AJOUTÉ DEBUG
                 try:
                     os.remove(self.analyzer_command_file_path)
                 except OSError as e_rem:
                     print(f"AVERTISSEMENT (GUI): Impossible de supprimer ancien fichier commande: {e_rem}")
-            # --- Fin Nettoyage ---
-
         except Exception as e_path:
             messagebox.showerror(
-                self.tr("error"),  # Utiliser une clé générique ou créer une clé spécifique
+                self.tr("error"),
                 f"Impossible de déterminer le chemin du fichier de communication temporaire:\n{e_path}",
             )
-            print(f"ERREUR (GUI): Échec détermination chemin fichier commande: {e_path}")  # <-- AJOUTÉ DEBUG
             traceback.print_exc(limit=2)
             return
-        # --- FIN MODIFICATION ---
 
-        # 3. Déterminer le chemin vers le script analyse_gui.py (inchangé)
-        try:
-            gui_file_path = os.path.abspath(__file__)
-            gui_dir = os.path.dirname(gui_file_path)
-            seestar_dir = os.path.dirname(gui_dir)
-            project_root_parent = os.path.dirname(seestar_dir)
-            analyzer_script_path = os.path.join(project_root_parent, "seestar", "beforehand", "analyse_gui.py")
-            analyzer_script_path = os.path.normpath(analyzer_script_path)
-            print(f"DEBUG (GUI): Chemin script analyseur trouvé: {analyzer_script_path}")  # <-- AJOUTÉ DEBUG
-        except Exception as e:
+        # 3. Construire la commande de lancement du produit ZeAnalyser (détection runtime)
+        analyzer_cmd = analyzer_launch.build_analyzer_command(input_folder, self.settings.language)
+        if analyzer_cmd is None:
             messagebox.showerror(
                 self.tr("analyzer_launch_error_title"),
-                f"Erreur interne chemin analyseur:\n{e}",
+                self.tr("analyzer_not_found"),
             )
             return
 
-        # 4. Vérifier si le script analyseur existe (inchangé)
-        if not os.path.exists(analyzer_script_path):
-            messagebox.showerror(
-                self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_script_not_found").format(path=analyzer_script_path),
-            )
-            return
+        env = analyzer_launch.make_analyzer_env(self.analyzer_command_file_path)
 
-        # 5. Construire et lancer la commande (MODIFIÉ pour ajouter l'argument command_file_path)
+        # 4. Lancer le processus séparé non bloquant et surveiller le fichier de commande
         try:
-            command = [
-                sys.executable,
-                analyzer_script_path,
-                "--input-dir",
-                input_folder,
-                "--command-file",
-                self.analyzer_command_file_path,
-                "--lang",
-                self.settings.language,
-                "--lock-lang",
-            ]
-            print(f"DEBUG (GUI): Commande lancement analyseur: {' '.join(command)}")  # <-- AJOUTÉ DEBUG
-
-            # Lancer comme processus séparé non bloquant
-            process = subprocess.Popen(command)
+            print(f"DEBUG (GUI): Commande lancement analyseur: {' '.join(analyzer_cmd)}")
+            subprocess.Popen(analyzer_cmd, env=env)
             self.update_progress_gui(self.tr("analyzer_launched"), None)
 
-            # --- NOUVEAU : Démarrer la surveillance du fichier de commande ---
-            print("DEBUG (GUI): Démarrage de la surveillance du fichier commande...")  # <-- AJOUTÉ DEBUG
             # Assurer qu'une seule boucle de vérification tourne à la fois
             if hasattr(self, "_analyzer_check_after_id") and self._analyzer_check_after_id:
-                print("DEBUG (GUI): Annulation surveillance précédente...")  # <-- AJOUTÉ DEBUG
                 try:
                     self.root.after_cancel(self._analyzer_check_after_id)
                 except tk.TclError:
-                    pass  # Ignore error if already cancelled/invalid
+                    pass
                 self._analyzer_check_after_id = None
 
-            # Démarrer la nouvelle boucle de vérification (ex: toutes les 1 seconde)
             self._check_analyzer_command_file()
-            # --- FIN NOUVEAU ---
 
-        # 6. Gestion des erreurs de lancement (inchangé)
         except FileNotFoundError:
             messagebox.showerror(
                 self.tr("analyzer_launch_error_title"),
-                self.tr("analyzer_launch_failed").format(error=f"Python '{sys.executable}' or script not found."),
+                self.tr("analyzer_launch_failed").format(error=f"Python '{sys.executable}' or ZeAnalyser not found."),
             )
         except OSError as e:
             messagebox.showerror(
@@ -2675,148 +2628,102 @@ class SeestarStackerGUI:
                 self.tr("analyzer_launch_failed").format(error=str(e)),
             )
             traceback.print_exc(limit=2)
-        print("DEBUG (GUI): Sortie de _launch_folder_analyzer.")  # <-- AJOUTÉ DEBUG
 
     #############################################################################################################################
 
     def _check_analyzer_command_file(self):
         """
         Vérifie périodiquement l'existence du fichier de commande de l'analyseur.
-        Si trouvé, lit le chemin, le supprime, et lance le stacking.
+        Si trouvé, lit la référence recommandée (REFERENCE=<path>), supprime le
+        fichier, et lance le stacking sur le dossier d'entrée déjà connu.
         """
-        # print("DEBUG (GUI): _check_analyzer_command_file() exécuté.") # <-- DEBUG (peut être trop verbeux)
-
-        # --- Vérifications préliminaires ---
         # 1. Le chemin du fichier de commande est-il défini ?
         if not hasattr(self, "analyzer_command_file_path") or not self.analyzer_command_file_path:
-            print("DEBUG (GUI): Vérification fichier commande annulée (chemin non défini).")
-            self._analyzer_check_after_id = None  # Assurer l'arrêt
+            self._analyzer_check_after_id = None
             return
 
         # 2. Un traitement est-il déjà en cours dans le stacker principal ?
         if self.processing:
-            # print("DEBUG (GUI): Traitement principal en cours, arrêt temporaire surveillance fichier commande.")
-            # Pas besoin de vérifier le fichier si on est déjà en train de stacker/traiter.
-            # On pourrait replanifier plus tard, mais pour l'instant, on arrête la surveillance
-            # une fois le traitement principal démarré.
-            self._analyzer_check_after_id = None  # Arrêter la boucle si traitement lancé par autre chose
+            self._analyzer_check_after_id = None
             return
 
         # 3. Le fichier de commande existe-t-il ?
         try:
             if os.path.exists(self.analyzer_command_file_path):
-                print(f"DEBUG (GUI): Fichier commande détecté: {self.analyzer_command_file_path}")  # <-- AJOUTÉ DEBUG
+                print(f"DEBUG (GUI): Fichier commande détecté: {self.analyzer_command_file_path}")
 
-                # --- Traitement du fichier ---
-                folder_path = None
                 ref_path = None
                 try:
-                    with open(self.analyzer_command_file_path, "r", encoding="utf-8") as f_cmd:
-                        lines = [ln.strip() for ln in f_cmd.readlines()]
-                    folder_path = lines[0] if lines else None
-                    ref_path = lines[1] if len(lines) > 1 else None
-                    print(f"DEBUG (GUI): Contenu fichier commande lu: '{lines}'")
-
-                    # Supprimer le fichier IMMÉDIATEMENT après lecture réussie
-                    try:
-                        os.remove(self.analyzer_command_file_path)
-                        print(f"DEBUG (GUI): Fichier commande supprimé.")  # <-- AJOUTÉ DEBUG
-                    except OSError as e_rem:
-                        print(
-                            f"AVERTISSEMENT (GUI): Échec suppression fichier commande {self.analyzer_command_file_path}: {e_rem}"
-                        )
-                        # Continuer quand même si la lecture a réussi
-
+                    ref_path = analyzer_launch.consume_command_file(self.analyzer_command_file_path)
+                    print(f"DEBUG (GUI): Fichier commande lu et supprimé, référence: {ref_path!r}")
                 except IOError as e_read:
-                    print(
-                        f"ERREUR (GUI): Impossible de lire le fichier commande {self.analyzer_command_file_path}: {e_read}"
-                    )
-                    # Essayer de supprimer le fichier même si lecture échoue (peut être corrompu)
+                    print(f"ERREUR (GUI): Impossible de lire le fichier commande {self.analyzer_command_file_path}: {e_read}")
                     try:
                         os.remove(self.analyzer_command_file_path)
                     except OSError:
                         pass
-                    # Replanifier la vérification car on n'a pas pu traiter
-                    if hasattr(self.root, "after"):  # Vérifier si root existe toujours
-                        self._analyzer_check_after_id = self.root.after(
-                            1000, self._check_analyzer_command_file
-                        )  # Replanifier dans 1s
-                    return  # Sortir pour cette itération
+                    if hasattr(self.root, "after"):
+                        self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file)
+                    return
 
                 # --- Agir sur le contenu lu ---
-                if folder_path and os.path.isdir(folder_path):
-                    analyzed_folder_path = os.path.abspath(folder_path)
-                    print(f"INFO (GUI): Commande d'empilement reçue pour: {analyzed_folder_path}")  # <-- AJOUTÉ INFO
+                if ref_path:
+                    # Le dossier à stacker est déjà connu (champ d'entrée / settings) ;
+                    # l'ancien protocole le lisait depuis le fichier de commande.
+                    current_input = self.input_path.get() or self.settings.input_folder
+                    analyzed_folder_path = os.path.abspath(current_input) if current_input else None
 
-                    # Mettre à jour le champ d'entrée
-                    current_input = self.input_path.get()
-                    if os.path.normpath(current_input) != os.path.normpath(analyzed_folder_path):
-                        print(
-                            f"DEBUG (GUI): Mise à jour du champ dossier d'entrée vers: {analyzed_folder_path}"
-                        )  # <-- AJOUTÉ DEBUG
-                        self.input_path.set(analyzed_folder_path)
-                        # Mettre à jour aussi le setting pour cohérence ?
-                        self.settings.input_folder = analyzed_folder_path
-                        # Redessiner l'aperçu initial si le dossier a changé
-                        self._try_show_first_input_image()
+                    if analyzed_folder_path and os.path.isdir(analyzed_folder_path):
+                        print(f"INFO (GUI): Commande d'empilement reçue pour: {analyzed_folder_path}")
 
-                    # Vérifier si le dossier de sortie est défini
-                    if not self.output_path.get():
-                        default_output = os.path.join(analyzed_folder_path, "stack_output_analyzer")  # Nom différent?
-                        print(
-                            f"INFO (GUI): Dossier sortie non défini, utilisation défaut: {default_output}"
-                        )  # <-- AJOUTÉ INFO
-                        self.output_path.set(default_output)
-                        self.settings.output_folder = default_output
+                        # Mettre à jour le champ d'entrée (au cas où il différerait des settings)
+                        if os.path.normpath(self.input_path.get()) != os.path.normpath(analyzed_folder_path):
+                            self.input_path.set(analyzed_folder_path)
+                            self.settings.input_folder = analyzed_folder_path
+                            self._try_show_first_input_image()
 
-                    if ref_path:
+                        # Vérifier si le dossier de sortie est défini
+                        if not self.output_path.get():
+                            default_output = os.path.join(analyzed_folder_path, "stack_output_analyzer")
+                            self.output_path.set(default_output)
+                            self.settings.output_folder = default_output
+
                         print(f"DEBUG (GUI): Référence recommandée reçue: {ref_path}")
                         self.reference_image_path.set(ref_path)
                         self.settings.reference_image_path = ref_path
 
-                    # Démarrer le stacking
-                    print(
-                        "DEBUG (GUI): Appel de self.start_processing() suite à commande analyseur..."
-                    )  # <-- AJOUTÉ DEBUG
-                    self.start_processing()
-                    # Pas besoin de replanifier la vérification, le but est atteint.
-                    self._analyzer_check_after_id = None
-                    return  # Sortir de la méthode
+                        self.start_processing()
+                        self._analyzer_check_after_id = None
+                        return
+
+                    else:
+                        print(f"AVERTISSEMENT (GUI): Dossier d'entrée invalide ('{analyzed_folder_path}'). Fichier supprimé.")
+                        if hasattr(self.root, "after"):
+                            self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file)
+                        return
 
                 else:
-                    print(
-                        f"AVERTISSEMENT (GUI): Contenu fichier commande invalide ('{lines}') ou n'est pas un dossier. Fichier supprimé."
-                    )
-                    # Replanifier la vérification car le contenu était invalide
-                    if hasattr(self.root, "after"):  # Vérifier si root existe toujours
-                        self._analyzer_check_after_id = self.root.after(
-                            1000, self._check_analyzer_command_file
-                        )  # Replanifier dans 1s
-                    return  # Sortir pour cette itération
+                    # Aucune référence dans le fichier : ne pas lancer, continuer la surveillance.
+                    print("INFO (GUI): Fichier commande sans référence, poursuite de la surveillance...")
+                    if hasattr(self.root, "after"):
+                        self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file)
+                    return
 
             else:
-                # --- Replanifier si le fichier n'existe pas ---
-                # print("DEBUG (GUI): Fichier commande non trouvé, replanification...") # <-- DEBUG (trop verbeux)
-                # Vérifier si la fenêtre racine existe toujours avant de replanifier
+                # Replanifier si le fichier n'existe pas
                 if hasattr(self.root, "after"):
-                    self._analyzer_check_after_id = self.root.after(
-                        1000, self._check_analyzer_command_file
-                    )  # Vérifier à nouveau dans 1000 ms (1 seconde)
+                    self._analyzer_check_after_id = self.root.after(1000, self._check_analyzer_command_file)
                 else:
-                    print("DEBUG (GUI): Fenêtre racine détruite, arrêt surveillance fichier commande.")
-                    self._analyzer_check_after_id = None  # Arrêter si la fenêtre est fermée
+                    self._analyzer_check_after_id = None
 
         except Exception as e_check:
             print(f"ERREUR (GUI): Erreur inattendue dans _check_analyzer_command_file: {e_check}")
             traceback.print_exc(limit=2)
-            # Essayer de replanifier même en cas d'erreur pour ne pas bloquer
             if hasattr(self.root, "after"):
                 try:
-                    self._analyzer_check_after_id = self.root.after(
-                        2000, self._check_analyzer_command_file
-                    )  # Attendre un peu plus longtemps après une erreur
+                    self._analyzer_check_after_id = self.root.after(2000, self._check_analyzer_command_file)
                 except tk.TclError:
-                    self._analyzer_check_after_id = None  # Arrêter si la fenêtre est fermée
+                    self._analyzer_check_after_id = None
             else:
                 self._analyzer_check_after_id = None
 

@@ -286,8 +286,9 @@ EN_TRANSLATIONS = {
     # --- Analyzer Launch ---
     "analyzer_launch_error_title": "Analyzer Launch Error",
     "analyzer_script_not_found": "Analyzer script not found at:\n{path}\nPlease check the installation.",
-    "analyzer_launch_failed": "Failed to launch the analyzer script:\n{error}",
+    "analyzer_launch_failed": "Failed to launch ZeAnalyser:\n{error}",
     "analyzer_launched": "Folder analyzer launched.",
+    "analyzer_not_found": "ZeAnalyser was not found.\nPlease install the ZeAnalyser product to use folder analysis.",
     # --- Mosaic Settings ---
     "Mosaic...": "Mosaic...",
     "mosaic_settings_title": "Mosaic Options",
