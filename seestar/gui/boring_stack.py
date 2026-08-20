@@ -673,7 +673,15 @@ def parse_args():
     p.add_argument("--keep-intermediates", action="store_true", help="Keep temporary memmap files")
     p.add_argument(
         "--final-combine",
-        choices=["none", "mean", "reject", "reproject", "reproject_coadd"],
+        choices=[
+            "none",
+            "mean",
+            "median",
+            "winsorized_sigma_clip",
+            "reject",
+            "reproject",
+            "reproject_coadd",
+        ],
         default=None,
         help="Override final combine strategy (CLI has priority over settings).",
     )
@@ -688,6 +696,8 @@ def _resolve_final_combine(cli_value: Optional[str], settings) -> str:
         "reproject-coadd": "reproject_coadd",
         "reproject": "reproject",
         "mean": "mean",
+        "median": "median",
+        "winsorized_sigma_clip": "winsorized_sigma_clip",
         "reject": "reject",
         "none": "none",
         None: None,
