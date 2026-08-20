@@ -10,12 +10,20 @@ does NOT touch the scientific engine.  The run-request builder
 (``run_config.py``) is reached through :mod:`seestar.gui_qt.run_bridge`, which
 re-exports the canonical :mod:`seestar.gui.run_config` module.  Because the
 ``seestar`` and ``seestar.gui`` package inits are lazy, neither the engine nor
-Tk is ever pulled in.
+Tk is ever pulled in.  The real stacker engine is reachable *only* through the
+lazy :class:`~seestar.gui_qt.backend_runner.SeestarQueuedStackerBackend`, which
+imports it on first ``run()``, not at import time.
 """
 
 from __future__ import annotations
 
 from .app import create_application, run_qt_app
+from .backend_runner import (
+    BackendRunResult,
+    BaseRunBackend,
+    SeestarQueuedStackerBackend,
+    SimulatedRunBackend,
+)
 from .main_window import (
     DEFAULT_TITLE,
     DRIZZLE_MODES,
@@ -34,6 +42,10 @@ __all__ = [
     "RunController",
     "RunStatus",
     "RunWorker",
+    "BaseRunBackend",
+    "BackendRunResult",
+    "SimulatedRunBackend",
+    "SeestarQueuedStackerBackend",
     "STACKING_MODES",
     "DRIZZLE_MODES",
     "SOLVER_PREFERENCES",

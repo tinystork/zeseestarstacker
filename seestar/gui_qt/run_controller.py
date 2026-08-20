@@ -1,14 +1,19 @@
-"""Qt lifecycle controller (M3 seam).
+"""Qt lifecycle controller (M3/M4 seam).
 
 :class:`RunController` is the GUI-thread owner of the run lifecycle.  It turns
-a canonical :class:`~seestar.gui_qt.run_bridge.RunRequest` into a simulated run
-by moving a :class:`~seestar.gui_qt.run_worker.RunWorker` onto a dedicated
-``QThread`` and relaying the worker's queued signals back to the GUI thread.
+a canonical :class:`~seestar.gui_qt.run_bridge.RunRequest` into a run by moving
+a :class:`~seestar.gui_qt.run_worker.RunWorker` onto a dedicated ``QThread`` and
+relaying the worker's queued signals back to the GUI thread.
+
+The *run backend* that actually executes the request is injectable: the default
+is the simulated runner (safe for offscreen smoke tests), while tests (and the
+next activation milestone) can pass a real or fake
+:class:`~seestar.gui_qt.backend_runner.BaseRunBackend` via ``backend=``.
 
 Threading rule (enforced by design): the controller lives on the GUI thread and
 is the *only* object that may own run state and QThread teardown.  Widgets are
 updated by the MainWindow slots connected to the controller's signals — never
-by the worker, which holds no widget references.
+by the worker or backend, which hold no widget references.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from .backend_runner import BaseRunBackend
 from .run_bridge import RunRequest
 from .run_worker import RunStatus, RunWorker
 
@@ -69,11 +75,14 @@ class RunController(QObject):
         *,
         steps: int = 10,
         step_delay_ms: int = 20,
+        backend: Optional[BaseRunBackend] = None,
     ) -> None:
-        """Start a simulated run for ``request`` on a fresh QThread.
+        """Start a run for ``request`` on a fresh QThread.
 
-        ``steps``/``step_delay_ms`` tune the deterministic stub (used by tests
-        to keep runs fast); they will disappear when the real backend is wired
+        ``backend`` selects the run backend.  When ``None`` (the default), the
+        deterministic :class:`SimulatedRunBackend` is used and
+        ``steps``/``step_delay_ms`` tune it (used by tests to keep runs fast);
+        those two knobs disappear from relevance once the real backend is wired
         in.  Raises if a run is already active, so a double-start is always a
         programming error rather than a silent no-op.
         """
@@ -81,9 +90,13 @@ class RunController(QObject):
             raise RuntimeError("RunController.start() called while a run is active")
         if not isinstance(request, RunRequest):
             raise TypeError("RunController.start() requires a RunRequest")
+        if backend is not None and not isinstance(backend, BaseRunBackend):
+            raise TypeError("RunController.start() backend must be a BaseRunBackend")
 
         thread = QThread(self)
-        worker = RunWorker(steps=steps, step_delay_ms=step_delay_ms)
+        worker = RunWorker(
+            backend=backend, steps=steps, step_delay_ms=step_delay_ms
+        )
         worker.set_request(request)
         worker.moveToThread(thread)
 
@@ -154,8 +167,9 @@ class RunController(QObject):
     def cancel(self) -> None:
         """Request cancellation of the active run (non-blocking).
 
-        The worker polls the flag and emits ``cancelled`` from its own thread;
-        the GUI learns of the outcome through the ``cancelled`` signal.
+        The worker polls the flag (and forwards ``cancel()`` to the backend) and
+        emits ``cancelled`` from its own thread; the GUI learns of the outcome
+        through the ``cancelled`` signal.
         """
         worker = self._worker
         if worker is not None:
