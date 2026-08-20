@@ -47,9 +47,7 @@ def test_gate_zesolver_absent_astap_configured_allowed():
 def test_gate_zesolver_absent_astap_absent_blocked():
     allowed, reason = resolve_solver_gate("zesolver", False, False)
     assert allowed is False
-    assert reason
-    assert "ZeSolver" in reason
-    assert "ASTAP" in reason
+    assert reason == "zesolver_unavailable_no_astap"
 
 
 def test_gate_astap_configured_allowed():
@@ -61,8 +59,7 @@ def test_gate_astap_configured_allowed():
 def test_gate_astap_not_configured_blocked():
     allowed, reason = resolve_solver_gate("astap", False, False)
     assert allowed is False
-    assert reason
-    assert "ASTAP" in reason
+    assert reason == "astap_not_configured"
 
 
 def test_gate_none_blocks_even_with_astap():
@@ -71,8 +68,7 @@ def test_gate_none_blocks_even_with_astap():
     # when ASTAP happens to be configured.
     allowed, reason = resolve_solver_gate("none", True, True)
     assert allowed is False
-    assert reason
-    assert "none" in reason
+    assert reason == "no_solver_configured"
 
 
 def test_gate_legacy_prefs_treated_as_zesolver():
@@ -81,13 +77,13 @@ def test_gate_legacy_prefs_treated_as_zesolver():
     assert resolve_solver_gate("astrometry", False, True) == (True, None)
     allowed, reason = resolve_solver_gate("ansvr", False, False)
     assert allowed is False
-    assert "ZeSolver" in reason
+    assert reason == "zesolver_unavailable_no_astap"
 
 
 def test_gate_unrecognised_pref_blocks():
     allowed, reason = resolve_solver_gate("bogus", True, True)
     assert allowed is False
-    assert reason
+    assert reason == "no_solver_configured"
 
 
 # ---------------------------------------------------------------------------

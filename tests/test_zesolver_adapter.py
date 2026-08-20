@@ -32,9 +32,11 @@ def _install_package_stub(name: str) -> None:
     sys.modules[name] = mod
 
 
-for _pkg in ("seestar", "seestar.alignment"):
-    if _pkg not in sys.modules:
-        _install_package_stub(_pkg)
+# Snapshot the modules present before we touch ``sys.modules``. This test module
+# must stay hermetic: leaking a hollow ``seestar``/``seestar.alignment`` stub
+# into ``sys.modules`` would shadow the real package for any test collected
+# after this one, making the whole suite order-dependent.
+_PREEXISTING_MODULE_KEYS = set(sys.modules.keys())
 
 
 def _load_by_path(name: str, relpath: str):
@@ -45,12 +47,25 @@ def _load_by_path(name: str, relpath: str):
     return mod
 
 
+# ``solver_port`` has no intra-package imports, but the adapter performs
+# ``from .solver_port import ...``, so it needs ``seestar.alignment`` to be a
+# resolvable package while it executes. We install a temporary stub for exactly
+# that purpose, then remove it (and every other module we introduced) straight
+# afterwards so no stub outlives this module's import.
+if "seestar.alignment" not in sys.modules:
+    _install_package_stub("seestar.alignment")
+
 solver_port = _load_by_path(
     "seestar.alignment.solver_port", "seestar/alignment/solver_port.py"
 )
 adapter = _load_by_path(
     "seestar.alignment.zesolver_adapter", "seestar/alignment/zesolver_adapter.py"
 )
+
+# Restore ``sys.modules`` to its pre-import state.
+for _key in list(sys.modules.keys()):
+    if _key not in _PREEXISTING_MODULE_KEYS:
+        del sys.modules[_key]
 
 DiscoveryState = solver_port.DiscoveryState
 SolveStatus = solver_port.SolveStatus

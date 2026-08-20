@@ -2456,14 +2456,6 @@ class SettingsManager:
             ),
         }
 
-        if (
-            "use_local_solver_priority" in settings_data
-        ):  # Nettoyage de l'ancienne clé si elle existait par erreur
-            del settings_data["use_local_solver_priority"]
-            logger.debug(
-                "DEBUG (SettingsManager save_settings): Ancienne clé 'use_local_solver_priority' supprimée des données de sauvegarde."
-            )
-
         try:
             with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(settings_data, f, indent=4, ensure_ascii=False)

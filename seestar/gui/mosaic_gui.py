@@ -162,7 +162,7 @@ class MosaicSettingsWindow(tk.Toplevel):
                         text=self.parent_gui.tr("mosaic_align_local_fast_only_label", default="Fast Local Only (Strict)"),
                         variable=self.local_mosaic_align_mode_var, value="local_fast_only", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
         ttk.Radiobutton(self.alignment_mode_frame,
-                        text=self.parent_gui.tr("mosaic_align_astrometry_per_panel_label", default="Astrometry.net per Panel (Slower)"),
+                        text=self.parent_gui.tr("mosaic_align_astrometry_per_panel_label", default="Per-Panel Astrometric Alignment (Slower)"),
                         variable=self.local_mosaic_align_mode_var, value="astrometry_per_panel", command=self._on_alignment_mode_change).pack(anchor=tk.W, padx=5, pady=2)
 
         # --- Bloc Configuration Astrometry ---
@@ -548,8 +548,6 @@ class MosaicSettingsWindow(tk.Toplevel):
             return
 
         setattr(self.parent_gui.settings, 'local_solver_preference', solver_choice)
-        if hasattr(self.parent_gui.settings, 'use_local_solver_priority'):
-            delattr(self.parent_gui.settings, 'use_local_solver_priority')
         self.parent_gui.settings.astap_path = astap_path
         self.parent_gui.settings.astap_data_dir = astap_data_dir
         setattr(self.parent_gui.settings, 'astap_search_radius', astap_radius)

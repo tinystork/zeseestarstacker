@@ -53,6 +53,26 @@ from . import analyzer_launch
 logger = logging.getLogger(__name__)
 
 
+# Stable reason codes returned by ``resolve_solver_gate`` mapped to their
+# localisation keys (and English fallbacks). Kept in sync with
+# ``seestar/core/solver_config.py`` and the en.py / fr.py catalogues.
+_SOLVER_GATE_REASON_KEYS = {
+    "zesolver_unavailable_no_astap": (
+        "solver_gate_reason_zesolver_unavailable_no_astap",
+        "ZeSolver is unavailable and ASTAP is not configured: no usable "
+        "astrometric solver.",
+    ),
+    "astap_not_configured": (
+        "solver_gate_reason_astap_not_configured",
+        "ASTAP is not configured (executable path is missing).",
+    ),
+    "no_solver_configured": (
+        "solver_gate_reason_no_solver_configured",
+        "No astrometric solver is configured (solver preference is 'none').",
+    ),
+}
+
+
 def _to_slug(gui_value: str) -> str:
     m = {
         "Reproject and coadd": "reproject_coadd",
@@ -6425,14 +6445,19 @@ class SeestarStackerGUI:
             except Exception:
                 zesolver_available = False
 
-            allowed, reason = resolve_solver_gate(
+            allowed, reason_code = resolve_solver_gate(
                 solver_pref, zesolver_available, astap_configured
             )
 
             if not allowed:
                 message = self.tr("reproject_solver_required_error")
-                if reason:
-                    message = f"{message}\n\n{reason}"
+                if reason_code:
+                    key, fallback = _SOLVER_GATE_REASON_KEYS.get(
+                        reason_code, ("reproject_solver_required_error", "")
+                    )
+                    reason = self.tr(key, default=fallback)
+                    if reason:
+                        message = f"{message}\n\n{reason}"
                 messagebox.showerror(self.tr("error"), message)
                 if hasattr(self, "start_button") and self.start_button.winfo_exists():
                     self.start_button.config(state=tk.NORMAL)

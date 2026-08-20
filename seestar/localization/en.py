@@ -307,7 +307,7 @@ EN_TRANSLATIONS = {
     "mosaic_alignment_method_frame_title": "Mosaic Alignment Method",
     "mosaic_align_local_fast_fallback_label": "Fast Local + WCS Fallback (Recommended)",
     "mosaic_align_local_fast_only_label": "Fast Local Only (Strict)",
-    "mosaic_align_astrometry_per_panel_label": "Astrometry.net per Panel (Slower)",
+    "mosaic_align_astrometry_per_panel_label": "Per-Panel Astrometric Alignment (Slower)",
     "fastaligner_tuning_frame_title": "FastAligner Tuning (for Local Alignment)",
     "fa_orb_features_label": "ORB Features:",  # Garder court pour UI
     "fa_min_abs_matches_label": "Min Abs. Matches:",  # Garder court
@@ -352,8 +352,11 @@ EN_TRANSLATIONS = {
     "enable_batch_reproject": "Enable inter-batch reprojection (requires WCS)",
     "ok_button": "OK",
     "cancel_button": "Cancel",
-    "tooltip_enable_batch_reproject": "Requires a working solver (ASTAP, Astrometry.net, or Ansvr)",
+    "tooltip_enable_batch_reproject": "Requires a working solver (ZeSolver or ASTAP)",
     "reproject_solver_required_error": "Reproject & Coadd requires an active astrometric solver (ZeSolver or ASTAP). Please enable it in the solver settings.",
+    "solver_gate_reason_zesolver_unavailable_no_astap": "ZeSolver is unavailable and ASTAP is not configured: no usable astrometric solver.",
+    "solver_gate_reason_astap_not_configured": "ASTAP is not configured (executable path is missing).",
+    "solver_gate_reason_no_solver_configured": "No astrometric solver is configured (solver preference is 'none').",
     # final log popup
     "Post-Processing Applied": "Post-Processing Applied",
     "Photutils 2D Background": "Photutils 2D Background",

@@ -12580,9 +12580,16 @@ class SeestarQueuedStacker:
             self.update_progress(f"⚠️ Outils de reprojection indisponibles: {e}", "WARN")
             return False
 
-        bs_mode = int(getattr(self, "batch_size", 0) or 0)
-        if bs_mode == 0:
-            return False
+        # NOTE: ``batch_size == 0`` (mode 0) is a first-class path here, not a
+        # skip condition. ``_ensure_reference_wcs_for_mode0`` (called above)
+        # populates the reference WCS/header, and the ``bs_local == 0`` branch
+        # below makes each classic batch inherit that astrometry directly so it
+        # is co-added without re-solving. An earlier "fix mode 0 and 1" commit
+        # (2a778d23) added an unconditional ``if bs_mode == 0: return False``
+        # guard that made this entire mode-0 path unreachable, contradicting the
+        # later "mode 0 fix" commit (06fad918) which introduced the reference-WCS
+        # inheritance + local-fallback logic. The guard is intentionally removed
+        # so mode 0 flows through the reference-WCS inheritance path.
 
         data_pairs = []
         weight_maps = []
@@ -14628,7 +14635,6 @@ class SeestarQueuedStacker:
         low_wht_soften_px=128,
         is_mosaic_run=False,
         mosaic_settings=None,
-        use_local_solver_priority=False,  # DEPRECATED - kept for signature compat
         astap_path="",
         astap_data_dir="",
         astap_search_radius=3.0,
@@ -14795,8 +14801,6 @@ class SeestarQueuedStacker:
             )
             self.astap_search_radius_config = 5.0
 
-        # self.use_local_solver_priority (attribut de self) n'est plus utilisé, la variable locale de la fonction l'est.
-        # logger.debug(f"    [Solver Settings sur self] Priorité Locale: {self.use_local_solver_priority}")
         logger.debug(f"    [Solver Settings sur self] ASTAP Exe: '{self.astap_path}'")
         logger.debug(
             f"    [Solver Settings sur self] ASTAP Data: '{self.astap_data_dir}'"

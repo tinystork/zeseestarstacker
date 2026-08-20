@@ -213,8 +213,9 @@ def resolve_solver_gate(solver_pref, zesolver_available, astap_configured):
     solve-requiring processing mode.
 
     Pure, GUI-free helper consumed by the GUI reproject gate.  Returns
-    ``(allowed: bool, reason: str | None)`` where ``reason`` is a user-facing
-    diagnostic string only when ``allowed`` is ``False``.
+    ``(allowed: bool, reason_code: str | None)`` where ``reason_code`` is a
+    stable, machine-readable code (localised by the caller via ``tr``) only
+    when ``allowed`` is ``False``.
 
     Semantics (consistent with ``AstrometrySolver._migrate_legacy_preference``):
 
@@ -238,19 +239,12 @@ def resolve_solver_gate(solver_pref, zesolver_available, astap_configured):
             return (True, None)
         if astap_configured:
             return (True, None)
-        return (
-            False,
-            "ZeSolver is unavailable and ASTAP is not configured: no usable "
-            "astrometric solver.",
-        )
+        return (False, "zesolver_unavailable_no_astap")
 
     if pref == "astap":
         if astap_configured:
             return (True, None)
-        return (
-            False,
-            "ASTAP is not configured (executable path is missing).",
-        )
+        return (False, "astap_not_configured")
 
     # "none" (or any unrecognised value) -> no solver selected.
-    return (False, "No astrometric solver is configured (solver preference is 'none').")
+    return (False, "no_solver_configured")
