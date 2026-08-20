@@ -379,6 +379,101 @@ def test_backend_factory_not_blocked_by_preflight_with_empty_folders(qapp):
 
 
 # --------------------------------------------------------------------------
+# M12: real-backend preflight hardening (batch size 1 + reproject solver gate)
+# --------------------------------------------------------------------------
+def test_seestar_mode_batch_size_one_blocks_start(qapp):
+    """batch_size == 1 must not start the real backend in seestar mode."""
+    win = MainWindow(backend_mode="seestar")
+    calls = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        calls.append((request, kwargs))
+        original_start(request, **kwargs)
+
+    win.controller.start = spy_start
+    try:
+        win.input_edit.setText("/inputs")
+        win.output_edit.setText("/outputs")
+        win.batch_spin.setValue(1)
+        win.start_button.click()
+
+        assert calls == []
+        assert win.is_running is False
+        assert win.start_button.isEnabled()
+        assert not win.stop_button.isEnabled()
+        assert win.controller.status is RunStatus.IDLE
+        assert not win.controller.has_live_thread
+
+        text = win.log_view.toPlainText()
+        assert "Cannot start real backend" in text
+        assert "Batch size 1" in text
+        assert "Cannot start real backend" in win.statusBar().currentMessage()
+    finally:
+        win.shutdown()
+
+
+def test_seestar_mode_reproject_without_solver_blocks_start(qapp):
+    """Reproject enabled + solver 'none' must not start the real backend."""
+    win = MainWindow(backend_mode="seestar")
+    calls = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        calls.append((request, kwargs))
+        original_start(request, **kwargs)
+
+    win.controller.start = spy_start
+    try:
+        win.input_edit.setText("/inputs")
+        win.output_edit.setText("/outputs")
+        win._settings_widgets["reproject_between_batches"].setChecked(True)
+        win.solver_combo.setCurrentText("none")
+        win.start_button.click()
+
+        assert calls == []
+        assert win.is_running is False
+        assert win.controller.status is RunStatus.IDLE
+        assert not win.controller.has_live_thread
+
+        text = win.log_view.toPlainText()
+        assert "Cannot start real backend" in text
+        assert "requires a local astrometric solver" in text
+    finally:
+        win.shutdown()
+
+
+def test_seestar_mode_reproject_with_astap_path_reaches_controller(qapp):
+    """Reproject enabled + ASTAP path configured passes preflight.
+
+    The spy intercepts ``controller.start`` so the real engine is never run;
+    reaching the controller proves the solver gate accepted the settings.
+    """
+    win = MainWindow(backend_mode="seestar")
+    seen = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        seen.append((request, kwargs))
+        # Deliberately do NOT call original_start: that would run the engine.
+
+    win.controller.start = spy_start
+    try:
+        win.input_edit.setText("/inputs")
+        win.output_edit.setText("/outputs")
+        win._settings_widgets["reproject_between_batches"].setChecked(True)
+        win.solver_combo.setCurrentText("astap")
+        win._settings_widgets["astap_path"].setText("/usr/bin/astap")
+        win.start_button.click()
+
+        assert len(seen) == 1
+        assert "Cannot start real backend" not in win.log_view.toPlainText()
+        assert win.is_running is False
+    finally:
+        win.shutdown()
+
+
+# --------------------------------------------------------------------------
 # CLI parsing (seestar.qt_main)
 # --------------------------------------------------------------------------
 def test_cli_parser_default_simulated():

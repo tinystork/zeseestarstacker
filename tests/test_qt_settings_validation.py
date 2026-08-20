@@ -90,9 +90,22 @@ def test_batch_size_below_auto_sentinel_rejected():
 
 
 def test_batch_size_valid_sentinels_accepted():
-    for batch in (-1, 0, 1, 2, 100):
+    for batch in (-1, 0, 2, 100):
         state = _state(input_folder="/in", output_folder="/out", batch_size=batch)
         assert validate_settings_for_backend(state, "seestar") == [], batch
+
+
+def test_batch_size_one_rejected_in_seestar_mode():
+    errors = validate_settings_for_backend(
+        _state(input_folder="/in", output_folder="/out", batch_size=1),
+        "seestar",
+    )
+    assert any("Batch size 1" in e for e in errors)
+
+
+def test_batch_size_one_accepted_in_simulated_mode():
+    state = _state(input_folder="", output_folder="", batch_size=1)
+    assert validate_settings_for_backend(state, "simulated") == []
 
 
 # --------------------------------------------------------------------------
@@ -133,6 +146,118 @@ def test_drizzle_group_size_valid_accepted():
 
 
 # --------------------------------------------------------------------------
+# seestar mode: reproject solver gate
+# --------------------------------------------------------------------------
+def test_reproject_with_solver_none_rejected():
+    errors = validate_settings_for_backend(
+        _state(
+            input_folder="/in",
+            output_folder="/out",
+            reproject_between_batches=True,
+            local_solver_preference="none",
+        ),
+        "seestar",
+    )
+    assert any("requires a local astrometric solver" in e for e in errors)
+
+
+def test_reproject_coadd_final_also_triggers_gate():
+    errors = validate_settings_for_backend(
+        _state(
+            input_folder="/in",
+            output_folder="/out",
+            reproject_coadd_final=True,
+            local_solver_preference="none",
+        ),
+        "seestar",
+    )
+    assert any("requires a local astrometric solver" in e for e in errors)
+
+
+def test_reproject_astap_without_path_rejected():
+    errors = validate_settings_for_backend(
+        _state(
+            input_folder="/in",
+            output_folder="/out",
+            reproject_between_batches=True,
+            local_solver_preference="astap",
+            astap_path="",
+        ),
+        "seestar",
+    )
+    assert any("no ASTAP path is configured" in e for e in errors)
+
+
+def test_reproject_astap_with_path_accepted():
+    state = _state(
+        input_folder="/in",
+        output_folder="/out",
+        reproject_between_batches=True,
+        local_solver_preference="astap",
+        astap_path="/usr/bin/astap",
+    )
+    assert validate_settings_for_backend(state, "seestar") == []
+
+
+def test_reproject_unknown_solver_rejected():
+    errors = validate_settings_for_backend(
+        _state(
+            input_folder="/in",
+            output_folder="/out",
+            reproject_between_batches=True,
+            local_solver_preference="bogus",
+        ),
+        "seestar",
+    )
+    assert any("requires a local astrometric solver" in e for e in errors)
+
+
+def test_reproject_disabled_solver_none_accepted():
+    state = _state(
+        input_folder="/in",
+        output_folder="/out",
+        reproject_between_batches=False,
+        reproject_coadd_final=False,
+        local_solver_preference="none",
+    )
+    assert validate_settings_for_backend(state, "seestar") == []
+
+
+def test_reproject_zesolver_with_astap_fallback_accepted():
+    state = _state(
+        input_folder="/in",
+        output_folder="/out",
+        reproject_between_batches=True,
+        local_solver_preference="zesolver",
+        astap_path="/usr/bin/astap",
+    )
+    assert validate_settings_for_backend(state, "seestar") == []
+
+
+def test_reproject_zesolver_without_astap_rejected():
+    errors = validate_settings_for_backend(
+        _state(
+            input_folder="/in",
+            output_folder="/out",
+            reproject_between_batches=True,
+            local_solver_preference="zesolver",
+            astap_path="",
+        ),
+        "seestar",
+    )
+    assert any("requires a configured ASTAP fallback" in e for e in errors)
+
+
+def test_reproject_gate_is_off_in_simulated_mode():
+    """The reproject solver gate must not apply to the simulated backend."""
+    state = _state(
+        reproject_between_batches=True,
+        local_solver_preference="none",
+    )
+    assert validate_settings_for_backend(state, "simulated") == []
+
+
+# --------------------------------------------------------------------------
 # RunRequest support (reads backend_kwargs key names)
 # --------------------------------------------------------------------------
 def test_run_request_with_empty_folders_rejected():
@@ -161,3 +286,20 @@ def test_run_request_carries_batch_and_drizzle_values():
     errors = validate_settings_for_backend(req, "seestar")
     assert any("Batch size must be an integer" in e for e in errors)
     assert any("Drizzle group size must be greater than 0" in e for e in errors)
+
+
+def test_run_request_reproject_solver_gate():
+    req = _request(
+        input_folder="/in",
+        output_folder="/out",
+        reproject_between_batches=True,
+        local_solver_preference="none",
+    )
+    errors = validate_settings_for_backend(req, "seestar")
+    assert any("requires a local astrometric solver" in e for e in errors)
+
+
+def test_run_request_batch_size_one_rejected():
+    req = _request(input_folder="/in", output_folder="/out", batch_size=1)
+    errors = validate_settings_for_backend(req, "seestar")
+    assert any("Batch size 1" in e for e in errors)
