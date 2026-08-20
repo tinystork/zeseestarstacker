@@ -9,7 +9,7 @@ the later parity migration and deliberately does NOT:
 * import the scientific engine.
 
 Threading rule (enforced by design, not just convention): the shell starts a
-*simulated* run on a dedicated ``QThread`` via a
+run on a dedicated ``QThread`` via a
 :class:`~seestar.gui_qt.run_controller.RunController`, but nothing mutates Qt
 widgets off the GUI thread.  The worker communicates with this window
 exclusively through Qt queued signals — never by touching widgets directly, and
@@ -20,13 +20,13 @@ The Stack tab exposes a *minimal* subset of the real settings controls
 Those controls feed a :class:`~seestar.gui_qt.settings_state.QtSettingsState`
 model, which :meth:`MainWindow.build_run_request` turns into a validated,
 immutable :class:`~seestar.gui_qt.run_bridge.RunRequest`, which the Start button
-hands to the lifecycle controller (a simulated run) — without ever starting the
-real backend.
+hands to the lifecycle controller.  The default backend remains simulated;
+real ``SeestarQueuedStacker`` activation is explicit opt-in only.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -47,11 +47,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .backend_runner import BaseRunBackend, SeestarQueuedStackerBackend
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
 from .settings_state import QtSettingsState
 
 DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
+
+# Backend selection modes understood by the shell's Start button.
+BACKEND_MODES = ("simulated", "seestar")
+DEFAULT_BACKEND_MODE = "simulated"
 
 # Placeholder tab labels used by the smoke test and future parity migration.
 TAB_STACK = "Stack"
@@ -78,14 +83,30 @@ class MainWindow(QMainWindow):
 
     The window owns presentation state (title, tabs, progress bar, status bar)
     plus a small settings form whose values are mirrored into a
-    :class:`QtSettingsState` model.  It never touches the scientific engine and
-    never starts a real run — the Start button begins a *simulated* run through
-    its :class:`RunController`, and all widget updates happen in GUI-thread
-    slots connected to that controller's queued signals.
+    :class:`QtSettingsState` model.  It never touches the scientific engine at
+    import time.  The default Start path begins a *simulated* run through its
+    :class:`RunController`; an explicit backend factory or ``backend_mode`` can
+    opt into another backend.  All widget updates happen in GUI-thread slots
+    connected to the controller's queued signals.
     """
 
-    def __init__(self, title: Optional[str] = None, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        title: Optional[str] = None,
+        parent: Optional[QWidget] = None,
+        *,
+        backend_factory: Optional[Callable[[], BaseRunBackend]] = None,
+        backend_mode: str = DEFAULT_BACKEND_MODE,
+    ):
         super().__init__(parent)
+        if backend_mode not in BACKEND_MODES:
+            raise ValueError(
+                f"backend_mode must be one of {BACKEND_MODES!r}, got {backend_mode!r}"
+            )
+        if backend_factory is not None and not callable(backend_factory):
+            raise TypeError("backend_factory must be callable or None")
+        self.backend_factory = backend_factory
+        self.backend_mode = backend_mode
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         self._running: bool = False
         self._shutdown_called: bool = False
@@ -234,7 +255,11 @@ class MainWindow(QMainWindow):
         if self._running:
             return
         request = self.build_run_request()
-        self.controller.start(request)
+        backend = self.resolve_backend()
+        if backend is None:
+            self.controller.start(request)
+        else:
+            self.controller.start(request, backend=backend)
 
     def _on_stop(self) -> None:
         if not self._running:
@@ -294,6 +319,26 @@ class MainWindow(QMainWindow):
         state.drizzle_mode = self.drizzle_mode_combo.currentText()
         state.drizzle_group_size = self.drizzle_group_spin.value()
         state.local_solver_preference = self.solver_combo.currentText()
+
+    def resolve_backend(self) -> Optional[BaseRunBackend]:
+        """Return the run backend for a Start, or ``None`` for the default.
+
+        The default (``backend_factory is None`` and
+        ``backend_mode == "simulated"``) returns ``None`` so
+        :meth:`RunController.start` falls back to its built-in
+        :class:`SimulatedRunBackend`.  A non-default selection produces an
+        explicit backend:
+
+        * ``backend_factory`` (when set) is called to produce a fresh backend,
+        * ``backend_mode == "seestar"`` lazily constructs a
+          :class:`SeestarQueuedStackerBackend` — the real engine is imported
+          only when that backend's ``run()`` is invoked, never here.
+        """
+        if self.backend_factory is not None:
+            return self.backend_factory()
+        if self.backend_mode == "seestar":
+            return SeestarQueuedStackerBackend()
+        return None
 
     def collect_settings_state(self) -> QtSettingsState:
         """Return the settings model, freshly synced from the current widgets.

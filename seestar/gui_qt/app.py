@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from PySide6.QtWidgets import QApplication
 
-from .main_window import MainWindow
+from .backend_runner import BaseRunBackend
+from .main_window import DEFAULT_BACKEND_MODE, MainWindow
 
 
 def create_application(argv: Optional[Sequence[str]] = None) -> QApplication:
@@ -26,13 +27,22 @@ def create_application(argv: Optional[Sequence[str]] = None) -> QApplication:
 def run_qt_app(
     argv: Optional[Sequence[str]] = None,
     title: Optional[str] = None,
+    backend_factory: Optional[Callable[[], BaseRunBackend]] = None,
+    backend_mode: str = DEFAULT_BACKEND_MODE,
 ) -> int:
     """Build the shell window and enter the Qt event loop.
 
-    Returns the :meth:`QApplication.exec` exit code.  Closing the window ends
-    the loop (Qt's ``quitOnLastWindowClosed`` default).
+    ``backend_mode`` (``"simulated"`` or ``"seestar"``) and/or
+    ``backend_factory`` select how the window's Start button resolves a run
+    backend; the default is the safe simulated runner.  Returns the
+    :meth:`QApplication.exec` exit code.  Closing the window ends the loop
+    (Qt's ``quitOnLastWindowClosed`` default).
     """
     app = create_application(argv)
-    window = MainWindow(title=title)
+    window = MainWindow(
+        title=title,
+        backend_factory=backend_factory,
+        backend_mode=backend_mode,
+    )
     window.show()
     return app.exec()

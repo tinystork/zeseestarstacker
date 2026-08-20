@@ -25,6 +25,8 @@ from .backend_runner import (
     SimulatedRunBackend,
 )
 from .main_window import (
+    BACKEND_MODES,
+    DEFAULT_BACKEND_MODE,
     DEFAULT_TITLE,
     DRIZZLE_MODES,
     SOLVER_PREFERENCES,
@@ -37,6 +39,8 @@ from .settings_state import QtSettingsState
 
 __all__ = [
     "MainWindow",
+    "BACKEND_MODES",
+    "DEFAULT_BACKEND_MODE",
     "DEFAULT_TITLE",
     "QtSettingsState",
     "RunController",
