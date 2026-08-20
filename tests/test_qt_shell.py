@@ -68,10 +68,31 @@ def test_gui_qt_public_surface():
 
 
 def test_tk_gui_still_imports():
-    """Invariant: adding the Qt shell must not break the Tk GUI import."""
-    import seestar.gui as tk_gui
+    """Invariant: adding the Qt shell must not break the Tk GUI import.
 
-    assert tk_gui.SeestarStackerGUI is not None
+    Run this in a fresh interpreter: once a Qt QApplication exists, matplotlib
+    correctly refuses to switch to TkAgg in-process, which is a test-ordering
+    artifact rather than a Tk-regression signal.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "import seestar.gui as tk_gui\n"
+        "assert tk_gui.SeestarStackerGUI is not None\n"
+        "print('TK_IMPORT_OK')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=root,
+    )
+    assert proc.returncode == 0, (
+        f"Tk import failed: stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
 
 
 def test_shell_does_not_import_engine():

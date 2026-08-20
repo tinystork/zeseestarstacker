@@ -35,6 +35,7 @@ from .main_window import (
 )
 from .run_controller import RunController
 from .run_worker import RunStatus, RunWorker
+from .settings_validation import validate_settings_for_backend
 from .settings_state import QtSettingsState
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "BackendRunResult",
     "SimulatedRunBackend",
     "SeestarQueuedStackerBackend",
+    "validate_settings_for_backend",
     "STACKING_MODES",
     "DRIZZLE_MODES",
     "SOLVER_PREFERENCES",

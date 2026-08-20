@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 from .backend_runner import BaseRunBackend, SeestarQueuedStackerBackend
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
+from .settings_validation import validate_settings_for_backend
 from .settings_state import QtSettingsState
 
 DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
@@ -254,12 +255,32 @@ class MainWindow(QMainWindow):
     def _on_start(self) -> None:
         if self._running:
             return
+        state = self.collect_settings_state()
+        errors = validate_settings_for_backend(state, self.backend_mode)
+        if errors:
+            self._on_preflight_failed(errors)
+            return
         request = self.build_run_request()
         backend = self.resolve_backend()
         if backend is None:
             self.controller.start(request)
         else:
             self.controller.start(request, backend=backend)
+
+    def _on_preflight_failed(self, errors: List[str]) -> None:
+        """Report a preflight validation failure without starting a run.
+
+        Runs on the GUI thread (invoked synchronously from ``_on_start``).  It
+        leaves the window idle — ``is_running`` stays ``False`` and the
+        start/stop buttons remain consistent — and surfaces the human-readable
+        errors through the status bar and the log tab.  No ``RunController``
+        call happens, so no ``failed`` signal is emitted.
+        """
+        message = "Cannot start real backend: " + "; ".join(errors)
+        self.log(message)
+        self.statusBar().showMessage(message)
+        self._running = False
+        self._update_run_state()
 
     def _on_stop(self) -> None:
         if not self._running:

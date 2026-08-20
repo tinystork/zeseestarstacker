@@ -283,6 +283,95 @@ def test_backend_mode_validation(qapp):
 
 
 # --------------------------------------------------------------------------
+# M6: real-backend start preflight (settings validation seam)
+# --------------------------------------------------------------------------
+def test_seestar_mode_empty_folders_blocks_start(qapp):
+    """Empty folders under seestar mode must not start the controller."""
+    win = MainWindow(backend_mode="seestar")
+    calls = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        calls.append((request, kwargs))
+        original_start(request, **kwargs)
+
+    win.controller.start = spy_start
+    try:
+        win.start_button.click()
+
+        # The preflight must short-circuit: controller.start never called.
+        assert calls == []
+        assert win.is_running is False
+        assert win.start_button.isEnabled()
+        assert not win.stop_button.isEnabled()
+        assert win.controller.status is RunStatus.IDLE
+        assert not win.controller.has_live_thread
+
+        text = win.log_view.toPlainText()
+        assert "Cannot start real backend" in text
+        assert "Input folder is empty." in text
+        assert "Output folder is empty." in text
+        assert "Cannot start real backend" in win.statusBar().currentMessage()
+    finally:
+        win.shutdown()
+
+
+def test_seestar_mode_valid_settings_reaches_controller_with_lazy_backend(qapp):
+    """Valid input/output reaches controller.start(backend=SeestarQueuedStackerBackend).
+
+    The spy intercepts ``controller.start`` so the lazy real backend (and the
+    engine) is never actually executed — only its construction is verified.
+    """
+    win = MainWindow(backend_mode="seestar")
+    seen = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        seen.append((request, kwargs))
+        # Deliberately do NOT call original_start: that would run the engine.
+
+    win.controller.start = spy_start
+    try:
+        win.input_edit.setText("/inputs")
+        win.output_edit.setText("/outputs")
+        win.start_button.click()
+
+        assert len(seen) == 1
+        request, kwargs = seen[0]
+        assert isinstance(request, CanonicalRunRequest)
+        backend = kwargs.get("backend")
+        assert isinstance(backend, SeestarQueuedStackerBackend)
+        assert request.backend_kwargs["input_dir"] == "/inputs"
+        assert request.backend_kwargs["output_dir"] == "/outputs"
+        assert "Cannot start real backend" not in win.log_view.toPlainText()
+        # We never actually started (spy suppressed the real start).
+        assert win.is_running is False
+    finally:
+        win.shutdown()
+
+
+def test_backend_factory_not_blocked_by_preflight_with_empty_folders(qapp):
+    """backend_factory stays usable with empty folders (not preflight-blocked)."""
+    fakes = []
+
+    def factory():
+        fake = FakeBackend(complete_immediately=True)
+        fakes.append(fake)
+        return fake
+
+    win = MainWindow(backend_factory=factory)
+    try:
+        win.start_button.click()  # empty folders on the factory/injection path
+        assert _pump_until(qapp, lambda: win.is_running is False)
+        assert len(fakes) == 1
+        assert len(fakes[0].run_calls) == 1
+        assert "Cannot start real backend" not in win.log_view.toPlainText()
+        assert win.controller.status is RunStatus.FINISHED
+    finally:
+        win.shutdown()
+
+
+# --------------------------------------------------------------------------
 # CLI parsing (seestar.qt_main)
 # --------------------------------------------------------------------------
 def test_cli_parser_default_simulated():
