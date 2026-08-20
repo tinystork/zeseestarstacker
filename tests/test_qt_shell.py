@@ -2,8 +2,8 @@
 
 These tests construct the minimal :class:`seestar.gui_qt.MainWindow` under the
 ``offscreen`` Qt platform plugin so they run headlessly (no X11/Wayland).  They
-verify importability and basic construction only — no real stacking, no engine,
-no worker threads.
+verify importability, layout, settings collection and the start/stop lifecycle
+seam (a simulated run on a QThread) — no real stacking and no engine.
 
 ``QT_QPA_PLATFORM=offscreen`` must be set before any ``QApplication`` is
 created; we set it defensively here so the suite also passes when invoked
@@ -11,6 +11,7 @@ without the env var.
 """
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -27,6 +28,18 @@ from seestar.gui_qt.main_window import (
 )
 from seestar.gui_qt.run_bridge import RunRequest
 from seestar.gui_qt.settings_state import QtSettingsState
+
+
+def _pump_until(qapp, predicate, timeout_ms: int = 5000) -> bool:
+    """Pump the GUI event loop until ``predicate`` is true (or timeout)."""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    qapp.processEvents()
+    return bool(predicate())
 
 
 @pytest.fixture(scope="session")
@@ -207,6 +220,10 @@ def test_start_stop_toggles_state():
         assert win.stop_button.isEnabled()
 
         win.stop_button.click()
+        # Cancellation is asynchronous: the run stays active until the worker
+        # observes the flag and its cancelled signal reaches the GUI thread.
+        app = QApplication.instance()
+        assert _pump_until(app, lambda: win.is_running is False)
         assert win.is_running is False
         assert win.start_button.isEnabled()
         assert not win.stop_button.isEnabled()
@@ -214,15 +231,17 @@ def test_start_stop_toggles_state():
         win.shutdown()
 
 
-def test_start_stop_signals_fire():
+def test_start_stop_drive_controller_lifecycle():
     win = MainWindow()
     events = []
-    win.started.connect(lambda: events.append("started"))
-    win.stopped.connect(lambda: events.append("stopped"))
+    win.controller.started.connect(lambda: events.append("started"))
+    win.controller.cancelled.connect(lambda: events.append("cancelled"))
     try:
         win.start_button.click()
         win.stop_button.click()
-        assert events == ["started", "stopped"]
+        app = QApplication.instance()
+        assert _pump_until(app, lambda: len(events) >= 2)
+        assert events == ["started", "cancelled"]
     finally:
         win.shutdown()
 

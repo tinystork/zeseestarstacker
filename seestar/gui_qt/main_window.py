@@ -6,27 +6,29 @@ the later parity migration and deliberately does NOT:
 
 * launch any real stacking,
 * import the Tk GUI,
-* import the scientific engine,
-* spawn background workers.
+* import the scientific engine.
 
-Threading rule (enforced by design, not just convention): this shell spawns no
-threads at all, so nothing can mutate Qt widgets off the GUI thread.  Any
-future worker must communicate with this window exclusively through Qt queued
-signals — never by touching widgets directly.
+Threading rule (enforced by design, not just convention): the shell starts a
+*simulated* run on a dedicated ``QThread`` via a
+:class:`~seestar.gui_qt.run_controller.RunController`, but nothing mutates Qt
+widgets off the GUI thread.  The worker communicates with this window
+exclusively through Qt queued signals — never by touching widgets directly, and
+never by receiving or storing widget references.
 
 The Stack tab exposes a *minimal* subset of the real settings controls
 (input/output/temp/filename, batch size, stacking mode, drizzle, local solver).
 Those controls feed a :class:`~seestar.gui_qt.settings_state.QtSettingsState`
 model, which :meth:`MainWindow.build_run_request` turns into a validated,
-immutable :class:`~seestar.gui_qt.run_bridge.RunRequest` — without ever starting
-the backend.
+immutable :class:`~seestar.gui_qt.run_bridge.RunRequest`, which the Start button
+hands to the lifecycle controller (a simulated run) — without ever starting the
+real backend.
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from .run_bridge import RunRequest, build_run_request as _build_run_request
+from .run_controller import RunController
 from .settings_state import QtSettingsState
 
 DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
@@ -76,14 +79,10 @@ class MainWindow(QMainWindow):
     The window owns presentation state (title, tabs, progress bar, status bar)
     plus a small settings form whose values are mirrored into a
     :class:`QtSettingsState` model.  It never touches the scientific engine and
-    never starts a real run.
+    never starts a real run — the Start button begins a *simulated* run through
+    its :class:`RunController`, and all widget updates happen in GUI-thread
+    slots connected to that controller's queued signals.
     """
-
-    # Emitted when the inert start/stop controls change state.  These exist so
-    # a future worker/controller can be wired in via queued connections without
-    # mutating widgets from another thread.
-    started = Signal()
-    stopped = Signal()
 
     def __init__(self, title: Optional[str] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -91,11 +90,13 @@ class MainWindow(QMainWindow):
         self._running: bool = False
         self._shutdown_called: bool = False
         self.settings_state: QtSettingsState = QtSettingsState()
+        self.controller = RunController(self)
 
         self._build_central()
         self._build_status_bar()
         self._wire_controls()
         self._wire_settings_controls()
+        self._wire_controller()
         self._sync_state_from_controls()
 
     # ------------------------------------------------------------------ UI
@@ -197,6 +198,20 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._on_stop)
         self._update_run_state()
 
+    def _wire_controller(self) -> None:
+        """Connect the lifecycle controller to this window's GUI-thread slots.
+
+        All of these are queued signal deliveries from the worker thread
+        (relayed by the controller), so every slot below runs on the GUI thread
+        and is the only place widgets may be updated.
+        """
+        self.controller.started.connect(self._on_run_started)
+        self.controller.progress_changed.connect(self._on_progress)
+        self.controller.log_message.connect(self.log)
+        self.controller.finished.connect(self._on_run_finished)
+        self.controller.failed.connect(self._on_run_failed)
+        self.controller.cancelled.connect(self._on_run_cancelled)
+
     def _wire_settings_controls(self) -> None:
         """Mirror every settings widget into ``self.settings_state`` on change."""
         self.input_edit.textChanged.connect(self._sync_state_from_controls)
@@ -218,20 +233,43 @@ class MainWindow(QMainWindow):
     def _on_start(self) -> None:
         if self._running:
             return
-        self._running = True
-        self.started.emit()
-        self._update_run_state()
-        self.statusBar().showMessage("Running (placeholder)…")
-        self.log("Started (placeholder — no real stacking).")
+        request = self.build_run_request()
+        self.controller.start(request)
 
     def _on_stop(self) -> None:
         if not self._running:
             return
-        self._running = False
-        self.stopped.emit()
+        self.controller.cancel()
+        self.statusBar().showMessage("Cancelling…")
+        self.log("Stop requested.")
+
+    # ------------------------------------------------- lifecycle callbacks
+    def _on_run_started(self) -> None:
+        self._running = True
         self._update_run_state()
-        self.statusBar().showMessage("Stopped.")
-        self.log("Stopped.")
+        self.statusBar().showMessage("Running…")
+
+    def _on_progress(self, percent: int) -> None:
+        self.progress.setValue(int(percent))
+
+    def _on_run_finished(self) -> None:
+        self._running = False
+        self._update_run_state()
+        self.progress.setValue(100)
+        self.statusBar().showMessage("Finished.")
+        self.log("Run finished.")
+
+    def _on_run_failed(self, message: str) -> None:
+        self._running = False
+        self._update_run_state()
+        self.statusBar().showMessage(f"Failed: {message}")
+        self.log(f"Run failed: {message}")
+
+    def _on_run_cancelled(self) -> None:
+        self._running = False
+        self._update_run_state()
+        self.statusBar().showMessage("Cancelled.")
+        self.log("Run cancelled.")
 
     def _update_run_state(self) -> None:
         self.start_button.setEnabled(not self._running)
@@ -305,15 +343,16 @@ class MainWindow(QMainWindow):
         """Idempotent teardown hook.
 
         Called automatically by :meth:`closeEvent` and safe to call directly
-        (e.g. from an application-level ``aboutToQuit`` handler).  Subclasses
-        may extend it for real teardown; the base implementation only stops the
-        inert run state.
+        (e.g. from an application-level ``aboutToQuit`` handler).  It requests
+        stop of any live run, waits for the worker QThread to finish, and
+        resets UI state.  Safe to call multiple times.
         """
         if self._shutdown_called:
             return
         self._shutdown_called = True
-        if self._running:
-            self._on_stop()
+        self.controller.shutdown()
+        self._running = False
+        self._update_run_state()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
         self.shutdown()

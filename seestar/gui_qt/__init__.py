@@ -23,12 +23,17 @@ from .main_window import (
     STACKING_MODES,
     MainWindow,
 )
+from .run_controller import RunController
+from .run_worker import RunStatus, RunWorker
 from .settings_state import QtSettingsState
 
 __all__ = [
     "MainWindow",
     "DEFAULT_TITLE",
     "QtSettingsState",
+    "RunController",
+    "RunStatus",
+    "RunWorker",
     "STACKING_MODES",
     "DRIZZLE_MODES",
     "SOLVER_PREFERENCES",
