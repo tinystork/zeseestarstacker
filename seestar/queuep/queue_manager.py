@@ -3093,11 +3093,6 @@ class SeestarQueuedStacker:
                                     continue
                             except Exception:
                                 pass
-                            try:
-                                if self.stacked_subdir_name in Path(os.path.abspath(fpath)).parts:
-                                    continue
-                            except Exception:
-                                pass
                             if os.path.abspath(fpath) not in self.processed_files:
                                 additional_pending += 1
                     except Exception:
@@ -13920,8 +13915,6 @@ class SeestarQueuedStacker:
                     ).split(os.sep):
                         continue
                     abs_fpath = os.path.abspath(fpath)
-                    if self.stacked_subdir_name in Path(abs_fpath).parts:
-                        continue
                     if abs_fpath not in self.processed_files:
                         # ---> AJOUTER CETTE LIGNE <---
                         logger.debug(
