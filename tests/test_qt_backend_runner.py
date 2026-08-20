@@ -83,7 +83,14 @@ class FakeBackend(BaseRunBackend):
         self.run_calls = []
         self.cancel_called = False
 
-    def run(self, request, progress_callback, log_callback, is_cancel_requested):
+    def run(
+        self,
+        request,
+        progress_callback,
+        log_callback,
+        is_cancel_requested,
+        preview_callback=None,
+    ):
         self.run_calls.append(request)
         log_callback("fake backend started")
         progress_callback(10)

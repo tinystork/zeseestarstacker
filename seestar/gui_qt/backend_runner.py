@@ -34,6 +34,7 @@ queued Qt signals.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import enum
 import importlib
 import time
@@ -55,6 +56,52 @@ LogCallback = Callable[[str], None]
 IsCancelRequested = Callable[[], bool]
 
 
+@dataclass
+class BackendPreviewPayload:
+    """Plain, toolkit-free preview metadata carried backend -> GUI thread.
+
+    This is a pure-Python carrier for the *metadata* of a preview update; the
+    pixel data itself (``data``/``header``) is passed through untouched but is
+    never interpreted here — rendering is a later milestone.  It is a pure
+    Python carrier with no Qt, Tk or engine dependency, so it can be imported
+    and unit-tested in isolation.
+
+    Fields
+    ------
+    data:
+        Preview pixel data (any type — the real backend passes ndarray/tuple;
+        we never touch it here).
+    header:
+        Preview FITS-style header (any type).
+    stack_name:
+        Human-readable stack/title label (``""`` when unknown).
+    image_count:
+        Images accumulated so far (optional).
+    total_images:
+        Estimated total images (optional).
+    current_batch:
+        Current batch number (optional).
+    total_batches:
+        Estimated total batches (optional).
+    extra:
+        Any positional arguments beyond the known fields, preserved verbatim
+        so future callback signatures never raise.
+    """
+
+    data: Any = None
+    header: Any = None
+    stack_name: str = ""
+    image_count: Optional[int] = None
+    total_images: Optional[int] = None
+    current_batch: Optional[int] = None
+    total_batches: Optional[int] = None
+    extra: tuple = ()
+
+
+# Plain callback type (no Qt type leaks into the backend layer).
+PreviewCallback = Callable[[BackendPreviewPayload], None]
+
+
 class BaseRunBackend:
     """Protocol-like interface every run backend implements.
 
@@ -63,6 +110,8 @@ class BaseRunBackend:
 
     * call ``progress_callback(percent)`` with 0..100 ints,
     * call ``log_callback(message)`` with human-readable lines,
+    * optionally call ``preview_callback(payload)`` with a
+      :class:`BackendPreviewPayload` when a preview update is available,
     * poll ``is_cancel_requested()`` frequently,
     * return :class:`BackendRunResult` (``FINISHED``/``CANCELLED``),
     * raise on terminal errors (the worker turns that into a ``failed`` signal).
@@ -77,6 +126,7 @@ class BaseRunBackend:
         progress_callback: ProgressCallback,
         log_callback: LogCallback,
         is_cancel_requested: IsCancelRequested,
+        preview_callback: Optional[PreviewCallback] = None,
     ) -> BackendRunResult:
         raise NotImplementedError
 
@@ -104,6 +154,7 @@ class SimulatedRunBackend(BaseRunBackend):
         progress_callback: ProgressCallback,
         log_callback: LogCallback,
         is_cancel_requested: IsCancelRequested,
+        preview_callback: Optional[PreviewCallback] = None,
     ) -> BackendRunResult:
         batch_size = request.backend_kwargs.get("batch_size")
         log_callback(f"Simulated run started (batch_size={batch_size}).")
@@ -147,6 +198,9 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
     * constructs ``SeestarQueuedStacker(**stacker_kwargs)``,
     * assigns ``stacker.align_on_disk = request.align_on_disk``,
     * installs a progress callback adapted to the worker's two callbacks,
+    * installs a preview callback (via ``stacker.set_preview_callback`` when
+      available) that adapts the stacker's positional preview signature to a
+      :class:`BackendPreviewPayload` for the worker's preview callback,
     * calls ``stacker.start_processing(**request.backend_kwargs)``,
     * polls ``stacker.is_running()`` until it finishes or cancellation is
       requested, and calls ``stacker.stop()`` on cancellation.
@@ -216,6 +270,67 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
 
         return _cb
 
+    @staticmethod
+    def _map_preview_payload(
+        args: tuple, kwargs: Optional[dict] = None
+    ) -> "BackendPreviewPayload":
+        """Map the stacker's positional preview args to a payload.
+
+        The real ``SeestarQueuedStacker`` calls its preview callback in one of
+        two positional forms observed in ``queue_manager``::
+
+            (data, header, stack_name, img_count, total_imgs_est,
+             current_batch, total_batches_est)
+            (data, header, stack_name, img_count, total_imgs_est,
+             current_batch)
+
+        Missing trailing args default to ``None`` and any args beyond the seven
+        known slots are preserved in :attr:`BackendPreviewPayload.extra`, so a
+        malformed or future signature never raises.  Keyword args (not used by
+        the real stacker) are accepted as a fallback for known field names.
+        """
+
+        def _pick(idx: int, key: str, default: Any = None) -> Any:
+            if idx < len(args):
+                return args[idx]
+            if kwargs:
+                return kwargs.get(key, default)
+            return default
+
+        stack_name = _pick(2, "stack_name", "")
+        return BackendPreviewPayload(
+            data=_pick(0, "data"),
+            header=_pick(1, "header"),
+            stack_name=stack_name if stack_name is not None else "",
+            image_count=_pick(3, "image_count"),
+            total_images=_pick(4, "total_images"),
+            current_batch=_pick(5, "current_batch"),
+            total_batches=_pick(6, "total_batches"),
+            extra=tuple(args[7:]) if len(args) > 7 else (),
+        )
+
+    @classmethod
+    def _make_preview_callback(
+        cls, preview_callback: PreviewCallback
+    ) -> Callable[..., None]:
+        """Adapt the stacker's preview callback to a payload-emitting callback.
+
+        Maps the stacker's positional preview signature to a
+        :class:`BackendPreviewPayload` and forwards it to the worker-provided
+        ``preview_callback``.  Any error in mapping/forwarding is swallowed so
+        a bad preview can never crash the stacker's run thread.
+        """
+
+        def _cb(*args: Any, **kwargs: Any) -> None:
+            try:
+                payload = cls._map_preview_payload(args, kwargs)
+                preview_callback(payload)
+            except Exception:
+                # Preview is best-effort; never let it break the run loop.
+                pass
+
+        return _cb
+
     def _stop_stackers(self) -> None:
         stacker = self._stacker
         if stacker is not None:
@@ -230,12 +345,17 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         progress_callback: ProgressCallback,
         log_callback: LogCallback,
         is_cancel_requested: IsCancelRequested,
+        preview_callback: Optional[PreviewCallback] = None,
     ) -> BackendRunResult:
         self._cancel_requested = False
         stacker = self._ensure_stackers(request)
         stacker.set_progress_callback(
             self._make_progress_callback(progress_callback, log_callback)
         )
+        if preview_callback is not None:
+            setter = getattr(stacker, "set_preview_callback", None)
+            if callable(setter):
+                setter(self._make_preview_callback(preview_callback))
 
         started = stacker.start_processing(**request.backend_kwargs)
         if not started:

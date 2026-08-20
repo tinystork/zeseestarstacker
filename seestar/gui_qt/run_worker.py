@@ -16,8 +16,9 @@ backend* (a :class:`~seestar.gui_qt.backend_runner.BaseRunBackend`):
 
 The worker communicates with the GUI *exclusively* through queued Qt signals
 (:attr:`progress`, :attr:`log`, :attr:`finished`, :attr:`failed`,
-:attr:`cancelled`).  It holds no widget references; the GUI never mutates worker
-internals directly.  Cancellation is requested through the thread-safe
+:attr:`cancelled`, :attr:`preview`).  It holds no widget references; the GUI
+never mutates worker internals directly.  Cancellation is requested through
+the thread-safe
 :meth:`RunWorker.request_cancel`, which both sets the poll flag and forwards a
 ``cancel()`` call to the backend so a real backend can stop its engine.
 """
@@ -56,7 +57,10 @@ class RunWorker(QObject):
     * ``log(str)`` — human-readable log line,
     * ``finished()`` — completed without cancellation,
     * ``failed(str)`` — terminal error (message),
-    * ``cancelled()`` — cancellation was requested and honoured.
+    * ``cancelled()`` — cancellation was requested and honoured,
+    * ``preview(object)`` — a
+      :class:`~seestar.gui_qt.backend_runner.BackendPreviewPayload` carrying a
+      preview metadata update from the backend.
 
     Parameters
     ----------
@@ -73,6 +77,7 @@ class RunWorker(QObject):
     finished = Signal()
     failed = Signal(str)
     cancelled = Signal()
+    preview = Signal(object)
 
     def __init__(
         self,
@@ -126,6 +131,9 @@ class RunWorker(QObject):
     def _emit_log(self, message: str) -> None:
         self.log.emit(str(message))
 
+    def _emit_preview(self, payload) -> None:
+        self.preview.emit(payload)
+
     @Slot()
     def run(self) -> None:
         """Execute the run via the backend.  Runs in the worker thread."""
@@ -141,6 +149,7 @@ class RunWorker(QObject):
                 progress_callback=self._emit_progress,
                 log_callback=self._emit_log,
                 is_cancel_requested=self._is_cancel_requested,
+                preview_callback=self._emit_preview,
             )
 
             if result is BackendRunResult.CANCELLED:

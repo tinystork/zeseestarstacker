@@ -47,7 +47,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .backend_runner import BaseRunBackend, SeestarQueuedStackerBackend
+from .backend_runner import (
+    BackendPreviewPayload,
+    BaseRunBackend,
+    SeestarQueuedStackerBackend,
+)
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
 from .settings_validation import validate_settings_for_backend
@@ -130,7 +134,7 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(self._build_stack_tab(), TAB_STACK)
         self.tabs.addTab(self._placeholder_panel("Settings placeholder"), TAB_SETTINGS)
-        self.tabs.addTab(self._placeholder_panel("Preview placeholder"), TAB_PREVIEW)
+        self.tabs.addTab(self._build_preview_tab(), TAB_PREVIEW)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
@@ -198,6 +202,16 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    def _build_preview_tab(self) -> QWidget:
+        """Build the Preview tab (metadata label only — no image rendering yet)."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        self.preview_label = QLabel("Preview: —")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.preview_label)
+        layout.addStretch(1)
+        return panel
+
     def _placeholder_panel(self, text: str) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -230,6 +244,7 @@ class MainWindow(QMainWindow):
         self.controller.started.connect(self._on_run_started)
         self.controller.progress_changed.connect(self._on_progress)
         self.controller.log_message.connect(self.log)
+        self.controller.preview_updated.connect(self._on_preview)
         self.controller.finished.connect(self._on_run_finished)
         self.controller.failed.connect(self._on_run_failed)
         self.controller.cancelled.connect(self._on_run_cancelled)
@@ -297,6 +312,24 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, percent: int) -> None:
         self.progress.setValue(int(percent))
+
+    def _on_preview(self, payload: BackendPreviewPayload) -> None:
+        """Update the Preview tab label from a preview payload (GUI thread only).
+
+        This is the metadata-only seam established before real image rendering:
+        it updates only the preview label with the stack name and counts.
+        """
+        name = payload.stack_name or "(no stack)"
+        text = f"Preview: {name}"
+        if payload.image_count is not None:
+            text += f" — {payload.image_count} img"
+            if payload.total_images is not None:
+                text += f" / {payload.total_images}"
+        if payload.current_batch is not None:
+            text += f" — batch {payload.current_batch}"
+            if payload.total_batches is not None:
+                text += f" / {payload.total_batches}"
+        self.preview_label.setText(text)
 
     def _on_run_finished(self) -> None:
         self._running = False

@@ -37,7 +37,11 @@ class RunController(QObject):
     * ``log_message(str)`` — log line,
     * ``finished()`` — run completed normally,
     * ``failed(str)`` — run failed with message,
-    * ``cancelled()`` — run was cancelled.
+    * ``cancelled()`` — run was cancelled,
+    * ``preview_updated(object)`` — a
+      :class:`~seestar.gui_qt.backend_runner.BackendPreviewPayload` relayed
+      from the backend (dropped after shutdown, see
+      :meth:`_on_worker_preview`).
     """
 
     started = Signal()
@@ -46,6 +50,7 @@ class RunController(QObject):
     finished = Signal()
     failed = Signal(str)
     cancelled = Signal()
+    preview_updated = Signal(object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -105,6 +110,7 @@ class RunController(QObject):
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_worker_progress)
         worker.log.connect(self._on_worker_log)
+        worker.preview.connect(self._on_worker_preview)
         worker.finished.connect(self._on_worker_finished)
         worker.failed.connect(self._on_worker_failed)
         worker.cancelled.connect(self._on_worker_cancelled)
@@ -132,6 +138,12 @@ class RunController(QObject):
         if self._status is not RunStatus.RUNNING:
             return
         self.log_message.emit(message)
+
+    @Slot(object)
+    def _on_worker_preview(self, payload) -> None:
+        if self._status is not RunStatus.RUNNING:
+            return
+        self.preview_updated.emit(payload)
 
     @Slot()
     def _on_worker_finished(self) -> None:

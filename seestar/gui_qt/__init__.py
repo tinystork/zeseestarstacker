@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from .app import create_application, run_qt_app
 from .backend_runner import (
+    BackendPreviewPayload,
     BackendRunResult,
     BaseRunBackend,
     SeestarQueuedStackerBackend,
@@ -48,6 +49,7 @@ __all__ = [
     "RunStatus",
     "RunWorker",
     "BaseRunBackend",
+    "BackendPreviewPayload",
     "BackendRunResult",
     "SimulatedRunBackend",
     "SeestarQueuedStackerBackend",

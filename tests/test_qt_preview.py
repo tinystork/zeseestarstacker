@@ -1,0 +1,470 @@
+"""M7 seam tests: the Qt preview callback path (backend -> worker -> controller -> window).
+
+These tests exercise the *metadata-only* preview seam under the ``offscreen``
+Qt platform plugin, with **no** real stacking and **no** image rendering:
+
+* a fake backend emits a :class:`BackendPreviewPayload` that the
+  :class:`RunController.preview_updated` signal and the :class:`MainWindow`
+  preview label receive on the GUI thread,
+* the default simulated backend emits no preview (least-disruptive path),
+* :class:`SeestarQueuedStackerBackend` installs a fake stacker's
+  ``set_preview_callback`` and maps the real 7-arg and 6-arg callback
+  signatures (plus extra/missing args) to :class:`BackendPreviewPayload`
+  without raising,
+* late preview updates are suppressed after controller shutdown,
+* fresh-process import hygiene and source-token cleanliness hold.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtCore import QCoreApplication, QThread
+from PySide6.QtWidgets import QApplication
+
+from seestar.gui_qt import (
+    BackendPreviewPayload,
+    MainWindow,
+    RunController,
+    RunStatus,
+    create_application,
+)
+from seestar.gui_qt.backend_runner import (
+    BackendRunResult,
+    BaseRunBackend,
+    SeestarQueuedStackerBackend,
+)
+from seestar.gui_qt.run_bridge import build_run_request
+from seestar.gui_qt.settings_state import QtSettingsState
+
+
+def _pump_until(qapp: QApplication, predicate, timeout_ms: int = 5000) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    qapp.processEvents()
+    return bool(predicate())
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = create_application([])
+    assert app is QApplication.instance()
+    return app
+
+
+def _make_request(**overrides):
+    state = QtSettingsState()
+    for key, value in overrides.items():
+        setattr(state, key, value)
+    return build_run_request(state)
+
+
+# --------------------------------------------------------------------------
+# Fakes (test-controlled, no real engine)
+# --------------------------------------------------------------------------
+class PreviewEmittingBackend(BaseRunBackend):
+    """Fake backend that emits one preview payload then finishes."""
+
+    def __init__(self) -> None:
+        self.run_calls = []
+        self.cancel_called = False
+
+    def run(
+        self,
+        request,
+        progress_callback,
+        log_callback,
+        is_cancel_requested,
+        preview_callback=None,
+    ):
+        self.run_calls.append(request)
+        progress_callback(10)
+        if preview_callback is not None:
+            preview_callback(
+                BackendPreviewPayload(
+                    data="FAKE_DATA",
+                    header={"PREV": "fake"},
+                    stack_name="Stack (3/10 Img)",
+                    image_count=3,
+                    total_images=10,
+                    current_batch=1,
+                    total_batches=4,
+                )
+            )
+        progress_callback(100)
+        return BackendRunResult.FINISHED
+
+    def cancel(self) -> None:
+        self.cancel_called = True
+
+
+class BlockingPreviewBackend(BaseRunBackend):
+    """Fake backend that emits a preview, then blocks until cancellation."""
+
+    def __init__(self) -> None:
+        self._cancel = False
+        self.cancel_called = False
+
+    def run(
+        self,
+        request,
+        progress_callback,
+        log_callback,
+        is_cancel_requested,
+        preview_callback=None,
+    ):
+        if preview_callback is not None:
+            preview_callback(BackendPreviewPayload(stack_name="queued-preview"))
+        while not (is_cancel_requested() or self._cancel):
+            time.sleep(0.001)
+        return BackendRunResult.CANCELLED
+
+    def cancel(self) -> None:
+        self._cancel = True
+        self.cancel_called = True
+
+
+class PreviewStacker:
+    """A fake ``SeestarQueuedStacker``-shaped object with a preview callback."""
+
+    def __init__(self, **kwargs) -> None:
+        self.init_kwargs = dict(kwargs)
+        self.align_on_disk = None
+        self.progress_cb = None
+        self.preview_cb = None
+        self.start_kwargs = None
+        self._running = False
+
+    def set_progress_callback(self, cb) -> None:
+        self.progress_cb = cb
+
+    def set_preview_callback(self, cb) -> None:
+        self.preview_cb = cb
+
+    def start_processing(self, **kwargs):
+        self.start_kwargs = dict(kwargs)
+        self._running = True
+        return True
+
+    def is_running(self) -> bool:
+        self._running = False
+        return False
+
+    def stop(self) -> None:
+        self._running = False
+
+
+class NoPreviewSetterStacker:
+    """A stacker-shaped fake that genuinely lacks ``set_preview_callback``."""
+
+    def __init__(self, **kwargs) -> None:
+        self.init_kwargs = dict(kwargs)
+        self.align_on_disk = None
+        self.progress_cb = None
+        self.start_kwargs = None
+        self._running = False
+
+    def set_progress_callback(self, cb) -> None:
+        self.progress_cb = cb
+
+    def start_processing(self, **kwargs):
+        self.start_kwargs = dict(kwargs)
+        self._running = True
+        return True
+
+    def is_running(self) -> bool:
+        self._running = False
+        return False
+
+    def stop(self) -> None:
+        self._running = False
+
+
+def _make_preview_stackers_factory(instances, *, stacker_cls=PreviewStacker):
+    def factory(**kwargs):
+        stacker = stacker_cls(**kwargs)
+        instances.append(stacker)
+        return stacker
+
+    return factory
+
+
+# --------------------------------------------------------------------------
+# Controller relays a preview payload on the GUI thread
+# --------------------------------------------------------------------------
+def test_controller_relays_preview_payload_on_gui_thread(qapp):
+    backend = PreviewEmittingBackend()
+    controller = RunController()
+    received = []
+    finished = []
+
+    def on_preview(payload):
+        received.append((payload, QThread.currentThread()))
+
+    controller.preview_updated.connect(on_preview)
+    controller.finished.connect(lambda: finished.append(True))
+    try:
+        controller.start(_make_request(), backend=backend)
+        assert _pump_until(qapp, lambda: controller.status is RunStatus.FINISHED)
+
+        assert finished == [True]
+        assert len(received) == 1
+        payload, thread = received[0]
+        assert isinstance(payload, BackendPreviewPayload)
+        assert payload.data == "FAKE_DATA"
+        assert payload.header == {"PREV": "fake"}
+        assert payload.stack_name == "Stack (3/10 Img)"
+        assert payload.image_count == 3
+        assert payload.total_images == 10
+        assert payload.current_batch == 1
+        assert payload.total_batches == 4
+        # Delivered on the GUI thread (the slot ran during processEvents).
+        assert thread is qapp.thread()
+        assert thread is QCoreApplication.instance().thread()
+    finally:
+        controller.shutdown()
+
+
+def test_main_window_preview_label_updates(qapp):
+    win = MainWindow(backend_factory=PreviewEmittingBackend)
+    try:
+        assert "Preview" in win.preview_label.text()
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+
+        text = win.preview_label.text()
+        assert "Preview: Stack (3/10 Img)" in text
+        assert "3 img" in text
+        assert "10" in text
+        assert "batch 1" in text
+        assert "4" in text
+        assert win.controller.status is RunStatus.FINISHED
+    finally:
+        win.shutdown()
+
+
+def test_simulated_backend_emits_no_preview(qapp):
+    """Default simulated backend is the least-disruptive path: no previews."""
+    controller = RunController()
+    previews = []
+    controller.preview_updated.connect(previews.append)
+    try:
+        controller.start(_make_request(batch_size=4), steps=5, step_delay_ms=1)
+        assert _pump_until(qapp, lambda: controller.status is RunStatus.FINISHED)
+        assert previews == []
+    finally:
+        controller.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Late preview suppression after shutdown
+# --------------------------------------------------------------------------
+def test_shutdown_suppresses_queued_preview(qapp):
+    """A preview emitted before shutdown must be dropped, not relayed.
+
+    The worker emits the preview on its thread; the queued signal is only
+    delivered when the GUI thread processes events.  ``shutdown()`` flips the
+    controller to IDLE *before* draining the queue, so the queued preview hits
+    ``_on_worker_preview`` while not RUNNING and is dropped.
+    """
+    backend = BlockingPreviewBackend()
+    controller = RunController()
+    previews = []
+    controller.preview_updated.connect(previews.append)
+
+    controller.start(_make_request(), backend=backend)
+    # Give the worker thread time to emit its preview (queued, not delivered).
+    time.sleep(0.05)
+    controller.shutdown()
+    # Drain the GUI event queue: the queued preview must be dropped.
+    qapp.processEvents()
+    qapp.processEvents()
+
+    assert previews == []
+    assert controller.status is RunStatus.IDLE
+    assert not controller.has_live_thread
+
+
+def test_controller_drops_late_preview_when_not_running(qapp):
+    """Directly: a preview relayed while not RUNNING is dropped."""
+    controller = RunController()
+    previews = []
+    controller.preview_updated.connect(previews.append)
+    try:
+        # No active run (status IDLE) — e.g. after shutdown.
+        controller._on_worker_preview(BackendPreviewPayload(stack_name="late"))
+        assert previews == []
+    finally:
+        controller.shutdown()
+
+
+# --------------------------------------------------------------------------
+# SeestarQueuedStackerBackend preview mapping (fake stacker, no engine)
+# --------------------------------------------------------------------------
+def _run_with_preview_backend(stacker_cls=PreviewStacker):
+    instances = []
+    backend = SeestarQueuedStackerBackend(
+        stacker_factory=_make_preview_stackers_factory(
+            instances, stacker_cls=stacker_cls
+        ),
+        poll_interval=0.001,
+    )
+    payloads = []
+    result = backend.run(
+        _make_request(batch_size=4),
+        lambda p: None,
+        lambda m: None,
+        lambda: False,
+        preview_callback=payloads.append,
+    )
+    return result, instances[0], payloads
+
+
+def test_seestar_backend_maps_7_arg_preview_callback():
+    result, stacker, payloads = _run_with_preview_backend()
+
+    assert result is BackendRunResult.FINISHED
+    assert callable(stacker.preview_cb)
+    stacker.preview_cb("DATA", {"HDR": 1}, "Stack (3/10 Img)", 3, 10, 1, 4)
+
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert isinstance(p, BackendPreviewPayload)
+    assert p.data == "DATA"
+    assert p.header == {"HDR": 1}
+    assert p.stack_name == "Stack (3/10 Img)"
+    assert p.image_count == 3
+    assert p.total_images == 10
+    assert p.current_batch == 1
+    assert p.total_batches == 4
+    assert p.extra == ()
+
+
+def test_seestar_backend_maps_6_arg_preview_callback():
+    result, stacker, payloads = _run_with_preview_backend()
+
+    assert result is BackendRunResult.FINISHED
+    stacker.preview_cb("DATA", None, "Stack (5/20)", 5, 20, 2)
+
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p.data == "DATA"
+    assert p.header is None
+    assert p.stack_name == "Stack (5/20)"
+    assert p.image_count == 5
+    assert p.total_images == 20
+    assert p.current_batch == 2
+    assert p.total_batches is None
+    assert p.extra == ()
+
+
+def test_seestar_backend_preview_tolerates_extra_and_missing_args():
+    result, stacker, payloads = _run_with_preview_backend()
+
+    assert result is BackendRunResult.FINISHED
+    # Extra args beyond the known seven are preserved in ``extra``.
+    stacker.preview_cb("D", "H", "name", 1, 2, 3, 4, "EXTRA1", "EXTRA2")
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p.extra == ("EXTRA1", "EXTRA2")
+
+    # A minimal (even malformed) call must not raise.
+    payloads.clear()
+    stacker.preview_cb("only-data")
+    assert len(payloads) == 1
+    q = payloads[0]
+    assert q.data == "only-data"
+    assert q.header is None
+    assert q.stack_name == ""
+    assert q.image_count is None
+
+
+def test_seestar_backend_without_preview_setter_is_tolerated():
+    """A stacker without ``set_preview_callback`` must not crash the run."""
+    result, stacker, payloads = _run_with_preview_backend(NoPreviewSetterStacker)
+
+    assert result is BackendRunResult.FINISHED
+    # The adapter is never installed because the stacker has no setter.
+    assert not hasattr(stacker, "preview_cb")
+    assert payloads == []
+
+
+# --------------------------------------------------------------------------
+# Source-token / import-hygiene invariants for the new seam
+# --------------------------------------------------------------------------
+def test_preview_source_is_tk_engine_numpy_free():
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).resolve().parents[1] / "seestar" / "gui_qt"
+    forbidden = (
+        "seestar.core",
+        "seestar.alignment",
+        "seestar.enhancement",
+        "seestar.queuep",
+        "tkinter",
+        "seestar.gui.settings",
+        "seestar.gui.main_window",
+        "seestar.gui.boring_stack",
+        "zesolver_adapter",
+        "zesolver.api",
+        "zealfie",
+        "numpy",
+        "PIL",
+        "matplotlib",
+    )
+    for name in ("backend_runner.py", "run_worker.py", "run_controller.py", "main_window.py"):
+        text = (pkg_dir / name).read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in text, f"{name} references {token}"
+
+
+def test_preview_import_hygiene_fresh_process():
+    """Fresh interpreter: importing the package must stay Tk/engine clean."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys\n"
+        "import seestar.gui_qt  # noqa: F401\n"
+        "from seestar.gui_qt import BackendPreviewPayload\n"
+        "from seestar.gui_qt.backend_runner import BackendPreviewPayload as B2\n"
+        "assert BackendPreviewPayload is B2\n"
+        "_bad = [m for m in sys.modules\n"
+        "        if m.startswith('tkinter')\n"
+        "        or m.startswith('seestar.core')\n"
+        "        or m.startswith('seestar.alignment')\n"
+        "        or m.startswith('seestar.enhancement')\n"
+        "        or m.startswith('seestar.queuep')\n"
+        "        or m in ('seestar.gui.main_window', 'seestar.gui.settings',"
+        " 'seestar.gui.boring_stack')]\n"
+        "if _bad:\n"
+        "    print('BAD_MODULES:', _bad)\n"
+        "    sys.exit(1)\n"
+        "from seestar.gui_qt.run_bridge import RunRequest as Q\n"
+        "from seestar.gui.run_config import RunRequest as C\n"
+        "assert Q is C\n"
+        "print('IMPORT_HYGIENE_OK')\n"
+    )
+    env = dict(os.environ)
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        env=env,
+    )
+    assert proc.returncode == 0, (
+        f"preview import hygiene violated: stdout={proc.stdout!r} "
+        f"stderr={proc.stderr!r}"
+    )
