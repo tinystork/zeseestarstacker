@@ -115,10 +115,37 @@ def _canonicalize_wcs_scale(wcs_obj):
     col_norms = np.sqrt(np.sum(cd ** 2, axis=0))
     if not (np.all(np.isfinite(col_norms)) and np.all(col_norms > 0)):
         return wcs_obj
+    # Drop the CD matrix *before* writing PC/CDELT: assigning ``cdelt`` while
+    # ``cd`` is present makes wcslib emit ``RuntimeWarning: cdelt will be
+    # ignored since cd is present``.  ``del wcs.cd`` is the documented wcslib
+    # way to switch to the canonical PC + CDELT representation, leaving the WCS
+    # truly single-encoded (``has_cd()`` becomes False).
+    del wcs_obj.wcs.cd
     # cd == pc @ diag(cdelt): keep the transform exact, encode the scale once.
     wcs_obj.wcs.pc = cd / col_norms[np.newaxis, :]
     wcs_obj.wcs.cdelt = col_norms
     return wcs_obj
+
+
+def _strip_redundant_scale_keywords(hdr):
+    """Remove CDELT/PC (and CROTA2) when a CD matrix is present.
+
+    ASTAP writes ``.wcs`` sidecars carrying the pixel scale in CD, CDELT and PC
+    simultaneously.  FITS gives ``CDi_j`` precedence over ``PCi_j`` + ``CDELTi``,
+    so the CDELT/PC forms are redundant whenever CD is present.  Dropping them
+    up-front guarantees wcslib never sees the ambiguous triple encoding at WCS
+    construction time; the scale is then re-encoded exactly once by
+    :func:`_canonicalize_wcs_scale`.  Headers without a CD matrix are returned
+    unchanged.
+    """
+    if not any(k in hdr for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")):
+        return hdr
+    for k in list(hdr.keys()):
+        if k in ("CDELT1", "CDELT2", "CROTA2"):
+            del hdr[k]
+        elif re.match(r"^PC\d_\d$", k):
+            del hdr[k]
+    return hdr
 
 
 def _sanitize_astap_wcs_text(txt: str) -> tuple[str, int, int]:
@@ -825,6 +852,8 @@ class AstrometrySolver:
             del hdr["HISTORY"]
         while "COMMENT" in hdr:
             del hdr["COMMENT"]
+
+        _strip_redundant_scale_keywords(hdr)
 
         try:
             wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)

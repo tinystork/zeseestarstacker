@@ -4080,85 +4080,97 @@ class SeestarQueuedStacker:
             except Exception:
                 self.all_input_filepaths = []
 
+        # When the reference WCS is already fixed (freeze_reference_wcs) and a
+        # celestial reference exists, skip the per-file plate-solving pre-scan.
+        # Reproject / Drizzle poses originales inherit the reference WCS, so
+        # solving every input again is redundant (and can even fail the whole
+        # run when every solve fails despite a valid fixed reference).
+        have_fixed_reference = bool(
+            self.freeze_reference_wcs
+            and self.reference_wcs_object is not None
+            and getattr(self.reference_wcs_object, "is_celestial", False)
+        )
+
         wcs_list: list[WCS] = []
         header_list: list[fits.Header] = []
 
-        solver_settings = {
-            "local_solver_preference": self.local_solver_preference,
-            "astap_path": self.astap_path,
-            "astap_data_dir": self.astap_data_dir,
-            "astap_search_radius": self.astap_search_radius,
-            "astap_downsample": self.astap_downsample,
-            "astap_sensitivity": self.astap_sensitivity,
-            "scale_est_arcsec_per_pix": getattr(
-                self, "reference_pixel_scale_arcsec", None
-            ),
-            "use_radec_hints": False,
-        }
+        if not have_fixed_reference:
+            solver_settings = {
+                "local_solver_preference": self.local_solver_preference,
+                "astap_path": self.astap_path,
+                "astap_data_dir": self.astap_data_dir,
+                "astap_search_radius": self.astap_search_radius,
+                "astap_downsample": self.astap_downsample,
+                "astap_sensitivity": self.astap_sensitivity,
+                "scale_est_arcsec_per_pix": getattr(
+                    self, "reference_pixel_scale_arcsec", None
+                ),
+                "use_radec_hints": False,
+            }
 
-        total = len(self.all_input_filepaths)
+            total = len(self.all_input_filepaths)
 
-        def _solve_single(path):
-            try:
-                hdr_local = fits.getheader(path, memmap=False)
-                if self.astrometry_solver:
-                    wcs_obj_local = self.astrometry_solver.solve(
-                        path,
-                        hdr_local,
-                        solver_settings,
-                        update_header_with_solution=False,
-                        batch_size=getattr(self, "batch_size", None),
-                        final_combine=getattr(self, "stack_final_combine", None),
+            def _solve_single(path):
+                try:
+                    hdr_local = fits.getheader(path, memmap=False)
+                    if self.astrometry_solver:
+                        wcs_obj_local = self.astrometry_solver.solve(
+                            path,
+                            hdr_local,
+                            solver_settings,
+                            update_header_with_solution=False,
+                            batch_size=getattr(self, "batch_size", None),
+                            final_combine=getattr(self, "stack_final_combine", None),
+                        )
+                    else:
+                        wcs_obj_local = solve_image_wcs(
+                            path,
+                            hdr_local,
+                            solver_settings,
+                            update_header_with_solution=False,
+                            batch_size=getattr(self, "batch_size", None),
+                            final_combine=getattr(self, "stack_final_combine", None),
+                        )
+                    return path, hdr_local, wcs_obj_local, None
+                except Exception as exc:
+                    return path, None, None, exc
+
+            max_workers = max(1, (os.cpu_count() or 1) // 2)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(_solve_single, fp) for fp in self.all_input_filepaths]
+                for idx, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                    if self.stop_processing:
+                        for f in futures:
+                            f.cancel()
+                        return False
+
+                    fpath, hdr, wcs_obj, err = fut.result()
+                    self.update_progress(
+                        f"   Solving {idx}/{total}: {os.path.basename(fpath)}",
+                        5 + int(35 * ((idx - 1) / max(total, 1))),
                     )
-                else:
-                    wcs_obj_local = solve_image_wcs(
-                        path,
-                        hdr_local,
-                        solver_settings,
-                        update_header_with_solution=False,
-                        batch_size=getattr(self, "batch_size", None),
-                        final_combine=getattr(self, "stack_final_combine", None),
-                    )
-                return path, hdr_local, wcs_obj_local, None
-            except Exception as exc:
-                return path, None, None, exc
 
-        max_workers = max(1, (os.cpu_count() or 1) // 2)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(_solve_single, fp) for fp in self.all_input_filepaths]
-            for idx, fut in enumerate(concurrent.futures.as_completed(futures), 1):
-                if self.stop_processing:
-                    for f in futures:
-                        f.cancel()
-                    return False
+                    if err is not None:
+                        self.update_progress(
+                            f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
+                            "WARN",
+                        )
 
-                fpath, hdr, wcs_obj, err = fut.result()
+                    elif wcs_obj and wcs_obj.is_celestial:
+                        wcs_list.append(wcs_obj)
+                        header_list.append(hdr)
+                    else:
+                        self.update_progress(
+                            f"⚠️ [Pré-scan] Échec résolution pour {os.path.basename(fpath)}",
+                            "WARN",
+                        )
+
+            if not wcs_list:
                 self.update_progress(
-                    f"   Solving {idx}/{total}: {os.path.basename(fpath)}",
-                    5 + int(35 * ((idx - 1) / max(total, 1))),
+                    "❌ Échec de la préparation de la grille : aucun WCS valide trouvé après résolution.",
+                    "ERROR",
                 )
-
-                if err is not None:
-                    self.update_progress(
-                        f"⚠️ [Pré-scan] Erreur WCS sur {os.path.basename(fpath)}: {err}",
-                        "WARN",
-                    )
-
-                elif wcs_obj and wcs_obj.is_celestial:
-                    wcs_list.append(wcs_obj)
-                    header_list.append(hdr)
-                else:
-                    self.update_progress(
-                        f"⚠️ [Pré-scan] Échec résolution pour {os.path.basename(fpath)}",
-                        "WARN",
-                    )
-
-        if not wcs_list:
-            self.update_progress(
-                "❌ Échec de la préparation de la grille : aucun WCS valide trouvé après résolution.",
-                "ERROR",
-            )
-            return False
+                return False
 
         if self.reference_wcs_object is None or not self.freeze_reference_wcs:
             # For ``batch_size == 1`` we mimic the behaviour of live stacking
