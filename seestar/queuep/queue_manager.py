@@ -300,6 +300,76 @@ _BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
 tBatchFiles = List[Tuple[str, List[str]]]
 
 # ----------------------------------------------------------------------
+# Finalization mode: one mode == one coherent accumulation/finalization
+# strategy.  The mode is decided at accumulation initialization
+# (``initialize``) and transmitted explicitly to ``_save_final_stack``.
+# ``_save_final_stack`` consumes this explicit mode and never falls back to an
+# arbitrary one.
+# ----------------------------------------------------------------------
+
+FINALIZATION_MODE_MOSAIC = "mosaic"
+FINALIZATION_MODE_DRIZZLE = "drizzle"
+FINALIZATION_MODE_REPROJECT_COADD = "reproject_coadd"
+FINALIZATION_MODE_CLASSIC_SUMW = "classic_sumw"
+
+_FINALIZATION_MODES = frozenset(
+    {
+        FINALIZATION_MODE_MOSAIC,
+        FINALIZATION_MODE_DRIZZLE,
+        FINALIZATION_MODE_REPROJECT_COADD,
+        FINALIZATION_MODE_CLASSIC_SUMW,
+    }
+)
+
+
+def _decide_finalization_mode(stacker) -> str:
+    """Map the stacker flag state to a single coherent finalization mode.
+
+    This is the single source of truth for "one mode == one accumulation /
+    finalization strategy".  It is deterministic and never selects an
+    arbitrary mode:
+
+    * ``is_mosaic_run``          -> ``mosaic``
+    * ``drizzle_active_session`` -> ``drizzle`` (takes precedence over any
+      stray reproject flag, so a drizzle accumulation can never be finalized
+      as a classic SUM/W stack)
+    * ``reproject_between_batches`` -> ``classic_sumw`` (reprojected batches
+      are summed into the SUM/W memmaps)
+    * ``reproject_coadd_final``  -> ``reproject_coadd`` (SCI/WHT produced
+      explicitly by ``_reproject_classic_batches``)
+    * otherwise                  -> ``classic_sumw``
+    """
+    if getattr(stacker, "is_mosaic_run", False):
+        return FINALIZATION_MODE_MOSAIC
+    if getattr(stacker, "drizzle_active_session", False):
+        return FINALIZATION_MODE_DRIZZLE
+    if getattr(stacker, "reproject_between_batches", False):
+        return FINALIZATION_MODE_CLASSIC_SUMW
+    if getattr(stacker, "reproject_coadd_final", False):
+        return FINALIZATION_MODE_REPROJECT_COADD
+    return FINALIZATION_MODE_CLASSIC_SUMW
+
+
+def _drizzle_accumulators_have_data(accs) -> bool:
+    """Return True when at least one drizzle accumulator holds non-zero weight."""
+    if not accs:
+        return False
+    for acc in accs:
+        try:
+            wht = getattr(acc, "wht", None)
+            if wht is None:
+                wht = getattr(acc, "_out_wht", None)
+            if wht is not None and np.any(np.asarray(wht) > 0):
+                return True
+        except Exception:
+            # Conservative: if the accumulator cannot be inspected, do not
+            # declare the run empty.
+            return True
+    return False
+
+
+
+# ----------------------------------------------------------------------
 # Pool size helper for CPU reprojection
 # ----------------------------------------------------------------------
 
@@ -2147,6 +2217,10 @@ class SeestarQueuedStacker:
         # M3: accumulateur drizzle unique par canal (le mode Final/Incremental
         # historique est désormais sans effet — un seul chemin scientifique).
         self.drizzle_accumulators = None
+        # Mode de finalisation explicite: décidé à l'initialisation de
+        # l'accumulation (``initialize``) puis transmis à ``_save_final_stack``.
+        # ``None`` tant que ``initialize`` n'a pas statué.
+        self.finalization_mode = None
         logger.debug(
             "  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide."
         )
@@ -2468,6 +2542,19 @@ class SeestarQueuedStacker:
         )
         logger.debug(
             f"    -> self.drizzle_mode: {getattr(self, 'drizzle_mode', 'Non Défini')}"
+        )
+
+        # --- Décision UNIQUE du mode de finalisation -----------------------
+        # Un mode == une stratégie d'accumulation/finalisation cohérente.  Ce
+        # mode est fixé ICI (initialisation de l'accumulation) puis transmis
+        # explicitement à ``_save_final_stack``, qui ne retombe jamais sur un
+        # mode arbitraire.
+        self.finalization_mode = _decide_finalization_mode(self)
+        logger.debug(
+            f"    -> Mode de finalisation décidé à l'initialisation: {self.finalization_mode}"
+        )
+        self.update_progress(
+            f"  DEBUG QM [initialize]: Mode de finalisation = {self.finalization_mode}",
         )
 
         self.enable_preview = bool(enable_preview)
@@ -5674,6 +5761,7 @@ class SeestarQueuedStacker:
                     self.drizzle_active_session
                     and not self.is_mosaic_run
                     and getattr(self, "drizzle_accumulators", None)
+                    and _drizzle_accumulators_have_data(self.drizzle_accumulators)
                 ):  # M3: accumulateur unique -> sauvegarde partielle
                     self.update_progress(
                         "   Sauvegarde du stack Drizzle partiel (accumulateur unique)..."
@@ -5738,12 +5826,16 @@ class SeestarQueuedStacker:
                 )
                 # M3: un seul chemin — accumulateur unique par canal. Le mode
                 # drizzle_mode (Final/Incremental) est désormais SANS EFFET.
-                if not getattr(self, "drizzle_accumulators", None):
+                # Garde en amont : un mode Drizzle ne finalise JAMAIS comme un
+                # stack SUM/W classique, et un run sans image accumulée échoue
+                # proprement ici (jamais de sélection d'un autre mode).
+                _ready, _ready_msg = self._check_finalization_ready()
+                if not _ready:
                     self.update_progress(
-                        "   ❌ Drizzle: accumulateurs non initialisés.",
-                        None,
+                        f"   ❌ {_ready_msg}",
+                        "ERROR",
                     )
-                    self.processing_error = "Drizzle: accumulateurs non initialisés"
+                    self.processing_error = _ready_msg
                     self.final_stacked_path = None
                 else:
                     self.update_progress(
@@ -5877,17 +5969,19 @@ class SeestarQueuedStacker:
 
                 if self.reproject_between_batches:
                     self.update_progress("🏁 Finalisation Stacking (Reprojection)...")
-                    if self.images_in_cumulative_stack > 0 or (
-                        hasattr(self, "cumulative_sum_memmap")
-                        and self.cumulative_sum_memmap is not None
-                    ):
+                    # Garde en amont : memmaps SUM/WHT présents ET au moins une
+                    # image accumulée avant d'autoriser la finalisation.
+                    _ready, _ready_msg = self._check_finalization_ready()
+                    if _ready:
                         self._save_final_stack(
                             output_filename_suffix="_classic_reproject"
                         )
                     else:
                         self.update_progress(
-                            "   Aucune image accumulée pour sauvegarde."
+                            f"   ❌ {_ready_msg}",
+                            "ERROR",
                         )
+                        self.processing_error = _ready_msg
                         self.final_stacked_path = None
                 elif self.reproject_coadd_final:
                     self.update_progress("🏁 Finalisation Reproject&Coadd...")
@@ -5924,15 +6018,17 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "🏁 Finalisation Stacking Classique (SUM/W)..."
                     )
-                    if self.images_in_cumulative_stack > 0 or (
-                        hasattr(self, "cumulative_sum_memmap")
-                        and self.cumulative_sum_memmap is not None
-                    ):
+                    # Garde en amont : memmaps SUM/WHT présents ET au moins une
+                    # image accumulée avant d'autoriser la finalisation.
+                    _ready, _ready_msg = self._check_finalization_ready()
+                    if _ready:
                         self._save_final_stack(output_filename_suffix="_classic_sumw")
                     else:
                         self.update_progress(
-                            "   Aucune image accumulée dans le stack classique. Sauvegarde ignorée."
+                            f"   ❌ {_ready_msg}",
+                            "ERROR",
                         )
+                        self.processing_error = _ready_msg
                         self.final_stacked_path = None
             else:  # Cas imprévu
                 logger.debug(
@@ -12528,6 +12624,44 @@ class SeestarQueuedStacker:
 
     ############################################################################################################################################
 
+    def _check_finalization_ready(self):
+        """Return ``(ok: bool, error_message: str)`` for the current mode.
+
+        Called UPSTREAM of ``_save_final_stack`` so that a mode is never
+        finalized with missing or empty accumulation — never by selecting an
+        arbitrary fallback mode.  Mirrors the single source of truth used at
+        accumulation initialization (``_decide_finalization_mode``).
+        """
+        mode = getattr(self, "finalization_mode", None) or _decide_finalization_mode(
+            self
+        )
+        if mode == FINALIZATION_MODE_MOSAIC:
+            # La mosaïque valide elle-même le nombre de panneaux en amont.
+            return True, ""
+        if mode == FINALIZATION_MODE_DRIZZLE:
+            accs = getattr(self, "drizzle_accumulators", None)
+            if not accs:
+                return False, "Drizzle: accumulateurs non initialisés."
+            if not _drizzle_accumulators_have_data(accs):
+                return False, "Drizzle: aucune image accumulée (poids tous nuls)."
+            return True, ""
+        if mode == FINALIZATION_MODE_REPROJECT_COADD:
+            # Le SCI/WHT est produit explicitement juste avant la sauvegarde;
+            # le chemin appelant valide déjà la présence des lots résolus.
+            return True, ""
+        # FINALIZATION_MODE_CLASSIC_SUMW
+        if (
+            getattr(self, "cumulative_sum_memmap", None) is None
+            or getattr(self, "cumulative_wht_memmap", None) is None
+        ):
+            return (
+                False,
+                "Stacking classique: accumulateurs memmap SUM/WHT non disponibles.",
+            )
+        if getattr(self, "images_in_cumulative_stack", 0) <= 0:
+            return False, "Stacking classique: aucune image accumulée."
+        return True, ""
+
     def _save_final_stack(
         self,
         output_filename_suffix: str = "",
@@ -12535,6 +12669,7 @@ class SeestarQueuedStacker:
         drizzle_final_sci_data=None,
         drizzle_final_wht_data=None,
         preserve_linear_output: bool = False,
+        finalization_mode: Optional[str] = None,
     ):
         """
         Calcule l'image finale, applique les post-traitements et sauvegarde.
@@ -12585,70 +12720,65 @@ class SeestarQueuedStacker:
             f"  DEBUG QM: preserve_linear_output active?: {preserve_linear_output_setting}"
         )
 
-        is_reproject_mosaic_mode = (
-            output_filename_suffix == "_mosaic_reproject"
-            and drizzle_final_sci_data is not None
-            and drizzle_final_wht_data is not None
+        # --- Résolution du MODE DE FINALISATION explicite -----------------
+        # Le mode est décidé à l'initialisation de l'accumulation
+        # (``self.finalization_mode``) et transmis explicitement.  Aucun
+        # fallback arbitraire : si le mode n'est pas renseigné, on le dérive
+        # déterministiquement de l'état cohérent des flags via la même source
+        # de vérité utilisée par ``initialize``.
+        finalization_mode = finalization_mode or getattr(
+            self, "finalization_mode", None
         )
-        # M3: le Drizzle standard lit désormais les accumulateurs uniques par
-        # canal. Le mode drizzle_mode (Final/Incremental) est SANS EFFET.
+        if finalization_mode is None:
+            finalization_mode = _decide_finalization_mode(self)
+        if finalization_mode not in _FINALIZATION_MODES:
+            raise ValueError(
+                f"Mode de finalisation inconnu ou incohérent: {finalization_mode!r}"
+            )
+
+        is_reproject_mosaic_mode = (
+            finalization_mode == FINALIZATION_MODE_MOSAIC
+        )
         is_drizzle_standard_from_accumulators = (
-            self.drizzle_active_session
-            and not self.is_mosaic_run
-            and not self.reproject_between_batches
-            and not getattr(self, "reproject_coadd_final", False)
-            and drizzle_final_sci_data is None
-            and getattr(self, "drizzle_accumulators", None) is not None
-            and not is_reproject_mosaic_mode
+            finalization_mode == FINALIZATION_MODE_DRIZZLE
         )
         is_classic_reproject_mode = (
-            (
-                self.reproject_between_batches
-                or getattr(self, "reproject_coadd_final", False)
-            )
-            and drizzle_final_sci_data is not None
-            and drizzle_final_wht_data is not None
+            finalization_mode == FINALIZATION_MODE_REPROJECT_COADD
         )
         is_classic_stacking_mode = (
-            self.cumulative_sum_memmap is not None
-            and self.cumulative_wht_memmap is not None
-            and not (
-                is_reproject_mosaic_mode
-                or is_drizzle_standard_from_accumulators
-                or is_classic_reproject_mode
-            )
+            finalization_mode == FINALIZATION_MODE_CLASSIC_SUMW
         )
 
-        current_operation_mode_log_desc = "Unknown"
-        current_operation_mode_log_fits = "Unknown"
+        # Validation du CONTRAT DE DONNÉES par mode (jamais de fallback) :
+        # les modes qui finalisent depuis un résultat SCI/WHT exigent ces
+        # données explicitement.
+        if is_reproject_mosaic_mode or is_classic_reproject_mode:
+            if drizzle_final_sci_data is None or drizzle_final_wht_data is None:
+                raise ValueError(
+                    f"Mode '{finalization_mode}': données finales SCI/WHT "
+                    "manquantes pour la finalisation Reproject&Coadd."
+                )
 
-        if is_reproject_mosaic_mode:
-            current_operation_mode_log_desc = "Mosaïque (reproject_and_coadd)"
-            current_operation_mode_log_fits = "Mosaic (reproject_and_coadd)"
-        elif is_drizzle_standard_from_accumulators:
-            current_operation_mode_log_desc = "Drizzle Standard (accumulateur unique)"
-            current_operation_mode_log_fits = "Drizzle Standard (single accumulator)"
-        elif is_classic_reproject_mode:
-            current_operation_mode_log_desc = "Stacking Classique Reproject"
-            current_operation_mode_log_fits = "Classic Stacking Reproject"
-        elif is_classic_stacking_mode:
-            current_operation_mode_log_desc = "Stacking Classique SUM/W (memmaps)"
-            current_operation_mode_log_fits = "Classic Stacking SUM/W (memmaps)"
-        else:
-            if not self.drizzle_active_session and not self.is_mosaic_run:
-                current_operation_mode_log_desc = (
-                    "Stacking Classique SUM/W (memmaps) - Fallback"
-                )
-                current_operation_mode_log_fits = (
-                    "Classic Stacking SUM/W (memmaps) - Fallback"
-                )
-                is_classic_stacking_mode = True
+        _MODE_LOG_DESC = {
+            FINALIZATION_MODE_MOSAIC: "Mosaïque (reproject_and_coadd)",
+            FINALIZATION_MODE_DRIZZLE: "Drizzle Standard (accumulateur unique)",
+            FINALIZATION_MODE_REPROJECT_COADD: "Stacking Classique Reproject",
+            FINALIZATION_MODE_CLASSIC_SUMW: "Stacking Classique SUM/W (memmaps)",
+        }
+        _MODE_LOG_FITS = {
+            FINALIZATION_MODE_MOSAIC: "Mosaic (reproject_and_coadd)",
+            FINALIZATION_MODE_DRIZZLE: "Drizzle Standard (single accumulator)",
+            FINALIZATION_MODE_REPROJECT_COADD: "Classic Stacking Reproject",
+            FINALIZATION_MODE_CLASSIC_SUMW: "Classic Stacking SUM/W (memmaps)",
+        }
+        current_operation_mode_log_desc = _MODE_LOG_DESC[finalization_mode]
+        current_operation_mode_log_fits = _MODE_LOG_FITS[finalization_mode]
 
         self.update_progress(
-            f"  DEBUG QM: Mode d'opération détecté pour sauvegarde: {current_operation_mode_log_desc}"
+            f"  DEBUG QM: Mode de finalisation explicite: {current_operation_mode_log_desc}"
         )
         logger.debug(
-            f"  DEBUG QM: Mode d'opération détecté pour sauvegarde: {current_operation_mode_log_desc}"
+            f"  DEBUG QM: Mode de finalisation explicite: {current_operation_mode_log_desc} (finalization_mode={finalization_mode!r})"
         )
         logger.debug("=" * 80 + "\n")
         self.update_progress(

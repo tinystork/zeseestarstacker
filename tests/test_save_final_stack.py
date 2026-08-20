@@ -79,6 +79,7 @@ def _make_obj(tmp_path, save_as_float32):
 
 def test_save_final_stack_preserve_linear_float32(tmp_path):
     obj = _make_obj(tmp_path, True)
+    obj.finalization_mode = qm.FINALIZATION_MODE_MOSAIC
     data = np.array([[0.2, 0.5], [0.3, 0.4]], dtype=np.float32)
     wht = np.ones_like(data, dtype=np.float32)
     qm.SeestarQueuedStacker._save_final_stack(
@@ -95,6 +96,7 @@ def test_save_final_stack_preserve_linear_float32(tmp_path):
 
 def test_save_final_stack_preserve_linear_int16(tmp_path):
     obj = _make_obj(tmp_path, False)
+    obj.finalization_mode = qm.FINALIZATION_MODE_MOSAIC
     data = np.array([[0.0, 1.0], [0.5, 0.25]], dtype=np.float32)
     wht = np.ones_like(data, dtype=np.float32)
     qm.SeestarQueuedStacker._save_final_stack(
@@ -150,16 +152,17 @@ def test_save_final_stack_incremental_drizzle_objects(tmp_path):
 def test_save_final_stack_zero_weights_abort(tmp_path):
     obj = _make_obj(tmp_path, True)
     obj.drizzle_active_session = True
-    obj.drizzle_mode = "Incremental"
     obj.preserve_linear_output = True
 
     shape = (2, 2)
-    from drizzle.resample import Drizzle
+    from seestar.core.drizzle_core import DrizzleAccumulator
 
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=shape) for _ in range(3)]
-    for idx, d in enumerate(obj.incremental_drizzle_objects):
-        d.out_img[:] = idx + 1.0
-        d.out_wht[:] = 0.0
+    # M3: single per-channel accumulator; all-zero weights must abort cleanly
+    # (no SUM/W memmap fallback).
+    obj.drizzle_accumulators = [DrizzleAccumulator(shape) for _ in range(3)]
+    for acc in obj.drizzle_accumulators:
+        acc._out_img[:] = 1.0
+        acc._out_wht[:] = 0.0
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,
@@ -276,7 +279,7 @@ def test_incremental_drizzle_batch_weight_accumulates(tmp_path):
 
 def test_save_final_stack_classic_reproject(tmp_path):
     obj = _make_obj(tmp_path, True)
-    obj.reproject_between_batches = True
+    obj.reproject_coadd_final = True
     obj.preserve_linear_output = True
     data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
     wht = np.ones_like(data, dtype=np.float32)
@@ -295,7 +298,7 @@ def test_save_final_stack_classic_reproject(tmp_path):
 
 def test_save_final_stack_classic_reproject_crop(tmp_path):
     obj = _make_obj(tmp_path, True)
-    obj.reproject_between_batches = True
+    obj.reproject_coadd_final = True
     obj.preserve_linear_output = True
 
     data = np.arange(16, dtype=np.float32).reshape(4, 4)
@@ -375,7 +378,7 @@ def test_save_final_stack_radec_from_reference_header(tmp_path):
 def test_save_final_stack_batch1_negative_int16(tmp_path):
     obj = _make_obj(tmp_path, False)
     obj.batch_size = 1
-    obj.reproject_between_batches = True
+    obj.reproject_coadd_final = True
     obj.preserve_linear_output = True
 
     data = np.array([[-2.0, -1.0], [-1.5, 0.0]], dtype=np.float32)
