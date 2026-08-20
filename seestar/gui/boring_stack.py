@@ -80,7 +80,23 @@ def _log_mem(tag: str) -> None:
         pass
 
 def _cleanup_stacker(stacker):
-    """Free all heavy resources held by a SeestarQueuedStacker instance."""
+    """Free all heavy resources held by a SeestarQueuedStacker instance.
+
+    BOUNDARY (M3-D): boring_stack is strictly the classic single-batch
+    (mono-lot) SUM/W memmap stacking path.  It never selects nor implements the
+    Drizzle incremental policy: ``start_processing`` is called with
+    ``use_drizzle=False`` and ``drizzle_mode`` is never forwarded, so no
+    drizzle session is ever active (``drizzle_active_session`` stays False) and
+    ``drizzle_accumulators`` is never created.  There is no per-group preview
+    and no group-size handling in this module.
+
+    ``stacker._wait_drizzle_processes()`` below is a M3-D legacy no-op (its only
+    historical submitter is marked OBSOLETE LEGACY and is never called).  It is
+    kept solely for the executor shutdown lifecycle and must not be read as an
+    active incremental-drizzle feature.  This cleanup only drains the legacy
+    executors and closes the classic ``cumulative_sum_memmap`` /
+    ``cumulative_wht_memmap`` memmaps.
+    """
     if stacker is None:
         return
     # 1. finish async drizzle jobs

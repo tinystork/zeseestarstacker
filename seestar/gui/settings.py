@@ -302,6 +302,23 @@ class SettingsManager:
                     value=default_values_from_code.get("drizzle_pixfrac", 1.0)
                 ),
             ).get()
+            # M3-D: ``drizzle_group_size`` est une politique de ressources
+            # (taille de groupe du preview incrémental), jamais une science.
+            # Lecture robuste depuis la variable UI avec fallback 50.
+            gs_str_ui = getattr(
+                gui_instance,
+                "drizzle_group_size_var",
+                tk.StringVar(
+                    value=str(default_values_from_code.get("drizzle_group_size", 50))
+                ),
+            ).get()
+            try:
+                gs_val = int(float(str(gs_str_ui).strip()))
+                if gs_val < 1:
+                    gs_val = default_values_from_code.get("drizzle_group_size", 50)
+            except (ValueError, TypeError):
+                gs_val = default_values_from_code.get("drizzle_group_size", 50)
+            self.drizzle_group_size = gs_val
             self.apply_chroma_correction = getattr(
                 gui_instance,
                 "apply_chroma_correction_var",
@@ -866,6 +883,11 @@ class SettingsManager:
             getattr(gui_instance, "drizzle_pixfrac_var", tk.DoubleVar()).set(
                 self.drizzle_pixfrac
             )
+            # M3-D: appliquer la taille de groupe si la variable UI existe.
+            if hasattr(gui_instance, "drizzle_group_size_var"):
+                getattr(gui_instance, "drizzle_group_size_var", tk.StringVar()).set(
+                    str(int(getattr(self, "drizzle_group_size", 50)))
+                )
 
             setattr(gui_instance, "mosaic_mode_active", bool(self.mosaic_mode_active))
             setattr(
@@ -1189,6 +1211,9 @@ class SettingsManager:
         defaults_dict["drizzle_mode"] = "Final"
         defaults_dict["drizzle_kernel"] = "square"
         defaults_dict["drizzle_pixfrac"] = 1.0
+        # M3-D: politique de ressources (taille de groupe du preview
+        # incrémental), pas une science. Defaut 50.
+        defaults_dict["drizzle_group_size"] = 50
         defaults_dict["drizzle_double_norm_fix"] = True
 
         # --- Paramètres de Correction Couleur et Post-Traitement ---
@@ -1750,6 +1775,23 @@ class SettingsManager:
                 messages.append(
                     f"Pixfrac Drizzle ('{original}') invalide, réinitialisé à {self.drizzle_pixfrac:.2f}"
                 )
+            # M3-D: taille de groupe du preview incrémental (entier >= 1).
+            try:
+                gs_val = int(float(self.drizzle_group_size))
+                if gs_val < 1:
+                    original = self.drizzle_group_size
+                    self.drizzle_group_size = defaults_fallback["drizzle_group_size"]
+                    messages.append(
+                        f"Taille de groupe Drizzle ({original}) invalide (<1), réinitialisée à {self.drizzle_group_size}"
+                    )
+                else:
+                    self.drizzle_group_size = gs_val
+            except (ValueError, TypeError):
+                original = self.drizzle_group_size
+                self.drizzle_group_size = defaults_fallback["drizzle_group_size"]
+                messages.append(
+                    f"Taille de groupe Drizzle ('{original}') invalide, réinitialisée à {self.drizzle_group_size}"
+                )
 
 
 
@@ -2131,7 +2173,7 @@ class SettingsManager:
             )
             if not isinstance(current_rc_val, bool):
                 messages.append(
-                    f"Option 'Reproject Coadd Final' ('{current_rc_val}') invalide, réinitialisée à {defaults_fallback['reproject_coadd_final']}." 
+                    f"Option 'Reproject Coadd Final' ('{current_rc_val}') invalide, réinitialisée à {defaults_fallback['reproject_coadd_final']}."
                 )
                 self.reproject_coadd_final = defaults_fallback["reproject_coadd_final"]
             else:
@@ -2371,6 +2413,7 @@ class SettingsManager:
             "drizzle_mode": str(self.drizzle_mode),
             "drizzle_kernel": str(self.drizzle_kernel),
             "drizzle_pixfrac": float(self.drizzle_pixfrac),
+            "drizzle_group_size": int(getattr(self, "drizzle_group_size", 50)),
             "drizzle_double_norm_fix": bool(
                 getattr(self, "drizzle_double_norm_fix", True)
             ),

@@ -659,7 +659,13 @@ def _stack_worker(args):
 
 
 def drizzle_batch_worker(args):
-    """Wrapper used by the drizzle process pool."""
+    """M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
+
+    Wrapper used by the invalidated double-pass incremental-drizzle process
+    pool (``_start_drizzle_process`` -> ``_process_incremental_drizzle_batch``).
+    M3 uses the single per-channel ``drizzle_accumulators`` instead and never
+    submits background drizzle batches, so no live code references this worker.
+    """
     self = args[0]
     batch_temp_filepaths_list = args[1]
     current_batch_num = args[2] if len(args) > 2 else 0
@@ -828,6 +834,8 @@ logger.debug("Configuration warnings OK.")
 # --- NEW GLOBAL VERSION STRING CONSTANT (ajoutée à la fin de queue_manager.py) ---
 # Assurez-vous d'ajouter cette ligne aussi à l'extérieur de la classe, tout en haut du fichier, comme je l'ai suggéré précédemment.
 # Global version string to make sure it's always the same
+# M3-D OBSOLETE LEGACY: only referenced by the invalidated
+# ``_process_incremental_drizzle_batch`` (forensic compatibility).
 GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "7.0.2 Boring ostentus"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
@@ -1234,7 +1242,15 @@ class SeestarQueuedStacker:
         current_batch_num=0,
         total_batches_est=0,
     ):
-        """Launch incremental drizzle processing using the dedicated executor."""
+        """M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
+
+        Launched the invalidated double-pass incremental drizzle on the
+        dedicated ``drizzle_executor``. No live code calls this method anymore:
+        M3 accumulates into ``drizzle_accumulators`` directly. ``drizzle_executor``
+        and ``drizzle_processes`` are still created/shut down for lifecycle
+        compatibility (see ``seestar/gui/boring_stack.py``), but this is the
+        only submitter and it is never invoked in M3.
+        """
 
         fut = self.drizzle_executor.submit(
             drizzle_batch_worker,
@@ -1248,7 +1264,17 @@ class SeestarQueuedStacker:
         self.drizzle_processes.append(fut)
 
     def _wait_drizzle_processes(self):
-        """Wait for all background drizzle processes to finish."""
+        """Legacy no-op in M3 (kept for the executor shutdown lifecycle).
+
+        ``self.drizzle_processes`` is never populated in M3 (the only submitter
+        was ``_start_drizzle_process``, now OBSOLETE LEGACY), so this wait is
+        effectively empty. Kept because ``_save_final_stack`` still calls it
+        defensively via ``getattr`` and the GUI shutdown path
+        (``seestar/gui/boring_stack.py``) invokes it before draining the
+        executor. The body below only updates the legacy
+        ``incremental_drizzle_objects`` / ``intermediate_drizzle_batch_files``
+        attributes that M3 no longer uses.
+        """
         for p in self.drizzle_processes:
             if hasattr(p, "join"):
                 p.join()
@@ -2186,9 +2212,16 @@ class SeestarQueuedStacker:
         self.current_stack_header = None
         self.current_stack_data_raw = None
         self.images_in_cumulative_stack = 0
+        # M3-D: ``cumulative_drizzle_data*`` are DISPLAY-ONLY preview artifacts
+        # derived from ``drizzle_accumulators`` (see
+        # ``_update_preview_drizzle_accumulator``). They are NOT scientific
+        # state and are never re-injected into the accumulation.
         self.cumulative_drizzle_data = None
         self.cumulative_drizzle_data_raw = None
         self.total_exposure_seconds = 0.0
+        # M3-D OBSOLETE LEGACY: intermediate drizzle batch files from the
+        # invalidated double-pass incremental path. Kept empty in M3 (the only
+        # writer was ``_wait_drizzle_processes``).
         self.intermediate_drizzle_batch_files = []
 
         # When inter-batch reprojection is enabled we may want to keep the
@@ -2213,6 +2246,10 @@ class SeestarQueuedStacker:
         # input size instead of the expanded drizzle size.
         self.keep_input_size_for_reproject = False
 
+        # M3-D OBSOLETE LEGACY: per-channel ``Drizzle`` object list of the
+        # invalidated double-pass incremental path. Kept only for forensic
+        # compatibility (referenced by the legacy
+        # ``_process_incremental_drizzle_batch``). M3 uses ``drizzle_accumulators``.
         self.incremental_drizzle_objects = []
         # M3: accumulateur drizzle unique par canal (le mode Final/Incremental
         # historique est désormais sans effet — un seul chemin scientifique).
@@ -2221,6 +2258,16 @@ class SeestarQueuedStacker:
         # l'accumulation (``initialize``) puis transmis à ``_save_final_stack``.
         # ``None`` tant que ``initialize`` n'a pas statué.
         self.finalization_mode = None
+        # M3-D: politique de traitement Drizzle. ``drizzle_processing_policy``
+        # ∈ {"standard", "incremental"} est dérivée de ``drizzle_mode`` (Final→
+        # standard, Incremental→incremental) : une seule science, deux
+        # politiques de ressources (grouping + preview). ``drizzle_group_size``
+        # est la taille de groupe du preview incrémental (défaut 50, lisible
+        # depuis les settings via getattr).
+        self.drizzle_processing_policy = "standard"
+        self.drizzle_group_size = 50
+        self._drizzle_frame_count = 0
+        self._drizzle_group_index = 0
         logger.debug(
             "  -> Attributs pour Drizzle Incrémental (objets) initialisés à liste vide."
         )
@@ -2244,6 +2291,12 @@ class SeestarQueuedStacker:
                     self.stack_final_combine = "reproject_coadd"
                 logger.debug(
                     f"  -> Flag reproject_coadd_final initialisé depuis settings: {self.reproject_coadd_final}"
+                )
+                self.drizzle_group_size = max(
+                    1, int(getattr(settings, "drizzle_group_size", 50) or 50)
+                )
+                logger.debug(
+                    f"  -> drizzle_group_size initialisé depuis settings: {self.drizzle_group_size}"
                 )
             except Exception:
                 logger.debug(
@@ -2726,6 +2779,16 @@ class SeestarQueuedStacker:
                 # Attribut legacy conservé (plus utilisé) : le mode
                 # Incrémental/Final historique est désormais sans effet.
                 self.incremental_drizzle_objects = []
+                self._drizzle_frame_count = 0
+                self._drizzle_group_index = 0
+                policy = getattr(self, "drizzle_processing_policy", "standard")
+                if policy == "incremental":
+                    logger.info(
+                        "DRIZZLE POLICY: INCREMENTAL (group_size=%d)",
+                        max(1, int(getattr(self, "drizzle_group_size", 50) or 50)),
+                    )
+                else:
+                    logger.info("DRIZZLE POLICY: STANDARD")
                 logger.debug(
                     f"  -> {len(self.drizzle_accumulators)} accumulateurs Drizzle (single) créés. Shape={out_shape_hw}"
                 )
@@ -3024,8 +3087,10 @@ class SeestarQueuedStacker:
     def refresh_preview(self) -> None:
         """Request a preview refresh using the current downsample factor."""
         try:
-            if getattr(self, "drizzle_active_session", False) and getattr(self, "cumulative_drizzle_data", None) is not None:
-                self._update_preview_incremental_drizzle()
+            if getattr(self, "drizzle_active_session", False) and getattr(
+                self, "drizzle_accumulators", None
+            ):
+                self._update_preview_drizzle_accumulator()
             else:
                 # Use SUM/W path which recomputes and applies downsample
                 self._update_preview_sum_w()
@@ -3476,8 +3541,13 @@ class SeestarQueuedStacker:
 
     def _update_preview_incremental_drizzle(self):
         """
-        Met à jour l'aperçu spécifiquement pour le mode Drizzle Incrémental.
-        Envoie les données drizzlées cumulatives et le header mis à jour.
+        M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
+
+        Legacy incremental-drizzle preview: sent the cumulative drizzled data
+        built by ``_process_incremental_drizzle_batch``. In M3 the preview is
+        derived from ``drizzle_accumulators`` by
+        ``_update_preview_drizzle_accumulator`` (DISPLAY-ONLY). No live path
+        calls this method.
         """
         global _last_drz_prev
         if _mono() - _last_drz_prev < _DRZ_PREV_MIN_DT:
@@ -5489,6 +5559,7 @@ class SeestarQueuedStacker:
                                         self._save_partial_stack()
                                         self._update_batch_count_file()
                                         self._current_batch_paths = []
+                                        self._drizzle_group_tick()
                                     else:
                                         self.failed_stack_count += 1
                                         logger.debug(
@@ -5740,10 +5811,10 @@ class SeestarQueuedStacker:
             )
             if self.drizzle_active_session and not self.is_mosaic_run:
                 logger.debug(
-                    f"      - Mode Drizzle (std): '{self.drizzle_mode}', Nb lots Drizzle interm.: {len(self.intermediate_drizzle_batch_files)}"
+                    f"      - Mode Drizzle (std): '{self.drizzle_mode}', Nb lots Drizzle interm. (legacy, vide en M3): {len(self.intermediate_drizzle_batch_files)}"
                 )
             logger.debug(
-                f"    - self.images_in_cumulative_stack (classique/DrizIncrVRAI): {self.images_in_cumulative_stack}"
+                f"    - self.images_in_cumulative_stack (classique): {self.images_in_cumulative_stack}"
             )
             logger.debug(
                 f"    - current_batch_items_with_masks_for_stack_batch (non traité si dernier lot partiel): {len(current_batch_items_with_masks_for_stack_batch)}"
@@ -5773,6 +5844,7 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "   Sauvegarde du stack Drizzle partiel (accumulateur unique)..."
                     )
+                    self._drizzle_flush_partial_group()
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_stopped",
                         stopped_early=True,
@@ -5848,6 +5920,7 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "🏁 Finalisation Drizzle (accumulateur unique)..."
                     )
+                    self._drizzle_flush_partial_group()
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_final"
                     )
@@ -8180,9 +8253,19 @@ class SeestarQueuedStacker:
         weight_map_override=None,  # Not used in this version but kept for signature compatibility
     ):
         """
-        [VRAI DRIZZLE INCRÉMENTAL] Traite un lot de fichiers temporaires en les ajoutant
-        aux objets Drizzle persistants. Met à jour l'aperçu après chaque image (ou lot).
-        Version: V_True_Incremental_Driz_DebugM81_Scale_2_Full_EXTENDED_DEBUG_ULTRA
+        M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
+
+        This is the invalidated double-pass incremental drizzle
+        ("V_True_Incremental_Driz"): it drizzled each batch of temporary files
+        onto persistent ``incremental_drizzle_objects`` (``Drizzle`` instances)
+        and re-drizzled batch results, which made the result depend on batch
+        size and fold edge flux. M3 replaces it with a single per-channel
+        ``DrizzleAccumulator`` (``drizzle_accumulators``), so this method is no
+        longer on any live worker path. It remains only because
+        ``tests/test_save_final_stack.py`` exercises its weight-override and
+        accumulation behaviour directly for regression documentation. The
+        "VRAI"/"TRUE incremental" wording inside this method is legacy and must
+        not be read as an active scientific path.
         """
         # Log de début de méthode
         logger.debug(
@@ -12843,6 +12926,8 @@ class SeestarQueuedStacker:
                 if not accs or len(accs) != 3:
                     raise ValueError("Accumulateurs Drizzle invalides ou manquants.")
 
+                logger.info("DRIZZLE FINALIZE: single accumulator (policy-independent)")
+
                 wht_channels = []
                 sci_channels = []
                 for acc in accs:
@@ -14371,6 +14456,7 @@ class SeestarQueuedStacker:
         self.is_mosaic_run = is_mosaic_run
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run
         self.drizzle_mode = str(drizzle_mode)
+        self._derive_drizzle_processing_policy()
 
         if getattr(self, "reference_pixel_scale_arcsec", None) is None:
             self.reference_pixel_scale_arcsec = None
@@ -15347,6 +15433,161 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.warning("M3: échec ajout frame au Drizzle: %s", e)
             return False
+
+    def _derive_drizzle_processing_policy(self):
+        """Map the legacy ``drizzle_mode`` to the M3 processing policy.
+
+        ``Final`` -> ``standard``, ``Incremental`` -> ``incremental``.  The
+        legacy ``drizzle_mode`` string is preserved for GUI/settings
+        compatibility but is otherwise inert: both policies share the exact
+        same single-accumulator science; only resource/preview timing differs
+        (``drizzle_group_size``).
+        """
+        mode = str(getattr(self, "drizzle_mode", "Final"))
+        if mode.lower() == "incremental":
+            self.drizzle_processing_policy = "incremental"
+        else:
+            self.drizzle_processing_policy = "standard"
+        gs = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        self.drizzle_group_size = gs
+        logger.debug(
+            "DRIZZLE POLICY MAPPING: drizzle_mode=%r -> drizzle_processing_policy=%r (group_size=%d)",
+            mode,
+            self.drizzle_processing_policy,
+            gs,
+        )
+
+    def _drizzle_group_tick(self):
+        """Increment the drizzle frame counter for every accumulated pose.
+
+        In the ``incremental`` policy only, emit a DISPLAY-ONLY group preview
+        + log whenever a full group is reached.  In ``standard`` policy the
+        counter still advances (so a manual preview reports an exact pose
+        count) but no automatic group preview is triggered.  The accumulation
+        science is unaffected in both policies.
+        """
+        self._drizzle_frame_count += 1
+        if getattr(self, "drizzle_processing_policy", "standard") != "incremental":
+            return
+        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        if self._drizzle_frame_count % group_size == 0:
+            self._drizzle_group_index += 1
+            self._update_preview_drizzle_accumulator()
+            logger.info(
+                "DRIZZLE POLICY: INCREMENTAL group %d/... frames accumulated: %d preview updated",
+                self._drizzle_group_index,
+                self._drizzle_frame_count,
+            )
+
+    def _drizzle_flush_partial_group(self):
+        """Preview the final partial group (if any) at end of run.
+
+        Only meaningful in incremental policy: when the total frame count is
+        not a multiple of ``drizzle_group_size``, the trailing partial group
+        has not yet been previewed.  The science result is unaffected.
+        """
+        if getattr(self, "drizzle_processing_policy", "standard") != "incremental":
+            return
+        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        frame_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+        if frame_count <= 0:
+            return
+        if frame_count % group_size != 0:
+            self._drizzle_group_index += 1
+            self._update_preview_drizzle_accumulator()
+            logger.info(
+                "DRIZZLE POLICY: INCREMENTAL group %d/... frames accumulated: %d preview updated",
+                self._drizzle_group_index,
+                frame_count,
+            )
+
+    def _update_preview_drizzle_accumulator(self):
+        """Derive a DISPLAY-ONLY preview from ``self.drizzle_accumulators``.
+
+        The preview is a per-channel ``finalize("divide")`` (SCI/WHT) stacked
+        to HWC, percentile-stretched to [0,1] and downsampled if large.  It
+        NEVER mutates the accumulator state (``finalize``/``wht`` return
+        copies).  The result is stored in ``self.cumulative_drizzle_data`` so
+        ``refresh_preview`` keeps working during drizzle, and sent through
+        ``self.preview_callback`` with the same contract as
+        ``_update_preview_sum_w`` (single HWC float32 array in [0,1]).
+        """
+        accs = getattr(self, "drizzle_accumulators", None)
+        if not accs:
+            return
+        if self.preview_callback is None:
+            return
+        try:
+            channels = [acc.finalize("divide").astype(np.float32) for acc in accs]
+            preview_hwc = np.stack(channels, axis=-1)
+
+            # Percentile stretch to [0,1] for display.
+            with np.errstate(all="ignore"):
+                lo, hi = np.nanpercentile(preview_hwc, [1.0, 99.0])
+            if hi > lo:
+                preview_hwc = (preview_hwc - lo) / (hi - lo)
+            elif np.any(np.isfinite(preview_hwc)) and np.any(preview_hwc != 0):
+                preview_hwc = np.full_like(preview_hwc, 0.5)
+            else:
+                preview_hwc = np.zeros_like(preview_hwc)
+            preview_hwc = np.clip(preview_hwc, 0.0, 1.0).astype(np.float32)
+
+            # Downsample if the preview is large (display-only).
+            preview_to_send = preview_hwc
+            if max(preview_hwc.shape[:2]) > _MAX_PREVIEW_SIDE_PX:
+                scale = _MAX_PREVIEW_SIDE_PX / max(preview_hwc.shape[:2])
+                new_size = (
+                    int(preview_hwc.shape[1] * scale),
+                    int(preview_hwc.shape[0] * scale),
+                )
+                preview_to_send = cv2.resize(
+                    preview_hwc, new_size, interpolation=cv2.INTER_AREA
+                )
+
+            # Apply the GUI-selected downsample factor as a final step (1..4).
+            try:
+                eff_factor = int(getattr(self, "preview_downsample_factor", 2))
+            except Exception:
+                eff_factor = 2
+            eff_factor = max(1, min(4, eff_factor))
+            if eff_factor > 1:
+                h, w = preview_to_send.shape[:2]
+                new_size = (max(1, w // eff_factor), max(1, h // eff_factor))
+                preview_to_send = cv2.resize(
+                    preview_to_send, new_size, interpolation=cv2.INTER_AREA
+                )
+
+            # Store the DISPLAY artifact so ``refresh_preview`` can serve it.
+            self.cumulative_drizzle_data = preview_to_send
+            self.cumulative_drizzle_data_raw = preview_hwc
+
+            header_copy = (
+                self.current_stack_header.copy()
+                if getattr(self, "current_stack_header", None)
+                else fits.Header()
+            )
+            header_copy["PREV_SRC"] = (
+                "Drizzle Accumulator",
+                "Source data for this preview",
+            )
+            img_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+            total_imgs_est = int(getattr(self, "files_in_queue", 0) or 0)
+            current_batch_num = int(getattr(self, "stacked_batches_count", 0) or 0)
+            total_batches_est = int(getattr(self, "total_batches_estimated", 0) or 0)
+            stack_name = f"Aperçu Drizzle ({img_count}/{total_imgs_est} Img)"
+
+            self.preview_callback(
+                preview_to_send,
+                header_copy,
+                stack_name,
+                img_count,
+                total_imgs_est,
+                current_batch_num,
+                total_batches_est,
+            )
+        except Exception as e:
+            logger.debug(f"Error in _update_preview_drizzle_accumulator: {e}")
+            traceback.print_exc(limit=2)
 
     def _validate_drizzle_science(self, final_image, final_wht):
         """M3: validate the final drizzle science BEFORE any uint16 conversion.

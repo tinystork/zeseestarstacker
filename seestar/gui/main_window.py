@@ -537,6 +537,9 @@ class SeestarStackerGUI:
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
+        # M3-D: politique de ressources (taille de groupe du preview
+        # incrémental), pas une science. Defaut 50.
+        self.drizzle_group_size_var = tk.StringVar(value="50")
         self.use_gpu_var = tk.BooleanVar(value=False)
 
         self.preview_stretch_method = tk.StringVar(value="Asinh")
@@ -635,13 +638,10 @@ class SeestarStackerGUI:
             global_drizzle_enabled = self.use_drizzle_var.get()
             state = tk.NORMAL if global_drizzle_enabled else tk.DISABLED
 
-            # --- NOUVEAU : Désactiver aussi l'échelle/WHT si mode Incrémental ---
-            # Certaines options peuvent ne pas être pertinentes en mode incrémental
-            # Pour l'instant, on les laisse actives dans les deux modes si Drizzle est coché.
-            # On pourrait ajouter une logique ici plus tard si nécessaire.
-            # Par exemple:
-            # is_incremental = self.drizzle_mode_var.get() == "Incremental"
-            # scale_state = state if not is_incremental else tk.DISABLED # Désactiver échelle si incrémental?
+            # M3-D: ``Final``/``Incremental`` is a RESOURCE/PREVIEW policy,
+            # not two sciences. Scale/WHT/kernel/pixfrac stay enabled in both
+            # modes; only ``drizzle_group_size`` depends on the Large dataset
+            # (Incremental) policy (grouped preview cadence).
 
             # Liste des widgets qui dépendent de l'activation GLOBALE de Drizzle
             widgets_to_toggle = [
@@ -674,6 +674,23 @@ class SeestarStackerGUI:
                 if widget and hasattr(widget, "winfo_exists") and widget.winfo_exists():
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
+
+            # M3-D: la taille de groupe n'est pertinente qu'en politique Large
+            # dataset (Incremental). Standard garde une science identique sans
+            # preview automatique par groupe -> widget désactivé.
+            group_state = tk.DISABLED
+            if global_drizzle_enabled and self.drizzle_mode_var.get() == "Incremental":
+                group_state = tk.NORMAL
+            for gwidget in (
+                getattr(self, "drizzle_group_size_label", None),
+                getattr(self, "drizzle_group_size_spinbox", None),
+            ):
+                if (
+                    gwidget
+                    and hasattr(gwidget, "winfo_exists")
+                    and gwidget.winfo_exists()
+                ):
+                    gwidget.config(state=group_state)
 
         except tk.TclError:
             # Ignorer les erreurs si un widget n'existe pas (peut arriver pendant l'init)
@@ -1313,24 +1330,60 @@ class SeestarStackerGUI:
         self.drizzle_check.pack(anchor=tk.W, padx=5, pady=(5, 2))
         self.drizzle_mode_frame = ttk.Frame(self.drizzle_options_frame)
         self.drizzle_mode_frame.pack(fill=tk.X, padx=(20, 5), pady=(2, 5))
-        self.drizzle_mode_label = ttk.Label(self.drizzle_mode_frame, text="Mode:")
+        self.drizzle_mode_label = ttk.Label(
+            self.drizzle_mode_frame,
+            text=self.tr("drizzle_processing_label", default="Drizzle processing:"),
+        )
         self.drizzle_mode_label.pack(side=tk.LEFT, padx=(0, 5))
         self.drizzle_radio_final = ttk.Radiobutton(
             self.drizzle_mode_frame,
-            text="Final",
+            text=self.tr("drizzle_processing_standard", default="Standard"),
             variable=self.drizzle_mode_var,
             value="Final",
             command=self._update_drizzle_options_state,
         )
         self.drizzle_radio_incremental = ttk.Radiobutton(
             self.drizzle_mode_frame,
-            text="Incremental",
+            text=self.tr(
+                "drizzle_processing_incremental", default="Large dataset / incremental"
+            ),
             variable=self.drizzle_mode_var,
             value="Incremental",
             command=self._update_drizzle_options_state,
         )
         self.drizzle_radio_final.pack(side=tk.LEFT, padx=3)
         self.drizzle_radio_incremental.pack(side=tk.LEFT, padx=3)
+        self.drizzle_group_size_frame = ttk.Frame(self.drizzle_options_frame)
+        self.drizzle_group_size_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
+        self.drizzle_group_size_label = ttk.Label(
+            self.drizzle_group_size_frame,
+            text=self.tr("drizzle_group_size_label", default="Preview group size:"),
+        )
+        self.drizzle_group_size_label.pack(side=tk.LEFT, padx=(0, 5))
+        self.drizzle_group_size_spinbox = ttk.Spinbox(
+            self.drizzle_group_size_frame,
+            from_=1,
+            to=100000,
+            increment=10,
+            textvariable=self.drizzle_group_size_var,
+            width=8,
+        )
+        self.drizzle_group_size_spinbox.pack(side=tk.LEFT, padx=5)
+        self.drizzle_policy_hint = ttk.Label(
+            self.drizzle_options_frame,
+            text=self.tr(
+                "drizzle_processing_hint",
+                default=(
+                    "Standard and Large dataset share the same M3 accumulator; "
+                    "Large dataset only adds grouped preview/progress. "
+                    "Final result is identical."
+                ),
+            ),
+            foreground="#666666",
+            wraplength=420,
+            justify=tk.LEFT,
+        )
+        self.drizzle_policy_hint.pack(anchor=tk.W, padx=(20, 5), pady=(0, 5))
         self.drizzle_scale_frame = ttk.Frame(self.drizzle_options_frame)
         self.drizzle_scale_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
         self.drizzle_scale_label = ttk.Label(self.drizzle_scale_frame, text="Scale:")
@@ -3662,12 +3715,10 @@ class SeestarStackerGUI:
             self.logger.debug(
                 "  [update_preview] Mise à jour de l'aperçu suivante : simple rafraîchissement sans auto-ajustement."
             )
-            if self.drizzle_mode_var.get() == "Incremental":
-                self.current_preview_data = preview_display
-                self.current_preview_hist_data = preview_hist
-                self.refresh_preview()
-                return
-            # Non-drizzle modes keep existing behaviour
+            # M3-D: le refresh de preview est indépendant de la politique —
+            # Standard et Large dataset partagent le même accumulateur M3 et le
+            # même chemin de rafraîchissement (aucun algorithme incrémental
+            # séparé). Les données preview courantes ont déjà été affectées plus haut.
             self.refresh_preview()
 
         if self.current_stack_header:
@@ -5549,7 +5600,6 @@ class SeestarStackerGUI:
         if q_stacker is not None:
             final_stack_path = getattr(q_stacker, "final_stacked_path", None)
             drizzle_active_session_backend = getattr(q_stacker, "drizzle_active_session", False)
-            drizzle_mode_backend = getattr(q_stacker, "drizzle_mode", "Final")
             was_stopped_by_user = getattr(q_stacker, "stop_processing_flag_for_gui", False)
             processing_error_details = getattr(q_stacker, "processing_error", None)
             source_folders_with_unaligned_in_run = getattr(q_stacker, "warned_unaligned_source_folders", set())
@@ -5586,13 +5636,10 @@ class SeestarStackerGUI:
                 )
             )
             if is_drizzle_result:
-                images_stacked = (
-                    aligned_count
-                    if drizzle_mode_backend == "Final"
-                    or "_mosaic" in os.path.basename(final_stack_path).lower()
-                    or "_reproject" in os.path.basename(final_stack_path).lower()
-                    else images_in_cumulative_from_backend
-                )
+                # M3-D: accumulateur unique — Standard et Large dataset comptent
+                # les poses accumulées de la même façon (aligned_count), comme
+                # mosaic/reproject. La politique ne change jamais le compteur.
+                images_stacked = aligned_count
             else:
                 images_stacked = images_in_cumulative_from_backend
         else:
