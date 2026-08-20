@@ -21,10 +21,13 @@ spec.loader.exec_module(solver_config)
 
 
 def test_default_config_has_key_keys():
-    assert "solver_method" in solver_config.DEFAULT_CONFIG
-    assert "astrometry_local_path" in solver_config.DEFAULT_CONFIG
-    assert "astrometry_api_key" in solver_config.DEFAULT_CONFIG
     assert "astap_default_search_radius" in solver_config.DEFAULT_CONFIG
+    assert "astap_default_downsample" in solver_config.DEFAULT_CONFIG
+    assert "astap_default_sensitivity" in solver_config.DEFAULT_CONFIG
+    # ANSVR / Astrometry.net constants are gone (M2b).
+    assert "solver_method" not in solver_config.DEFAULT_CONFIG
+    assert "astrometry_local_path" not in solver_config.DEFAULT_CONFIG
+    assert "astrometry_api_key" not in solver_config.DEFAULT_CONFIG
 
 
 def test_config_round_trip_preserves_keys(tmp_path, monkeypatch):
@@ -33,16 +36,14 @@ def test_config_round_trip_preserves_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(solver_config, "_legacy_config_candidates", lambda: [])
 
     data = solver_config.DEFAULT_CONFIG.copy()
-    data["solver_method"] = "ansvr"
-    data["astrometry_local_path"] = "/tmp/ansvr"
-    data["astrometry_api_key"] = "XYZ123"
+    data["astap_default_search_radius"] = 7.5
+    data["astap_default_downsample"] = 3
 
     assert solver_config.save_config(data)
     loaded = solver_config.load_config()
 
-    assert loaded["solver_method"] == "ansvr"
-    assert loaded["astrometry_local_path"] == "/tmp/ansvr"
-    assert loaded["astrometry_api_key"] == "XYZ123"
+    assert loaded["astap_default_search_radius"] == 7.5
+    assert loaded["astap_default_downsample"] == 3
 
 
 def test_soft_migration_from_legacy(tmp_path, monkeypatch):
@@ -50,7 +51,11 @@ def test_soft_migration_from_legacy(tmp_path, monkeypatch):
     legacy = tmp_path / "zemosaic_config.json"
     legacy.write_text(
         json.dumps(
-            {"solver_method": "ansvr", "astap_default_search_radius": 5.0}
+            {
+                "solver_method": "ansvr",
+                "astrometry_api_key": "XYZ123",
+                "astap_default_search_radius": 5.0,
+            }
         ),
         encoding="utf-8",
     )
@@ -59,15 +64,19 @@ def test_soft_migration_from_legacy(tmp_path, monkeypatch):
     monkeypatch.setattr(solver_config, "_legacy_config_candidates", lambda: [legacy])
 
     loaded = solver_config.load_config()
-    assert loaded["solver_method"] == "ansvr"
     assert loaded["astap_default_search_radius"] == 5.0
+    # Legacy ANSVR/API-key keys are ignored (not part of DEFAULT_CONFIG).
+    assert "solver_method" not in loaded
+    assert "astrometry_api_key" not in loaded
     # Legacy file is consulted read-only and left in place.
     assert legacy.exists()
 
     # Saving writes to the new user location, not the legacy file.
     assert solver_config.save_config(loaded)
     assert new_path.exists()
-    assert json.loads(legacy.read_text(encoding="utf-8"))["solver_method"] == "ansvr"
+    saved = json.loads(new_path.read_text(encoding="utf-8"))
+    assert "solver_method" not in saved
+    assert "astrometry_api_key" not in saved
 
 
 def test_getters_return_defaults(monkeypatch):

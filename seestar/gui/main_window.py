@@ -38,7 +38,7 @@ import numpy as np
 from astropy.io import fits
 from PIL import Image, ImageTk
 
-from seestar.core.solver_config import load_config
+from seestar.core.solver_config import load_config, resolve_solver_gate
 
 from ..queuep.queue_manager import (
     GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG as APP_VERSION,
@@ -248,7 +248,6 @@ class SeestarStackerGUI:
         except Exception as e:
             self.logger.error(f"Error loading or setting window icon: {e}")
 
-        self.astrometry_api_key_var = tk.StringVar()
         self.last_stack_path = tk.StringVar()
         self.temp_folder_path = tk.StringVar()
         self.localization = Localization("en")
@@ -317,10 +316,6 @@ class SeestarStackerGUI:
         self.language_var.set(self.settings.language)
         self.localization.set_language(self.settings.language)
         self.logger.info(f"DEBUG (GUI __init__): Settings chargés, langue définie sur '{self.settings.language}'.")
-        self.logger.info(
-            f"DEBUG (GUI __init__): Valeur de self.settings.astrometry_api_key APRES load_settings: '{self.settings.astrometry_api_key}' (longueur: {len(self.settings.astrometry_api_key)})"
-        )
-
         self._auto_stretch_after_id = None
         self._auto_wb_after_id = None
         self.auto_zoom_histogram_var = tk.BooleanVar(value=False)
@@ -346,15 +341,6 @@ class SeestarStackerGUI:
         self.logger.info("DEBUG (GUI __init__): Layout créé, managers initialisés.")
 
         self.settings.apply_to_ui(self)
-        try:
-            api_key_val_after_apply = self.astrometry_api_key_var.get()
-            self.logger.info(
-                f"DEBUG (GUI __init__): Valeur de self.astrometry_api_key_var APRES apply_to_ui: '{api_key_val_after_apply}' (longueur: {len(api_key_val_after_apply)})"
-            )
-        except Exception as e_get_var:
-            self.logger.error(
-                f"DEBUG (GUI __init__): Erreur lecture self.astrometry_api_key_var après apply_to_ui: {e_get_var}"
-            )
 
         if hasattr(self, "_update_spinbox_from_float"):
             self._update_spinbox_from_float()
@@ -613,17 +599,9 @@ class SeestarStackerGUI:
         print(
             f"DEBUG (GUI init_variables): Variable preserve_linear_output_var créée (valeur initiale: {self.preserve_linear_output_var.get()})."
         )
-        self.use_third_party_solver_var = tk.BooleanVar(value=True)
-        print(
-            f"DEBUG (GUI init_variables): Variable use_third_party_solver_var créée (valeur initiale: {self.use_third_party_solver_var.get()})."
-        )
         self.reproject_between_batches_var = tk.BooleanVar(value=False)
         # Separate toggle for final reproject+coadd
         self.reproject_coadd_var = tk.BooleanVar(value=False)
-        self.ansvr_host_port_var = tk.StringVar(value="127.0.0.1:8080")
-
-        self.astrometry_solve_field_dir_var = tk.StringVar(value="")
-
         # --- FIN NOUVELLE VARIABLE ---
 
         print("DEBUG (GUI init_variables V_SaveAsFloat32_1): Fin initialisation variables Tkinter.")  # Version Log
@@ -6436,30 +6414,26 @@ class SeestarStackerGUI:
                 return
         print("DEBUG (GUI start_processing): Phase 2 - Vérification avertissement OK (ou non applicable).")
 
-        # --- Additional check: reproject modes require a configured local solver ---
+        # --- Additional check: reproject modes require a usable solver ---
         if self.reproject_between_batches_var.get() or getattr(self, "reproject_coadd_var", tk.BooleanVar()).get():
-            use_solver = self.use_third_party_solver_var.get()
             solver_pref = getattr(self.settings, "local_solver_preference", "none")
             astap_path = getattr(self.settings, "astap_path", "").strip()
+            astap_configured = bool(astap_path)
 
-            solver_configured = False
-            if solver_pref == "astap":
-                solver_configured = bool(astap_path)
-            elif solver_pref in ("zesolver", "ansvr", "astrometry"):
-                # ZeSolver primary (legacy preferences migrate to it); ASTAP
-                # remains an acceptable autonomous fallback.
-                try:
-                    zesolver_ready = (
-                        discover_zesolver().state.value == "available"
-                    )
-                except Exception:
-                    zesolver_ready = False
-                solver_configured = bool(astap_path) or zesolver_ready
-            else:
-                solver_configured = False
+            try:
+                zesolver_available = discover_zesolver().state.value == "available"
+            except Exception:
+                zesolver_available = False
 
-            if not (use_solver and solver_configured):
-                messagebox.showerror(self.tr("error"), self.tr("reproject_solver_required_error"))
+            allowed, reason = resolve_solver_gate(
+                solver_pref, zesolver_available, astap_configured
+            )
+
+            if not allowed:
+                message = self.tr("reproject_solver_required_error")
+                if reason:
+                    message = f"{message}\n\n{reason}"
+                messagebox.showerror(self.tr("error"), message)
                 if hasattr(self, "start_button") and self.start_button.winfo_exists():
                     self.start_button.config(state=tk.NORMAL)
                 return
@@ -6718,11 +6692,9 @@ class SeestarStackerGUI:
                     "low_wht_percentile": self.settings.low_wht_percentile,
                     "low_wht_soften_px": self.settings.low_wht_soften_px,
                     "is_mosaic_run": self.settings.mosaic_mode_active,
-                    "api_key": self.settings.astrometry_api_key,
                     "mosaic_settings": self.settings.mosaic_settings,
                     "astap_path": self.settings.astap_path,
                     "astap_data_dir": self.settings.astap_data_dir,
-                    "local_ansvr_path": self.settings.local_ansvr_path,
                     "local_solver_preference": self.settings.local_solver_preference,
                     "astap_search_radius": self.settings.astap_search_radius,
                     "astap_downsample": self.settings.astap_downsample,

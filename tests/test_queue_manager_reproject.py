@@ -518,7 +518,7 @@ def test_freeze_reference_wcs(monkeypatch, tmp_path):
         fits.writeto(path, np.moveaxis(np.zeros(obj.memmap_shape, dtype=np.float32), -1, 0), hdr, overwrite=True)
         return True
 
-    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_solver_and_update_header", fake_run_astap)
 
     obj._solve_cumulative_stack()
 
@@ -945,7 +945,7 @@ def test_reproject_coadd_skips_solver_when_wcs_present(monkeypatch, tmp_path):
     def fail_solver(*a, **k):
         raise AssertionError("solver should not be called")
 
-    monkeypatch.setattr(obj, "_run_astap_and_update_header", fail_solver)
+    monkeypatch.setattr(obj, "_run_solver_and_update_header", fail_solver)
 
     class DummySolver:
         def solve(
@@ -1014,7 +1014,7 @@ def test_save_classic_batch_respects_flag(monkeypatch, tmp_path):
         called["n"] += 1
         return True
 
-    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_solver_and_update_header", fake_run_astap)
 
     hdr = qm.fits.Header()
     data = np.zeros((4, 4, 3), dtype=np.float32)
@@ -1113,7 +1113,7 @@ def test_save_classic_batch_crop_resolves(monkeypatch, tmp_path):
         calls["n"] += 1
         return True
 
-    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_solver_and_update_header", fake_run_astap)
 
     hdr = qm.fits.Header()
     hdr["CRPIX1"] = 5.0
@@ -1160,7 +1160,7 @@ def test_save_classic_batch_unsolved_skipped(monkeypatch, tmp_path):
     def fake_run_astap(self, path):
         return False
 
-    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_astap_and_update_header", fake_run_astap)
+    monkeypatch.setattr(qm.SeestarQueuedStacker, "_run_solver_and_update_header", fake_run_astap)
 
     hdr = qm.fits.Header()
     data = np.ones((4, 4, 3), dtype=np.float32)

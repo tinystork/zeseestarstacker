@@ -614,7 +614,6 @@ def parse_args():
         default=None,
         help="Maximum HQ memory in GB (overrides SEESTAR_MAX_MEM)",
     )
-    p.add_argument("--api-key", default=None, help="Astrometry.net API key")
     p.add_argument("--batch-size", type=int, default=1, help="Batch size")
     p.add_argument(
         "--chunk-size",
@@ -782,13 +781,11 @@ def _run_stack(args, progress_cb) -> int:
 
     solver_settings = {
         "local_solver_preference": settings.local_solver_preference,
-        "api_key": args.api_key or getattr(settings, "astrometry_api_key", ""),
         "astap_path": settings.astap_path,
         "astap_data_dir": settings.astap_data_dir,
         "astap_search_radius": settings.astap_search_radius,
         "astap_downsample": settings.astap_downsample,
         "astap_sensitivity": settings.astap_sensitivity,
-        "local_ansvr_path": getattr(settings, "local_ansvr_path", ""),
     }
 
     stacker = SeestarQueuedStacker(
@@ -801,7 +798,6 @@ def _run_stack(args, progress_cb) -> int:
         astap_downsample=settings.astap_downsample,
         astap_sensitivity=settings.astap_sensitivity,
     )
-    stacker.api_key = solver_settings["api_key"]
     solver = AstrometrySolver(progress_callback=progress_cb) if args.batch_size == 1 else None
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker

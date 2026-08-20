@@ -2017,8 +2017,6 @@ class SeestarQueuedStacker:
         self.astap_search_radius = float(kwargs.get("astap_search_radius", 3.0))
         self.astap_downsample = int(kwargs.get("astap_downsample", 1))
         self.astap_sensitivity = int(kwargs.get("astap_sensitivity", 100))
-        self.local_ansvr_path = str(kwargs.get("local_ansvr_path", ""))
-        self.api_key = kwargs.get("api_key")
 
         self.reference_wcs_object = None
         self.reference_header_for_wcs = None
@@ -14629,12 +14627,10 @@ class SeestarQueuedStacker:
         low_wht_percentile=5,
         low_wht_soften_px=128,
         is_mosaic_run=False,
-        api_key=None,
         mosaic_settings=None,
         use_local_solver_priority=False,  # DEPRECATED - kept for signature compat
         astap_path="",
         astap_data_dir="",
-        local_ansvr_path="",
         astap_search_radius=3.0,
         astap_downsample=1,
         astap_sensitivity=100,
@@ -14771,7 +14767,6 @@ class SeestarQueuedStacker:
         self.astap_search_radius = float(astap_search_radius)
         self.astap_downsample = int(astap_downsample)
         self.astap_sensitivity = int(astap_sensitivity)
-        self.local_ansvr_path = str(local_ansvr_path)
 
         logger.debug(
             f"    [Solver Settings sur self via start_processing args] Pref: '{self.local_solver_preference}'"
@@ -14791,9 +14786,6 @@ class SeestarQueuedStacker:
         logger.debug(
             f"    [Solver Settings sur self via start_processing args] ASTAP Sensitivity: {self.astap_sensitivity}"
         )
-        logger.debug(
-            f"    [Solver Settings sur self via start_processing args] Ansvr Path: '{self.local_ansvr_path}'"
-        )
 
         try:
             self.astap_search_radius_config = float(astap_search_radius)
@@ -14810,9 +14802,6 @@ class SeestarQueuedStacker:
             f"    [Solver Settings sur self] ASTAP Data: '{self.astap_data_dir}'"
         )
         logger.debug(
-            f"    [Solver Settings sur self] Ansvr Local: '{self.local_ansvr_path}'"
-        )
-        logger.debug(
             f"    [Solver Settings sur self] ASTAP Search Radius Config: {self.astap_search_radius_config}°"
         )
 
@@ -14820,7 +14809,6 @@ class SeestarQueuedStacker:
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run
         self.drizzle_mode = str(drizzle_mode)
 
-        self.api_key = api_key if isinstance(api_key, str) else ""
         if getattr(self, "reference_pixel_scale_arcsec", None) is None:
             self.reference_pixel_scale_arcsec = None
 

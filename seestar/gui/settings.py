@@ -302,17 +302,6 @@ class SettingsManager:
                     value=default_values_from_code.get("drizzle_pixfrac", 1.0)
                 ),
             ).get()
-            self.astrometry_api_key = (
-                getattr(
-                    gui_instance,
-                    "astrometry_api_key_var",
-                    tk.StringVar(
-                        value=default_values_from_code.get("astrometry_api_key", "")
-                    ),
-                )
-                .get()
-                .strip()
-            )
             self.apply_chroma_correction = getattr(
                 gui_instance,
                 "apply_chroma_correction_var",
@@ -605,19 +594,6 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
-            # --- NOUVEAU : Lecture du setting d'utilisation des solveurs tiers ---
-            self.use_third_party_solver = getattr(
-                gui_instance,
-                "use_third_party_solver_var",
-                tk.BooleanVar(
-                    value=default_values_from_code.get("use_third_party_solver", True)
-                ),
-            ).get()
-            logger.debug(
-                f"DEBUG SM (update_from_ui): self.use_third_party_solver lu (attribut UI ou défaut): {self.use_third_party_solver}"
-            )
-            # --- FIN NOUVEAU ---
-
             # --- NEW: read boring thread mode ---
             self.boring_thread_mode = getattr(
                 gui_instance,
@@ -677,22 +653,6 @@ class SettingsManager:
                 self,
                 "astap_search_radius",
                 default_values_from_code.get("astap_search_radius", 30.0),
-            )
-            self.local_ansvr_path = getattr(
-                self,
-                "local_ansvr_path",
-                default_values_from_code.get("local_ansvr_path", ""),
-            )
-            self.ansvr_host_port = getattr(
-                self,
-                "ansvr_host_port",
-                default_values_from_code.get("ansvr_host_port", "127.0.0.1:8080"),
-            )
-
-            self.astrometry_solve_field_dir = getattr(
-                self,
-                "astrometry_solve_field_dir",
-                default_values_from_code.get("astrometry_solve_field_dir", ""),
             )
 
             # In classic stacking mode this option defaults to disabled unless
@@ -842,16 +802,6 @@ class SettingsManager:
                 self.astap_search_radius = self.get_default_values()[
                     "astap_search_radius"
                 ]
-            if not hasattr(self, "local_ansvr_path"):
-                self.local_ansvr_path = self.get_default_values()["local_ansvr_path"]
-            if not hasattr(self, "ansvr_host_port"):
-                self.ansvr_host_port = self.get_default_values()["ansvr_host_port"]
-
-            if not hasattr(self, "astrometry_solve_field_dir"):
-                self.astrometry_solve_field_dir = self.get_default_values()[
-                    "astrometry_solve_field_dir"
-                ]
-
             if not hasattr(self, "reproject_between_batches"):
                 self.reproject_between_batches = self.get_default_values()[
                     "reproject_between_batches"
@@ -1014,11 +964,6 @@ class SettingsManager:
                 gui_instance, "photutils_bn_exclude_percentile_var", tk.DoubleVar()
             ).set(self.photutils_bn_exclude_percentile)
 
-            if hasattr(gui_instance, "_update_photutils_bn_options_state"):
-                getattr(gui_instance, "astrometry_api_key_var", tk.StringVar()).set(
-                    self.astrometry_api_key or ""
-                )
-
             if hasattr(gui_instance, "apply_feathering_var"):
                 getattr(gui_instance, "apply_feathering_var", tk.BooleanVar()).set(
                     self.apply_feathering
@@ -1084,15 +1029,6 @@ class SettingsManager:
             )
             logger.debug(
                 f"DEBUG (Settings apply_to_ui): use_gpu appliqué à l'UI (valeur: {self.use_gpu})"
-            )
-            # --- FIN NOUVEAU ---
-
-            # --- NOUVEAU : Application du toggle use_third_party_solver ---
-            getattr(gui_instance, "use_third_party_solver_var", tk.BooleanVar()).set(
-                self.use_third_party_solver
-            )
-            logger.debug(
-                f"DEBUG (Settings apply_to_ui): use_third_party_solver appliqué à l'UI (valeur: {self.use_third_party_solver})"
             )
             # --- FIN NOUVEAU ---
 
@@ -1170,14 +1106,6 @@ class SettingsManager:
             getattr(gui_instance, "use_radec_hints_var", tk.BooleanVar()).set(
                 self.use_radec_hints
             )
-            getattr(gui_instance, "ansvr_host_port_var", tk.StringVar()).set(
-                self.ansvr_host_port
-            )
-
-            getattr(gui_instance, "astrometry_solve_field_dir_var", tk.StringVar()).set(
-                self.astrometry_solve_field_dir
-            )
-
             getattr(gui_instance, "reproject_between_batches_var", tk.BooleanVar()).set(
                 self.reproject_between_batches
             )
@@ -1327,13 +1255,6 @@ class SettingsManager:
         )
         # --- FIN NOUVEAU ---
 
-        # --- Nouveau : activation/désactivation solveurs tiers ---
-        defaults_dict["use_third_party_solver"] = True
-        logger.debug(
-            f"DEBUG (SettingsManager get_default_values): Ajout de 'use_third_party_solver'={defaults_dict['use_third_party_solver']}"
-        )
-        # --- FIN NOUVEAU ---
-
         # --- Paramètres Solveurs Locaux ---
         defaults_dict["local_solver_preference"] = "none"
         defaults_dict["astap_path"] = ""
@@ -1342,11 +1263,6 @@ class SettingsManager:
         defaults_dict["astap_downsample"] = 1
         defaults_dict["astap_sensitivity"] = 100
         defaults_dict["use_radec_hints"] = False
-        defaults_dict["local_ansvr_path"] = ""
-        defaults_dict["ansvr_host_port"] = "127.0.0.1:8080"
-
-        defaults_dict["astrometry_solve_field_dir"] = ""
-
         # When enabled, each batch is solved and reprojected incrementally onto
         # the reference WCS.
         defaults_dict["reproject_between_batches"] = False
@@ -1370,8 +1286,6 @@ class SettingsManager:
             "fastalign_dao_max_stars": 750,
             "mosaic_scale_factor": 1,  # <-- NOUVELLE LIGNE : Facteur d'échelle par défaut pour mosaïque (entier)
         }
-
-        defaults_dict["astrometry_api_key"] = ""
 
         # --- Paramètres de Prévisualisation ---
         defaults_dict["preview_stretch_method"] = "Asinh"
@@ -2062,16 +1976,6 @@ class SettingsManager:
                     100.0,
                 )
             )
-            current_api_key = getattr(
-                self, "astrometry_api_key", defaults_fallback["astrometry_api_key"]
-            )
-            if not isinstance(current_api_key, str):
-                messages.append(
-                    "Clé API Astrometry invalide (pas une chaîne), réinitialisée."
-                )
-                self.astrometry_api_key = defaults_fallback["astrometry_api_key"]
-            else:
-                self.astrometry_api_key = current_api_key.strip()
             self.output_filename = str(
                 getattr(self, "output_filename", defaults_fallback["output_filename"])
             ).strip()
@@ -2203,24 +2107,6 @@ class SettingsManager:
                 self.use_gpu = current_use_gpu
             # --- FIN NOUVEAU ---
 
-            # --- NOUVEAU : Validation du toggle use_third_party_solver ---
-            logger.debug("    -> Validating use_third_party_solver...")
-            current_use_solver_val = getattr(
-                self,
-                "use_third_party_solver",
-                defaults_fallback["use_third_party_solver"],
-            )
-            if not isinstance(current_use_solver_val, bool):
-                messages.append(
-                    f"Option 'Use Third Party Solver' ('{current_use_solver_val}') invalide, réinitialisée à {defaults_fallback['use_third_party_solver']}."
-                )
-                self.use_third_party_solver = defaults_fallback[
-                    "use_third_party_solver"
-                ]
-            else:
-                self.use_third_party_solver = current_use_solver_val
-            # --- FIN NOUVEAU ---
-
             # --- NEW: Validation of boring_thread_mode ---
             logger.debug("    -> Validating boring_thread_mode...")
             current_boring_val = getattr(
@@ -2259,9 +2145,6 @@ class SettingsManager:
             ).strip()
             self.astap_data_dir = str(
                 getattr(self, "astap_data_dir", defaults_fallback["astap_data_dir"])
-            ).strip()
-            self.local_ansvr_path = str(
-                getattr(self, "local_ansvr_path", defaults_fallback["local_ansvr_path"])
             ).strip()
             param_name_debug = "astap_search_radius"
             value_before_validation = getattr(
@@ -2304,7 +2187,7 @@ class SettingsManager:
             logger.debug(
                 f"DEBUG (Settings validate_settings): {param_name_debug} FINAL après validation: {getattr(self, param_name_debug, 'ERREUR_ATTR_FINAL')}°"
             )
-            valid_solver_prefs = ["none", "astap", "astrometry", "ansvr"]
+            valid_solver_prefs = ["none", "astap", "zesolver"]
             current_pref = getattr(
                 self,
                 "local_solver_preference",
@@ -2369,38 +2252,6 @@ class SettingsManager:
                 messages.append(
                     f"Rayon recherche ASTAP ('{original_radius_str}') invalide, réinitialisé à {self.astap_search_radius:.1f}°."
                 )
-            current_local_ansvr_path = getattr(
-                self, "local_ansvr_path", defaults_fallback["local_ansvr_path"]
-            )
-            if not isinstance(current_local_ansvr_path, str):
-                messages.append(
-                    "Chemin Ansvr Local invalide (pas une chaîne), réinitialisé."
-                )
-                self.local_ansvr_path = defaults_fallback["local_ansvr_path"]
-            else:
-                self.local_ansvr_path = current_local_ansvr_path.strip()
-            current_ansvr_host_port = getattr(
-                self, "ansvr_host_port", defaults_fallback["ansvr_host_port"]
-            )
-            if not isinstance(current_ansvr_host_port, str):
-                messages.append("Ansvr host/port invalide, réinitialisé.")
-                self.ansvr_host_port = defaults_fallback["ansvr_host_port"]
-            else:
-                self.ansvr_host_port = current_ansvr_host_port.strip()
-
-            current_astrometry_dir = getattr(
-                self,
-                "astrometry_solve_field_dir",
-                defaults_fallback["astrometry_solve_field_dir"],
-            )
-            if not isinstance(current_astrometry_dir, str):
-                messages.append("Chemin solve-field invalide, réinitialisé.")
-                self.astrometry_solve_field_dir = defaults_fallback[
-                    "astrometry_solve_field_dir"
-                ]
-            else:
-                self.astrometry_solve_field_dir = current_astrometry_dir.strip()
-
             self.reproject_between_batches = bool(
                 getattr(
                     self,
@@ -2555,7 +2406,6 @@ class SettingsManager:
             "photutils_bn_exclude_percentile": float(
                 self.photutils_bn_exclude_percentile
             ),
-            "astrometry_api_key": str(self.astrometry_api_key),
             "preview_stretch_method": str(self.preview_stretch_method),
             "preview_black_point": float(self.preview_black_point),
             "preview_white_point": float(self.preview_white_point),
@@ -2584,11 +2434,6 @@ class SettingsManager:
                 getattr(self, "preserve_linear_output", False)
             ),
             # --- FIN NOUVEAU ---
-            # --- NOUVEAU : Sauvegarde du toggle use_third_party_solver ---
-            "use_third_party_solver": bool(
-                getattr(self, "use_third_party_solver", True)
-            ),
-            # --- FIN NOUVEAU ---
             # --- NEW: Save boring thread mode ---
             "boring_thread_mode": bool(
                 getattr(self, "boring_thread_mode", False)
@@ -2603,11 +2448,6 @@ class SettingsManager:
                 getattr(self, "astap_search_radius", 30.0)
             ),  # Maintenu comme avant
             "use_radec_hints": bool(getattr(self, "use_radec_hints", False)),
-            "local_ansvr_path": str(getattr(self, "local_ansvr_path", "")),
-            "ansvr_host_port": str(getattr(self, "ansvr_host_port", "127.0.0.1:8080")),
-            "astrometry_solve_field_dir": str(
-                getattr(self, "astrometry_solve_field_dir", "")
-            ),
             "reproject_between_batches": bool(
                 getattr(self, "reproject_between_batches", False)
             ),

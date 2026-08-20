@@ -45,9 +45,6 @@ DEFAULT_CONFIG = {
     "gpu_id_phase5": 0,
     "gpu_selector": "",
     "final_assembly_method": "reproject_coadd",  # "reproject_coadd" | "incremental"
-    "solver_method": "ansvr",
-    "astrometry_local_path": "",
-    "astrometry_api_key": "",
     "save_final_as_uint16": False,
     "coadd_use_memmap": True,
     "coadd_memmap_dir": "",
@@ -204,3 +201,56 @@ def get_astap_default_sensitivity():
     return load_config().get(
         "astap_default_sensitivity", DEFAULT_CONFIG["astap_default_sensitivity"]
     )
+
+
+# Legacy solver-preference values that now map onto ZeSolver (which owns the
+# former ANSVR / Astrometry.net strategies).  Kept for soft migration only.
+_LEGACY_SOLVER_PREFERENCES = ("ansvr", "astrometry")
+
+
+def resolve_solver_gate(solver_pref, zesolver_available, astap_configured):
+    """Resolve whether a usable astrometric solver is available for a
+    solve-requiring processing mode.
+
+    Pure, GUI-free helper consumed by the GUI reproject gate.  Returns
+    ``(allowed: bool, reason: str | None)`` where ``reason`` is a user-facing
+    diagnostic string only when ``allowed`` is ``False``.
+
+    Semantics (consistent with ``AstrometrySolver._migrate_legacy_preference``):
+
+    * ``"zesolver"`` + ZeSolver available              -> allowed.
+    * ``"zesolver"`` + ZeSolver unavailable            -> allowed only when
+      ``astap_configured`` (ZeSolver falls back to ASTAP at solve time).
+    * ``"astap"``    + ASTAP configured                -> allowed.
+    * ``"none"`` / ``"astap"`` / ``"zesolver"`` with no usable solver -> blocked
+      with a specific reason.
+    * Legacy ``"ansvr"`` / ``"astrometry"`` are treated as ``"zesolver"``.
+    """
+    if not isinstance(solver_pref, str):
+        solver_pref = str(solver_pref or "none")
+    pref = solver_pref.strip().lower()
+
+    if pref in _LEGACY_SOLVER_PREFERENCES:
+        pref = "zesolver"
+
+    if pref == "zesolver":
+        if zesolver_available:
+            return (True, None)
+        if astap_configured:
+            return (True, None)
+        return (
+            False,
+            "ZeSolver is unavailable and ASTAP is not configured: no usable "
+            "astrometric solver.",
+        )
+
+    if pref == "astap":
+        if astap_configured:
+            return (True, None)
+        return (
+            False,
+            "ASTAP is not configured (executable path is missing).",
+        )
+
+    # "none" (or any unrecognised value) -> no solver selected.
+    return (False, "No astrometric solver is configured (solver preference is 'none').")
