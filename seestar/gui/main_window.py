@@ -6734,6 +6734,7 @@ class SeestarStackerGUI:
                     "drizzle_mode": self.settings.drizzle_mode,
                     "drizzle_kernel": self.settings.drizzle_kernel,
                     "drizzle_pixfrac": self.settings.drizzle_pixfrac,
+                    "drizzle_group_size": self.settings.drizzle_group_size,
                     "apply_chroma_correction": self.settings.apply_chroma_correction,
                     "apply_final_scnr": self.settings.apply_final_scnr,
                     "final_scnr_target_channel": self.settings.final_scnr_target_channel,

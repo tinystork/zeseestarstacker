@@ -368,6 +368,20 @@ def _drizzle_accumulators_have_data(accs) -> bool:
     return False
 
 
+def _coerce_drizzle_group_size(value) -> int:
+    """Clamp a ``drizzle_group_size`` to a sane integer >= 1.
+
+    ``drizzle_group_size`` is a RESOURCE/PREVIEW policy knob (size of the group
+    used for the incremental DISPLAY-ONLY preview cadence), never a science
+    setting.  The GUI/settings layer already validates it, but this boundary
+    helper keeps the backend defensive: values < 1 clamp to 1, and non-numeric
+    / missing values fall back to the 50 default.
+    """
+    try:
+        return max(1, int(float(value)))
+    except (ValueError, TypeError):
+        return 50
+
 
 # ----------------------------------------------------------------------
 # Pool size helper for CPU reprojection
@@ -14248,6 +14262,7 @@ class SeestarQueuedStacker:
         drizzle_mode="Final",
         drizzle_kernel="square",
         drizzle_pixfrac=1.0,
+        drizzle_group_size=50,
         apply_chroma_correction=True,
         apply_final_scnr=False,
         final_scnr_target_channel="green",
@@ -14324,6 +14339,9 @@ class SeestarQueuedStacker:
         logger.debug(f"    use_drizzle (global arg de func): {use_drizzle}")
 
         logger.debug(f"    drizzle_mode (global arg de func): {drizzle_mode}")
+        logger.debug(
+            f"    drizzle_group_size (global arg de func): {drizzle_group_size}"
+        )
         logger.debug(f"    mosaic_settings (dict brut): {mosaic_settings}")
         logger.debug(
             f"    save_as_float32 (arg de func): {save_as_float32}"
@@ -14456,6 +14474,10 @@ class SeestarQueuedStacker:
         self.is_mosaic_run = is_mosaic_run
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run
         self.drizzle_mode = str(drizzle_mode)
+        self.drizzle_group_size = _coerce_drizzle_group_size(drizzle_group_size)
+        logger.debug(
+            f"    [Drizzle Group Size] self.drizzle_group_size = {self.drizzle_group_size}"
+        )
         self._derive_drizzle_processing_policy()
 
         if getattr(self, "reference_pixel_scale_arcsec", None) is None:
