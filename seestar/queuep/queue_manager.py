@@ -166,6 +166,49 @@ def _fits_getdata_safe(path, memmap=True, **kwargs):
         raise
 
 
+# WCS keywords propagated from the reference header onto classic batches in the
+# reproject&coadd final pass.  ``PC1_1..PC2_2`` MUST be copied together with
+# ``CDELT1/2``: ``CDELT`` carries the pixel scale while ``PC`` holds the
+# (dimensionless) rotation.  Copying ``CDELT`` alone produces a scale-1 WCS
+# (or a rotation-free one) which destroys the reprojection (every batch is
+# then squeezed into a sub-pixel blob, yielding a uniform "white" final).
+_REFERENCE_WCS_KEYS = (
+    "CRPIX1",
+    "CRPIX2",
+    "CDELT1",
+    "CDELT2",
+    "PC1_1",
+    "PC1_2",
+    "PC2_1",
+    "PC2_2",
+    "CD1_1",
+    "CD1_2",
+    "CD2_1",
+    "CD2_2",
+    "CTYPE1",
+    "CTYPE2",
+    "CUNIT1",
+    "CUNIT2",
+    "CRVAL1",
+    "CRVAL2",
+    "RADESYS",
+    "EQUINOX",
+    "LONPOLE",
+    "LATPOLE",
+)
+
+
+def _header_has_wcs_keywords(hdr) -> bool:
+    """True when ``hdr`` carries a usable celestial WCS (CD or PC+CDELT form)."""
+    if hdr is None:
+        return False
+    if not all(k in hdr for k in ("CRVAL1", "CRVAL2", "CTYPE1", "CTYPE2")):
+        return False
+    return all(k in hdr for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")) or all(
+        k in hdr for k in ("PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2")
+    )
+
+
 try:
     from seestar.enhancement.weight_utils import make_radial_weight_map
 except Exception:
@@ -11718,17 +11761,7 @@ class SeestarQueuedStacker:
                 else:
                     try:
                         hdr = fits.getheader(sci_path, memmap=False)
-                        has_wcs = all(
-                            k in hdr
-                            for k in (
-                                "CRVAL1",
-                                "CRVAL2",
-                                "CD1_1",
-                                "CD1_2",
-                                "CD2_1",
-                                "CD2_2",
-                            )
-                        )
+                        has_wcs = _header_has_wcs_keywords(hdr)
                     except Exception:
                         hdr = None
                         has_wcs = False
@@ -11737,20 +11770,7 @@ class SeestarQueuedStacker:
                             # Inject the reference WCS to mirror previous batch_size=0 behaviour
                             try:
                                 hdr = hdr or fits.Header()
-                                for k in (
-                                    "CRPIX1",
-                                    "CRPIX2",
-                                    "CDELT1",
-                                    "CDELT2",
-                                    "CD1_1",
-                                    "CD1_2",
-                                    "CD2_1",
-                                    "CD2_2",
-                                    "CTYPE1",
-                                    "CTYPE2",
-                                    "CRVAL1",
-                                    "CRVAL2",
-                                ):
+                                for k in _REFERENCE_WCS_KEYS:
                                     if k in self.reference_header_for_wcs:
                                         hdr[k] = self.reference_header_for_wcs[k]
                                 data = fits.getdata(sci_path, memmap=False)
@@ -12613,10 +12633,7 @@ class SeestarQueuedStacker:
                 bs_local = int(getattr(self, "batch_size", 0) or 0)
                 try:
                     hdr = fits.getheader(sci_path, memmap=False)
-                    has_wcs = all(
-                        k in hdr
-                        for k in ("CRVAL1", "CRVAL2", "CD1_1", "CD1_2", "CD2_1", "CD2_2")
-                    )
+                    has_wcs = _header_has_wcs_keywords(hdr)
                 except Exception:
                     hdr = None
                     has_wcs = False
@@ -12624,20 +12641,7 @@ class SeestarQueuedStacker:
                     try:
                         hdr = hdr or fits.Header()
                         ref_hdr = self.reference_header_for_wcs
-                        for key in (
-                            "CRPIX1",
-                            "CRPIX2",
-                            "CDELT1",
-                            "CDELT2",
-                            "CD1_1",
-                            "CD1_2",
-                            "CD2_1",
-                            "CD2_2",
-                            "CTYPE1",
-                            "CTYPE2",
-                            "CRVAL1",
-                            "CRVAL2",
-                        ):
+                        for key in _REFERENCE_WCS_KEYS:
                             if key in ref_hdr:
                                 hdr[key] = ref_hdr[key]
                         # When ``batch_size`` equals 0 the classic batches should
@@ -16617,5 +16621,3 @@ class SeestarQueuedStacker:
                 self.freeze_reference_wcs = True
         except Exception:
             pass
-
-

@@ -83,6 +83,44 @@ _LEGACY_PREFERENCES = ("ansvr", "astrometry")
 _legacy_preference_warned = False
 
 
+def _canonicalize_wcs_scale(wcs_obj):
+    """Normalize a WCS so the pixel scale is encoded exactly once.
+
+    ASTAP (recent builds) writes ``.wcs`` sidecars that carry the pixel scale
+    simultaneously in the CD matrix, in ``CDELT`` and in ``PC``.  astropy keeps
+    all three representations, and wcslib then applies ``PC x CDELT`` so the
+    effective pixel scale becomes ``scale^2`` (e.g. ~0.0016 arcsec/pix for a
+    genuine 2.37 arcsec/pix Seestar solution).  Every pixel->world transform
+    is then corrupted (the whole field collapses onto a few pixels) and
+    ``proj_plane_pixel_scales`` reports the bogus ``scale^2`` value, which
+    triggers the "Reference WCS pixel scale ... outside [0.1, 30.0]; clipping"
+    warning.
+
+    When a CD matrix is present we rebuild the WCS from it so that ``PC`` is a
+    dimensionless rotation and ``CDELT`` carries the scale: the scale is then
+    encoded exactly once, transforms are correct, and ``to_header`` round-trips
+    cleanly (no double encoding).  WCSes that already use a single encoding
+    (``cd`` absent) are left untouched.
+
+    Returns the (possibly mutated) WCS object.
+    """
+    if wcs_obj is None:
+        return wcs_obj
+    try:
+        cd = np.asarray(wcs_obj.wcs.cd, dtype=float)
+    except AttributeError:
+        return wcs_obj
+    if cd.ndim != 2 or cd.shape != (2, 2):
+        return wcs_obj
+    col_norms = np.sqrt(np.sum(cd ** 2, axis=0))
+    if not (np.all(np.isfinite(col_norms)) and np.all(col_norms > 0)):
+        return wcs_obj
+    # cd == pc @ diag(cdelt): keep the transform exact, encode the scale once.
+    wcs_obj.wcs.pc = cd / col_norms[np.newaxis, :]
+    wcs_obj.wcs.cdelt = col_norms
+    return wcs_obj
+
+
 def _sanitize_astap_wcs_text(txt: str) -> tuple[str, int, int]:
     """
     Sanitize raw ASTAP ``.wcs`` text before parsing.
@@ -794,6 +832,8 @@ class AstrometrySolver:
             while "CONTINUE" in hdr:
                 del hdr["CONTINUE"]
             wcs_obj = WCS(hdr, naxis=2, relax=True, fix=True)
+
+        wcs_obj = _canonicalize_wcs_scale(wcs_obj)
 
         if wcs_obj is not None:
             try:
