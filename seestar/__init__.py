@@ -3,94 +3,68 @@ Seestar: Un outil d'empilement et de traitement d'images astronomiques.
 
 Seestar est conçu pour aligner et empiler des images astronomiques afin
 d'améliorer le rapport signal-bruit des observations astrophotographiques.
+
+Import hygiene (M2): ``import seestar`` must stay cheap.  It must NOT import the
+scientific engine (``seestar.core`` / ``seestar.alignment`` /
+``seestar.enhancement`` / ``seestar.queuep``) nor the Tk GUI (``seestar.gui``).
+Those heavy subtrees are reached lazily through :func:`__getattr__`, so
+``import seestar.gui_qt`` never pulls in Tk or the engine, while
+``seestar.SeestarAligner``, ``seestar.SeestarStackerGUI``, etc. keep working on
+first access.
 """
+
+from __future__ import annotations
+
+import importlib
 
 __version__ = "7.0.2"
 __codename__ = "Boring ostentus"  # including zenalyser and hierarchical auto stacking
 __author__ = "Tinystork"
 
-import sys
-
-# Core functionalities (unchanged from your original structure)
-try:
-    from seestar.core import (
-        SeestarAligner,
-        load_and_validate_fits,
-        debayer_image,
-        detect_and_correct_hot_pixels,
-        save_fits_image,
-        save_preview_image,
-        estimate_batch_size,
-        apply_denoise,  # Keep apply_denoise available if GUI option removed
-        collect_headers,
-        compute_final_output_grid,
-    )
-    _CORE_AVAILABLE = True
-except Exception as e:  # pragma: no cover - optional dependency may be missing
-    import logging
-
-    logging.getLogger(__name__).warning(
-        "Seestar core not available (%s). Some functionality is disabled.", e
-    )
-    _CORE_AVAILABLE = False
-
-# Tools (updated imports based on the new stretch.py)
-from seestar.tools import (
-    StretchPresets,  # Changed from Stretch class
-    ColorCorrection,  # Added
-    apply_auto_stretch,  # Added helper
-    apply_auto_white_balance,  # Added helper
-    apply_enhanced_stretch,  # Kept this name, assuming it's useful elsewhere
-    save_fits_as_png  # Kept
-)
-
-from seestar.enhancement import reproject_utils
-
-# GUI (optional)
-try:
-    if _CORE_AVAILABLE:
-        from seestar.gui import SeestarStackerGUI
-        _GUI_AVAILABLE = True
-    else:
-        raise RuntimeError("Core modules missing")
-except BaseException as e:  # pragma: no cover - GUI might not be present
-    import logging
-
-    sys.modules.pop("seestar.gui", None)
-    logging.getLogger(__name__).warning(
-        "Seestar GUI not available (%s). Running in headless mode.", e
-    )
-    SeestarStackerGUI = None
-    _GUI_AVAILABLE = False
+# Public name -> (module, attribute).  ``attribute=None`` means "return the
+# module object itself" (used for the ``reproject_utils`` submodule re-export).
+_LAZY_IMPORTS = {
+    # core (scientific engine) — imported only on first access
+    "SeestarAligner": ("seestar.core", "SeestarAligner"),
+    "load_and_validate_fits": ("seestar.core", "load_and_validate_fits"),
+    "debayer_image": ("seestar.core", "debayer_image"),
+    "detect_and_correct_hot_pixels": ("seestar.core", "detect_and_correct_hot_pixels"),
+    "save_fits_image": ("seestar.core", "save_fits_image"),
+    "save_preview_image": ("seestar.core", "save_preview_image"),
+    "estimate_batch_size": ("seestar.core", "estimate_batch_size"),
+    "apply_denoise": ("seestar.core", "apply_denoise"),
+    "collect_headers": ("seestar.core", "collect_headers"),
+    "compute_final_output_grid": ("seestar.core", "compute_final_output_grid"),
+    # tools
+    "StretchPresets": ("seestar.tools", "StretchPresets"),
+    "ColorCorrection": ("seestar.tools", "ColorCorrection"),
+    "apply_auto_stretch": ("seestar.tools", "apply_auto_stretch"),
+    "apply_auto_white_balance": ("seestar.tools", "apply_auto_white_balance"),
+    "apply_enhanced_stretch": ("seestar.tools", "apply_enhanced_stretch"),
+    "save_fits_as_png": ("seestar.tools", "save_fits_as_png"),
+    # enhancement submodule (re-exported as a top-level name)
+    "reproject_utils": ("seestar.enhancement.reproject_utils", None),
+    # GUI (default Tk entry point)
+    "SeestarStackerGUI": ("seestar.gui", "SeestarStackerGUI"),
+}
 
 __all__ = [
-    # Tools
-    'StretchPresets',
-    'ColorCorrection',
-    'apply_auto_stretch',
-    'apply_auto_white_balance',
-    'apply_enhanced_stretch',
-    'save_fits_as_png',
-    'reproject_utils',
-    # Package Info
-    '__version__',
-    '__author__'
+    "__version__",
+    "__author__",
+    *sorted(_LAZY_IMPORTS),
 ]
 
-if _CORE_AVAILABLE:
-    __all__[0:0] = [
-        'SeestarAligner',
-        'load_and_validate_fits',
-        'debayer_image',
-        'detect_and_correct_hot_pixels',
-        'save_fits_image',
-        'save_preview_image',
-        'estimate_batch_size',
-        'apply_denoise',
-        'collect_headers',
-        'compute_final_output_grid',
-    ]
 
-if _GUI_AVAILABLE:
-    __all__.append('SeestarStackerGUI')
-# --- END OF FILE seestar/__init__.py ---
+def __getattr__(name):
+    entry = _LAZY_IMPORTS.get(name)
+    if entry is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr = entry
+    module = importlib.import_module(module_name)
+    value = module if attr is None else getattr(module, attr)
+    globals()[name] = value
+    return value
+
+
+def __dir__():  # pragma: no cover - helper for interactive use
+    return sorted(set(globals()) | set(_LAZY_IMPORTS))
