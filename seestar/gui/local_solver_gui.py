@@ -13,9 +13,15 @@ from seestar.core.solver_config import load_config, save_config, resolve_solver_
 from seestar.alignment.zesolver_adapter import (
     check_zesolver_readiness,
     open_zesolver_configuration,
+    zesolver_session_refresh_action,
 )
 from seestar.alignment.solver_port import zesolver_ui_state
 from .ui_utils import ToolTip
+
+# Interval (ms) between lifecycle polls while a ZeSolver configuration
+# session is still running (single check per tick, never a busy loop).
+_ZESOLVER_REFRESH_TICK_MS = 250
+
 
 class LocalSolverSettingsWindow(tk.Toplevel):
     """
@@ -140,17 +146,40 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
     def _on_configure_zesolver(self):
         """Launch the public ZeSolver configuration UI (never raises)."""
-        ok, msg = open_zesolver_configuration()
+        ok, payload = open_zesolver_configuration()
         if not ok:
             messagebox.showerror(
                 self.tr("error"),
-                msg or self.tr(
+                payload or self.tr(
                     "solver_configure_zesolver_failed",
                     default="Impossible de configurer ZeSolver.",
                 ),
                 parent=self,
             )
+            self._refresh_zesolver_status()
+            return
         self._refresh_zesolver_status()
+        # Deferred refresh: re-evaluate readiness + controls once the
+        # configuration session ends (opaque handle; no-op for API v1.1).
+        self._schedule_zesolver_refresh(payload)
+
+    def _schedule_zesolver_refresh(self, handle):
+        """Poll the config session lifecycle and refresh once it ends.
+
+        Uses a recursive ``after()`` that re-arms itself only while the session
+        is still running (one check per tick — no permanent polling).  The pure
+        decision lives in :func:`zesolver_session_refresh_action`; an API v1.1
+        (or otherwise unobservable) handle yields ``"none"`` and no work.
+        """
+        action = zesolver_session_refresh_action(handle)
+        if action == "refresh":
+            self._refresh_zesolver_status()
+            self._update_warning()
+        elif action == "wait":
+            self.after(
+                _ZESOLVER_REFRESH_TICK_MS,
+                lambda: self._schedule_zesolver_refresh(handle),
+            )
 
     def _on_solver_choice_change(self, *args):
         """

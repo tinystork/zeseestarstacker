@@ -906,3 +906,68 @@ def test_zesolver_ui_state_labels_and_colors_other_states():
     )
     assert ui.label == "ZeSolver : inutilisable (installation d\u00e9fectueuse)"
     assert ui.status_color == "gray"
+
+
+# ---------------------------------------------------------------------------
+# W-3: opaque session handle propagation + pure refresh scheduling helper
+# ---------------------------------------------------------------------------
+
+
+class _FakeSessionHandle:
+    def __init__(self, running=True):
+        self._running = running
+        self.is_running_calls = 0
+
+    def is_running(self):
+        self.is_running_calls += 1
+        return self._running
+
+
+def test_open_configuration_returns_handle_when_v12(monkeypatch):
+    handle = _FakeSessionHandle(running=True)
+
+    def open_configuration():
+        return handle
+
+    v1 = _make_v1(open_configuration=open_configuration)
+    _install_package_stubs(monkeypatch, v1)
+    ok, payload = adapter.open_zesolver_configuration()
+    assert ok is True
+    assert payload is handle
+
+
+def test_open_configuration_v11_returns_none(monkeypatch):
+    # v1.1 open_configuration returns None -> success, no handle.
+    def open_configuration():
+        return None
+
+    v1 = _make_v1(open_configuration=open_configuration)
+    _install_package_stubs(monkeypatch, v1)
+    ok, payload = adapter.open_zesolver_configuration()
+    assert ok is True
+    assert payload is None
+
+
+def test_session_refresh_action_none_handle():
+    assert adapter.zesolver_session_refresh_action(None) == "none"
+
+
+def test_session_refresh_action_running():
+    assert adapter.zesolver_session_refresh_action(_FakeSessionHandle(True)) == "wait"
+
+
+def test_session_refresh_action_finished():
+    assert adapter.zesolver_session_refresh_action(_FakeSessionHandle(False)) == "refresh"
+
+
+def test_session_refresh_action_no_is_running():
+    # A v1.1-style handle (or a plain object) has no observable lifecycle.
+    assert adapter.zesolver_session_refresh_action(object()) == "none"
+
+
+def test_session_refresh_action_is_running_raises():
+    class _BoomHandle:
+        def is_running(self):
+            raise RuntimeError("boom")
+
+    assert adapter.zesolver_session_refresh_action(_BoomHandle()) == "none"

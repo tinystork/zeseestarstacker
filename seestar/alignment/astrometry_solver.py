@@ -520,7 +520,20 @@ class AstrometrySolver:
             self._log(f"ZeSolver indisponible ({msg}). Fallback ASTAP.", "WARN")
             return None, True
 
-        self._log(f"ZeSolver: échec ({status_value}). Fallback ASTAP.", "WARN")
+        # FAILED (or an unrecognised status): log an actionable diagnostic built
+        # exclusively from the stable public-contract fields already mapped into
+        # SolverOutcome (failure_code / message / backend_used).  No private
+        # ZeSolver internals, no catalog details, no filesystem paths.
+        failure_code = getattr(outcome, "failure_code", None) or "unknown"
+        backend = getattr(outcome, "backend_used", None) or "zesolver"
+        message = getattr(outcome, "message", None)
+        detail = f"failure_code={failure_code}, backend={backend}"
+        if message:
+            detail += f", message={message!r}"
+        self._log(
+            f"ZeSolver: échec ({status_value}) — {detail}. Fallback ASTAP.",
+            "WARN",
+        )
         return None, True
 
     @staticmethod

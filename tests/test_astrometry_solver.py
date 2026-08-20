@@ -268,3 +268,48 @@ def test_resolve_astap_app(monkeypatch, tmp_path):
 
     resolved = astrometry_solver.resolve_astap_executable(str(app_dir))
     assert resolved == str(exe)
+
+
+def test_zesolver_failed_logs_actionable_diagnostic_and_falls_back(monkeypatch):
+    solver = AstrometrySolver()
+
+    messages = []
+
+    def fake_log(message, level="INFO"):
+        messages.append(str(message))
+
+    monkeypatch.setattr(solver, "_log", fake_log)
+
+    class _FakeOutcome:
+        status = "failed"
+        failure_code = "no_solution"
+        message = "no stars found"
+        backend_used = "zesolver"
+
+    class _FakeAdapter:
+        def __init__(self):
+            self.solve_calls = 0
+
+        def solve(self, **kwargs):
+            self.solve_calls += 1
+            return _FakeOutcome()
+
+    adapter = _FakeAdapter()
+    solver._zesolver_adapter = adapter
+
+    wcs, allow_fallback = solver._try_solve_zesolver(
+        "/tmp/img.fits", None, {}, False
+    )
+
+    assert wcs is None
+    assert allow_fallback is True
+    assert adapter.solve_calls == 1
+
+    diag = "\n".join(messages)
+    assert "failure_code=no_solution" in diag
+    assert "backend=zesolver" in diag
+    assert "no stars found" in diag
+    # The diagnostic must not leak internal paths / source locations / tracebacks.
+    assert "/tmp/" not in diag
+    assert ".py" not in diag
+    assert "Traceback" not in diag

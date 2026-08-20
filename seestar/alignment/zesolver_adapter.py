@@ -290,13 +290,16 @@ def check_zesolver_readiness() -> SolverDiscovery:
     )
 
 
-def open_zesolver_configuration() -> tuple[bool, str | None]:
+def open_zesolver_configuration() -> tuple[bool, Any]:
     """Launch ZeSolver's public configuration UI (contract-only, never raises).
 
-    Returns ``(True, None)`` on success and ``(False, message)`` when the public
-    API is absent or ``v1.open_configuration()`` fails.  Zsss never knows (or
-    touches) ZeSolver internal paths — the mapping lives entirely on the ZeSolver
-    side of the contract.
+    Returns ``(True, handle)`` on success when the installed API v1.2+ supports
+    an observable lifecycle (the opaque ``ConfigurationSession`` handle returned
+    by ``v1.open_configuration()``), ``(True, None)`` when the older v1.1 API
+    returns no handle, and ``(False, message)`` when the public API is absent or
+    ``v1.open_configuration()`` fails.  The handle is internal to Zsss (never
+    shown in the UI); Zsss never knows (or touches) ZeSolver internal paths —
+    the mapping lives entirely on the ZeSolver side of the contract.
     """
     try:
         v1 = importlib.import_module(_ZESOLVER_API_MODULE)
@@ -311,11 +314,46 @@ def open_zesolver_configuration() -> tuple[bool, str | None]:
         )
 
     try:
-        open_fn()
+        handle = open_fn()
     except Exception as exc:  # pragma: no cover - exercised via fakes
         return (False, f"open_configuration failed: {type(exc).__name__}: {exc}")
 
-    return (True, None)
+    # v1.2+ returns an opaque handle; v1.1 returns ``None`` (no lifecycle to
+    # observe -> the caller keeps today's behaviour, with no error).
+    return (True, handle)
+
+
+def zesolver_session_refresh_action(handle: Any) -> str:
+    """Decide the next deferred-refresh action for a config-session handle.
+
+    Pure helper (no tkinter, no threads, no busy loop): the GUI consumes the
+    returned action to drive a recursive ``after()`` poll that runs only while
+    the session is still alive.
+
+    Returns one of:
+
+    * ``"refresh"`` — the session has finished; the caller should re-check
+      readiness and refresh the displayed state.
+    * ``"wait"`` — the session is still running; the caller should re-check
+      after one tick (not busy-poll).
+    * ``"none"`` — there is no observable lifecycle (``None`` handle, or a
+      handle without a working ``is_running``): no deferred refresh, no error
+      (this is the API v1.1 behaviour).
+
+    The handle is treated as opaque: only the public ``is_running`` method is
+    ever consulted, and any error degrades gracefully to ``"none"``.
+    """
+    if handle is None:
+        return "none"
+    is_running = getattr(handle, "is_running", None)
+    if not callable(is_running):
+        return "none"
+    try:
+        if is_running():
+            return "wait"
+    except Exception:  # pragma: no cover - defensive
+        return "none"
+    return "refresh"
 
 
 class ZeSolverAdapter:
