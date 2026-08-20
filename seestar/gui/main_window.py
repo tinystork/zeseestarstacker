@@ -180,6 +180,7 @@ from .histogram_widget import HistogramWidget
 from .preview import PreviewManager
 from .progress import ProgressManager
 from .settings import SettingsManager
+from .run_config import build_run_request
 
 
 class SeestarStackerGUI:
@@ -6663,193 +6664,105 @@ class SeestarStackerGUI:
             self._update_low_wht_mask_options_state()  # S'assurer d'appeler ceci aussi
         print("DEBUG (GUI start_processing): Phase 4 - Settings synchronisés et validés.")
 
+        # --- 5. Prepare single-batch (CSV) mode and build the immutable run snapshot ---
+        # All run-critical settings are now collected and validated on the GUI
+        # thread (M0 migration seam). The starter thread below only consumes the
+        # snapshot and never re-reads Tk variables or mutates the settings model.
+        try:
+            special_single = self._prepare_single_batch_if_needed()
+        except FileNotFoundError as fnfe:
+            messagebox.showerror(
+                self.tr("error"),
+                self.tr(
+                    "stack_plan_missing_file_error",
+                    default="File listed in stack_plan.csv not found:\n{path}",
+                ).format(path=str(fnfe)),
+            )
+            if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                self.start_button.config(state=tk.NORMAL)
+            if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                self.stop_button.config(state=tk.DISABLED)
+            self.processing = False
+            self._set_parameter_widgets_state(tk.NORMAL)
+            return
+
+        try:
+            run_request = build_run_request(
+                self.settings,
+                initial_additional_folders=folders_to_pass_to_backend,
+                auto_chunk_size=self._get_auto_chunk_size(),
+                special_single=special_single,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                self.tr("error"),
+                self.tr(
+                    "run_request_build_error",
+                    default="Unable to prepare processing settings:\n{error}",
+                ).format(error=str(exc)),
+            )
+            if hasattr(self, "start_button") and self.start_button.winfo_exists():
+                self.start_button.config(state=tk.NORMAL)
+            if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
+                self.stop_button.config(state=tk.DISABLED)
+            self.processing = False
+            self._set_parameter_widgets_state(tk.NORMAL)
+            return
+
         # Heavy work is delegated to a starter thread to keep Tk responsive.
 
         def _starter():
+            self.queued_stacker.align_on_disk = run_request.align_on_disk
+
+            # Start progress tracking before launching backend processing so
+            # that early progress messages are not missed.
+            self.thread = threading.Thread(
+                target=self._track_processing_progress,
+                daemon=True,
+                name="GUI_ProgressTracker",
+            )
+            self.thread.start()
+
             try:
-                self.settings.update_from_ui(self)
-                validation_messages = self.settings.validate_settings()
-                special_single = self._prepare_single_batch_if_needed()
-                try:
-                    self.queued_stacker.align_on_disk = int(self.settings.batch_size) >= 1
-                except Exception:
-                    self.queued_stacker.align_on_disk = False
-                if validation_messages:
-                    def _apply_valid():
-                        self.update_progress_gui("⚠️ Paramètres ajustés après validation:", None)
-                        for msg in validation_messages:
-                            self.update_progress_gui(f"  - {msg}", None)
-                        self.settings.apply_to_ui(self)
-                        self._update_drizzle_options_state()
-                        self._update_final_scnr_options_state()
-                        self._update_photutils_bn_options_state()
-                        self._update_feathering_options_state()
-                        self._update_low_wht_mask_options_state()
-                    if hasattr(self, "gui_event_queue"):
-                        self.gui_event_queue.put(_apply_valid)
-                    else:
-                        self.root.after(0, _apply_valid)
-                raw_match_bg = getattr(
-                    self.settings, "match_background_for_final", None
+                started = self.queued_stacker.start_processing(
+                    **run_request.backend_kwargs
                 )
-                if raw_match_bg is None:
-                    match_background_for_final = None
-                else:
-                    match_background_for_final = bool(raw_match_bg)
+            except Exception as e:
+                started = False
+                print(f"Backend start failed: {e}")
 
-                backend_kwargs = {
-                    "input_dir": self.settings.input_folder,
-                    "output_dir": self.settings.output_folder,
-                    "temp_folder": self.settings.temp_folder,
-                    "output_filename": self.settings.output_filename,
-                    "reference_path_ui": self.settings.reference_image_path,
-                    "initial_additional_folders": folders_to_pass_to_backend,
-                    "stacking_mode": self.settings.stacking_mode,
-                    "kappa": self.settings.kappa,
-                    "stack_kappa_low": self.settings.stack_kappa_low,
-                    "stack_kappa_high": self.settings.stack_kappa_high,
-                    "winsor_limits": (
-                        tuple(float(x.strip()) for x in str(self.settings.stack_winsor_limits).split(","))
-                        if isinstance(self.settings.stack_winsor_limits, str)
-                        else (0.05, 0.05)
-                    ),
-                    "normalize_method": self.settings.stack_norm_method,
-                    "weighting_method": self.settings.stack_weight_method,
-                    "batch_size": self.settings.batch_size,
-                    "ordered_files": getattr(self.settings, "order_file_list", None),
-                    "correct_hot_pixels": self.settings.correct_hot_pixels,
-                    "hot_pixel_threshold": self.settings.hot_pixel_threshold,
-                    "neighborhood_size": self.settings.neighborhood_size,
-                    "bayer_pattern": self.settings.bayer_pattern,
-                    "perform_cleanup": self.settings.cleanup_temp,
-                    "use_weighting": self.settings.stack_weight_method != "none",
-                    "weight_by_snr": self.settings.weight_by_snr,
-                    "weight_by_stars": self.settings.weight_by_stars,
-                    "snr_exp": self.settings.snr_exponent,
-                    "stars_exp": self.settings.stars_exponent,
-                    "min_w": self.settings.min_weight,
-                    "use_drizzle": self.settings.use_drizzle,
-                    "drizzle_scale": float(self.settings.drizzle_scale),
-                    "drizzle_wht_threshold": self.settings.drizzle_wht_threshold,
-                    "drizzle_mode": self.settings.drizzle_mode,
-                    "drizzle_kernel": self.settings.drizzle_kernel,
-                    "drizzle_pixfrac": self.settings.drizzle_pixfrac,
-                    "drizzle_group_size": self.settings.drizzle_group_size,
-                    "apply_chroma_correction": self.settings.apply_chroma_correction,
-                    "apply_final_scnr": self.settings.apply_final_scnr,
-                    "final_scnr_target_channel": self.settings.final_scnr_target_channel,
-                    "final_scnr_amount": self.settings.final_scnr_amount,
-                    "final_scnr_preserve_luminosity": self.settings.final_scnr_preserve_luminosity,
-                    "bn_grid_size_str": self.settings.bn_grid_size_str,
-                    "bn_perc_low": self.settings.bn_perc_low,
-                    "bn_perc_high": self.settings.bn_perc_high,
-                    "bn_std_factor": self.settings.bn_std_factor,
-                    "bn_min_gain": self.settings.bn_min_gain,
-                    "bn_max_gain": self.settings.bn_max_gain,
-                    "cb_border_size": self.settings.cb_border_size,
-                    "cb_blur_radius": self.settings.cb_blur_radius,
-                    "cb_min_b_factor": self.settings.cb_min_b_factor,
-                    "cb_max_b_factor": self.settings.cb_max_b_factor,
-                    "apply_master_tile_crop": self.settings.apply_master_tile_crop,
-                    "master_tile_crop_percent": self.settings.master_tile_crop_percent,
-                    "final_edge_crop_percent": self.settings.final_edge_crop_percent,
-                    "apply_photutils_bn": self.settings.apply_photutils_bn,
-                    "photutils_bn_box_size": self.settings.photutils_bn_box_size,
-                    "photutils_bn_filter_size": self.settings.photutils_bn_filter_size,
-                    "photutils_bn_sigma_clip": self.settings.photutils_bn_sigma_clip,
-                    "photutils_bn_exclude_percentile": self.settings.photutils_bn_exclude_percentile,
-                    "apply_feathering": self.settings.apply_feathering,
-                    "feather_blur_px": self.settings.feather_blur_px,
-                    "apply_batch_feathering": self.settings.apply_batch_feathering,
-                    "apply_low_wht_mask": self.settings.apply_low_wht_mask,
-                    "low_wht_percentile": self.settings.low_wht_percentile,
-                    "low_wht_soften_px": self.settings.low_wht_soften_px,
-                    "is_mosaic_run": self.settings.mosaic_mode_active,
-                    "mosaic_settings": self.settings.mosaic_settings,
-                    "astap_path": self.settings.astap_path,
-                    "astap_data_dir": self.settings.astap_data_dir,
-                    "local_solver_preference": self.settings.local_solver_preference,
-                    "astap_search_radius": self.settings.astap_search_radius,
-                    "astap_downsample": self.settings.astap_downsample,
-                    "astap_sensitivity": self.settings.astap_sensitivity,
-                    "save_as_float32": self.settings.save_final_as_float32,
-                    "preserve_linear_output": self.settings.preserve_linear_output,
-                    "reproject_between_batches": self.settings.reproject_between_batches,
-                    "reproject_coadd_final": self.settings.reproject_coadd_final,
-                    "match_background_for_final": match_background_for_final,
-                }
+            def _after_start(started=started, special_single=run_request.special_single):
+                if special_single:
+                    self.batch_size.set(self.settings.batch_size)
+                    self.stacking_mode.set(self.settings.stacking_mode)
+                    self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
+                    self.use_drizzle_var.set(self.settings.use_drizzle)
+                    if hasattr(self, "stack_final_combine_var"):
+                        try:
+                            self.stack_final_combine_var.set(self.settings.stack_final_combine)
+                            if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
+                                label = self.final_key_to_label.get(
+                                    self.settings.stack_final_combine, self.settings.stack_final_combine
+                                )
+                                self.stack_final_display_var.set(label)
+                        except Exception:
+                            pass
 
-                if self.settings.batch_size == 1 and not special_single:
-                    backend_kwargs["chunk_size"] = self._get_auto_chunk_size()
-
-                # Start progress tracking before launching backend processing so that
-                # early progress messages are not missed.
-                self.thread = threading.Thread(
-                    target=self._track_processing_progress,
-                    daemon=True,
-                    name="GUI_ProgressTracker",
-                )
-                self.thread.start()
-
-                try:
-                    started = self.queued_stacker.start_processing(**backend_kwargs)
-                except Exception as e:
-                    started = False
-                    print(f"Backend start failed: {e}")
-
-                def _after_start(started=started, special_single=special_single):
-                    if special_single:
-                        self.batch_size.set(self.settings.batch_size)
-                        self.stacking_mode.set(self.settings.stacking_mode)
-                        self.reproject_between_batches_var.set(self.settings.reproject_between_batches)
-                        self.use_drizzle_var.set(self.settings.use_drizzle)
-                        if hasattr(self, "stack_final_combine_var"):
-                            try:
-                                self.stack_final_combine_var.set(self.settings.stack_final_combine)
-                                if hasattr(self, "stack_final_display_var") and hasattr(self, "final_key_to_label"):
-                                    label = self.final_key_to_label.get(
-                                        self.settings.stack_final_combine, self.settings.stack_final_combine
-                                    )
-                                    self.stack_final_display_var.set(label)
-                            except Exception:
-                                pass
-
-                    self._final_stretch_set_by_processing_finished = False
-                    if not started:
-                        if hasattr(self, "start_button") and self.start_button.winfo_exists():
-                            self.start_button.config(state=tk.NORMAL)
-                        self.processing = False
-                        self.update_progress_gui(
-                            "ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.",
-                            None,
-                        )
-                        self._set_parameter_widgets_state(tk.NORMAL)
-
-                if hasattr(self, "gui_event_queue"):
-                    self.gui_event_queue.put(_after_start)
-                else:
-                    self.root.after(0, _after_start)
-
-            except FileNotFoundError as fnfe:
-                def _prep_error_inner(fnfe=fnfe):
-                    messagebox.showerror(
-                        self.tr("error"),
-                        self.tr(
-                            "stack_plan_missing_file_error",
-                            default="File listed in stack_plan.csv not found:\n{path}",
-                        ).format(path=str(fnfe)),
-                    )
+                self._final_stretch_set_by_processing_finished = False
+                if not started:
                     if hasattr(self, "start_button") and self.start_button.winfo_exists():
                         self.start_button.config(state=tk.NORMAL)
-                    if hasattr(self, "stop_button") and self.stop_button.winfo_exists():
-                        self.stop_button.config(state=tk.DISABLED)
                     self.processing = False
+                    self.update_progress_gui(
+                        "ⓘ Échec démarrage traitement (le backend a refusé ou erreur critique). Vérifiez logs console.",
+                        None,
+                    )
                     self._set_parameter_widgets_state(tk.NORMAL)
 
-                if hasattr(self, "gui_event_queue"):
-                    self.gui_event_queue.put(_prep_error_inner)
-                else:
-                    self.root.after(0, _prep_error_inner)
+            if hasattr(self, "gui_event_queue"):
+                self.gui_event_queue.put(_after_start)
+            else:
+                self.root.after(0, _after_start)
 
         threading.Thread(target=_starter, daemon=True, name="BackendStarter").start()
 

@@ -53,6 +53,9 @@ qm = importlib.import_module("seestar.queuep.queue_manager")
 MAIN_WINDOW_SRC = (ROOT / "seestar" / "gui" / "main_window.py").read_text(
     encoding="utf-8"
 )
+RUN_CONFIG_SRC = (ROOT / "seestar" / "gui" / "run_config.py").read_text(
+    encoding="utf-8"
+)
 QM_SRC = (ROOT / "seestar" / "queuep" / "queue_manager.py").read_text(
     encoding="utf-8"
 )
@@ -65,8 +68,11 @@ QM_SRC = (ROOT / "seestar" / "queuep" / "queue_manager.py").read_text(
 
 def test_gui_backend_kwargs_forwards_settings_group_size():
     # The GUI must forward the settings value into backend_kwargs so it reaches
-    # start_processing (the previously missing seam).
-    assert '"drizzle_group_size": self.settings.drizzle_group_size' in MAIN_WINDOW_SRC
+    # start_processing (the previously missing seam). Since M0 the forwarding
+    # lives in the Qt-independent ``run_config`` snapshot builder, which the
+    # GUI ``start_processing`` invokes to build its backend kwargs.
+    assert '"drizzle_group_size": settings.drizzle_group_size' in RUN_CONFIG_SRC
+    assert "build_run_request(" in MAIN_WINDOW_SRC
 
 
 def test_start_processing_signature_accepts_drizzle_group_size():
