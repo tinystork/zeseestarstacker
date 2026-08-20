@@ -1,7 +1,7 @@
-"""M7 seam tests: the Qt preview callback path (backend -> worker -> controller -> window).
+"""M7/M8 seam tests: Qt preview callbacks and display-only rendering.
 
-These tests exercise the *metadata-only* preview seam under the ``offscreen``
-Qt platform plugin, with **no** real stacking and **no** image rendering:
+These tests exercise the preview seam under the ``offscreen`` Qt platform
+plugin, with **no** real stacking:
 
 * a fake backend emits a :class:`BackendPreviewPayload` that the
   :class:`RunController.preview_updated` signal and the :class:`MainWindow`
@@ -12,6 +12,7 @@ Qt platform plugin, with **no** real stacking and **no** image rendering:
   signatures (plus extra/missing args) to :class:`BackendPreviewPayload`
   without raising,
 * late preview updates are suppressed after controller shutdown,
+* M8 converts small image-like payloads to Qt pixmaps on the GUI thread,
 * fresh-process import hygiene and source-token cleanliness hold.
 """
 
@@ -22,6 +23,7 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 import pytest
 from PySide6.QtCore import QCoreApplication, QThread
 from PySide6.QtWidgets import QApplication
@@ -39,6 +41,7 @@ from seestar.gui_qt.backend_runner import (
     SeestarQueuedStackerBackend,
 )
 from seestar.gui_qt.run_bridge import build_run_request
+from seestar.gui_qt.preview_render import render_preview_image
 from seestar.gui_qt.settings_state import QtSettingsState
 
 
@@ -398,6 +401,166 @@ def test_seestar_backend_without_preview_setter_is_tolerated():
 
 
 # --------------------------------------------------------------------------
+# M8: display-only image rendering (Qt pixmap from BackendPreviewPayload.data)
+# --------------------------------------------------------------------------
+class ImagePreviewBackend(BaseRunBackend):
+    """Fake backend that emits one preview payload with arbitrary ``data``."""
+
+    def __init__(self, data, stack_name="img-preview") -> None:
+        self._data = data
+        self._stack_name = stack_name
+        self.cancel_called = False
+
+    def run(
+        self,
+        request,
+        progress_callback,
+        log_callback,
+        is_cancel_requested,
+        preview_callback=None,
+    ):
+        progress_callback(50)
+        if preview_callback is not None:
+            preview_callback(
+                BackendPreviewPayload(
+                    data=self._data,
+                    stack_name=self._stack_name,
+                    image_count=1,
+                    total_images=5,
+                )
+            )
+        progress_callback(100)
+        return BackendRunResult.FINISHED
+
+    def cancel(self) -> None:
+        self.cancel_called = True
+
+
+def test_renderer_returns_copied_qimage_for_uint8_rgb():
+    arr = np.zeros((3, 5, 3), dtype=np.uint8)
+    arr[:, :, 0] = 255
+    img = render_preview_image(arr)
+    assert img is not None
+    assert not img.isNull()
+    assert img.width() == 5
+    assert img.height() == 3
+
+
+def test_renderer_tolerates_invalid_data():
+    assert render_preview_image(None) is None
+    assert render_preview_image("not-an-image") is None
+    assert render_preview_image(12345) is None
+    assert render_preview_image([]) is None
+    assert render_preview_image(np.array([1, 2, 3])) is None  # 1D -> not an image
+    assert render_preview_image(np.zeros((0, 4, 3), dtype=np.uint8)) is None
+    assert render_preview_image(np.zeros((4, 4, 5), dtype=np.uint8)) is None  # 5 ch
+
+
+def test_main_window_preview_pixmap_from_float_rgb(qapp):
+    arr = np.zeros((8, 12, 3), dtype=np.float32)
+    arr[:, :, 0] = 1.0  # pure red
+    win = MainWindow(backend_factory=lambda: ImagePreviewBackend(arr, "rgb-preview"))
+    try:
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+
+        assert "rgb-preview" in win.preview_label.text()
+        pixmap = win.preview_image_label.pixmap()
+        assert pixmap is not None
+        assert not pixmap.isNull()
+        assert pixmap.width() == 12
+        assert pixmap.height() == 8
+        color = pixmap.toImage().pixelColor(0, 0)
+        assert color.red() > 200
+        assert color.green() < 20
+        assert color.blue() < 20
+    finally:
+        win.shutdown()
+
+
+def test_main_window_preview_pixmap_from_2d_mono(qapp):
+    arr = np.full((6, 10), 0.5, dtype=np.float32)
+    win = MainWindow(backend_factory=lambda: ImagePreviewBackend(arr, "mono-preview"))
+    try:
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+
+        pixmap = win.preview_image_label.pixmap()
+        assert not pixmap.isNull()
+        assert pixmap.width() == 10
+        assert pixmap.height() == 6
+        color = pixmap.toImage().pixelColor(0, 0)
+        assert color.red() == color.green() == color.blue()
+        assert abs(color.red() - 127) <= 2
+    finally:
+        win.shutdown()
+
+
+def test_main_window_preview_pixmap_from_tuple_payload(qapp):
+    display = np.zeros((5, 7, 3), dtype=np.float32)
+    display[:, :, 1] = 1.0  # pure green
+    hist = np.array([0.1, 0.2, 0.3])  # 1D, not an image
+    win = MainWindow(
+        backend_factory=lambda: ImagePreviewBackend((display, hist), "tuple-preview")
+    )
+    try:
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+
+        pixmap = win.preview_image_label.pixmap()
+        assert not pixmap.isNull()
+        assert pixmap.width() == 7
+        assert pixmap.height() == 5
+        color = pixmap.toImage().pixelColor(0, 0)
+        assert color.green() > 200
+        assert color.red() < 20
+        assert color.blue() < 20
+    finally:
+        win.shutdown()
+
+
+def test_renderer_tuple_payload_skips_non_image_array_candidate():
+    """Tuple/list payloads render the first image-like candidate, not just any array."""
+    hist = np.array([0.1, 0.2, 0.3])  # array-like but not image-like
+    display = np.zeros((4, 6, 3), dtype=np.float32)
+    display[:, :, 1] = 1.0
+
+    img = render_preview_image((hist, display))
+
+    assert img is not None
+    assert not img.isNull()
+    assert img.width() == 6
+    assert img.height() == 4
+    color = img.pixelColor(0, 0)
+    assert color.green() > 200
+    assert color.red() < 20
+    assert color.blue() < 20
+
+
+def test_main_window_preview_invalid_data_clears_pixmap(qapp):
+    """Invalid data never crashes and clears the image area (documented policy)."""
+    win = MainWindow()
+    try:
+        arr = np.zeros((4, 4, 3), dtype=np.float32)
+        arr[:, :, 2] = 1.0
+        win._on_preview(BackendPreviewPayload(data=arr, stack_name="ok"))
+        assert not win.preview_image_label.pixmap().isNull()
+        assert "ok" in win.preview_label.text()
+
+        # Invalid data: metadata label still updates, image area clears.
+        win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
+        assert win.preview_image_label.pixmap().isNull()
+        assert "bad" in win.preview_label.text()
+
+        # Missing data also clears without raising.
+        win._on_preview(BackendPreviewPayload(data=None, stack_name="none"))
+        assert win.preview_image_label.pixmap().isNull()
+        assert "none" in win.preview_label.text()
+    finally:
+        win.shutdown()
+
+
+# --------------------------------------------------------------------------
 # Source-token / import-hygiene invariants for the new seam
 # --------------------------------------------------------------------------
 def test_preview_source_is_tk_engine_numpy_free():
@@ -416,14 +579,16 @@ def test_preview_source_is_tk_engine_numpy_free():
         "zesolver_adapter",
         "zesolver.api",
         "zealfie",
-        "numpy",
         "PIL",
         "matplotlib",
     )
-    for name in ("backend_runner.py", "run_worker.py", "run_controller.py", "main_window.py"):
-        text = (pkg_dir / name).read_text(encoding="utf-8")
+    # numpy is allowed as a *lazy* import inside the renderer; its absence at
+    # import time is asserted by test_preview_import_hygiene_fresh_process below
+    # (via sys.modules), not by forbidding the source token here.
+    for py in sorted(pkg_dir.glob("*.py")):
+        text = py.read_text(encoding="utf-8")
         for token in forbidden:
-            assert token not in text, f"{name} references {token}"
+            assert token not in text, f"{py.name} references {token}"
 
 
 def test_preview_import_hygiene_fresh_process():
@@ -446,7 +611,8 @@ def test_preview_import_hygiene_fresh_process():
         "        or m.startswith('seestar.enhancement')\n"
         "        or m.startswith('seestar.queuep')\n"
         "        or m in ('seestar.gui.main_window', 'seestar.gui.settings',"
-        " 'seestar.gui.boring_stack')]\n"
+        " 'seestar.gui.boring_stack')\n"
+        "        or m.split('.')[0] in ('numpy', 'PIL', 'matplotlib')]\n"
         "if _bad:\n"
         "    print('BAD_MODULES:', _bad)\n"
         "    sys.exit(1)\n"

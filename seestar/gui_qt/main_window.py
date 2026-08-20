@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -52,6 +53,7 @@ from .backend_runner import (
     BaseRunBackend,
     SeestarQueuedStackerBackend,
 )
+from .preview_render import render_preview_image
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
 from .settings_validation import validate_settings_for_backend
@@ -203,12 +205,16 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_preview_tab(self) -> QWidget:
-        """Build the Preview tab (metadata label only — no image rendering yet)."""
+        """Build the Preview tab (metadata label + display-only image area)."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         self.preview_label = QLabel("Preview: —")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.preview_label)
+        self.preview_image_label = QLabel()
+        self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_image_label.setMinimumSize(64, 64)
+        layout.addWidget(self.preview_image_label)
         layout.addStretch(1)
         return panel
 
@@ -316,8 +322,11 @@ class MainWindow(QMainWindow):
     def _on_preview(self, payload: BackendPreviewPayload) -> None:
         """Update the Preview tab label from a preview payload (GUI thread only).
 
-        This is the metadata-only seam established before real image rendering:
-        it updates only the preview label with the stack name and counts.
+        The metadata label is updated unconditionally (stack name and counts).
+        Additionally, when ``payload.data`` is image-like, it is converted
+        (strictly display-only, via :func:`preview_render.render_preview_image`)
+        and shown as a pixmap.  Invalid/missing data never raises and clears
+        the image area, so no stale preview survives a failed render.
         """
         name = payload.stack_name or "(no stack)"
         text = f"Preview: {name}"
@@ -330,6 +339,12 @@ class MainWindow(QMainWindow):
             if payload.total_batches is not None:
                 text += f" / {payload.total_batches}"
         self.preview_label.setText(text)
+
+        image = render_preview_image(payload.data)
+        if image is not None and not image.isNull():
+            self.preview_image_label.setPixmap(QPixmap.fromImage(image))
+        else:
+            self.preview_image_label.clear()
 
     def _on_run_finished(self) -> None:
         self._running = False
