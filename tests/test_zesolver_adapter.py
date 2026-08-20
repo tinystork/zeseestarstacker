@@ -164,11 +164,17 @@ def _make_v1(
     probe=None,
     product_version="1.2.3",
     supported_capabilities=("near_solve", "blind_solve", "wcs_write", "gpu", "cancel"),
+    readiness=None,
+    open_configuration=None,
 ):
     v1 = types.ModuleType("zesolver.api.v1")
     v1.API_VERSION = api_version
     v1.API_MAJOR = api_major
     v1.probe = probe if probe is not None else (lambda **kw: None)
+    if readiness is not None:
+        v1.readiness = readiness
+    if open_configuration is not None:
+        v1.open_configuration = open_configuration
 
     def get_api_info():
         return types.SimpleNamespace(
@@ -705,3 +711,198 @@ def test_resolve_timeout_only_astap_key():
     assert adapter.ZeSolverAdapter._resolve_timeout({"astap_timeout_sec": 45}) == 45.0
     # ansvr_timeout_sec must no longer be consulted as a fallback.
     assert adapter.ZeSolverAdapter._resolve_timeout({"ansvr_timeout_sec": 999}) == 120.0
+
+
+
+# ---------------------------------------------------------------------------
+# M2d-B additions: readiness check, open_configuration, UI state mapping
+# ---------------------------------------------------------------------------
+
+
+def _make_readiness_report(
+    *,
+    operational=True,
+    configuration_needed=False,
+    message=None,
+    capabilities=("near_solve", "blind_solve"),
+):
+    caps = [
+        types.SimpleNamespace(id=cap_id, availability=_FakeAvailability.AVAILABLE)
+        for cap_id in capabilities
+    ]
+    return types.SimpleNamespace(
+        operational=operational,
+        configuration_needed=configuration_needed,
+        capabilities=caps,
+        catalog_source="bundled",
+        message=message,
+    )
+
+
+def test_check_readiness_operational(monkeypatch):
+    v1 = _make_v1(readiness=lambda: _make_readiness_report(operational=True))
+    _install_package_stubs(monkeypatch, v1)
+    discovery = adapter.check_zesolver_readiness()
+    assert discovery.state is DiscoveryState.AVAILABLE
+    assert discovery.capabilities == ("near_solve", "blind_solve")
+    assert discovery.operational is True
+
+
+def test_check_readiness_not_operational(monkeypatch):
+    v1 = _make_v1(
+        readiness=lambda: _make_readiness_report(
+            operational=False, configuration_needed=True, message="catalog missing"
+        )
+    )
+    _install_package_stubs(monkeypatch, v1)
+    discovery = adapter.check_zesolver_readiness()
+    assert discovery.state is DiscoveryState.NOT_OPERATIONAL
+    assert discovery.configuration_needed is True
+    assert discovery.operational is False
+    assert discovery.message == "catalog missing"
+
+
+def test_check_readiness_absent_from_v1(monkeypatch):
+    v1 = _make_v1()  # no readiness attribute
+    _install_package_stubs(monkeypatch, v1)
+    discovery = adapter.check_zesolver_readiness()
+    assert discovery.state is DiscoveryState.NOT_OPERATIONAL
+    assert discovery.configuration_needed is False
+    assert "readiness" in discovery.message
+
+
+def test_check_readiness_raises(monkeypatch):
+    def readiness():
+        raise RuntimeError("boom")
+
+    v1 = _make_v1(readiness=readiness)
+    _install_package_stubs(monkeypatch, v1)
+    discovery = adapter.check_zesolver_readiness()
+    assert discovery.state is DiscoveryState.UNHEALTHY
+
+
+def test_check_readiness_fast_fail_when_cheap_not_available(monkeypatch):
+    calls = {"readiness": 0}
+
+    def readiness():
+        calls["readiness"] += 1
+        return _make_readiness_report(operational=True)
+
+    v1 = _make_v1(readiness=readiness)
+    _install_package_stubs(monkeypatch, v1)
+
+    monkeypatch.setattr(
+        adapter,
+        "discover_zesolver",
+        lambda: solver_port.SolverDiscovery(state=DiscoveryState.NOT_INSTALLED),
+    )
+    discovery = adapter.check_zesolver_readiness()
+    assert discovery.state is DiscoveryState.NOT_INSTALLED
+    assert calls["readiness"] == 0
+
+
+def test_open_configuration_success(monkeypatch):
+    calls = {"n": 0}
+
+    def open_configuration():
+        calls["n"] += 1
+
+    v1 = _make_v1(open_configuration=open_configuration)
+    _install_package_stubs(monkeypatch, v1)
+    ok, msg = adapter.open_zesolver_configuration()
+    assert ok is True
+    assert msg is None
+    assert calls["n"] == 1
+
+
+def test_open_configuration_api_absent(monkeypatch):
+    v1 = _make_v1()  # no open_configuration attribute
+    _install_package_stubs(monkeypatch, v1)
+    ok, msg = adapter.open_zesolver_configuration()
+    assert ok is False
+    assert msg is not None
+
+
+def test_open_configuration_raises(monkeypatch):
+    def open_configuration():
+        raise RuntimeError("boom")
+
+    v1 = _make_v1(open_configuration=open_configuration)
+    _install_package_stubs(monkeypatch, v1)
+    ok, msg = adapter.open_zesolver_configuration()
+    assert ok is False
+    assert "boom" in msg
+
+
+def test_zesolver_ui_state_available_with_backends():
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(
+            state=DiscoveryState.AVAILABLE,
+            capabilities=("near_solve", "blind_solve"),
+        )
+    )
+    assert ui.label == "ZeSolver : pr\u00eat \u2014 Near / Blind disponibles"
+    assert ui.status_color == "green"
+    assert ui.show_configuration_button is False
+
+
+def test_zesolver_ui_state_available_without_backends():
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(state=DiscoveryState.AVAILABLE)
+    )
+    assert ui.label == "ZeSolver : pr\u00eat"
+    assert ui.status_color == "green"
+
+
+def test_zesolver_ui_state_not_operational_with_config_needed():
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(
+            state=DiscoveryState.NOT_OPERATIONAL, configuration_needed=True
+        )
+    )
+    assert ui.label == "ZeSolver : install\u00e9 mais non configur\u00e9"
+    assert ui.status_color == "orange"
+    assert ui.show_configuration_button is True
+
+
+def test_zesolver_ui_state_not_operational_without_config_needed():
+    # readiness-absent case: still NOT_OPERATIONAL but no Configurer button.
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(
+            state=DiscoveryState.NOT_OPERATIONAL, configuration_needed=False
+        )
+    )
+    assert ui.show_configuration_button is False
+
+
+def test_zesolver_ui_state_never_shows_button_for_other_states():
+    cases = [
+        solver_port.SolverDiscovery(state=DiscoveryState.AVAILABLE),
+        solver_port.SolverDiscovery(state=DiscoveryState.NOT_INSTALLED),
+        solver_port.SolverDiscovery(state=DiscoveryState.INCOMPATIBLE),
+        solver_port.SolverDiscovery(state=DiscoveryState.UNHEALTHY),
+    ]
+    for disc in cases:
+        assert solver_port.zesolver_ui_state(disc).show_configuration_button is False
+
+
+def test_zesolver_ui_state_labels_and_colors_other_states():
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(state=DiscoveryState.NOT_INSTALLED)
+    )
+    assert ui.label == "ZeSolver : non install\u00e9"
+    assert ui.status_color == "gray"
+
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(
+            state=DiscoveryState.INCOMPATIBLE, message="bad major"
+        )
+    )
+    assert ui.label == "ZeSolver : incompatible \u2014 bad major"
+    assert ui.status_color == "gray"
+
+    ui = solver_port.zesolver_ui_state(
+        solver_port.SolverDiscovery(state=DiscoveryState.UNHEALTHY)
+    )
+    assert ui.label == "ZeSolver : inutilisable (installation d\u00e9fectueuse)"
+    assert ui.status_color == "gray"

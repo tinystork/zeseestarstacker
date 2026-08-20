@@ -51,6 +51,7 @@ def test_discovery_state_values():
     assert solver_port.DiscoveryState.NOT_INSTALLED.value == "not_installed"
     assert solver_port.DiscoveryState.INCOMPATIBLE.value == "incompatible"
     assert solver_port.DiscoveryState.UNHEALTHY.value == "unhealthy"
+    assert solver_port.DiscoveryState.NOT_OPERATIONAL.value == "not_operational"
 
 
 def test_solver_discovery_defaults():
@@ -59,6 +60,9 @@ def test_solver_discovery_defaults():
     assert disc.api_version is None
     assert disc.product_version is None
     assert disc.message is None
+    assert disc.capabilities == ()
+    assert disc.configuration_needed is False
+    assert disc.operational is None
 
 
 def test_contract_constants():

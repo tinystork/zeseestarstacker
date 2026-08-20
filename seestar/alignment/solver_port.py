@@ -98,6 +98,7 @@ class DiscoveryState(str, Enum):
     NOT_INSTALLED = "not_installed"
     INCOMPATIBLE = "incompatible"
     UNHEALTHY = "unhealthy"
+    NOT_OPERATIONAL = "not_operational"
 
 
 @dataclass
@@ -108,6 +109,95 @@ class SolverDiscovery:
     api_version: str | None = None
     product_version: str | None = None
     message: str | None = None
+    capabilities: tuple[str, ...] = ()
+    configuration_needed: bool = False
+    operational: bool | None = None
+
+
+@dataclass
+class ZeSolverUiState:
+    """Presentation state for the ZeSolver status label in the GUI.
+
+    Pure, GUI-free value object produced by :func:`zesolver_ui_state` so the
+    mapping can be tested without tkinter.
+    """
+
+    label: str
+    show_configuration_button: bool = False
+    status_color: str = "gray"
+
+
+# Human-readable solve-backend names for the AVAILABLE readiness suffix.
+_SOLVE_BACKEND_LABELS: tuple[tuple[str, str], ...] = (
+    ("near_solve", "Near"),
+    ("blind_solve", "Blind"),
+)
+
+
+def zesolver_ui_state(discovery: SolverDiscovery) -> ZeSolverUiState:
+    """Map a :class:`SolverDiscovery` onto a display-ready UI state.
+
+    Pure helper (no tkinter): the GUI only consumes the returned label, colour
+    and "show configuration button" flag.
+    """
+    state = getattr(discovery, "state", None)
+    capabilities = tuple(str(c) for c in getattr(discovery, "capabilities", ()) or ())
+    message = getattr(discovery, "message", None)
+    configuration_needed = bool(getattr(discovery, "configuration_needed", False))
+
+    if state is DiscoveryState.AVAILABLE:
+        label = "ZeSolver : prêt"
+        backends = [
+            name for cap_id, name in _SOLVE_BACKEND_LABELS if cap_id in capabilities
+        ]
+        if backends:
+            label += " — " + " / ".join(backends) + " disponibles"
+        return ZeSolverUiState(
+            label=label,
+            show_configuration_button=False,
+            status_color="green",
+        )
+
+    if state is DiscoveryState.NOT_OPERATIONAL:
+        return ZeSolverUiState(
+            label="ZeSolver : installé mais non configuré",
+            show_configuration_button=configuration_needed,
+            status_color="orange",
+        )
+
+    if state is DiscoveryState.NOT_INSTALLED:
+        return ZeSolverUiState(
+            label="ZeSolver : non installé",
+            show_configuration_button=False,
+            status_color="gray",
+        )
+
+    if state is DiscoveryState.INCOMPATIBLE:
+        label = "ZeSolver : incompatible"
+        if message:
+            label += f" — {message}"
+        return ZeSolverUiState(
+            label=label,
+            show_configuration_button=False,
+            status_color="gray",
+        )
+
+    if state is DiscoveryState.UNHEALTHY:
+        label = "ZeSolver : inutilisable (installation défectueuse)"
+        if message:
+            label += f" — {message}"
+        return ZeSolverUiState(
+            label=label,
+            show_configuration_button=False,
+            status_color="gray",
+        )
+
+    # Unknown / missing state -> conservative "unusable".
+    return ZeSolverUiState(
+        label="ZeSolver : inutilisable",
+        show_configuration_button=False,
+        status_color="gray",
+    )
 
 
 # ---------------------------------------------------------------------------

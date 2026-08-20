@@ -10,7 +10,11 @@ from tkinter import ttk, filedialog, messagebox
 import os  # Pour les opérations sur les chemins
 import platform
 from seestar.core.solver_config import load_config, save_config, resolve_solver_gate
-from seestar.alignment.zesolver_adapter import discover_zesolver
+from seestar.alignment.zesolver_adapter import (
+    check_zesolver_readiness,
+    open_zesolver_configuration,
+)
+from seestar.alignment.solver_port import zesolver_ui_state
 from .ui_utils import ToolTip
 
 class LocalSolverSettingsWindow(tk.Toplevel):
@@ -109,29 +113,44 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self._on_solver_choice_change()
 
     # ------------------------------------------------------------------
-    # ZeSolver status (display only, cheap probe — no catalog/GPU/network)
+    # ZeSolver status (readiness-based; pure mapping lives in solver_port)
     # ------------------------------------------------------------------
-    def _zesolver_status(self):
-        """Return ``(state_value, human_text)`` for the ZeSolver status label."""
-        try:
-            discovery = discover_zesolver()
-            state = getattr(discovery.state, "value", str(discovery.state))
-        except Exception as exc:
-            return ("unavailable", f"ZeSolver: unavailable ({type(exc).__name__})")
-        if state == "available":
-            text = "ZeSolver: available"
-            pv = getattr(discovery, "product_version", None)
-            if pv:
-                text += f" (v{pv})"
-        else:
-            text = f"ZeSolver: {state}"
-            msg = getattr(discovery, "message", None)
-            if msg:
-                text += f" \u2014 {msg}"
-        return (state, text)
+    def _zesolver_ui_state(self):
+        """Return the display state (label, colour, show-config button)."""
+        return zesolver_ui_state(check_zesolver_readiness())
 
-    def _zesolver_available(self):
-        return self._zesolver_status()[0] == "available"
+    def _zesolver_operational(self):
+        """True when ZeSolver is *operational* (readiness reports AVAILABLE)."""
+        try:
+            return check_zesolver_readiness().state.value == "available"
+        except Exception:
+            return False
+
+    def _refresh_zesolver_status(self):
+        """Update the status label/colour and show/hide the config button."""
+        ui = self._zesolver_ui_state()
+        self.zesolver_status_label.configure(
+            text=ui.label,
+            foreground=ui.status_color,
+        )
+        if ui.show_configuration_button:
+            self.configure_zesolver_button.pack(anchor=tk.W, pady=(0, 4))
+        else:
+            self.configure_zesolver_button.pack_forget()
+
+    def _on_configure_zesolver(self):
+        """Launch the public ZeSolver configuration UI (never raises)."""
+        ok, msg = open_zesolver_configuration()
+        if not ok:
+            messagebox.showerror(
+                self.tr("error"),
+                msg or self.tr(
+                    "solver_configure_zesolver_failed",
+                    default="Impossible de configurer ZeSolver.",
+                ),
+                parent=self,
+            )
+        self._refresh_zesolver_status()
 
     def _on_solver_choice_change(self, *args):
         """
@@ -171,7 +190,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
             choice = self.local_solver_choice_var.get()
             astap_configured = bool(self.astap_path_var.get().strip())
             allowed, _ = resolve_solver_gate(
-                choice, self._zesolver_available(), astap_configured
+                choice, self._zesolver_operational(), astap_configured
             )
             show = not allowed
         self.warning_label.configure(
@@ -210,24 +229,29 @@ class LocalSolverSettingsWindow(tk.Toplevel):
 
         ttk.Radiobutton(
             self.solver_choice_frame,
-            text=self.tr("solver_zesolver", default="ZeSolver (ASTAP fallback)"),
+            text=self.tr("solver_zesolver", default="ZeSolver"),
             variable=self.local_solver_choice_var,
             value="zesolver",
             command=self._on_solver_choice_change,
         ).pack(anchor=tk.W, pady=2)
 
         # --- ZeSolver status display (read-only) ---
-        zesolver_state, zesolver_text = self._zesolver_status()
-        self.zesolver_status_label = ttk.Label(
+        self.zesolver_status_label = ttk.Label(main_frame, text="")
+        self.zesolver_status_label.pack(anchor=tk.W, pady=(0, 4))
+
+        self.configure_zesolver_button = ttk.Button(
             main_frame,
-            text=zesolver_text,
-            foreground="green" if zesolver_state == "available" else "orange",
+            text=self.tr("solver_configure_zesolver", default="Configurer ZeSolver"),
+            command=self._on_configure_zesolver,
         )
-        self.zesolver_status_label.pack(anchor=tk.W, pady=(0, 10))
+        # packed / forgotten dynamically by _refresh_zesolver_status()
 
         self.astap_frame = ttk.LabelFrame(
             main_frame,
-            text=self.tr("solver_astap", default="ASTAP"),
+            text=self.tr(
+                "local_solver_astap_fallback_title",
+                default="ASTAP — fallback autonome",
+            ),
             padding="10",
         )
         self.astap_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -330,6 +354,7 @@ class LocalSolverSettingsWindow(tk.Toplevel):
         self.warning_label.pack(anchor=tk.W)
 
         self._update_warning()
+        self._refresh_zesolver_status()
 
         button_frame = ttk.Frame(main_frame, padding="5")
         button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))

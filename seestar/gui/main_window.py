@@ -46,7 +46,7 @@ from ..queuep.queue_manager import (
 
 from .ui_utils import ToolTip
 from .boring_stack import read_paths
-from ..alignment.zesolver_adapter import discover_zesolver
+from ..alignment.zesolver_adapter import check_zesolver_readiness
 from . import analyzer_launch
 
 
@@ -6441,12 +6441,12 @@ class SeestarStackerGUI:
             astap_configured = bool(astap_path)
 
             try:
-                zesolver_available = discover_zesolver().state.value == "available"
+                zesolver_operational = check_zesolver_readiness().state.value == "available"
             except Exception:
-                zesolver_available = False
+                zesolver_operational = False
 
             allowed, reason_code = resolve_solver_gate(
-                solver_pref, zesolver_available, astap_configured
+                solver_pref, zesolver_operational, astap_configured
             )
 
             if not allowed:

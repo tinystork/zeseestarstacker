@@ -208,7 +208,7 @@ def get_astap_default_sensitivity():
 _LEGACY_SOLVER_PREFERENCES = ("ansvr", "astrometry")
 
 
-def resolve_solver_gate(solver_pref, zesolver_available, astap_configured):
+def resolve_solver_gate(solver_pref, zesolver_operational, astap_configured):
     """Resolve whether a usable astrometric solver is available for a
     solve-requiring processing mode.
 
@@ -219,13 +219,17 @@ def resolve_solver_gate(solver_pref, zesolver_available, astap_configured):
 
     Semantics (consistent with ``AstrometrySolver._migrate_legacy_preference``):
 
-    * ``"zesolver"`` + ZeSolver available              -> allowed.
-    * ``"zesolver"`` + ZeSolver unavailable            -> allowed only when
+    * ``"zesolver"`` + ZeSolver operational            -> allowed.
+    * ``"zesolver"`` + ZeSolver absent/non operational -> allowed only when
       ``astap_configured`` (ZeSolver falls back to ASTAP at solve time).
     * ``"astap"``    + ASTAP configured                -> allowed.
     * ``"none"`` / ``"astap"`` / ``"zesolver"`` with no usable solver -> blocked
       with a specific reason.
     * Legacy ``"ansvr"`` / ``"astrometry"`` are treated as ``"zesolver"``.
+
+    ``zesolver_operational`` must reflect *operational* readiness (i.e. the
+    readiness check), not merely "installed": an installed-but-not-operational
+    ZeSolver must NOT satisfy the gate by itself.
     """
     if not isinstance(solver_pref, str):
         solver_pref = str(solver_pref or "none")
@@ -235,7 +239,7 @@ def resolve_solver_gate(solver_pref, zesolver_available, astap_configured):
         pref = "zesolver"
 
     if pref == "zesolver":
-        if zesolver_available:
+        if zesolver_operational:
             return (True, None)
         if astap_configured:
             return (True, None)

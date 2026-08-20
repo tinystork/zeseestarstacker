@@ -196,6 +196,128 @@ def discover_zesolver() -> SolverDiscovery:
     )
 
 
+def _readiness_capabilities(report: Any) -> tuple[str, ...]:
+    """Extract the solve backends reported AVAILABLE by a readiness report.
+
+    The readiness report exposes per-capability availability (``id`` /
+    ``availability``) the same way ``probe`` does.  We keep only the solve
+    backends (``near_solve`` / ``blind_solve``) that are reported AVAILABLE, in
+    a stable order.
+    """
+    states = getattr(report, "capabilities", None) or ()
+    available: set[str] = set()
+    for cap_state in states:
+        cap_id = getattr(cap_state, "id", None)
+        availability = getattr(cap_state, "availability", None)
+        availability_value = getattr(availability, "value", availability)
+        if cap_id is not None and availability_value == "available":
+            available.add(str(cap_id))
+    return tuple(c for c in SOLVE_BACKEND_CAPABILITIES if c in available)
+
+
+def check_zesolver_readiness() -> SolverDiscovery:
+    """Resolve ZeSolver *operational* readiness via the public v1 contract.
+
+    This is the M2d "is ZeSolver actually usable right now?" check, layered on
+    top of the cheap product discovery: product states (``NOT_INSTALLED`` /
+    ``UNHEALTHY`` / ``INCOMPATIBLE``) take priority and short-circuit, so
+    ``discover_zesolver()`` keeps its exact semantics.  Only when the product is
+    ``AVAILABLE`` do we consult ``v1.readiness()`` (imported lazily).
+
+    * ``operational=True``  -> ``AVAILABLE`` with the solve backends reported
+      AVAILABLE (``capabilities``) and ``operational=True``.
+    * ``operational=False`` -> ``NOT_OPERATIONAL`` with ``configuration_needed``
+      and the report ``message``.
+    * ``readiness`` absent  -> ``NOT_OPERATIONAL``, ``configuration_needed=False``,
+      clear "does not support readiness" message.
+    * ``readiness`` raises  -> ``UNHEALTHY`` with the execution error message.
+    """
+    discovery = discover_zesolver()
+    if discovery.state is not DiscoveryState.AVAILABLE:
+        return discovery
+
+    try:
+        v1 = importlib.import_module(_ZESOLVER_API_MODULE)
+    except Exception as exc:  # pragma: no cover - defensive
+        return SolverDiscovery(
+            state=DiscoveryState.UNHEALTHY,
+            api_version=discovery.api_version,
+            product_version=discovery.product_version,
+            message=f"import failed: {type(exc).__name__}: {exc}",
+        )
+
+    readiness = getattr(v1, "readiness", None)
+    if readiness is None:
+        return SolverDiscovery(
+            state=DiscoveryState.NOT_OPERATIONAL,
+            api_version=discovery.api_version,
+            product_version=discovery.product_version,
+            configuration_needed=False,
+            message=(
+                "la version installée de ZeSolver ne supporte pas la "
+                "vérification de readiness"
+            ),
+        )
+
+    try:
+        report = readiness()
+    except Exception as exc:  # pragma: no cover - exercised via fakes
+        return SolverDiscovery(
+            state=DiscoveryState.UNHEALTHY,
+            api_version=discovery.api_version,
+            product_version=discovery.product_version,
+            message=f"readiness failed: {type(exc).__name__}: {exc}",
+        )
+
+    operational = getattr(report, "operational", None)
+
+    if operational is True:
+        return SolverDiscovery(
+            state=DiscoveryState.AVAILABLE,
+            api_version=discovery.api_version,
+            product_version=discovery.product_version,
+            capabilities=_readiness_capabilities(report),
+            operational=True,
+        )
+
+    return SolverDiscovery(
+        state=DiscoveryState.NOT_OPERATIONAL,
+        api_version=discovery.api_version,
+        product_version=discovery.product_version,
+        configuration_needed=bool(getattr(report, "configuration_needed", False)),
+        operational=operational if operational is False else None,
+        message=getattr(report, "message", None),
+    )
+
+
+def open_zesolver_configuration() -> tuple[bool, str | None]:
+    """Launch ZeSolver's public configuration UI (contract-only, never raises).
+
+    Returns ``(True, None)`` on success and ``(False, message)`` when the public
+    API is absent or ``v1.open_configuration()`` fails.  Zsss never knows (or
+    touches) ZeSolver internal paths — the mapping lives entirely on the ZeSolver
+    side of the contract.
+    """
+    try:
+        v1 = importlib.import_module(_ZESOLVER_API_MODULE)
+    except Exception as exc:  # pragma: no cover - exercised via fakes
+        return (False, f"ZeSolver import failed: {type(exc).__name__}: {exc}")
+
+    open_fn = getattr(v1, "open_configuration", None)
+    if open_fn is None:
+        return (
+            False,
+            "la version installée de ZeSolver ne supporte pas la configuration",
+        )
+
+    try:
+        open_fn()
+    except Exception as exc:  # pragma: no cover - exercised via fakes
+        return (False, f"open_configuration failed: {type(exc).__name__}: {exc}")
+
+    return (True, None)
+
+
 class ZeSolverAdapter:
     """Plate solving through the public ``zesolver.api.v1`` API.
 
