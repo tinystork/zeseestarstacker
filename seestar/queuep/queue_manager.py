@@ -3982,13 +3982,11 @@ class SeestarQueuedStacker:
 
         solver_settings = {
             "local_solver_preference": self.local_solver_preference,
-            "api_key": self.api_key,
             "astap_path": self.astap_path,
             "astap_data_dir": self.astap_data_dir,
             "astap_search_radius": self.astap_search_radius,
             "astap_downsample": self.astap_downsample,
             "astap_sensitivity": self.astap_sensitivity,
-            "local_ansvr_path": self.local_ansvr_path,
             "scale_est_arcsec_per_pix": getattr(
                 self, "reference_pixel_scale_arcsec", None
             ),
@@ -4612,20 +4610,14 @@ class SeestarQueuedStacker:
 
             solver_settings_for_ref_anchor = {
                 "local_solver_preference": self.local_solver_preference,
-                "api_key": self.api_key,
                 "astap_path": self.astap_path,
                 "astap_data_dir": self.astap_data_dir,
                 "astap_search_radius": self.astap_search_radius,
                 "astap_downsample": self.astap_downsample,
                 "astap_sensitivity": self.astap_sensitivity,
-                "local_ansvr_path": self.local_ansvr_path,
                 "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,  # Peut être None au premier passage
                 "scale_tolerance_percent": 20,
-                "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
                 "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                "astrometry_net_timeout_sec": getattr(
-                    self, "astrometry_net_timeout_sec", 300
-                ),
                 # Hints can dramatically speed ASTAP when RA/DEC are present
                 "use_radec_hints": False,
             }
@@ -4634,12 +4626,7 @@ class SeestarQueuedStacker:
                 f"DEBUG QM (_worker): Contenu de solver_settings_for_ref_anchor:"
             )
             for key_s, val_s in solver_settings_for_ref_anchor.items():
-                if key_s == "api_key":
-                    logger.debug(
-                        f"    '{key_s}': '{'Présente' if val_s else 'Absente'}'"
-                    )
-                else:
-                    logger.debug(f"    '{key_s}': '{val_s}'")
+                logger.debug(f"    '{key_s}': '{val_s}'")
 
             logger.debug(
                 f"!!!! DEBUG _worker AVANT BLOC IF/ELIF POUR SOLVING ANCRE (SECTION 1.A) !!!! self.is_mosaic_run = {self.is_mosaic_run}"
@@ -7543,23 +7530,15 @@ class SeestarQueuedStacker:
                     if self.astrometry_solver:
                         solver_settings_for_panel_fallback = {
                             "local_solver_preference": self.local_solver_preference,
-                            "api_key": self.api_key,
                             "astap_path": self.astap_path,
                             "astap_data_dir": self.astap_data_dir,
                             "astap_search_radius": self.astap_search_radius,
                             "astap_downsample": self.astap_downsample,
                             "astap_sensitivity": self.astap_sensitivity,
-                            "local_ansvr_path": self.local_ansvr_path,
                             "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,
                             "scale_tolerance_percent": 20,
-                            "ansvr_timeout_sec": getattr(
-                                self, "ansvr_timeout_sec", 120
-                            ),
                             "astap_timeout_sec": getattr(
                                 self, "astap_timeout_sec", 120
-                            ),
-                            "astrometry_net_timeout_sec": getattr(
-                                self, "astrometry_net_timeout_sec", 300
                             ),
                         }
                         wcs_panel_solved_by_solver = None
@@ -7618,20 +7597,14 @@ class SeestarQueuedStacker:
                 if self.astrometry_solver:
                     solver_settings_for_this_panel = {
                         "local_solver_preference": self.local_solver_preference,
-                        "api_key": self.api_key,
                         "astap_path": self.astap_path,
                         "astap_data_dir": self.astap_data_dir,
                         "astap_search_radius": self.astap_search_radius,
                         "astap_downsample": self.astap_downsample,
                         "astap_sensitivity": self.astap_sensitivity,
-                        "local_ansvr_path": self.local_ansvr_path,
                         "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,
                         "scale_tolerance_percent": 20,
-                        "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
                         "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                        "astrometry_net_timeout_sec": getattr(
-                            self, "astrometry_net_timeout_sec", 300
-                        ),
                     }
                     wcs_final_pour_retour = self.astrometry_solver.solve(
                         file_path,
@@ -7660,20 +7633,14 @@ class SeestarQueuedStacker:
                 if self.astrometry_solver:
                     solver_settings_for_file = {
                         "local_solver_preference": self.local_solver_preference,
-                        "api_key": self.api_key,
                         "astap_path": self.astap_path,
                         "astap_data_dir": self.astap_data_dir,
                         "astap_search_radius": self.astap_search_radius,
                         "astap_downsample": self.astap_downsample,
                         "astap_sensitivity": self.astap_sensitivity,
-                        "local_ansvr_path": self.local_ansvr_path,
                         "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,
                         "scale_tolerance_percent": 20,
-                        "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
                         "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                        "astrometry_net_timeout_sec": getattr(
-                            self, "astrometry_net_timeout_sec", 300
-                        ),
                     }
                     wcs_final_pour_retour = self.astrometry_solver.solve(
                         file_path,
@@ -11089,7 +11056,7 @@ class SeestarQueuedStacker:
         logger.debug("=" * 70 + "\n")
         return final_sci_image_HWC, final_wht_map_HWC
 
-    def _run_astap_and_update_header(self, fits_path: str) -> bool:
+    def _run_solver_and_update_header(self, fits_path: str) -> bool:
         """Solve the provided FITS with the configured solver and update its header."""
         try:
             header = fits.getheader(fits_path)
@@ -11099,22 +11066,16 @@ class SeestarQueuedStacker:
 
         solver_settings = {
             "local_solver_preference": getattr(self, "local_solver_preference", "none"),
-            "api_key": getattr(self, "api_key", ""),
             "astap_path": getattr(self, "astap_path", ""),
             "astap_data_dir": getattr(self, "astap_data_dir", ""),
             "astap_search_radius": getattr(self, "astap_search_radius", 3.0),
             "astap_downsample": getattr(self, "astap_downsample", 1),
             "astap_sensitivity": getattr(self, "astap_sensitivity", 100),
-            "local_ansvr_path": getattr(self, "local_ansvr_path", ""),
             "scale_est_arcsec_per_pix": getattr(
                 self, "reference_pixel_scale_arcsec", None
             ),
             "scale_tolerance_percent": 20,
-            "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
             "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-            "astrometry_net_timeout_sec": getattr(
-                self, "astrometry_net_timeout_sec", 300
-            ),
             "use_radec_hints": getattr(self, "use_radec_hints", False),
         }
 
@@ -11203,7 +11164,7 @@ class SeestarQueuedStacker:
         fits.PrimaryHDU(data=np.moveaxis(stack, -1, 0), header=hdr).writeto(
             tmp.name, overwrite=True
         )
-        solved_ok = self._run_astap_and_update_header(tmp.name)
+        solved_ok = self._run_solver_and_update_header(tmp.name)
         if solved_ok:
             hdr = fits.getheader(tmp.name)
         os.remove(tmp.name)
@@ -11564,7 +11525,7 @@ class SeestarQueuedStacker:
         solved_ok = True
 
         if run_astap:
-            solved_ok = self._run_astap_and_update_header(sci_fits)
+            solved_ok = self._run_solver_and_update_header(sci_fits)
             if solved_ok:
                 header = fits.getheader(sci_fits)
             else:
@@ -11803,7 +11764,7 @@ class SeestarQueuedStacker:
                                 has_wcs = False
                         if not has_wcs and getattr(self, "batch_size", 0) != 0:
                             try:
-                                self._run_astap_and_update_header(sci_path)
+                                self._run_solver_and_update_header(sci_path)
                                 hdr = fits.getheader(sci_path, memmap=False)
                             except Exception:
                                 hdr = None
@@ -12700,7 +12661,7 @@ class SeestarQueuedStacker:
                     # ``batch_size=0`` + reproject path the reference WCS above
                     # already avoids this branch, but other scenarios still rely
                     # on ASTAP to recover the astrometry.
-                    solved_ok = self._run_astap_and_update_header(sci_path)
+                    solved_ok = self._run_solver_and_update_header(sci_path)
                     if solved_ok:
                         hdr = fits.getheader(sci_path, memmap=False)
                     else:
@@ -14474,7 +14435,7 @@ class SeestarQueuedStacker:
         """Résout en arrière-plan le WCS des FITS d'un dossier sans geler le GUI.
 
         - Pool limité (1–2 threads) pour charge CPU faible
-        - Header FITS mis à jour via `_run_astap_and_update_header`
+        - Header FITS mis à jour via `_run_solver_and_update_header`
         - Ignore les fichiers déjà munis d'un WCS valide
 
         Retourne le nombre de tentatives effectuées.
@@ -14562,7 +14523,7 @@ class SeestarQueuedStacker:
                 if getattr(self, "stop_processing", False):
                     return False
                 try:
-                    return bool(self._run_astap_and_update_header(pth))
+                    return bool(self._run_solver_and_update_header(pth))
                 except Exception:
                     return False
 
@@ -15265,20 +15226,14 @@ class SeestarQueuedStacker:
 
                 solver_settings_for_ref = {
                     "local_solver_preference": self.local_solver_preference,
-                    "api_key": self.api_key,
                     "astap_path": self.astap_path,
                     "astap_data_dir": self.astap_data_dir,
                     "astap_search_radius": self.astap_search_radius,
                     "astap_downsample": self.astap_downsample,
                     "astap_sensitivity": self.astap_sensitivity,
-                    "local_ansvr_path": self.local_ansvr_path,
                     "scale_est_arcsec_per_pix": self.reference_pixel_scale_arcsec,
                     "scale_tolerance_percent": 20,
-                    "ansvr_timeout_sec": getattr(self, "ansvr_timeout_sec", 120),
                     "astap_timeout_sec": getattr(self, "astap_timeout_sec", 120),
-                    "astrometry_net_timeout_sec": getattr(
-                        self, "astrometry_net_timeout_sec", 300
-                    ),
                     # Speed up ASTAP when RA/DEC are available in the header
                     "use_radec_hints": False,
                 }

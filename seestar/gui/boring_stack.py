@@ -843,7 +843,7 @@ def _run_stack(args, progress_cb) -> int:
                     if progress_cb:
                         progress_cb(f"WCS solving source: {base}", None)
                     try:
-                        stacker._run_astap_and_update_header(src)
+                        stacker._run_solver_and_update_header(src)
                         hdr = fits.getheader(src)
                     except Exception:
                         logger.exception("Astrometric solver failed for %s", src)

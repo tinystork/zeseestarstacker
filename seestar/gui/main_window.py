@@ -46,6 +46,7 @@ from ..queuep.queue_manager import (
 
 from .ui_utils import ToolTip
 from .boring_stack import read_paths
+from ..alignment.zesolver_adapter import discover_zesolver
 from . import analyzer_launch
 
 
@@ -6440,19 +6441,22 @@ class SeestarStackerGUI:
             use_solver = self.use_third_party_solver_var.get()
             solver_pref = getattr(self.settings, "local_solver_preference", "none")
             astap_path = getattr(self.settings, "astap_path", "").strip()
-            ansvr_path = getattr(self.settings, "local_ansvr_path", "").strip()
-            astrometry_dir = getattr(self.settings, "astrometry_solve_field_dir", "").strip()
-            api_key = getattr(self.settings, "astrometry_api_key", "").strip()
 
             solver_configured = False
             if solver_pref == "astap":
                 solver_configured = bool(astap_path)
-            elif solver_pref == "ansvr":
-                solver_configured = bool(ansvr_path)
-            elif solver_pref == "astrometry":
-                solver_configured = bool(astrometry_dir or api_key)
+            elif solver_pref in ("zesolver", "ansvr", "astrometry"):
+                # ZeSolver primary (legacy preferences migrate to it); ASTAP
+                # remains an acceptable autonomous fallback.
+                try:
+                    zesolver_ready = (
+                        discover_zesolver().state.value == "available"
+                    )
+                except Exception:
+                    zesolver_ready = False
+                solver_configured = bool(astap_path) or zesolver_ready
             else:
-                solver_configured = any([astap_path, ansvr_path, astrometry_dir, api_key])
+                solver_configured = False
 
             if not (use_solver and solver_configured):
                 messagebox.showerror(self.tr("error"), self.tr("reproject_solver_required_error"))

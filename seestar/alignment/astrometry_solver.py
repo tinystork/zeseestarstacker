@@ -1,17 +1,17 @@
 """
-Module pour gérer l'interaction avec les solveurs astrométriques,
-y compris Astrometry.net (web service), ASTAP (local), et ansvr (Astrometry.net local).
+Module pour gérer l'interaction avec les solveurs astrométriques.
+
+Deux chemins de résolution seulement : ZeSolver (optionnel, prioritaire) et
+ASTAP (fallback autonome). Les solveurs ANSVR et Astrometry.net (web) ont été
+retirés de Zsss ; ZeSolver les gère via ses stratégies internes.
 """
 import os
 import re
 import numpy as np
 import warnings
 import time
-import tempfile
 import traceback
 import subprocess  # Pour appeler les solveurs locaux
-import shutil  # Pour trouver les exécutables
-import gc
 import logging
 import platform
 from seestar.core.solver_config import get_astap_default_search_radius
@@ -55,19 +55,9 @@ def resolve_astap_executable(path: str) -> str:
         if os.path.isfile(candidate_upper):
             return candidate_upper
     return path
-# --- Dépendances Astropy/Astroquery (comme avant) ---
-_ASTROQUERY_AVAILABLE = False
-_ASTROPY_AVAILABLE = False
-AstrometryNet = None
 
-try:
-    from astroquery.astrometry_net import AstrometryNet as ActualAstrometryNet
-    AstrometryNet = ActualAstrometryNet
-    _ASTROQUERY_AVAILABLE = True
-    # print("DEBUG [AstrometrySolverModule]: astroquery.astrometry_net importé.") # Moins verbeux
-except ImportError:
-    logger.warning(
-        "AstrometrySolver: astroquery non installée. Plate-solving web Astrometry.net désactivé.")
+# --- Dépendances Astropy ---
+_ASTROPY_AVAILABLE = False
 
 try:
     from astropy.io import fits
@@ -80,6 +70,17 @@ try:
 except ImportError:
     logger.error(
         "ERREUR CRITIQUE [AstrometrySolverModule]: Astropy non installée. Le module ne peut fonctionner.")
+
+
+try:
+    from seestar.alignment.zesolver_adapter import ZeSolverAdapter
+except Exception:  # pragma: no cover - l'adaptateur optionnel ne doit jamais casser le solver
+    ZeSolverAdapter = None
+
+# Préférences solver obsolètes désormais gérées par ZeSolver (qui internalise les
+# stratégies Astrometry.net). Migrées avec un WARN unique.
+_LEGACY_PREFERENCES = ("ansvr", "astrometry")
+_legacy_preference_warned = False
 
 
 def _sanitize_astap_wcs_text(txt: str) -> tuple[str, int, int]:
@@ -122,200 +123,16 @@ def _sanitize_astap_wcs_text(txt: str) -> tuple[str, int, int]:
     return "\n".join(out) + "\n", modified, dropped
 
 
-def _estimate_scale_from_fits_for_cfg(fits_path, default_pixsize_um=2.4, default_focal_mm=250.0, solver_instance=None):
-    """
-    Estime l’échelle en arcsec/pixel à partir du header FITS.
-    Utilise des valeurs par défaut si XPIXSZ ou FOCALLEN sont absents.
-    Le paramètre solver_instance est optionnel et permet de loguer via self._log si fourni.
-    """
-    pixel_size_um = default_pixsize_um
-    focal_length_mm = default_focal_mm
-    source_of_pixsize = "default (func)" # Source par défaut si pas de header ou clé
-    source_of_focal = "default (func)"   # Source par défaut
-
-    def _default_log(msg, level="INFO"):
-        level_upper = str(level).upper()
-        lvl = {
-            "DEBUG": logging.DEBUG,
-            "INFO": logging.INFO,
-            "WARN": logging.WARNING,
-            "ERROR": logging.ERROR,
-        }.get(level_upper, logging.INFO)
-        logger.log(lvl, msg)
-
-    log_func = _default_log
-    if solver_instance and hasattr(solver_instance, '_log') and callable(solver_instance._log):
-        log_func = solver_instance._log
-
-
-    log_func(f"CFG ScaleEst: Tentative lecture FITS '{os.path.basename(fits_path)}' pour échelle.", "DEBUG")
-    try:
-        # Utiliser memmap=False pour éviter de garder le fichier ouvert inutilement,
-        # surtout si cette fonction est appelée dans une boucle ou un contexte sensible.
-        with fits.open(fits_path, memmap=False) as hdul:
-            if hdul and len(hdul) > 0 and hdul[0].header: # Vérifier que le HDU et le header existent
-                hdr = hdul[0].header
-                # Chercher XPIXSZ (taille pixel en X)
-                if 'XPIXSZ' in hdr:
-                    try:
-                        val = float(hdr['XPIXSZ'])
-                        if val > 1e-3: # Accepter seulement si > 0.001 micron (valeur raisonnable)
-                            pixel_size_um = val
-                            source_of_pixsize = "header (XPIXSZ)"
-                        else:
-                            log_func(f"CFG ScaleEst: Valeur XPIXSZ ('{hdr['XPIXSZ']}') <= 0.001µm, fallback sur défaut.", "WARN")
-                    except (ValueError, TypeError):
-                        log_func(f"CFG ScaleEst: Valeur XPIXSZ ('{hdr['XPIXSZ']}') invalide dans header, fallback sur défaut.", "WARN")
-                elif 'PIXSIZE1' in hdr: # Clé alternative commune
-                    try:
-                        val = float(hdr['PIXSIZE1'])
-                        if val > 1e-3:
-                            pixel_size_um = val
-                            source_of_pixsize = "header (PIXSIZE1)"
-                        else:
-                            log_func(f"CFG ScaleEst: Valeur PIXSIZE1 ('{hdr['PIXSIZE1']}') <= 0.001µm, fallback sur défaut.", "WARN")
-                    except (ValueError, TypeError):
-                        log_func(f"CFG ScaleEst: Valeur PIXSIZE1 ('{hdr['PIXSIZE1']}') invalide, fallback sur défaut.", "WARN")
-                else:
-                    log_func(f"CFG ScaleEst: Clés XPIXSZ/PIXSIZE1 non trouvées pour '{os.path.basename(fits_path)}'. Utilisation défaut {default_pixsize_um}µm.", "DEBUG")
-
-
-                # Chercher FOCALLEN (longueur focale)
-                if 'FOCALLEN' in hdr:
-                    try:
-                        val = float(hdr['FOCALLEN'])
-                        if val > 1.0: # Accepter seulement si > 1 mm (valeur raisonnable)
-                            focal_length_mm = val
-                            source_of_focal = "header (FOCALLEN)"
-                        else:
-                            log_func(f"CFG ScaleEst: Valeur FOCALLEN ('{hdr['FOCALLEN']}') <= 1mm, fallback sur défaut.", "WARN")
-                    except (ValueError, TypeError):
-                        log_func(f"CFG ScaleEst: Valeur FOCALLEN ('{hdr['FOCALLEN']}') invalide dans header, fallback sur défaut.", "WARN")
-                else:
-                    log_func(f"CFG ScaleEst: Clé FOCALLEN non trouvée pour '{os.path.basename(fits_path)}'. Utilisation défaut {default_focal_mm}mm.", "DEBUG")
-            else:
-                log_func(f"CFG ScaleEst: Header FITS non trouvé ou invalide dans '{os.path.basename(fits_path)}'. Utilisation des défauts pour échelle.", "WARN")
-    except FileNotFoundError:
-        log_func(f"CFG ScaleEst: Fichier FITS '{os.path.basename(fits_path)}' non trouvé pour estimation échelle. Utilisation des défauts.", "ERROR")
-    except Exception as e:
-        log_func(f"CFG ScaleEst: Erreur lecture FITS '{os.path.basename(fits_path)}' pour échelle: {e}. Utilisation des défauts.", "ERROR")
-        # traceback.print_exc(limit=1) # Décommenter pour debug plus profond si besoin
-
-    # Sécurité pour éviter division par zéro ou focale absurde
-    if focal_length_mm <= 1e-3: # Si la focale est toujours invalide après lecture/fallback
-        log_func(f"CFG ScaleEst: Focale finale ({focal_length_mm}mm de {source_of_focal}) invalide ou trop petite, "
-                 f"forçage à la valeur par défaut de la fonction ({default_focal_mm}mm).", "WARN")
-        focal_length_mm = default_focal_mm # Utiliser le défaut de la fonction en dernier recours
-
-    # Formule: scale_arcsec_per_pix = (pixel_size_microns / focal_length_mm) * 206.265
-    scale_arcsec_per_pix = (pixel_size_um / focal_length_mm) * 206.265
-
-    log_func(f"CFG ScaleEst: Échelle finale estimée: {scale_arcsec_per_pix:.3f} arcsec/pix "
-             f"(PixSz: {pixel_size_um:.2f}µm [{source_of_pixsize}], "
-             f"Focale: {focal_length_mm:.1f}mm [{source_of_focal}])", "INFO") # INFO est plus visible
-    return scale_arcsec_per_pix
-
-
-
-
-
-def _generate_astrometry_cfg_auto(fits_file_for_scale_estimation,
-                                 index_directory_path,
-                                 output_cfg_path=None,
-                                 solver_instance=None):
-    """
-    Génère un fichier .cfg pour solve-field qui LISTE EXPLICITEMENT les fichiers d'index
-    trouvés dans le répertoire d'index fourni.
-    """
-    def _default_log(msg, level="INFO"):
-        level_upper = str(level).upper()
-        lvl = {
-            "DEBUG": logging.DEBUG,
-            "INFO": logging.INFO,
-            "WARN": logging.WARNING,
-            "ERROR": logging.ERROR,
-        }.get(level_upper, logging.INFO)
-        logger.log(lvl, msg)
-
-    log_func = _default_log
-    if solver_instance and hasattr(solver_instance, '_log') and callable(solver_instance._log):
-        log_func = solver_instance._log
-
-    log_func(f"CFG AutoGen (List Indexes V1): Début pour index_dir '{index_directory_path}'", "INFO")
-
-    if not os.path.isdir(index_directory_path):
-        log_func(f"CFG AutoGen: ERREUR - Répertoire d'index '{index_directory_path}' non trouvé.", "ERROR")
-        return None
-
-    # --- Lister les fichiers d'index ---
-    abs_index_dir = os.path.abspath(index_directory_path)
-    # Utiliser glob pour trouver les fichiers d'index. Le pattern peut être ajusté.
-    # On s'attend à des noms comme index-4207.fits, index-4207-00.fits, etc.
-    index_files_pattern = os.path.join(abs_index_dir, "index-*.fits")
-    found_index_files = glob.glob(index_files_pattern)
-
-    if not found_index_files:
-        log_func(f"CFG AutoGen: ERREUR - Aucun fichier d'index (pattern '{index_files_pattern}') trouvé dans '{abs_index_dir}'.", "ERROR")
-        log_func(f"  Vérifiez que le répertoire contient des fichiers comme 'index-4207.fits', etc.", "ERROR")
-        return None
-    
-    log_func(f"CFG AutoGen: {len(found_index_files)} fichier(s) d'index trouvé(s) dans '{abs_index_dir}'.", "DEBUG")
-
-    # --- Détermination du chemin de sortie du .cfg (inchangée) ---
-    if output_cfg_path is None:
-        # ... (logique pour app_specific_cfg_dir et fallback vers temp) ...
-        cfg_dir_base = os.path.expanduser("~"); app_specific_cfg_dir = os.path.join(cfg_dir_base, ".config", "zeseestarstacker_solver")
-        try: os.makedirs(app_specific_cfg_dir, exist_ok=True); output_cfg_path = os.path.join(app_specific_cfg_dir, "auto_generated_astrometry.cfg")
-        except OSError:
-            try: temp_dir_for_cfg = tempfile.mkdtemp(prefix="zss_cfg_"); output_cfg_path = os.path.join(temp_dir_for_cfg, "auto_generated_astrometry.cfg")
-            except Exception: log_func(f"CFG AutoGen: ERREUR CRITIQUE - Impossible de déterminer chemin .cfg", "ERROR"); return None
-    else: # ... (logique si output_cfg_path est fourni) ...
-        try: output_cfg_dir_parent = os.path.dirname(output_cfg_path); os.makedirs(output_cfg_dir_parent, exist_ok=True)
-        except OSError: log_func(f"CFG AutoGen: ERREUR création dir parent pour .cfg custom", "ERROR")
-
-
-    # --- Contenu du .cfg avec liste explicite des index ---
-    content_lines = [
-        f"# Astrometry.cfg auto-generated by ZeSeestarStacker (Explicit Index List V1)",
-        f"# Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"# Based on image (for context): {os.path.basename(fits_file_for_scale_estimation)}",
-        f"# Index directory scanned: {abs_index_dir}",
-        "",
-        "# Explicitly list index files found:",
-    ]
-    for index_file_path in sorted(found_index_files): # Trier pour un ordre constant
-        content_lines.append(f"index {index_file_path}")
-    
-    content_lines.extend([
-        "",
-        "# Path to your Astrometry.net index files (gardé pour info, mais les 'index' ci-dessus sont prioritaires)",
-        f"add_path {abs_index_dir}",
-        "",
-        "inparallel",
-        
-        ""
-    ])
-
-    try:
-        with open(output_cfg_path, "w") as f:
-            for line in content_lines:
-                f.write(line + "\n")
-        log_func(f"CFG AutoGen: Fichier (Explicit Index List) '{output_cfg_path}' généré. {len(found_index_files)} index listés.", "INFO")
-        return output_cfg_path
-    except IOError as e_write:
-        log_func(f"CFG AutoGen: ERREUR CRITIQUE - Échec écriture fichier .cfg (Explicit Index List) '{output_cfg_path}': {e_write}", "ERROR")
-        return None
-
-
-
-
-
-
-
 class AstrometrySolver:
     """
     Classe pour orchestrer la résolution astrométrique en utilisant différents solveurs.
+
+    Deux chemins de résolution seulement : ZeSolver (optionnel) et ASTAP (fallback).
     """
+    #: Classe d'adaptateur ZeSolver (importée au niveau module — jamais le package
+    #: ``zesolver`` lui-même). L'*instance* est créée paresseusement au premier usage.
+    _zesolver_adapter_class = ZeSolverAdapter
+
     def __init__(self, progress_callback=None, verbose=None):
         """
         Initialise le solveur.
@@ -335,7 +152,7 @@ class AstrometrySolver:
         # Ces valeurs seront écrasées par celles des 'settings' dans la méthode solve() si fournies.
         self.default_pixel_size_um_for_cfg = 2.4  # Valeur Seestar S50 par défaut
         self.default_focal_length_mm_for_cfg = 250.0 # Valeur Seestar S50 par défaut
-        self._settings_dict_from_solve = {} # Initialiser aussi pour ansvr_search_radius_deg
+        self._zesolver_adapter = None
 
     def _extract_scale_arcsec(self, wcs_obj):
         """Return pixel scale in arcsec/pixel from a WCS object."""
@@ -345,8 +162,6 @@ class AstrometrySolver:
             except Exception:
                 return float("nan")
         return float("nan")
-
-
 
 
     def _log(self, message, level="INFO"):
@@ -392,20 +207,26 @@ class AstrometrySolver:
         """
         Tente de résoudre le WCS d'une image en utilisant la stratégie configurée.
 
+        Deux chemins de résolution existent : ZeSolver (optionnel, prioritaire
+        lorsqu'il est installé/compatible/configuré) et ASTAP (fallback autonome).
+        Les anciens solveurs ANSVR et Astrometry.net (web) sont désormais gérés
+        exclusivement par ZeSolver via ses stratégies internes.
+
         Args:
             image_path (str): Chemin vers le fichier image à résoudre.
             fits_header (fits.Header): Header FITS de l'image.
             settings (dict): Dictionnaire contenant la configuration des solveurs.
-                             Clés attendues: 'local_solver_preference' (str: "none", "astap", "ansvr"),
-                                           'astap_path' (str), 'astap_data_dir' (str), 'astap_search_radius' (float),
-                                           'local_ansvr_path' (str), 'api_key' (str),
-                                           'scale_est_arcsec_per_pix' (float, optional),
-                                           'scale_tolerance_percent' (float, optional),
-                                           'ansvr_timeout_sec' (int), 'astap_timeout_sec' (int),
-                                           'astrometry_net_timeout_sec' (int),
-                                           'use_radec_hints' (bool).
-            update_header_with_solution (bool): Si True, met à jour ``fits_header`` avec la solution.
-            is_boring_stack_disk_mode (bool): True uniquement pour le pipeline disque ``batch_size=1``.
+                             Clés attendues: 'local_solver_preference'
+                             ("none", "astap", "zesolver"; les valeurs obsolètes
+                             "ansvr"/"astrometry" sont migrées vers "zesolver"),
+                             'astap_path', 'astap_data_dir', 'astap_search_radius',
+                             'astap_downsample', 'astap_sensitivity',
+                             'astap_timeout_sec', 'scale_est_arcsec_per_pix',
+                             'scale_tolerance_percent', 'use_radec_hints'.
+            update_header_with_solution (bool): Si True, met à jour ``fits_header``
+                avec la solution.
+            is_boring_stack_disk_mode (bool): True uniquement pour le pipeline
+                disque ``batch_size=1``.
 
         Returns:
             astropy.wcs.WCS or None: Objet WCS si succès, None si échec.
@@ -429,65 +250,50 @@ class AstrometrySolver:
         )
         wcs_solution = None
 
-        
-        self._settings_dict_from_solve = settings.copy() # triche :-) Stocker une copie pour accès interne 
         # --- Récupération des paramètres depuis le dictionnaire settings ---
-        solver_preference = settings.get('local_solver_preference', "none") 
-        api_key = settings.get('api_key', None)
+        solver_preference = settings.get('local_solver_preference', "none")
         scale_est = settings.get('scale_est_arcsec_per_pix', None)
         scale_tol = settings.get('scale_tolerance_percent', 20)
-        
+
         astap_exe = settings.get('astap_path', "")
         astap_data = settings.get('astap_data_dir', None)
-        # Lire la valeur du rayon pour ASTAP depuis le dictionnaire settings
         astap_search_radius_from_settings = settings.get(
             'astap_search_radius', ASTAP_DEFAULT_SEARCH_RADIUS
-        )  # Valeur par défaut si non trouvée
+        )
         astap_downsample_val = settings.get('astap_downsample', 2)
         astap_sensitivity_val = settings.get('astap_sensitivity', 100)
         astap_timeout = settings.get('astap_timeout_sec', 120)
         use_radec_hints = settings.get('use_radec_hints', False)
 
-        ansvr_config_path = settings.get('local_ansvr_path', "")
-        ansvr_timeout = settings.get('ansvr_timeout_sec', 120)
-        
-        anet_web_timeout = settings.get('astrometry_net_timeout_sec', 300)
+        # Migration: les préférences obsolètes pointent vers ZeSolver (qui possède
+        # désormais les stratégies Astrometry.net).
+        if solver_preference in ("ansvr", "astrometry"):
+            solver_preference = self._migrate_legacy_preference(solver_preference)
 
-        self._log(
-            f"ASTAP search radius from settings: {astap_search_radius_from_settings} (type: {type(astap_search_radius_from_settings)})",
-            "DEBUG",
-        )
-        self._log(
-            f"Settings received by solve(): {settings}",
-            "DEBUG",
-        )
-
-        # Logs existants pour confirmer les valeurs utilisées
         self._log(f"Solver preference: '{solver_preference}'", "DEBUG")
         self._log(
-            f"ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius (sera passé à _try_solve_astap): {astap_search_radius_from_settings}, Timeout: {astap_timeout}",
+            f"ASTAP Exe: '{astap_exe}', Data: '{astap_data}', Radius: {astap_search_radius_from_settings}, Timeout: {astap_timeout}",
             "DEBUG",
         )
-        self._log(
-            f"Use RA/DEC hints: {use_radec_hints}",
-            "DEBUG",
-        )
-        self._log(
-            f"Ansvr Path/Config: '{ansvr_config_path}', Timeout: {ansvr_timeout}",
-            "DEBUG",
-        )
-        self._log(
-            f"API Key Web: {'Présente' if api_key else 'Absente'}, Timeout Web: {anet_web_timeout}",
-            "DEBUG",
-        )
-        self._log(
-            f"Scale Est (pour Web/Ansvr): {scale_est}, Scale Tol: {scale_tol}",
-            "DEBUG",
-        )
+        self._log(f"Use RA/DEC hints: {use_radec_hints}", "DEBUG")
 
-        local_solver_attempted_and_failed = False
+        # --- ZeSolver (optionnel, primaire) ---
+        if solver_preference == "zesolver":
+            wcs_solution, allow_fallback = self._try_solve_zesolver(
+                image_path,
+                fits_header,
+                settings,
+                update_header_with_solution,
+            )
+            if wcs_solution is not None:
+                return wcs_solution
+            if not allow_fallback:
+                self._log("ZeSolver: résolution annulée; aucun fallback ASTAP.", "INFO")
+                return None
+            self._log("ZeSolver: échec/indisponible; tentative ASTAP en fallback.", "WARN")
 
-        if solver_preference == "astap":
+        # --- ASTAP (primaire pour "astap", fallback pour "zesolver") ---
+        if solver_preference in ("astap", "zesolver"):
             astap_exe_resolved = resolve_astap_executable(astap_exe)
             if astap_exe_resolved and os.path.isfile(astap_exe_resolved):
                 if astap_exe_resolved != astap_exe:
@@ -495,14 +301,17 @@ class AstrometrySolver:
                         f"ASTAP: bundle detected, using executable '{astap_exe_resolved}'.",
                         "DEBUG",
                     )
-                self._log("Priorité au solveur local: ASTAP.", "INFO")
+                if solver_preference == "astap":
+                    self._log("Priorité au solveur local: ASTAP.", "INFO")
+                else:
+                    self._log("Fallback vers le solveur local ASTAP.", "INFO")
                 t0 = time.time()
                 wcs_solution = self._try_solve_astap(
                     image_path,
                     fits_header,
                     astap_exe_resolved,
                     astap_data,
-                    astap_search_radius_from_settings,  # Utiliser la valeur lue
+                    astap_search_radius_from_settings,
                     scale_est,
                     scale_tol,
                     astap_timeout,
@@ -521,260 +330,146 @@ class AstrometrySolver:
                     )
                     return wcs_solution
                 else:
-                    local_solver_attempted_and_failed = True 
                     self._log("ASTAP a échoué ou n'a pas trouvé de solution.", "WARN")
             else:
                 self._log(
                     f"ASTAP sélectionné mais chemin exécutable '{astap_exe}' invalide ou non fourni.",
                     "WARN",
                 )
-                local_solver_attempted_and_failed = True
-
-        elif solver_preference == "ansvr":
-            if ansvr_config_path: 
-                self._log("Priorité au solveur local: Astrometry.net Local (solve-field).", "INFO")
-                self._log(
-                    f"Preparing _try_solve_local_ansvr for {os.path.basename(image_path)}",
-                    "DEBUG",
-                )
-                t0 = time.time()
-                wcs_solution = self._try_solve_local_ansvr(
-                    image_path,
-                    fits_header,
-                    ansvr_config_path,
-                    scale_est,
-                    scale_tol,
-                    ansvr_timeout,
-                    update_header_with_solution,
-                )
-                self._log(
-                    f"Return from _try_solve_local_ansvr for {os.path.basename(image_path)}. Solution: {'Oui' if wcs_solution else 'Non'}",
-                    'DEBUG',
-                )
-                if wcs_solution:
-                    dt = time.time() - t0
-                    scale = self._extract_scale_arcsec(wcs_solution)
-                    self._log(
-                        f"🔭 [Solver] ansvr OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
-                        "INFO",
-                    )
-                    return wcs_solution
-                else:
-                    local_solver_attempted_and_failed = True
-                    self._log("Astrometry.net Local (solve-field) a échoué ou n'a pas trouvé de solution.", "WARN")
-            else:
-                self._log("Astrometry.net Local sélectionné mais chemin/config non fourni. Ignoré.", "WARN")
-                local_solver_attempted_and_failed = True
-
-        if solver_preference == "none" or local_solver_attempted_and_failed:
-            if api_key:
-                if local_solver_attempted_and_failed:
-                    self._log("Solveur local préféré a échoué. Tentative avec Astrometry.net (web service) en fallback...", "INFO")
-                else: 
-                    self._log("Aucun solveur local préféré. Tentative avec Astrometry.net (web service)...", "INFO")
-                
-                t0 = time.time()
-                wcs_solution = self._solve_astrometry_net_web(
-                    image_path_for_solver=image_path,
-                    fits_header_original=fits_header,
-                    api_key=api_key,
-                    scale_est_arcsec_per_pix=scale_est,
-                    scale_tolerance_percent=scale_tol,
-                    timeout_sec=anet_web_timeout,
-                    update_header_with_solution=update_header_with_solution,
-                )
-                if wcs_solution:
-                    dt = time.time() - t0
-                    scale = self._extract_scale_arcsec(wcs_solution)
-                    self._log(
-                        f"🔭 [Solver] Astrometry.net-API OK  –  scale {scale:.2f}\"/px  RMS 0.00″  (elapsed {dt:.1f}s)",
-                        "INFO",
-                    )
-                    return wcs_solution
-                else:
-                    self._log("Astrometry.net (web service) a échoué ou n'a pas trouvé de solution.", "WARN")
-            else:
-                if solver_preference == "none":
-                    self._log("Aucun solveur local sélectionné et clé API pour Astrometry.net (web) non fournie.", "INFO")
-                elif local_solver_attempted_and_failed:
-                     self._log("Solveur local a échoué et clé API pour Astrometry.net (web) non fournie. Fallback web impossible.", "INFO")
+        elif solver_preference == "none":
+            self._log(
+                "Aucun solveur configuré (local_solver_preference='none'). Aucune résolution tentée.",
+                "INFO",
+            )
 
         if not wcs_solution:
-            self._log(f"Aucune solution astrométrique trouvée pour {os.path.basename(image_path)} après toutes les tentatives configurées.", "WARN")
-        
+            self._log(
+                f"Aucune solution astrométrique trouvée pour {os.path.basename(image_path)} après toutes les tentatives configurées.",
+                "WARN",
+            )
+
         return None
 
+    def _migrate_legacy_preference(self, preference):
+        """Map a legacy solver preference onto ``zesolver`` (one-time WARN)."""
+        global _legacy_preference_warned
+        if not _legacy_preference_warned:
+            _legacy_preference_warned = True
+            self._log(
+                f"Préférence solver obsolète '{preference}' migrée vers 'zesolver' "
+                "(ZeSolver gère désormais les stratégies Astrometry.net).",
+                "WARN",
+            )
+        return "zesolver"
 
+    def _get_zesolver_adapter(self):
+        """Return the lazily-created ZeSolver adapter (one per solver instance).
 
+        The adapter *instance* is created on first use only; the class is
+        imported at module load (it never imports ``zesolver`` itself). Returns
+        ``None`` when the adapter is unavailable (import failure).
+        """
+        if self._zesolver_adapter is None:
+            adapter_cls = self._zesolver_adapter_class
+            if adapter_cls is None:
+                self._log("ZeSolver: classe d'adaptateur indisponible (import échoué).", "WARN")
+                return None
+            self._zesolver_adapter = adapter_cls()
+        return self._zesolver_adapter
 
+    def _try_solve_zesolver(
+        self,
+        image_path,
+        fits_header,
+        settings,
+        update_header_with_solution,
+    ):
+        """Run the optional ZeSolver path and map its outcome onto a WCS.
 
+        Returns ``(wcs, allow_fallback)``:
+          * ``wcs`` is the solved WCS (or the pre-existing WCS on SKIPPED, or
+            ``None`` when nothing usable was produced).
+          * ``allow_fallback`` is ``False`` only when the user cancelled the
+            solve (the caller then returns ``None`` without ASTAP).
+        """
+        adapter = self._get_zesolver_adapter()
+        if adapter is None:
+            self._log("ZeSolver indisponible (adaptateur absent). Fallback ASTAP.", "WARN")
+            return None, True
 
+        try:
+            outcome = adapter.solve(
+                image_fits_path=image_path,
+                fits_header=fits_header,
+                settings=settings,
+                progress_callback=self.progress_callback,
+                log=self._log,
+            )
+        except Exception as exc:
+            self._log(
+                f"ZeSolver: exception inattendue {type(exc).__name__}: {exc}",
+                "WARN",
+            )
+            return None, True
 
-    # --- DANS LA CLASSE AstrometrySolver DANS seestar/alignment/astrometry_solver.py ---
+        if outcome is None:
+            self._log("ZeSolver: résultat nul. Fallback ASTAP.", "WARN")
+            return None, True
 
-    def _try_solve_local_ansvr(self, image_path, fits_header,
-                               ansvr_user_provided_path,
-                               scale_est_arcsec_per_pix,
-                               scale_tolerance_percent,
-                               timeout_sec,
-                               update_header_with_solution):
+        status = getattr(outcome, "status", None)
+        status_value = getattr(status, "value", status)
 
-        # --- Section 0: Log d'entrée et validation initiale de image_path ---
-        base_img_name_for_log = os.path.basename(image_path) if image_path and isinstance(image_path, str) else "INVALID_IMAGE_PATH"
-        entry_msg = f"Entering _try_solve_local_ansvr for {base_img_name_for_log}"
-        self._log(entry_msg, "DEBUG")
-        self._log(f"LocalAnsvr: Tentative résolution pour '{base_img_name_for_log}'.", "INFO")
-        self._log(f"  LocalAnsvr: image_path brut reçu: '{image_path}' (type: {type(image_path)})", "DEBUG")
-        self._log(f"  LocalAnsvr: ansvr_user_provided_path: '{ansvr_user_provided_path}'", "DEBUG")
+        if status_value == "solved":
+            wcs = getattr(outcome, "wcs", None)
+            if wcs is None or not getattr(wcs, "is_celestial", False):
+                self._log("ZeSolver: SOLVED mais WCS absent/non céleste. Fallback ASTAP.", "WARN")
+                return None, True
+            if update_header_with_solution and fits_header is not None:
+                self._update_fits_header_with_wcs(
+                    fits_header, wcs, solver_name="ZeSolver"
+                )
+            scale = self._extract_scale_arcsec(wcs)
+            self._log(f"🔭 [Solver] ZeSolver OK  –  scale {scale:.2f}\"/px", "INFO")
+            return wcs, False
 
-        if not image_path or not os.path.isfile(image_path):
-            self._log(f"LocalAnsvr: Fichier image source '{image_path}' invalide ou non trouvé. Échec.", "ERROR")
+        if status_value == "skipped":
+            existing = self._wcs_from_header(fits_header)
+            if existing is not None:
+                self._log(
+                    "ZeSolver: SKIPPED (WCS déjà présent). Utilisation du WCS existant.",
+                    "INFO",
+                )
+                return existing, False
+            self._log(
+                "ZeSolver: SKIPPED mais aucun WCS céleste dans le header. Fallback ASTAP.",
+                "WARN",
+            )
+            return None, True
+
+        if status_value == "cancelled":
+            self._log("ZeSolver: résolution annulée par l'utilisateur.", "INFO")
+            return None, False
+
+        if status_value == "unavailable":
+            msg = getattr(outcome, "message", None) or "absent/incompatible"
+            self._log(f"ZeSolver indisponible ({msg}). Fallback ASTAP.", "WARN")
+            return None, True
+
+        self._log(f"ZeSolver: échec ({status_value}). Fallback ASTAP.", "WARN")
+        return None, True
+
+    @staticmethod
+    def _wcs_from_header(header):
+        """Return a celestial WCS parsed from a FITS header, or ``None``."""
+        if header is None:
             return None
-        norm_image_path_original = os.path.normpath(image_path)
-        self._log(f"LocalAnsvr: Image à traiter (originale directe): '{norm_image_path_original}'.", "DEBUG")
-        
-        temp_dir_ansvr_solve = None; wcs_object = None
-        solve_field_exe_final_path = None; config_file_to_use_for_cmd = None
-        user_provided_cfg_file = None 
-        
-        # On utilise directement le chemin original pour solve-field
-        path_to_pass_to_solve_field = norm_image_path_original
-        self._log(f"LocalAnsvr: Utilisation du fichier FITS original direct pour solve-field: '{path_to_pass_to_solve_field}'", "INFO")
-
         try:
-            temp_dir_ansvr_solve = tempfile.mkdtemp(prefix="ansvr_solve_")
-            self._log(f"LocalAnsvr: Répertoire temp principal: {temp_dir_ansvr_solve}", "DEBUG")
-
-            # --- BLOC DE CRÉATION DE COPIE FITS "PROPRE" EST MAINTENANT COMMENTÉ/SUPPRIMÉ ---
-            # temp_fits_name = "cleaned_input_for_test_original_" + base_img_name_for_log
-            # temp_fits_for_solving_path = os.path.join(temp_dir_ansvr_solve, temp_fits_name)
-            # try:
-            #     # ... (code de copie) ...
-            # except Exception as e_copy_fits:
-            #     self._log(f"LocalAnsvr: WARN - Erreur création copie FITS 'propre': {e_copy_fits}. Utilisation original.", "WARN")
-            # --- FIN BLOC COMMENTÉ/SUPPRIMÉ ---
-
-            # --- Section 1: Déterminer exécutable et .cfg ---
-            self._log(f"LocalAnsvr: Section 1 - Interprétation ansvr_user_provided_path ('{ansvr_user_provided_path}').", "DEBUG")
-            if ansvr_user_provided_path and isinstance(ansvr_user_provided_path, str) and ansvr_user_provided_path.strip():
-                abs_user_path = os.path.abspath(os.path.normpath(ansvr_user_provided_path.strip()))
-                if os.path.exists(abs_user_path):
-                    if os.path.isfile(abs_user_path):
-                        if abs_user_path.lower().endswith(".cfg"):
-                            user_provided_cfg_file = abs_user_path; config_file_to_use_for_cmd = user_provided_cfg_file
-                            solve_field_exe_final_path = shutil.which("solve-field")
-                        else: solve_field_exe_final_path = abs_user_path
-                    elif os.path.isdir(abs_user_path):
-                        generated_cfg_path = _generate_astrometry_cfg_auto( # Utilise la version "Minimal V3"
-                            fits_file_for_scale_estimation=path_to_pass_to_solve_field, # Pour les commentaires du .cfg
-                            index_directory_path=abs_user_path, output_cfg_path=None, solver_instance=self
-                        )
-                        if generated_cfg_path and os.path.isfile(generated_cfg_path):
-                            config_file_to_use_for_cmd = generated_cfg_path
-                            solve_field_exe_final_path = shutil.which("solve-field")
-                        else: self._log(f"LocalAnsvr: ERREUR - Échec génération .cfg auto pour '{abs_user_path}'.", "ERROR"); raise RuntimeError("CFG Auto Gen Failed")
-                else: solve_field_exe_final_path = shutil.which("solve-field")
-            else: solve_field_exe_final_path = shutil.which("solve-field")
-
-            if not solve_field_exe_final_path or not os.path.isfile(solve_field_exe_final_path) or not os.access(solve_field_exe_final_path, os.X_OK):
-                self._log(f"LocalAnsvr: ERREUR - Exécutable ('{solve_field_exe_final_path}') non valide.", "ERROR"); raise RuntimeError("Solve-field Exe Invalid")
-            self._log(f"LocalAnsvr: Exe: '{solve_field_exe_final_path}'. Cfg: '{config_file_to_use_for_cmd if config_file_to_use_for_cmd else 'Aucun spécifique'}'.", "DEBUG")
-
-            # --- Section 2: Exécution de solve-field ---
-            output_base_name = "sfs_direct_" + os.path.splitext(os.path.basename(path_to_pass_to_solve_field))[0] # Nom de base pour les sorties
-            output_fits_path = os.path.join(temp_dir_ansvr_solve, output_base_name + ".new")
-
-            cmd = [
-                solve_field_exe_final_path, "--no-plots", "--overwrite", "--no-verify", "--guess-scale",
-                # "--downsample", "2", # Temporairement enlevé pour isoler l'effet du fichier original
-                "--dir", temp_dir_ansvr_solve, "--new-fits", output_fits_path,
-                "--corr", os.path.join(temp_dir_ansvr_solve, output_base_name + ".corr"),
-                "--match", os.path.join(temp_dir_ansvr_solve, output_base_name + ".match"),
-                "--rdls", os.path.join(temp_dir_ansvr_solve, output_base_name + ".rdls"),
-                "--axy", os.path.join(temp_dir_ansvr_solve, output_base_name + ".axy"),
-                "--crpix-center", "--parity", "neg", "-v"
-            ]
-
-            if config_file_to_use_for_cmd: cmd.extend(["--config", config_file_to_use_for_cmd])
-            
-            # Les options d'échelle manuelles ne sont PAS ajoutées car on utilise --guess-scale
-            # if scale_est_arcsec_per_pix is not None and scale_est_arcsec_per_pix > 0:
-            #    ... (bloc commenté)
-
-            if fits_header:
-                add_rd_cmd = True
-                if config_file_to_use_for_cmd and user_provided_cfg_file and self._cfg_contains_radec(config_file_to_use_for_cmd): add_rd_cmd = False
-                if add_rd_cmd:
-                    ra_h=fits_header.get('RA',fits_header.get('CRVAL1')); dec_h=fits_header.get('DEC',fits_header.get('CRVAL2'))
-                    if isinstance(ra_h,(int,float)) and isinstance(dec_h,(int,float)):
-                        rad_s=getattr(self,'_settings_dict_from_solve',{}).get('ansvr_search_radius_deg',15.0)
-                        cmd.extend(["--ra",str(ra_h),"--dec",str(dec_h),"--radius",str(max(0.1,rad_s))])
-            
-            cmd.append(path_to_pass_to_solve_field) # C'est maintenant norm_image_path_original
-            self._log(f"LocalAnsvr (SANS COPIE FITS): Commande: {' '.join(cmd)}", "INFO")
-            self._log(f"LocalAnsvr: Exécution solve-field pour '{base_img_name_for_log}' (timeout={timeout_sec}s)...", "INFO")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, check=False, cwd=None)
-            
-            self._log(f"LocalAnsvr: Code retour solve-field: {result.returncode}", "DEBUG")
-            if result.stdout and result.returncode != 0: self._log(f"LocalAnsvr stdout (échec):\n{result.stdout[:1000]}", "DEBUG")
-            if result.stderr: self._log(f"LocalAnsvr stderr:\n{result.stderr[:1000]}", "DEBUG")
-
-            if result.returncode == 0:
-                if os.path.exists(output_fits_path) and os.path.getsize(output_fits_path) > 0:
-                    self._log(f"LocalAnsvr: Résolution RÉUSSIE pour '{base_img_name_for_log}'. Fichier solution: '{os.path.basename(output_fits_path)}'.", "INFO")
-                    try:
-                        with fits.open(output_fits_path,memmap=False) as h_sol: solved_header=h_sol[0].header
-                        # Sanitize header and ensure CTYPE has "-SIP" if SIP terms exist
-                        try:
-                            sanitize_header_for_wcs(solved_header)
-                        except Exception:
-                            pass
-                        with warnings.catch_warnings(): warnings.simplefilter("ignore",FITSFixedWarning); wcs_object=WCS(solved_header,naxis=2)
-                        if wcs_object and wcs_object.is_celestial:
-                            nx=solved_header.get('NAXIS1',fits_header.get('NAXIS1') if fits_header else None) 
-                            ny=solved_header.get('NAXIS2',fits_header.get('NAXIS2') if fits_header else None)
-                            if nx and ny: wcs_object.pixel_shape=(int(nx),int(ny)) 
-                            if update_header_with_solution and fits_header is not None: self._update_fits_header_with_wcs(fits_header,wcs_object,solver_name="LocalAnsvr_GuessDirect") # Nom du solveur mis à jour
-                        else: self._log(f"LocalAnsvr: ERREUR - WCS non céleste depuis '{os.path.basename(output_fits_path)}'.", "ERROR"); wcs_object=None
-                    except Exception as e_p: self._log(f"LocalAnsvr: ERREUR parsing FITS solution '{os.path.basename(output_fits_path)}': {e_p}","ERROR"); wcs_object=None
-                else: self._log(f"LocalAnsvr: ERREUR - solve-field code 0 mais FITS solution '{os.path.basename(output_fits_path)}' manquant/vide.", "ERROR"); wcs_object=None
-            else: self._log(f"LocalAnsvr: WARN - solve-field a échoué pour '{base_img_name_for_log}' (code: {result.returncode}).", "WARN"); wcs_object=None
-        except RuntimeError as rte_internal: self._log(f"LocalAnsvr: ERREUR (Runtime) interne: {rte_internal}", "ERROR"); wcs_object=None
-        except subprocess.TimeoutExpired: self._log(f"LocalAnsvr: ERREUR - Timeout ({timeout_sec}s) pour '{base_img_name_for_log}'.", "ERROR"); wcs_object=None
-        except FileNotFoundError: self._log(f"LocalAnsvr: ERREUR - Exécutable '{solve_field_exe_final_path}' non trouvé par subprocess.", "ERROR"); wcs_object=None
-        except Exception as e: self._log(f"LocalAnsvr: ERREUR inattendue: {e}", "ERROR"); traceback.print_exc(limit=1); wcs_object=None
-        finally:
-            if temp_dir_ansvr_solve and os.path.isdir(temp_dir_ansvr_solve):
-                try: shutil.rmtree(temp_dir_ansvr_solve, ignore_errors=True); self._log(f"LocalAnsvr: Répertoire temp '{temp_dir_ansvr_solve}' supprimé.", "DEBUG")
-                except Exception as e_cl: self._log(f"LocalAnsvr: WARN - Erreur nettoyage dir temp '{temp_dir_ansvr_solve}': {e_cl}", "WARN")
-            self._log(f"LocalAnsvr: Fin traitement pour '{base_img_name_for_log}'.", "DEBUG")
-
-        self._log(f"LocalAnsvr: Fin résolution pour {base_img_name_for_log}. Solution trouvée: {'Oui' if wcs_object else 'Non'}", "INFO")
-        return wcs_object
-
-    # ... (le reste de la classe AstrometrySolver)
-
-
-
-
-
-
-
-    # --- AJOUT D'UNE MÉTHODE HELPER POUR VÉRIFIER LE CONTENU DU .CFG ---
-    def _cfg_contains_radec(self, cfg_path):
-        """Vérifie si un fichier .cfg semble contenir des options RA/DEC."""
-        if not cfg_path or not os.path.isfile(cfg_path):
-            return False
-        try:
-            with open(cfg_path, 'r') as f_cfg:
-                for line in f_cfg:
-                    line_low = line.strip().lower()
-                    if line_low.startswith("ra ") or line_low.startswith("dec ") or line_low.startswith("radius "):
-                        return True
+            wcs = WCS(header, naxis=2, relax=True)
+            if wcs.is_celestial:
+                return wcs
         except Exception:
-            return False # Prudence
-        return False
+            pass
+        return None
 
     def _derive_pixel_scale_from_header(self, header):
         """Return pixel scale (arcsec/pix) derived from FITS header if possible."""
@@ -1066,196 +761,6 @@ class AstrometrySolver:
         return wcs_object
 
 
-
-
-
-
-    def _solve_astrometry_net_web(self, image_path_for_solver, fits_header_original, api_key,
-                                  scale_est_arcsec_per_pix, scale_tolerance_percent, timeout_sec,
-                                  update_header_with_solution):
-        """
-        Méthode interne pour gérer la résolution via le service web Astrometry.net.
-        Basée sur la fonction globale solve_image_wcs précédente.
-        Prend un CHEMIN de fichier FITS, le charge, le prépare et le soumet.
-        """
-        self._log(f"Entering _solve_astrometry_net_web for {os.path.basename(image_path_for_solver)}", "DEBUG")
-        self._log(f"WebANET: Début tentative solving pour {os.path.basename(image_path_for_solver)}", "DEBUG")
-
-        if not _ASTROQUERY_AVAILABLE or not _ASTROPY_AVAILABLE:
-            self._log("Dépendances manquantes (astroquery ou astropy) pour Astrometry.net web.", "ERROR")
-            return None
-        if not os.path.isfile(image_path_for_solver):
-            self._log(f"Fichier image source '{image_path_for_solver}' non trouvé pour Astrometry.net web.", "ERROR")
-            return None
-        if not api_key:
-            self._log("Clé API Astrometry.net manquante pour service web.", "ERROR")
-            return None
-
-        ast = AstrometryNet()
-        ast.api_key = api_key
-        # --- CONFIGURER LE TIMEOUT SUR L'INSTANCE ASTROMETRYNET ---
-        original_timeout_astroquery = None # Pour restaurer
-        if timeout_sec is not None and timeout_sec > 0:
-            try:
-                if hasattr(ast, 'TIMEOUT'): 
-                    original_timeout_astroquery = ast.TIMEOUT
-                    ast.TIMEOUT = timeout_sec 
-                    self._log(f"WebANET: Timeout configuré à {timeout_sec}s pour l'instance AstrometryNet (via ast.TIMEOUT).", "DEBUG")
-                # Si AstrometryNet.TIMEOUT est une variable de classe, on ne la modifie pas globalement ici.
-                # On se fie à ce que l'instance ast.TIMEOUT soit prioritaire si elle existe.
-            except Exception as e_timeout:
-                self._log(f"WebANET: Erreur lors de la configuration du timeout: {e_timeout}", "WARN")
-        # --- ---
-        
-        temp_prepared_fits_path = None
-        wcs_solution_header_text = None 
-
-        try:
-            # --- Charger et préparer l'image pour la soumission ---
-            try:
-                with fits.open(image_path_for_solver, memmap=False) as hdul_solve:
-                    img_data_np = hdul_solve[0].data 
-            except Exception as e_load:
-                self._log(f"WebANET: Erreur chargement FITS '{image_path_for_solver}': {e_load}", "ERROR")
-                return None
-
-            if img_data_np is None:
-                self._log("WebANET: Données image None après chargement.", "ERROR")
-                return None
-            
-            data_to_solve = None
-            if not np.all(np.isfinite(img_data_np)):
-                img_data_np = np.nan_to_num(img_data_np)
-
-            if img_data_np.ndim == 3 and img_data_np.shape[0] == 3: 
-                img_data_np_hwc = np.moveaxis(img_data_np, 0, -1)
-                lum_coeffs = np.array([0.299,0.587,0.114],dtype=np.float32).reshape(1,1,3)
-                luminance_img = np.sum(img_data_np_hwc * lum_coeffs, axis=2).astype(np.float32)
-                data_to_solve = luminance_img
-            elif img_data_np.ndim == 2: 
-                data_to_solve = img_data_np.astype(np.float32)
-            else:
-                self._log(f"WebANET: Shape d'image non supportée ({img_data_np.shape}).", "ERROR")
-                return None
-
-            min_v, max_v = np.min(data_to_solve), np.max(data_to_solve)
-            data_norm_float = (data_to_solve - min_v) / (max_v - min_v) if max_v > min_v else np.zeros_like(data_to_solve)
-            data_uint16 = (np.clip(data_norm_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
-            data_int16 = (data_uint16.astype(np.int32) - 32768).astype(np.int16)
-            
-            header_temp_for_submission = fits.Header()
-            header_temp_for_submission['SIMPLE'] = True
-            header_temp_for_submission['BITPIX'] = 16
-            header_temp_for_submission['BSCALE'] = 1
-            header_temp_for_submission['BZERO'] = 32768
-            header_temp_for_submission['NAXIS'] = 2
-            header_temp_for_submission['NAXIS1'] = data_int16.shape[1]
-            header_temp_for_submission['NAXIS2'] = data_int16.shape[0]
-            for key in ['OBJECT', 'DATE-OBS', 'EXPTIME', 'FILTER', 'INSTRUME', 'TELESCOP']:
-                 if fits_header_original and key in fits_header_original:
-                     header_temp_for_submission[key] = fits_header_original[key]
-
-            with tempfile.NamedTemporaryFile(suffix=".fits", delete=False, mode="wb") as temp_f:
-                temp_prepared_fits_path = temp_f.name
-            fits.writeto(
-                temp_prepared_fits_path,
-                data_int16,
-                header=header_temp_for_submission,
-                overwrite=True,
-                output_verify='silentfix',
-            )
-            if header_temp_for_submission.get("BITPIX") == 16:
-                with fits.open(temp_prepared_fits_path, mode="update", memmap=False) as hdul_fix:
-                    hd0 = hdul_fix[0]
-                    hd0.header["BSCALE"] = 1
-                    hd0.header["BZERO"] = 32768
-                    hdul_fix.flush()
-            self._log(
-                f"WebANET: Fichier temporaire int16 créé: {os.path.basename(temp_prepared_fits_path)}",
-                "DEBUG",
-            )
-            del data_to_solve, data_norm_float, data_uint16, img_data_np
-            gc.collect()
-            
-            solve_args = {'allow_commercial_use':'n',
-                            'allow_modifications':'n',
-                            'publicly_visible':'n',
-                           }
-            # Le paramètre 'timeout' pour solve_from_image est géré par ast.TIMEOUT.
-            # Il n'est pas un argument direct de la méthode solve_from_image.
-
-            if scale_est_arcsec_per_pix is not None and scale_est_arcsec_per_pix > 0:
-                 try:
-                     scale_est_val = float(scale_est_arcsec_per_pix); tolerance_val = float(scale_tolerance_percent)
-                     scale_lower = scale_est_val*(1.0-tolerance_val/100.0); scale_upper = scale_est_val*(1.0+tolerance_val/100.0)
-                     solve_args['scale_units'] = 'arcsecperpix'; solve_args['scale_lower'] = scale_lower
-                     solve_args['scale_upper'] = scale_upper
-                     self._log(f"WebANET: Solving avec échelle: [{scale_lower:.2f} - {scale_upper:.2f}] arcsec/pix", "DEBUG")
-                 except (ValueError, TypeError): self._log("WebANET: Erreur config échelle, ignorée.", "WARN")
-            else: self._log("WebANET: Solving sans estimation d'échelle.", "DEBUG")
-
-            self._log("WebANET: Soumission du job...", "INFO")
-            try:
-                wcs_solution_header_text = ast.solve_from_image(temp_prepared_fits_path, **solve_args)
-                if wcs_solution_header_text: self._log("WebANET: Solving RÉUSSI (header solution reçu).", "INFO")
-                else: self._log("WebANET: Solving ÉCHOUÉ (pas de header solution).", "WARN")
-            except Exception as solve_err: # Inclut potentiellement TimeoutError d'astroquery
-                if "Timeout" in str(solve_err) or "timeout" in str(solve_err).lower():
-                    self._log(f"WebANET: Timeout ({timeout_sec}s) lors du solving: {solve_err}", "ERROR")
-                else:
-                    self._log(f"WebANET: ERREUR pendant solving: {type(solve_err).__name__} - {solve_err}", "ERROR")
-                traceback.print_exc(limit=1)
-                wcs_solution_header_text = None
-
-        except Exception as prep_err:
-            self._log(f"WebANET: ERREUR préparation image pour soumission: {prep_err}", "ERROR")
-            traceback.print_exc(limit=1)
-            wcs_solution_header_text = None
-        finally:
-            if temp_prepared_fits_path and os.path.exists(temp_prepared_fits_path):
-                try: os.remove(temp_prepared_fits_path); self._log("WebANET: Fichier temporaire supprimé.", "DEBUG")
-                except Exception: pass
-
-            if original_timeout_astroquery is not None and hasattr(ast, 'TIMEOUT'):
-                try:
-                    ast.TIMEOUT = original_timeout_astroquery
-                    self._log(f"WebANET: Timeout AstrometryNet restauré à sa valeur originale ({original_timeout_astroquery}).", "DEBUG")
-                except Exception as e_restore_timeout:
-                    self._log(f"WebANET: Erreur restauration timeout: {e_restore_timeout}", "WARN")
-        
-        if not wcs_solution_header_text: return None
-
-        solved_wcs_object = None
-        try:
-            if isinstance(wcs_solution_header_text, fits.Header):
-                try:
-                    sanitize_header_for_wcs(wcs_solution_header_text)
-                except Exception:
-                    pass
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", FITSFixedWarning)
-                    solved_wcs_object = WCS(wcs_solution_header_text)
-                
-                if solved_wcs_object and solved_wcs_object.is_celestial:
-                    self._log("WebANET: Objet WCS créé avec succès.", "DEBUG")
-                    nx_sol = wcs_solution_header_text.get('IMAGEW', fits_header_original.get('NAXIS1') if fits_header_original else None)
-                    ny_sol = wcs_solution_header_text.get('IMAGEH', fits_header_original.get('NAXIS2') if fits_header_original else None)
-                    if nx_sol and ny_sol: solved_wcs_object.pixel_shape = (int(nx_sol), int(ny_sol))
-                    
-                    if update_header_with_solution and fits_header_original is not None:
-                        self._update_fits_header_with_wcs(fits_header_original, solved_wcs_object, solver_name="Astrometry.net")
-                else:
-                    self._log("WebANET: WCS de solution non céleste ou invalide.", "ERROR")
-                    solved_wcs_object = None
-            else:
-                self._log("WebANET: Solution retournée n'est pas un objet Header Astropy.", "ERROR")
-                solved_wcs_object = None
-        except Exception as wcs_conv_err:
-            self._log(f"WebANET: ERREUR conversion header solution en WCS: {wcs_conv_err}", "ERROR")
-            solved_wcs_object = None
-        
-        return solved_wcs_object
-
     def _parse_wcs_file_content(self, wcs_file_path, image_shape_hw):
         """Parse a ``.wcs`` file and return a :class:`~astropy.wcs.WCS` object."""
 
@@ -1356,7 +861,6 @@ def solve_image_wcs(
     final_combine=None,
 ):
     """Convenience wrapper for :class:`AstrometrySolver`.
-
 
 
     Parameters

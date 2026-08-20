@@ -82,14 +82,22 @@ class _FakeWritePolicy(enum.Enum):
     OVERWRITE_INPUT = "overwrite_input"
 
 
+class _FakeWritePolicyRich(enum.Enum):
+    OVERWRITE_INPUT = "overwrite_input"
+    WRITE_NONE = "write_none"
+    READ_ONLY = "read_only"
+
+
 class _FakeSolveStatus(enum.Enum):
     SOLVED = "solved"
     FAILED = "failed"
+    SKIPPED = "skipped"
     CANCELLED = "cancelled"
 
 
 class _FakeFailureCode(enum.Enum):
     NO_SOLUTION = "no_solution"
+    SKIPPED_EXISTING_WCS = "skipped_existing_wcs"
 
 
 class _FakeAvailability(enum.Enum):
@@ -601,3 +609,84 @@ def test_sources_have_no_top_level_zesolver_import():
     assert "import zesolver" not in adapter_src
     assert "from zesolver" not in adapter_src
     assert "zesolver.api.v1" in adapter_src
+
+
+# ---------------------------------------------------------------------------
+# M2a additions: SKIPPED mapping, write-policy selection, timeout source
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_skipped_status_maps_to_skipped(monkeypatch):
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(_FakeSolveStatus.SKIPPED, message="already solved")
+    _install_package_stubs(monkeypatch, v1)
+
+    outcome = adapter.ZeSolverAdapter().solve(
+        image_fits_path="/tmp/img.fits",
+        fits_header={},
+        settings={},
+        progress_callback=None,
+    )
+    assert outcome.status is SolveStatus.SKIPPED
+    assert outcome.failure_code == "skipped_existing_wcs"
+    assert outcome.wcs is None
+    assert outcome.should_write_header_back is False
+
+
+def test_adapter_skipped_via_failure_code(monkeypatch):
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(
+        _FakeSolveStatus.FAILED,
+        failure_code=_FakeFailureCode.SKIPPED_EXISTING_WCS,
+        message="file already has WCS",
+    )
+    _install_package_stubs(monkeypatch, v1)
+
+    outcome = adapter.ZeSolverAdapter().solve(
+        image_fits_path="/tmp/img.fits",
+        fits_header={},
+        settings={},
+        progress_callback=None,
+    )
+    assert outcome.status is SolveStatus.SKIPPED
+    assert outcome.failure_code == "skipped_existing_wcs"
+
+
+def test_adapter_skipped_keeps_existing_wcs_header(monkeypatch):
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(
+        _FakeSolveStatus.SKIPPED,
+        wcs_header=v1.CanonicalWcsHeader(VALID_WCS_CARDS),
+        message="already solved",
+    )
+    _install_package_stubs(monkeypatch, v1)
+
+    outcome = adapter.ZeSolverAdapter().solve(
+        image_fits_path="/tmp/img.fits",
+        fits_header={"NAXIS1": 100},
+        settings={},
+        progress_callback=None,
+    )
+    assert outcome.status is SolveStatus.SKIPPED
+    assert outcome.wcs is not None
+    assert list(outcome.wcs.wcs.ctype) == ["RA---TAN", "DEC--TAN"]
+    assert outcome.should_write_header_back is False
+
+
+def test_write_policy_least_destructive_selection():
+    v1 = types.SimpleNamespace(WritePolicy=_FakeWritePolicyRich)
+    chosen = adapter.ZeSolverAdapter._select_least_destructive_write_policy(v1)
+    assert chosen is _FakeWritePolicyRich.WRITE_NONE
+
+
+def test_write_policy_falls_back_to_overwrite_input():
+    v1 = types.SimpleNamespace(WritePolicy=_FakeWritePolicy)
+    chosen = adapter.ZeSolverAdapter._select_least_destructive_write_policy(v1)
+    assert chosen is _FakeWritePolicy.OVERWRITE_INPUT
+
+
+def test_resolve_timeout_only_astap_key():
+    assert adapter.ZeSolverAdapter._resolve_timeout({}) == 120.0
+    assert adapter.ZeSolverAdapter._resolve_timeout({"astap_timeout_sec": 45}) == 45.0
+    # ansvr_timeout_sec must no longer be consulted as a fallback.
+    assert adapter.ZeSolverAdapter._resolve_timeout({"ansvr_timeout_sec": 999}) == 120.0
