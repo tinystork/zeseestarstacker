@@ -50,6 +50,10 @@ tools = [
     # Standalone visu.py image viewer (seestar/tools/visu.py)
     "PyQt5",
 ]
+qt = [
+    # Non-default PySide6 GUI shell (seestar/gui_qt, run via `python -m seestar.qt_main`)
+    "PySide6",
+]
 
 [project.gui-scripts]
 zeseestarstacker = "seestar.main:main"

@@ -1,0 +1,38 @@
+"""QApplication lifecycle helpers for the non-default PySide6 shell."""
+
+from __future__ import annotations
+
+import sys
+from typing import Optional, Sequence
+
+from PySide6.QtWidgets import QApplication
+
+from .main_window import MainWindow
+
+
+def create_application(argv: Optional[Sequence[str]] = None) -> QApplication:
+    """Return the process-wide QApplication, creating it if necessary.
+
+    Safe to call multiple times (returns the existing instance).  Passing an
+    explicit ``argv`` is useful in tests; otherwise ``sys.argv`` is used.
+    """
+    app = QApplication.instance()
+    if app is None:
+        args = list(argv) if argv is not None else list(sys.argv)
+        app = QApplication(args)
+    return app
+
+
+def run_qt_app(
+    argv: Optional[Sequence[str]] = None,
+    title: Optional[str] = None,
+) -> int:
+    """Build the shell window and enter the Qt event loop.
+
+    Returns the :meth:`QApplication.exec` exit code.  Closing the window ends
+    the loop (Qt's ``quitOnLastWindowClosed`` default).
+    """
+    app = create_application(argv)
+    window = MainWindow(title=title)
+    window.show()
+    return app.exec()
