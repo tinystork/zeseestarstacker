@@ -69,6 +69,11 @@ def _make_obj(tmp_path, save_as_float32):
     obj.reproject_between_batches = False
     obj.cumulative_sum_memmap = None
     obj.cumulative_wht_memmap = None
+    # M3: the single-accumulator save path validates the science before writing;
+    # bind the real method onto the lightweight test double.
+    obj._validate_drizzle_science = types.MethodType(
+        qm.SeestarQueuedStacker._validate_drizzle_science, obj
+    )
     return obj
 
 
@@ -108,20 +113,21 @@ def test_save_final_stack_preserve_linear_int16(tmp_path):
 
 
 def test_save_final_stack_incremental_drizzle_objects(tmp_path):
+    # M3: the old ``incremental_drizzle_objects`` mode is gone; the final stack
+    # is now read from the single per-channel accumulators.
     obj = _make_obj(tmp_path, True)
     obj.drizzle_active_session = True
-    obj.drizzle_mode = "Incremental"
     obj.preserve_linear_output = True
 
     shape = (2, 2)
-    from drizzle.resample import Drizzle
+    from seestar.core.drizzle_core import DrizzleAccumulator
 
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=shape) for _ in range(3)]
-    obj.incremental_drizzle_objects[0].out_img[:] = 1.0
-    obj.incremental_drizzle_objects[1].out_img[:] = 2.0
-    obj.incremental_drizzle_objects[2].out_img[:] = 3.0
-    for d in obj.incremental_drizzle_objects:
-        d.out_wht[:] = 1.0
+    obj.drizzle_accumulators = [DrizzleAccumulator(shape) for _ in range(3)]
+    obj.drizzle_accumulators[0]._out_img[:] = 1.0
+    obj.drizzle_accumulators[1]._out_img[:] = 2.0
+    obj.drizzle_accumulators[2]._out_img[:] = 3.0
+    for acc in obj.drizzle_accumulators:
+        acc._out_wht[:] = 1.0
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,
@@ -135,58 +141,11 @@ def test_save_final_stack_incremental_drizzle_objects(tmp_path):
     assert np.any(saved != 0)
 
 
-def test_save_final_stack_incremental_drizzle_batch(tmp_path):
-    obj = _make_obj(tmp_path, True)
-    obj.drizzle_active_session = True
-    obj.drizzle_mode = "Incremental"
-    obj.preserve_linear_output = True
-    obj.stop_processing = False
-    obj.perform_cleanup = False
-    obj.preview_callback = None
-    obj._update_preview_incremental_drizzle = lambda: None
-    obj.reproject_between_batches = False
-    obj.reference_wcs_object = None
-    obj.drizzle_output_shape_hw = (5, 5)
-    obj.drizzle_output_wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
-    obj.drizzle_scale = 1.0
-    obj.drizzle_pixfrac = 1.0
-    obj.drizzle_kernel = "square"
-    obj.images_in_cumulative_stack = 0
-    obj.failed_stack_count = 0
-    obj.current_stack_header = None
-
-    from drizzle.resample import Drizzle
-
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
-
-    wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
-    data = np.stack([
-        np.full(obj.drizzle_output_shape_hw, c + 1, dtype=np.float32) for c in range(3)
-    ], axis=0)
-    header = wcs.to_header()
-    header["EXPTIME"] = 1.0
-    path = tmp_path / "tmp.fits"
-    fits.writeto(path, data, header, overwrite=True)
-
-    qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
-        obj, [str(path)], current_batch_num=1, total_batches_est=1
-    )
-
-    for d in obj.incremental_drizzle_objects:
-        assert np.sum(d.out_wht) > 0
-
-    qm.SeestarQueuedStacker._save_final_stack(
-        obj,
-        output_filename_suffix="_drizzle_incr_true_batch",
-        preserve_linear_output=True,
-    )
-
-    saved = fits.getdata(obj.final_stacked_path)
-    assert saved.shape == (3, 5, 5)
-    assert saved[0].max() >= 0.9
-    assert saved[1].max() >= 1.9
-    assert saved[2].max() >= 2.9
-
+# Removed test_save_final_stack_incremental_drizzle_batch: it exercised the
+# legacy `_process_incremental_drizzle_batch` incremental path, which M3 has
+# removed from the worker (single per-channel accumulator instead).  Batch
+# invariance is now covered by test_batch_invariance_at_qm_level and the
+# accumulator save path by test_save_final_stack_incremental_drizzle_objects.
 
 def test_save_final_stack_zero_weights_abort(tmp_path):
     obj = _make_obj(tmp_path, True)
@@ -370,19 +329,24 @@ def test_save_final_stack_classic_reproject_crop(tmp_path):
 
 
 def test_save_final_stack_adds_radec(tmp_path):
+    # M3: drizzle_mode="Final" (batch data) is gone; the final stack is built
+    # from the single per-channel accumulators, and its header must still carry
+    # RA/DEC propagated from the output WCS.
     obj = _make_obj(tmp_path, True)
     obj.drizzle_active_session = True
-    obj.drizzle_mode = "Final"
     obj.preserve_linear_output = True
     obj.drizzle_output_wcs = make_wcs()
 
-    data = np.ones((2, 2), dtype=np.float32)
-    wht = np.ones_like(data, dtype=np.float32)
+    from seestar.core.drizzle_core import DrizzleAccumulator
+
+    shape = (2, 2)
+    obj.drizzle_accumulators = [DrizzleAccumulator(shape) for _ in range(3)]
+    for acc in obj.drizzle_accumulators:
+        acc._out_img[:] = 1.0
+        acc._out_wht[:] = 1.0
 
     qm.SeestarQueuedStacker._save_final_stack(
         obj,
-        drizzle_final_sci_data=data,
-        drizzle_final_wht_data=wht,
         preserve_linear_output=True,
     )
 

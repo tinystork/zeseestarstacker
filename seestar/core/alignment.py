@@ -138,7 +138,7 @@ class SeestarAligner:
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 # ... (imports et début de la méthode inchangés) ...
 
-    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True, use_disk=False):
+    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True, use_disk=False, return_M=False):
         """
         Aligns a single image to the reference.
 
@@ -148,13 +148,22 @@ class SeestarAligner:
         When False the output canvas is expanded so that no pixels are cropped.
 
         Version: AlignFix_ClassicStackingRegression_1
+
+        If ``return_M`` is True the return value is a 3-tuple
+        ``(aligned_img, success, M)`` where ``M`` is the 2x3 float64 affine
+        actually used by ``cv2.warpAffine`` (mapping ORIGINAL pixels to the
+        reference grid).  ``M`` is ``None`` on every failure path (no matrix
+        was computed).  The default (``return_M=False``) keeps the historic
+        2-tuple return and must not break ``align_single_image_task``.
         """
         logger.debug(f"  DEBUG ALIGNER (_align_image V_ClassicStackingRegression_1) pour '{file_name}':")
         logger.debug(f"    force_same_shape_as_ref = {force_same_shape_as_ref}")
         # ... (début de la méthode jusqu'à find_transform inchangé) ...
         if img_to_align is None:
             print(f"    Input img_to_align: None. Retour échec.")
-            return None, False 
+            if return_M:
+                return None, False, None
+            return None, False
         
         tmp_in_path = None
         if use_disk:
@@ -181,6 +190,8 @@ class SeestarAligner:
         
         if reference_image is None:
             self.update_progress(f"❌ Alignement impossible {file_name}: Référence non disponible.")
+            if return_M:
+                return img_to_align, False, None
             return img_to_align, False
 
         reference_image_float = reference_image.astype(np.float32, copy=False)
@@ -200,6 +211,8 @@ class SeestarAligner:
 
             if source_2d_for_detection.shape != ref_2d_for_detection.shape:
                 self.update_progress(f"❌ Alignement {file_name}: Dimensions incompatibles pour détection.")
+                if return_M:
+                    return img_to_align, False, None
                 return img_to_align, False
             
             print(f"    AVANT aa.find_transform: source_2d_for_detection Range: [{np.min(source_2d_for_detection):.4g}, {np.max(source_2d_for_detection):.4g}]")
@@ -327,18 +340,30 @@ class SeestarAligner:
                     except Exception:
                         pass
                 gc.collect()
+            if return_M:
+                return (
+                    aligned_img_final,
+                    True,
+                    np.asarray(cv2_M_final, dtype=np.float64),
+                )
             return aligned_img_final, True
 
         except aa.MaxIterError as ae:
             self.update_progress(f"⚠️ Alignement échoué {file_name}: {ae}")
-            return img_to_align, False 
+            if return_M:
+                return img_to_align, False, None
+            return img_to_align, False
         except ValueError as ve: 
             self.update_progress(f"❌ Erreur alignement {file_name} (ValueError): {ve}")
             traceback.print_exc(limit=1)
-            return img_to_align, False 
+            if return_M:
+                return img_to_align, False, None
+            return img_to_align, False
         except Exception as e:
             self.update_progress(f"❌ Erreur alignement inattendue {file_name}: {e}")
             traceback.print_exc(limit=3)
+            if return_M:
+                return img_to_align, False, None
             return img_to_align, False
 
 

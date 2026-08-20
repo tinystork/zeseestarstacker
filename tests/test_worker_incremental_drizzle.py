@@ -1,3 +1,13 @@
+"""Worker wiring test for the M3 single-accumulator drizzle path.
+
+Historically this file asserted that the worker drove the *incremental* drizzle
+mode (``_process_incremental_drizzle_batch`` / ``incremental_drizzle_objects``).
+That mode has been unified into a single per-channel accumulator
+(``drizzle_accumulators`` + ``_add_frame_to_drizzle_accumulators``), so the
+worker no longer calls the incremental path.  This test now asserts the worker
+feeds each ORIGINAL pose to ``_add_frame_to_drizzle_accumulators`` instead.
+"""
+
 import importlib
 import sys
 import types
@@ -60,7 +70,7 @@ def _make_worker(tmp_path):
     obj.files_in_queue = 1
     obj.batch_size = 1
     obj.drizzle_active_session = True
-    obj.drizzle_mode = "Incremental"
+    obj.drizzle_mode = "Final"  # M3: drizzle_mode is now without effect
     obj.stacked_batches_count = 0
     obj.total_batches_estimated = 1
     obj.mosaic_settings_dict = {}
@@ -105,29 +115,37 @@ def _make_worker(tmp_path):
     obj._create_drizzle_output_wcs = lambda ref_wcs, shape, scale: (make_wcs(shape), shape)
 
     dummy_data = np.zeros((2, 2, 3), dtype=np.float32)
+    tf = np.array([[1.0, 0.0, 0.5], [0.0, 1.0, -0.25]], dtype=np.float64)
+    # _process_file returns (data, header, scores, wcs, matrix_m, mask); the
+    # worker must feed (data, header, matrix_m, mask, native_wcs=wcs) to the
+    # accumulator.
     obj._process_file = lambda *a, **k: (
         dummy_data,
         fits.Header(),
         None,
         None,
-        None,
+        tf,
         np.ones((2, 2), dtype=np.float32),
     )
-    obj._save_drizzle_input_temp = lambda d, h: str(Path(tmp_path) / "tmp.fits")
-    obj._save_final_stack = lambda *a, **k: None
 
-    from drizzle.resample import Drizzle
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=(2, 2)) for _ in range(3)]
+    calls = {"add_frame": 0}
 
-    calls = {"incremental": 0}
-
-    def fake_incremental(batch, num, total):
-        calls["incremental"] += 1
+    def fake_add_frame(original_data, header, tf_val, weight_map, native_wcs=None):
+        calls["add_frame"] += 1
+        assert native_wcs is None
         obj.stop_processing = True
+        return True
 
-    obj._process_incremental_drizzle_batch = fake_incremental
-    obj._start_drizzle_process = lambda batch, num, tot: fake_incremental(batch, num, tot)
-    obj._process_and_save_drizzle_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("final called"))
+    obj._add_frame_to_drizzle_accumulators = fake_add_frame
+    obj._move_to_stacked = lambda *a, **k: None
+    obj._save_partial_stack = lambda *a, **k: None
+    obj._update_batch_count_file = lambda *a, **k: None
+    obj._send_eta_update = lambda *a, **k: None
+    obj._save_final_stack = lambda *a, **k: None
+    # Classic / incremental paths must NOT be exercised anymore.
+    obj._process_incremental_drizzle_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("incremental called"))
+    obj._start_drizzle_process = lambda *a, **k: (_ for _ in ()).throw(AssertionError("incremental start called"))
+    obj._process_and_save_drizzle_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("final batch called"))
     obj._process_completed_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("classic called"))
     obj.cleanup_temp_reference = lambda: None
     obj._cleanup_drizzle_temp_files = lambda: None
@@ -138,7 +156,7 @@ def _make_worker(tmp_path):
     return obj, calls
 
 
-def test_worker_calls_incremental_drizzle(tmp_path):
+def test_worker_calls_add_frame_to_drizzle_accumulators(tmp_path):
     obj, calls = _make_worker(tmp_path)
     qm.SeestarQueuedStacker._worker(obj)
-    assert calls["incremental"] == 1
+    assert calls["add_frame"] == 1
