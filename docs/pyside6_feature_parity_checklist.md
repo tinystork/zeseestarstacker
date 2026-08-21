@@ -290,8 +290,8 @@ Notes / gaps:
   `use_gpu` → `stacker.use_gpu` and `max_hq_mem_gb` →
   `stacker.max_hq_mem` (bytes) before `start_processing`, never as
   `start_processing` kwargs (see §19).  The boring single-batch subprocess
-  route's `--max-mem` stays fixed at the 8.0 GB default (pre-existing M4 delta,
-  a separate subprocess path, not the `RunController` run flow).  `[x]` backend.
+  route forwards the same `max_hq_mem_gb` as `--max-mem` since M25 (see §20.4),
+  so the configured HQ-RAM limit reaches both run paths.  `[x]` backend.
 - **Kappa / Winsor visibility (Tk `_toggle_kappa_visibility`) is not reproduced.**
   The Tk Stacking tab hides the Kappa Low/High and Winsor-Limits controls unless
   the stacking method or final-combine is `kappa_sigma` /
@@ -544,8 +544,8 @@ Explicitly out of scope this lot (deferred gaps, unchanged `[ ]`):
 last-stack resume (10.1) and the official Qt entry point (11.2).  (The engine
 solver bridge (3.6) was closed by M21, the Res-factor E2E (16.15) by M22, and
 last-stack resume (10.1) by M23, all after this lot.)  The boring single-batch
-subprocess `--max-mem` also stays fixed at 8.0 GB (pre-existing M4 delta, a
-separate subprocess route outside the `RunController` run flow).
+subprocess `--max-mem` now forwards the configured `max_hq_mem_gb` (see §20.4,
+M25; it was a pre-existing M4 delta).
 
 ## 20. Last-stack display / resume parity (M23)
 
@@ -588,10 +588,28 @@ and no new engine import.
 `batches_count.txt` artifact set.  No new resume UI is built; the seam is now
 covered by tests (`test_qt_last_stack_resume_m23.py`) and documented here.
 
+**20.4 — Boring `--max-mem` parity (M25).**  The boring single-batch route now
+forwards the user-configured HQ-RAM limit instead of hardcoding `8.0`.
+`MainWindow._start_boring_route` passes `max_mem_gb=float(state.max_hq_mem_gb)`
+into `boring_route.build_boring_request`, and `build_boring_request` keeps its
+`max_mem_gb: float = 8.0` default so callers that pass nothing still get `8.0`.
+
+**Parity statement (Tk reference vs Qt boring now).**  The Tk boring branch
+emits `--max-mem str(getattr(self.settings, "max_hq_mem_gb", 8))` with
+`max_hq_mem_gb` a float read from the `max_hq_mem_var` `tk.DoubleVar` (default
+`8.0`) — i.e. Tk *always* forwards the configured value and never omits
+`--max-mem` (the engine default rule only applies when the CLI arg is absent,
+which never happens in the Tk flow).  The Qt boring route now emits the
+identical argv (`--max-mem str(float(state.max_hq_mem_gb))`, default `8.0`), so
+the two surfaces are value-for-value identical for both the default and any
+configured value (the engine parses `--max-mem` as `float`, so `"8.0"` / `"4.0"`
+… encode the same limit).  No Tk/engine change; the regular (non-boring) run
+path is unchanged (it already read the same `max_hq_mem_gb` source via M20).
+
 Explicitly out of scope this lot (unchanged `[ ]`): the official Qt entry point
-(11.2) and the boring single-batch `--max-mem` 8.0 GB delta (pre-existing M4).
-(The M22 live-preview-frame display reconciliation was closed by M24, after
-this lot.)
+(11.2).  (The M22 live-preview-frame display reconciliation was closed by M24,
+and the boring single-batch `--max-mem` 8.0 GB delta by M25, both after this
+lot.)
 
 ---
 
@@ -1039,3 +1057,19 @@ this lot.)
   + the existing import-hygiene tests; `git diff --check` clean.  Remaining
   gaps: Qt entry point (11.2) and the boring single-batch `--max-mem` 8.0 GB
   delta.
+- **2026-08-21 — lot ZSSS-QT-FP-M25**: boring single-batch `--max-mem` delta
+  (pre-existing M4) closed.  `MainWindow._start_boring_route` now forwards the
+  user-configured HQ-RAM limit by passing `max_mem_gb=float(state.max_hq_mem_gb)`
+  into `boring_route.build_boring_request`; `build_boring_request` keeps its
+  `max_mem_gb: float = 8.0` default so callers that pass nothing still get
+  `8.0`.  **Parity statement:** the Tk boring branch emits
+  `--max-mem str(getattr(self.settings, "max_hq_mem_gb", 8))` with
+  `max_hq_mem_gb` a float (default `8.0`) — Tk always forwards the configured
+  value and never omits `--max-mem`; the Qt boring route now emits the identical
+  argv (`--max-mem str(float(state.max_hq_mem_gb))`, default `8.0`), so the two
+  surfaces are value-for-value identical for the default and any configured
+  value.  No Tk/engine change; the regular run path is unchanged (same
+  `max_hq_mem_gb` source, M20).  Covered by
+  `tests/test_qt_boring_mem_m25.py` (new, 6 tests) + the M4/M20 suites + the
+  existing import-hygiene tests; `git diff --check` clean.  Remaining gap: Qt
+  entry point (11.2).

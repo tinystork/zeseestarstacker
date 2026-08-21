@@ -854,9 +854,9 @@ class MainWindow(QMainWindow):
         )
         self.final_combine_combo.setCurrentText(default_label)
 
-        # HQ RAM limit (GB) — Tk ``max_hq_mem_var`` (Stacking tab).  GUI
-        # parity only today: the Qt backend bridge does not consume it (the
-        # boring CLI ``--max-mem`` stays fixed at the 8.0 default).
+        # HQ RAM limit (GB) — Tk ``max_hq_mem_var`` (Stacking tab).  Forwarded
+        # to the boring single-batch subprocess as ``--max-mem`` (M25) and to
+        # the regular run path as the M20 seam field ``max_hq_mem_gb``.
         self.max_hq_mem_spin = QSpinBox()
         self.max_hq_mem_spin.setRange(1, 64)
         self.max_hq_mem_spin.setSingleStep(1)
@@ -1779,6 +1779,7 @@ class MainWindow(QMainWindow):
             normalize_method=str(state.stack_norm_method or "none"),
             save_final_as_float32=bool(state.save_final_as_float32),
             final_combine=str(state.stack_final_combine or "mean"),
+            max_mem_gb=float(state.max_hq_mem_gb),
         )
         self.log(
             "Launching boring stack "

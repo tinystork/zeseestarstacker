@@ -163,9 +163,8 @@ class QtSettingsState:
     stack_final_combine: str = "mean"
     batch_size: int = 0
     # HQ RAM limit (GB) for the single-batch / boring stack subprocess (Tk
-    # ``max_hq_mem_var``).  GUI parity only today: the Qt backend bridge does
-    # not consume it yet (the boring CLI ``--max-mem`` stays fixed at the 8.0
-    # default) — backend E2E later.
+    # ``max_hq_mem_var``).  Forwarded to the boring CLI ``--max-mem`` (M25) and
+    # to the regular run path as the M20 seam field ``max_hq_mem_gb``.
     max_hq_mem_gb: float = 8.0
     order_file_list: List[str] = field(default_factory=list)
 

@@ -261,6 +261,12 @@ def build_boring_request(
 
     ``python_executable`` defaults to :data:`sys.executable` (overridable in
     tests so the assertion never depends on the interpreter path).
+
+    ``max_mem_gb`` (default ``8.0``) is the HQ RAM limit forwarded verbatim as
+    ``--max-mem``.  The Tk boring branch always passes this value
+    (``str(getattr(self.settings, "max_hq_mem_gb", 8))``), so the Qt shell
+    passes ``float(state.max_hq_mem_gb)`` (default ``8.0``) for byte-identical
+    parity; the ``8.0`` default here only applies when a caller passes nothing.
     """
     script_path = resolve_boring_script_path()
     command = [
