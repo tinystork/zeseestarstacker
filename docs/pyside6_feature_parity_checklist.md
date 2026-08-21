@@ -345,25 +345,35 @@ equivalent with the backend part deferred.
 | 16.12 | `hist_reset_btn` "R" | reset zoom | `hist_reset_button` | `[x]` |
 | 16.13 | `preview_canvas` (Canvas) | preview image surface | `preview_image_label` (QLabel) | `[x]` |
 | 16.14 | `zoom_100_button` "Zoom 100%" / `zoom_fit_button` "Zoom Fit" | discrete zoom (engine-free) | `zoom_combo` (`Fit`/`100%`/`200%`/`50%`) | `[x]` (shape diff) |
-| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` (display-only) | `[x]` display-only, `[ ]` backend E2E (unchanged by M20) |
+| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` | `[x]` display-only, `[x]` backend E2E live control (M22) |
 | 16.16 | `rotate_left_button` / `rotate_right_button` | rotate preview ±90° (engine-free) | `rotate_left_button` / `rotate_right_button` | `[x]` |
 | 16.17 | Pan (left-drag / scroll) via `PreviewManager` | canvas pan + scroll-zoom (engine-free) | `PreviewImageView` + `render_view(zoom_factor=…, pan_offset=…)` | `[x]` (M18, checklist 6.7, §17) |
 | 16.18 | Save / export | no dedicated right-panel button; the run saves FITS/PNG via the engine | run backend + `open_output_button` | `[x]` (N/A) |
 
 Notes / gaps:
 
-- **Res-cycle button (16.15).**  The Qt right panel now has a `preview_res_button`
+- **Res-cycle button (16.15).**  The Qt right panel has a `preview_res_button`
   that cycles factors 1→2→3→4→1 with the Tk `Res 1/N` label (localized
-  `Res`/`Rés`), persisted in GUI state (`_preview_res_factor`), and — via a new
+  `Res`/`Rés`), persisted in GUI state (`_preview_res_factor`), and — via the
   display-only `downsampled_image` / `render_view(..., downsample_factor=...)`
-  seam — re-renders the local preview at the new factor.  It never mutates
-  `_preview_source` and never imports/uses the engine.  **Engine coupling gap:**
-  the Tk button also calls `queued_stacker.set_preview_downsample_factor` +
-  `refresh_preview` (a real backend re-render); the Qt button is display-only
-  ("backend E2E later").  **Default deviation:** the Qt default factor is `1`
-  (native) because the Qt shell's display-only preview is never
-  engine-downsampled and the existing preview tests lock native rendering; the
-  Tk initial factor is `2` (engine `preview_downsample_factor` default).  `[x]`
+  seam — re-renders the local preview at the new factor; it never mutates
+  `_preview_source`.  **Engine coupling (M22, delivered):** during an active
+  run the button now also forwards the factor through a thread-safe control
+  channel (GUI → `RunController` → `RunWorker` → backend →
+  `stacker.set_preview_downsample_factor` + `refresh_preview`, applied on the
+  worker thread), matching the Tk `_cycle_preview_resolution` engine coupling;
+  idle clicks stay display-only.  **Display-path caveat:** the engine factor
+  changes the *resolution of the preview data* the engine pushes (via its
+  preview callback), while the Qt shell additionally applies its own local
+  display downsample (`_preview_res_factor`) to whatever it renders — the two
+  are not yet coordinated, so the on-screen preview does not yet reflect the
+  engine factor 1:1 (the engine-side application is verifiable on the stacker
+  instance; the live-preview-frame display reconciliation remains a documented
+  gap, no new preview-frame pipeline is built).  **Default deviation:** the Qt
+  default factor is `1` (native) because the Qt shell's display-only preview is
+  never engine-downsampled and the existing preview tests lock native
+  rendering; the Tk initial factor is `2` (engine `preview_downsample_factor`
+  default).  `[x]` display-only (M17), `[x]` backend E2E live control (M22).
 - **Kappa/winsor visibility (M16 gap closed).**  `_toggle_kappa_visibility` now
   mirrors the Tk `_toggle_kappa_visibility` rule exactly: `stack_kappa_low` /
   `stack_kappa_high` show for stacking method `kappa-sigma` /
@@ -528,10 +538,10 @@ Mechanics:
   today's defaults.
 
 Explicitly out of scope this lot (deferred gaps, unchanged `[ ]`):
-the Res-factor E2E (16.15), last-stack resume (10.1) and the official Qt entry
-point (11.2).  (The engine solver bridge (3.6) was closed by M21, after this
-lot.)  The boring single-batch subprocess `--max-mem` also stays fixed at
-8.0 GB (pre-existing M4 delta, a separate subprocess route outside the
+last-stack resume (10.1) and the official Qt entry point (11.2).  (The engine
+solver bridge (3.6) was closed by M21 and the Res-factor E2E (16.15) by M22,
+after this lot.)  The boring single-batch subprocess `--max-mem` also stays
+fixed at 8.0 GB (pre-existing M4 delta, a separate subprocess route outside the
 `RunController` run flow).
 
 ---
@@ -908,3 +918,27 @@ lot.)  The boring single-batch subprocess `--max-mem` also stays fixed at
   existing import-hygiene tests; `git diff --check` clean.  Remaining gaps:
   Res-factor E2E (16.15), last-stack resume (10.1), Qt entry point (11.2), and
   the boring single-batch `--max-mem` 8.0 GB delta.
+- **2026-08-21 — lot ZSSS-QT-FP-M22**: backend E2E part 3 — live Res-factor
+  control (checklist 16.15 backend half → `[x]`).  The Qt `preview_res_button`
+  now drives the live engine `preview_downsample_factor` during an active run
+  via a thread-safe control channel: `MainWindow._on_preview_res_cycle` →
+  `RunController.set_preview_downsample_factor` →
+  `RunWorker.set_preview_downsample_factor` →
+  `SeestarQueuedStackerBackend.set_preview_downsample_factor` (enqueues the
+  factor on a thread-safe `queue.Queue`) → drained by the backend's run loop on
+  the worker thread → `stacker.set_preview_downsample_factor(factor)` +
+  `stacker.refresh_preview()` (Tk `_cycle_preview_resolution` parity, both
+  best-effort).  Idle clicks stay display-only (label + local display downsample
+  unchanged); the factor mapping is identity (`Res 1/1` → 1, `Res 1/2` → 2,
+  `Res 1/4` → 4).  No Tk/engine changes; the control channel is additive and
+  thread-safe (all stacker mutations happen on the worker thread, never the GUI
+  thread).  **Display-path gap:** the engine factor changes the resolution of
+  the preview *data* the engine pushes (via its preview callback), while the
+  shell still applies its own local display downsample — the on-screen preview
+  does not yet reconcile the two; the engine-side application is verifiable on
+  the stacker instance, and the live-preview-frame display reconciliation
+  remains `[ ]` (no new preview-frame pipeline built).  Covered by
+  `tests/test_qt_res_live_m22.py` (new, 11 tests) + the existing
+  import-hygiene tests; `git diff --check` clean.  Remaining gaps: last-stack
+  resume (10.1), Qt entry point (11.2), and the boring single-batch `--max-mem`
+  8.0 GB delta.

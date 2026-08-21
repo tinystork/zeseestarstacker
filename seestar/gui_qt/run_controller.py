@@ -187,6 +187,18 @@ class RunController(QObject):
         if worker is not None:
             worker.request_cancel()
 
+    def set_preview_downsample_factor(self, factor: int) -> None:
+        """Request a live preview-downsample factor change during a run.
+
+        Thread-safe control channel (GUI thread -> worker -> backend -> live
+        stacker).  A no-op when no run is active (idle Res clicks stay
+        display-only), and the backend applies the factor on the worker thread
+        so the stacker is only ever mutated by its owner thread.
+        """
+        worker = self._worker
+        if worker is not None:
+            worker.set_preview_downsample_factor(factor)
+
     def shutdown(self, wait_ms: int = 5000) -> bool:
         """Idempotent teardown: cancel any active run and reap its QThread.
 

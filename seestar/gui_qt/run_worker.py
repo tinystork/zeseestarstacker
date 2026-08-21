@@ -118,6 +118,21 @@ class RunWorker(QObject):
             except Exception:
                 pass
 
+    def set_preview_downsample_factor(self, factor: int) -> None:
+        """Forward a live preview-downsample request to the backend (GUI thread).
+
+        Thread-safe in the same way as :meth:`request_cancel`: the backend is
+        responsible for applying the factor to the live stacker on the worker
+        thread (or no-op when it has no engine).  A missing backend is a silent
+        no-op.
+        """
+        backend = self._backend
+        if backend is not None:
+            try:
+                backend.set_preview_downsample_factor(factor)
+            except Exception:
+                pass
+
     def _is_cancel_requested(self) -> bool:
         self._cancel_mutex.lock()
         try:

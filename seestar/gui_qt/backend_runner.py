@@ -37,7 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import enum
 import importlib
-from queue import Empty
+from queue import Empty, Queue
 import time
 from typing import Any, Callable, Optional
 
@@ -134,6 +134,15 @@ class BaseRunBackend:
     def cancel(self) -> None:
         raise NotImplementedError
 
+    def set_preview_downsample_factor(self, factor: int) -> None:
+        """Request a live preview-downsample factor change during a run.
+
+        The base backend has no live engine, so this is a no-op (safe to call
+        from any thread at any time).  The real backend overrides it to forward
+        the factor to the live stacker instance on the worker thread.
+        """
+        return None
+
 
 class SimulatedRunBackend(BaseRunBackend):
     """Deterministic, backend-free simulated run (the M3 stub, promoted).
@@ -206,6 +215,13 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
     * polls ``stacker.is_running()`` until it finishes or cancellation is
       requested, and calls ``stacker.stop()`` on cancellation.
 
+    Live control (M22): :meth:`set_preview_downsample_factor` is a thread-safe
+    control channel the GUI thread uses during an active run.  It enqueues the
+    factor on ``self._control_queue``; :meth:`run` drains that queue on the
+    worker thread and applies ``stacker.set_preview_downsample_factor`` +
+    ``stacker.refresh_preview`` (Tk ``_cycle_preview_resolution`` parity), so
+    the stacker is only ever mutated by the thread that drives it.
+
     Parameters
     ----------
     stacker_factory:
@@ -231,6 +247,11 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         self._stacker_kwargs = dict(stacker_kwargs)
         self._stacker: Optional[Any] = None
         self._cancel_requested = False
+        # Thread-safe control channel (GUI thread -> worker thread).  The GUI
+        # thread enqueues live-control requests via
+        # :meth:`set_preview_downsample_factor`; :meth:`run` drains them on the
+        # worker thread so the stacker is only ever mutated by its owner thread.
+        self._control_queue: Queue = Queue()
 
     def _load_stackers_class(self):
         if self._stacker_factory is not None:
@@ -415,6 +436,64 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
                 except Exception:
                     pass
 
+    @staticmethod
+    def _apply_preview_downsample_control(stacker: Any, factor: int) -> None:
+        """Apply a live preview-downsample control request to a stacker.
+
+        Mirrors the Tk ``_cycle_preview_resolution`` engine coupling: call
+        ``stacker.set_preview_downsample_factor(factor)`` then
+        ``stacker.refresh_preview()``.  Each call is best-effort (a missing or
+        raising method is ignored) so any stacker-like object is safe.
+        """
+        setter = getattr(stacker, "set_preview_downsample_factor", None)
+        if callable(setter):
+            setter(factor)
+        refresher = getattr(stacker, "refresh_preview", None)
+        if callable(refresher):
+            refresher()
+
+    def _drain_control_queue(self, stacker: Any) -> None:
+        """Apply any pending live-control requests to ``stacker`` (worker thread).
+
+        The GUI thread enqueues requests via
+        :meth:`set_preview_downsample_factor`; this method runs on the worker
+        thread inside :meth:`run`'s polling loop and applies them to the
+        stacker so the stacker is only ever mutated on the thread that owns it.
+        Unknown/malformed items are dropped (live controls are best-effort).
+        """
+        while True:
+            try:
+                item = self._control_queue.get_nowait()
+            except Empty:
+                break
+            try:
+                kind, value = item
+                if kind == "preview_downsample_factor":
+                    self._apply_preview_downsample_control(stacker, int(value))
+            except Exception:
+                # A malformed control item must never abort the drain or the
+                # run; live controls are best-effort.
+                pass
+            finally:
+                try:
+                    self._control_queue.task_done()
+                except Exception:
+                    pass
+
+    def set_preview_downsample_factor(self, factor: int) -> None:
+        """Thread-safe live preview-downsample control (GUI thread -> worker).
+
+        Enqueues the factor on a thread-safe queue drained by :meth:`run` on
+        the worker thread, so the stacker mutation happens on the thread that
+        drives it (never concurrently with processing).  Safe to call before,
+        during or after a run; a request with no active run is simply never
+        drained (a silent no-op, no crash).
+        """
+        try:
+            self._control_queue.put(("preview_downsample_factor", int(factor)))
+        except Exception:
+            pass
+
     def run(
         self,
         request: RunRequest,
@@ -446,6 +525,7 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             if not stacker.is_running():
                 break
             self._drain_gui_event_queue(stacker)
+            self._drain_control_queue(stacker)
             time.sleep(self._poll_interval)
 
         # Flush any callbacks the engine queued in the instant before its
@@ -453,6 +533,9 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         # progress/log/preview state even when the thread ended between two
         # polls.
         self._drain_gui_event_queue(stacker)
+        # Also apply any live-control request that arrived in that same
+        # instant (best-effort; the run is already terminal).
+        self._drain_control_queue(stacker)
 
         if is_cancel_requested() or self._cancel_requested:
             # Cancellation observed (worker flag or backend.cancel()).  stop()

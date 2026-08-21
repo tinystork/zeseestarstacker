@@ -185,10 +185,10 @@ DRIZZLE_MODES = ["Final", "Incremental"]
 SOLVER_PREFERENCES = ["none", "astap", "zesolver"]
 
 # Preview resolution-cycle factors (Tk ``preview_res_button`` parity, M17).
-# Display-only: the Tk button also drives the engine
-# ``preview_downsample_factor`` + ``refresh_preview``; the Qt shell cycles the
-# same 1/1..1/4 label plus a local display downsample and never touches the
-# engine (backend E2E later).  The Qt default is 1 (native) — the shell's
+# The Qt shell cycles the same 1/1..1/4 label plus a local display downsample;
+# since M22 it ALSO drives the engine ``preview_downsample_factor`` +
+# ``refresh_preview`` during an active run via a thread-safe control channel
+# (idle clicks stay display-only).  The Qt default is 1 (native) — the shell's
 # display-only preview is never engine-downsampled, so "1/1" is its native
 # state; the Tk initial factor is 2 (engine ``preview_downsample_factor``
 # default), a documented deviation.
@@ -2541,13 +2541,17 @@ class MainWindow(QMainWindow):
         self.preview_res_button.setText(self._preview_res_text())
 
     def _on_preview_res_cycle(self) -> None:
-        """Cycle the preview-resolution factor 1→2→3→4→1 (display-only).
+        """Cycle the preview-resolution factor 1→2→3→4→1.
 
         Advances the factor among 1/2/3/4 (default 1), updates the button label
-        and re-renders the local preview at the new factor.  The Tk button
-        additionally calls the engine ``set_preview_downsample_factor`` +
-        ``refresh_preview`` (engine-coupled); the Qt shell only changes GUI
-        state and applies a local display downsample — backend E2E later.
+        and re-renders the local preview at the new factor (display-only, as
+        before).  During an active run it additionally forwards the factor to
+        the live engine via the thread-safe control channel
+        (:meth:`RunController.set_preview_downsample_factor`), which applies
+        ``set_preview_downsample_factor`` + ``refresh_preview`` to the running
+        stacker on the worker thread (Tk ``_cycle_preview_resolution``
+        engine-coupling parity).  When no run is active the button is
+        display-only, exactly as before.
         """
         factors = PREVIEW_RES_FACTORS
         if self._preview_res_factor in factors:
@@ -2558,6 +2562,12 @@ class MainWindow(QMainWindow):
         self._preview_res_factor = factors[idx]
         self._render_preview_res_button()
         self._refresh_preview_view()
+        # Live engine coupling (M22): only forward while a run is active.  The
+        # controller/worker/backend chain is a no-op for backends without a
+        # live engine (simulated), and the worker thread applies it to the
+        # stacker, so a Res click never races the engine's own processing.
+        if self._running:
+            self.controller.set_preview_downsample_factor(self._preview_res_factor)
 
     def _on_wb_changed(self, *_ignored) -> None:
         """Update the white-balance gains and re-render the preview (display-only)."""
