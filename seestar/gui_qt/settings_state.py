@@ -162,6 +162,11 @@ class QtSettingsState:
     # the Tk ``SettingsManager.update_from_ui`` derivation.
     stack_final_combine: str = "mean"
     batch_size: int = 0
+    # HQ RAM limit (GB) for the single-batch / boring stack subprocess (Tk
+    # ``max_hq_mem_var``).  GUI parity only today: the Qt backend bridge does
+    # not consume it yet (the boring CLI ``--max-mem`` stays fixed at the 8.0
+    # default) — backend E2E later.
+    max_hq_mem_gb: float = 8.0
     order_file_list: List[str] = field(default_factory=list)
 
     # --- Hot pixel / calibration ---
@@ -186,6 +191,9 @@ class QtSettingsState:
     drizzle_kernel: str = "square"
     drizzle_pixfrac: float = 1.0
     drizzle_group_size: int = 50
+    # Drizzle GPU toggle (Tk ``use_gpu_var``, Stacking tab).  GUI parity only
+    # today: ``build_backend_kwargs`` does not consume it (backend E2E later).
+    use_gpu: bool = False
 
     # --- Colour / post-processing ---
     apply_chroma_correction: bool = True

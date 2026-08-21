@@ -312,10 +312,21 @@ def test_boring_mode_gates_drizzle_controls(qapp):
         assert not win.drizzle_check.isChecked()
         assert not win.drizzle_mode_combo.isEnabled()
         assert not win.drizzle_group_spin.isEnabled()
-        # Un-checking boring re-enables drizzle controls.
+        # Un-checking boring re-enables the drizzle *checkbox* only.  The
+        # sub-options stay gated by the (now force-unchecked) drizzle flag —
+        # M16 added Tk-parity drizzle gating (`_update_drizzle_options_state`),
+        # so ``drizzle_mode_combo`` / ``drizzle_group_spin`` are enabled by the
+        # Enable-drizzle flag, not merely by "not boring".
         win.boring_check.setChecked(False)
         assert win.drizzle_check.isEnabled()
+        assert not win.drizzle_mode_combo.isEnabled()
+        assert not win.drizzle_group_spin.isEnabled()
+        # Re-checking drizzle re-enables the mode combo; the group-size spin is
+        # enabled only in the Large-dataset (Incremental) mode.
+        win.drizzle_check.setChecked(True)
         assert win.drizzle_mode_combo.isEnabled()
+        assert not win.drizzle_group_spin.isEnabled()
+        win.drizzle_mode_combo.setCurrentText("Incremental")
         assert win.drizzle_group_spin.isEnabled()
     finally:
         win.shutdown()

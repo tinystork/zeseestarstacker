@@ -216,6 +216,101 @@ Notes / gaps:
 
 ---
 
+## 15. Stacking tab content parity (M16)
+
+Per-control Tk `tab_stacking` → Qt parity (the Tk controls live in
+`seestar/gui/main_window.py` ~l.957-1516; the Qt surface is the `Stacking` tab
+built by `MainWindow._build_stacking_tab` plus the `Expert` tab "Stacking /
+Paths", "Drizzle Advanced", "Calibration / Hot Pixels" and "Colour /
+Post-processing" sections, which host the Tk Stacking-tab sub-options moved
+there by M10/M15).  `[x]` = delivered this lot (present + correct
+label/default/range/enabler); `[ ]` = gap with a note.
+
+| # | Tk control (label → var) | Range / default | Qt equivalent | Status |
+|---|---|---|---|---|
+| 15.1 | "Input:" → `input_path` | str | `input_edit` + Browse (Stacking tab) | `[x]` |
+| 15.2 | "Output:" → `output_path` | str | `output_edit` + Browse | `[x]` |
+| 15.3 | "Filename:" → `output_filename_var` | str | `output_filename_edit` | `[x]` |
+| 15.4 | "Reference" → `reference_image_path` | str | `reference_edit` + Browse | `[x]` |
+| 15.5 | "Last stack:" → `last_stack_path` | str | `last_stack_edit` + Browse | `[x]` |
+| 15.6 | "Temporary:" → `temp_folder_path` | str | `temp_edit` + Browse | `[x]` |
+| 15.7 | "Crop master tiles" → `apply_master_tile_crop_var` | bool, `False` | `apply_master_tile_crop` checkbox (enabler, Expert tab) | `[x]` (M15) |
+| 15.8 | "Crop % per side" → `master_tile_crop_percent_var` | 0.0–25.0 step 0.5, `18.0` | `master_tile_crop_percent` (Expert tab) | `[x]` (M15) |
+| 15.9 | "Normalization:" → `stack_norm_method_var` | combo none/linear_fit/sky_mean, `none` | `stack_norm_method` combo (Expert tab) | `[x]` |
+| 15.10 | "Weighting:" → `stack_weight_method_var` | combo none/noise_variance/noise_fwhm/snr/stars, `none` | `stack_weight_method` combo (Expert tab) | `[x]` |
+| 15.11 | "Kappa Low:" → `stacking_kappa_low_var` | 0.1–10 step 0.1, `3.0` | `stack_kappa_low` (Expert tab, 0.0–10.0) | `[x]` (range diff) |
+| 15.12 | "Kappa High:" → `stacking_kappa_high_var` | 0.1–10 step 0.1, `3.0` | `stack_kappa_high` (Expert tab, 0.0–10.0) | `[x]` (range diff) |
+| 15.13 | "Winsor Limits:" → `stacking_winsor_limits_str_var` | str `0.05,0.05` | `stack_winsor_limits` (Expert tab) | `[x]` |
+| 15.14 | "Final Combine:" → `stack_final_combine_var` | combo mean/median/winsorized_sigma_clip/reproject/reproject_coadd, `mean` | `final_combine_combo` (Stacking tab) | `[x]` |
+| 15.15 | "HQ RAM limit (GB)" → `max_hq_mem_var` | 1–64 step 1, `8.0` | `max_hq_mem_spin` (Stacking tab) | `[x]` display-only, `[ ]` backend |
+| 15.16 | "Method:" → `stack_method_var` | combo mean/median/kappa_sigma/winsorized_sigma_clip/linear_fit_clip, `kappa_sigma` | `stacking_mode_combo` (Stacking tab, backend keys) | `[x]` (label diff) |
+| 15.17 | "Apply Final SCNR (Green)" → `apply_final_scnr_var` | bool, `False` | `apply_final_scnr` checkbox (enabler, Expert tab) | `[x]` (enabler; default diff) |
+| 15.18 | SCNR amount → `final_scnr_amount_var` | 0–1 step 0.05, `0.8` | `final_scnr_amount` (Expert tab) | `[x]` (default diff) |
+| 15.19 | "Preserve Luminosity (SCNR)" → `final_scnr_preserve_lum_var` | bool, `True` | `final_scnr_preserve_luminosity` (Expert tab) | `[x]` |
+| 15.20 | "Batch Size:" → `batch_size` | 0–9999 step 1, `10` | `batch_spin` (Stacking tab, `-1..1_000_000`, `0`=Auto) | `[x]` (contract §1) |
+| 15.21 | "Threaded Boring Stack" → `boring_thread_var` | bool, `False` | `boring_check` (Stacking tab) | `[x]` |
+| 15.22 | "Enable Drizzle" → `use_drizzle_var` | bool, `False` | `drizzle_check` (Stacking tab) | `[x]` |
+| 15.23 | "Drizzle processing:" → `drizzle_mode_var` | radio Standard(`Final`)/Large dataset(`Incremental`), `Final` | `drizzle_mode_combo` (`Final`/`Incremental`) | `[x]` (radio vs combo) |
+| 15.24 | "Preview group size:" → `drizzle_group_size_var` | 1–100000 step 10, `50` | `drizzle_group_spin` (1–100000 step 10, `50`) | `[x]` |
+| 15.25 | Drizzle policy hint (grey, wrapped) | — | `drizzle_policy_hint` (Stacking tab) | `[x]` (this lot) |
+| 15.26 | "Scale:" → `drizzle_scale_var` | radio x2/x3/x4, `2` | `drizzle_scale` (Expert tab, int 1–10) | `[x]` (radio vs spinbox) |
+| 15.27 | "WHT Threshold %:" → `drizzle_wht_display_var`→`drizzle_wht_threshold_var` | 10–100 step 5 (%), `0.7` | `drizzle_wht_threshold` (Expert tab, float 0–1) | `[x]` (% vs float) |
+| 15.28 | "Kernel:" → `drizzle_kernel_var` | combo 7 kernels, `square` | `drizzle_kernel` combo (Expert tab) | `[x]` |
+| 15.29 | "Pixfrac:" → `drizzle_pixfrac_var` | 0.01–2.00 step 0.05, `1.0` | `drizzle_pixfrac` (Expert tab) | `[x]` |
+| 15.30 | "Use GPU" → `use_gpu_var` | bool, `False` | `use_gpu_check` (Stacking tab) | `[x]` display-only, `[ ]` backend |
+| 15.31 | "Correct hot pixels" → `correct_hot_pixels` | bool, `True` | `correct_hot_pixels` checkbox (Expert tab) | `[x]` |
+| 15.32 | "Threshold:" → `hot_pixel_threshold` | 1–10 step 0.1, `3.0` | `hot_pixel_threshold` (Expert tab, 0.5–10) | `[x]` (range diff) |
+| 15.33 | "Neighborhood:" → `neighborhood_size` | 3–15 step 2, `5` | `neighborhood_size` (Expert tab, 1–20 step 1) | `[x]` (range/step diff) |
+| 15.34 | "Cleanup temporary files" → `cleanup_temp_var` | bool, `True` | `cleanup_temp` checkbox (Expert tab) | `[x]` |
+| 15.35 | "Edge Enhance" → `apply_chroma_correction_var` | bool, `True` | `apply_chroma_correction` checkbox (Expert tab) | `[x]` |
+
+Notes / gaps:
+
+- **Drizzle enabler gating mirrors Tk** (15.22–15.30): the Enable-drizzle flag
+  gates the drizzle mode combo, the group-size spin, the new Use-GPU checkbox
+  and the Expert-tab "Drizzle Advanced" sub-options (scale / WHT threshold /
+  kernel / pixfrac) via `_update_drizzle_gating` (the Qt equivalent of Tk
+  `_update_drizzle_options_state`).  **Group-size gate** (M3-D): the group-size
+  spinbox is enabled only when drizzle is on *and* the mode is
+  `Incremental` (Large dataset), matching the Tk policy.  The existing M4
+  boring-mode gate (`_update_boring_gating`) now delegates to the drizzle gate
+  so boring mode still force-disables+unchecks drizzle while the Tk-parity
+  drizzle flag takes over the sub-option enablement.  `[x]`
+- **SCNR enabler gating** (15.17–15.19): `apply_final_scnr` now gates
+  `final_scnr_target_channel` / `final_scnr_amount` /
+  `final_scnr_preserve_luminosity` (added to `EXPERT_ENABLER_GATES`), mirroring
+  the Tk `_update_final_scnr_options_state`.  `[x]`
+- **Engine-coupled gaps (display-only now, backend E2E later).**
+  `use_gpu` (15.30) and `max_hq_mem_gb` (15.15) are added to `QtSettingsState`
+  and surfaced on the Stacking tab (persisted/collected like Tk) but are **not**
+  consumed by `build_backend_kwargs` — `use_gpu` has no backend kwarg today and
+  the boring CLI `--max-mem` stays fixed at the 8.0 GB default (pre-existing M4
+  delta).  `[ ]` backend E2E for both.
+- **Kappa / Winsor visibility (Tk `_toggle_kappa_visibility`) is not reproduced.**
+  The Tk Stacking tab hides the Kappa Low/High and Winsor-Limits controls unless
+  the stacking method or final-combine is `kappa_sigma` /
+  `winsorized_sigma_clip`; the Qt Expert tab shows them always (they are always
+  present in `build_backend_kwargs`, so this is purely cosmetic).  `[ ]`
+- **Control-shape deltas** (present, but different widget): drizzle mode is a
+  combo (`Final`/`Incremental`) instead of the Tk "Standard"/"Large dataset /
+  incremental" radio pair (15.23); drizzle scale is an int spinbox 1–10 instead
+  of the Tk x2/x3/x4 radio (15.26); the WHT threshold is a raw 0–1 float instead
+  of a 10–100 % display that converts to 0–1 (15.27).  The stored backend keys /
+  defaults are identical.
+- **Default-value divergence (Tk init vars vs `SettingsManager`).**  The Tk
+  `init_variables` seeds `apply_final_scnr_var=False` / `final_scnr_amount_var=
+  0.8` / `max_hq_mem_var=8` (DoubleVar) / `use_gpu_var=False`, while the
+  canonical `SettingsManager.get_default_values` seeds `apply_final_scnr=True` /
+  `final_scnr_amount=0.6` / `max_hq_mem_gb=8` / `use_gpu=False`.  The Qt shell
+  seeds every widget from `QtSettingsState` (aligned with `SettingsManager`),
+  matching the M15 convention; the transient Tk init-var values are not
+  reproduced.  `[x]` (documented divergence).
+- **Reset behaviour.**  The Tk Stacking tab has no reset button (only the
+  Expert tab does, via `reset_expert_button`, M15); the Qt Stacking tab
+  likewise has none.  `[x]` (N/A, verified).
+
+---
+
 ## Last updated
 
 - **2026-08-21 — lot ZSSS-QT-FP-M1**: delivered items 2.1, 2.2 and section 13
@@ -461,3 +556,26 @@ Notes / gaps:
   No Tk/engine/backend/settings-file changes; `_preview_source` never mutated.
   Covered by `tests/test_qt_expert_m15.py` (10 tests) + the existing import
   hygiene tests; `git diff --check` clean.
+- **2026-08-21 — lot ZSSS-QT-FP-M16**: Stacking tab content parity + closure
+  (new section 15).  Delivered the full Tk `tab_stacking` → Qt per-control
+  parity: the previously missing Stacking-tab items are now present — the
+  drizzle **Use GPU** checkbox (`use_gpu_check`), the **HQ RAM limit (GB)**
+  spinbox (`max_hq_mem_spin`) and the grey **drizzle policy hint**
+  (`drizzle_policy_hint`), all FR/EN localised via `localization`.  The
+  drizzle enabler now gates its sub-options exactly like Tk
+  `_update_drizzle_options_state` (mode combo + group-size spin + Use-GPU +
+  the Expert-tab "Drizzle Advanced" scale/WHT/kernel/pixfrac), with the M3-D
+  **group-size gate** (enabled only for drizzle + `Incremental` Large-dataset
+  mode); the boring-mode gate (`_update_boring_gating`) now delegates to the
+  drizzle gate.  `apply_final_scnr` was added to `EXPERT_ENABLER_GATES` so the
+  SCNR amount / target-channel / preserve-luminosity sub-options gate like Tk
+  `_update_final_scnr_options_state`.  `QtSettingsState` gains `use_gpu` and
+  `max_hq_mem_gb` (persisted/collected like Tk) but they are **not** consumed
+  by `build_backend_kwargs` → "display-only now, backend E2E later" (the boring
+  CLI `--max-mem` stays fixed at 8.0 GB; no `use_gpu` backend kwarg).  No
+  Tk/engine/backend/settings-file changes; `_preview_source` never mutated.
+  One legitimate test re-point: `tests/test_qt_boring_route.py`
+  `test_boring_mode_gates_drizzle_controls` now reflects the Tk-parity drizzle
+  gating (sub-options re-enable only after re-checking drizzle, not merely on
+  un-checking boring).  Covered by `tests/test_qt_stacking_m16.py` (11 tests)
+  + the existing import-hygiene tests; `git diff --check` clean.

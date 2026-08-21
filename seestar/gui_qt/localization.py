@@ -60,6 +60,20 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "browse": {"en": "Browse...", "fr": "Parcourir..."},
     "boring_check": {"en": "Threaded Boring Stack", "fr": "Empilement Boring en thread"},
     "drizzle_check": {"en": "Enable drizzle", "fr": "Activer le drizzle"},
+    "hq_ram_limit": {"en": "HQ RAM limit (GB)", "fr": "Limite RAM HQ (Go)"},
+    "drizzle_use_gpu": {"en": "Use GPU", "fr": "Utiliser le GPU"},
+    "drizzle_policy_hint": {
+        "en": (
+            "Standard and Large dataset share the same M3 accumulator; "
+            "Large dataset only adds grouped preview/progress. "
+            "Final result is identical."
+        ),
+        "fr": (
+            "Standard et Large dataset partagent le même accumulateur M3 ; "
+            "Large dataset ajoute seulement un aperçu/progression groupés. "
+            "Le résultat final est identique."
+        ),
+    },
     # Right panel.
     "preview_group": {"en": "Preview", "fr": "Aperçu"},
     "view_group": {"en": "View", "fr": "Vue"},

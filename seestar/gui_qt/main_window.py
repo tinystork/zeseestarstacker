@@ -482,6 +482,15 @@ EXPERT_ENABLER_GATES = {
     ],
     "apply_feathering": ["feather_blur_px"],
     "apply_low_wht_mask": ["low_wht_percentile", "low_wht_soften_px"],
+    # Final SCNR (Tk Stacking-tab ``_update_final_scnr_options_state``): the
+    # "Apply Final SCNR" checkbox gates the target-channel / amount /
+    # preserve-luminosity sub-options.  In Qt these live on the Expert tab
+    # "Colour / Post-processing" section but the gating semantics are identical.
+    "apply_final_scnr": [
+        "final_scnr_target_channel",
+        "final_scnr_amount",
+        "final_scnr_preserve_luminosity",
+    ],
 }
 
 # The set of Expert-tab attributes the "Reset Expert Settings" button restores
@@ -798,6 +807,14 @@ class MainWindow(QMainWindow):
         )
         self.final_combine_combo.setCurrentText(default_label)
 
+        # HQ RAM limit (GB) — Tk ``max_hq_mem_var`` (Stacking tab).  GUI
+        # parity only today: the Qt backend bridge does not consume it (the
+        # boring CLI ``--max-mem`` stays fixed at the 8.0 default).
+        self.max_hq_mem_spin = QSpinBox()
+        self.max_hq_mem_spin.setRange(1, 64)
+        self.max_hq_mem_spin.setSingleStep(1)
+        self.max_hq_mem_spin.setValue(int(self.settings_state.max_hq_mem_gb))
+
         self.drizzle_check = QCheckBox(self._tr("drizzle_check"))
         self._bind_text(self.drizzle_check, "drizzle_check")
         self.drizzle_check.setChecked(False)
@@ -807,8 +824,23 @@ class MainWindow(QMainWindow):
         self.drizzle_mode_combo.setCurrentText("Final")
 
         self.drizzle_group_spin = QSpinBox()
-        self.drizzle_group_spin.setRange(1, 1_000_000)
+        self.drizzle_group_spin.setRange(1, 100_000)
+        self.drizzle_group_spin.setSingleStep(10)
         self.drizzle_group_spin.setValue(50)
+
+        # Drizzle GPU toggle (Tk ``use_gpu_var``) — display/settings-only
+        # parity; gated by the Enable-drizzle flag (Tk parity) and not wired
+        # to ``build_backend_kwargs`` (backend E2E later).
+        self.use_gpu_check = QCheckBox(self._tr("drizzle_use_gpu"))
+        self._bind_text(self.use_gpu_check, "drizzle_use_gpu")
+        self.use_gpu_check.setChecked(bool(self.settings_state.use_gpu))
+
+        # Drizzle policy hint (Tk ``drizzle_policy_hint``) — a grey, wrapped,
+        # display-only note about the Standard / Large-dataset accumulator.
+        self.drizzle_policy_hint = QLabel(self._tr("drizzle_policy_hint"))
+        self._bind_text(self.drizzle_policy_hint, "drizzle_policy_hint")
+        self.drizzle_policy_hint.setWordWrap(True)
+        self.drizzle_policy_hint.setStyleSheet("color: #666666;")
 
         self.solver_combo = QComboBox()
         self.solver_combo.addItems(SOLVER_PREFERENCES)
@@ -845,9 +877,12 @@ class MainWindow(QMainWindow):
         form.addRow("", self.boring_check)
         self._add_form_row(form, "stacking_mode", self.stacking_mode_combo)
         self._add_form_row(form, "final_combine", self.final_combine_combo)
+        self._add_form_row(form, "hq_ram_limit", self.max_hq_mem_spin)
         form.addRow("", self.drizzle_check)
         self._add_form_row(form, "drizzle_mode", self.drizzle_mode_combo)
         self._add_form_row(form, "drizzle_group_size", self.drizzle_group_spin)
+        form.addRow("", self.use_gpu_check)
+        form.addRow("", self.drizzle_policy_hint)
         self._add_form_row(form, "local_solver", self.solver_combo)
         layout.addLayout(form)
         layout.addStretch(1)
@@ -1546,6 +1581,7 @@ class MainWindow(QMainWindow):
         self.batch_spin.valueChanged.connect(self._sync_state_from_controls)
         self.batch_spin.valueChanged.connect(self._on_batch_size_changed)
         self.boring_check.stateChanged.connect(self._on_boring_check_changed)
+        self.max_hq_mem_spin.valueChanged.connect(self._sync_state_from_controls)
         self.stacking_mode_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
@@ -1553,10 +1589,13 @@ class MainWindow(QMainWindow):
             self._sync_state_from_controls
         )
         self.drizzle_check.stateChanged.connect(self._sync_state_from_controls)
+        self.drizzle_check.stateChanged.connect(self._update_drizzle_gating)
         self.drizzle_mode_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
+        self.drizzle_mode_combo.currentIndexChanged.connect(self._update_drizzle_gating)
         self.drizzle_group_spin.valueChanged.connect(self._sync_state_from_controls)
+        self.use_gpu_check.stateChanged.connect(self._sync_state_from_controls)
         self.solver_combo.currentIndexChanged.connect(self._sync_state_from_controls)
 
         for widget in self._settings_widgets.values():
@@ -1571,6 +1610,7 @@ class MainWindow(QMainWindow):
                     self._update_expert_enabler_states
                 )
         self._update_expert_enabler_states()
+        self._update_drizzle_gating()
 
     # ------------------------------------------------------------ controls
     def _on_start(self) -> None:
@@ -1783,10 +1823,46 @@ class MainWindow(QMainWindow):
         """
         boring = self.boring_check.isChecked()
         self.drizzle_check.setEnabled(not boring)
-        self.drizzle_mode_combo.setEnabled(not boring)
-        self.drizzle_group_spin.setEnabled(not boring)
         if boring and self.drizzle_check.isChecked():
             self.drizzle_check.setChecked(False)
+        # Re-apply the drizzle sub-option gating (Tk ``_update_drizzle_options_state``)
+        # so the mode/group/scale/WHT/kernel/pixfrac/GPU controls reflect the
+        # combined boring + enable-drizzle state.
+        self._update_drizzle_gating()
+
+    def _update_drizzle_gating(self) -> None:
+        """Gate drizzle sub-options from the Enable-drizzle flag (Tk parity).
+
+        Mirrors the Tk ``_update_drizzle_options_state`` method: when drizzle is
+        disabled (or boring mode forces it off) the mode combo, the scale/WHT/
+        kernel/pixfrac sub-options and the GPU toggle are disabled; the group-size
+        spinbox is additionally enabled only in the Large-dataset (``Incremental``)
+        mode, exactly like the Tk M3-D policy (``drizzle_group_size`` depends on
+        the Large-dataset policy, not the global drizzle flag alone).
+        """
+        boring = self.boring_check.isChecked()
+        drizzle = self.drizzle_check.isChecked() and not boring
+
+        self.drizzle_mode_combo.setEnabled(drizzle)
+
+        # M3-D: group size is only relevant in the Large-dataset (Incremental)
+        # policy; Standard keeps the same science with no grouped preview.
+        group = drizzle and self.drizzle_mode_combo.currentText() == "Incremental"
+        self.drizzle_group_spin.setEnabled(group)
+
+        self.use_gpu_check.setEnabled(drizzle)
+
+        # Expert-tab "Drizzle Advanced" sub-options share the same global
+        # Enable-drizzle gate (Tk parity).
+        for attr in (
+            "drizzle_scale",
+            "drizzle_wht_threshold",
+            "drizzle_kernel",
+            "drizzle_pixfrac",
+        ):
+            widget = self._settings_widgets.get(attr)
+            if widget is not None:
+                widget.setEnabled(drizzle)
 
     def _on_solver(self) -> None:
         """Open the solver configuration dialog and apply accepted values.
@@ -2557,6 +2633,8 @@ class MainWindow(QMainWindow):
         state.use_drizzle = self.drizzle_check.isChecked()
         state.drizzle_mode = self.drizzle_mode_combo.currentText()
         state.drizzle_group_size = self.drizzle_group_spin.value()
+        state.use_gpu = self.use_gpu_check.isChecked()
+        state.max_hq_mem_gb = float(self.max_hq_mem_spin.value())
         state.local_solver_preference = self.solver_combo.currentText()
 
         # Final-combination business control drives the derived reproject flags
@@ -2661,9 +2739,11 @@ class MainWindow(QMainWindow):
             self.batch_spin,
             self.stacking_mode_combo,
             self.final_combine_combo,
+            self.max_hq_mem_spin,
             self.drizzle_check,
             self.drizzle_mode_combo,
             self.drizzle_group_spin,
+            self.use_gpu_check,
             self.solver_combo,
             self.mosaic_active_check,
         ]
@@ -2684,10 +2764,12 @@ class MainWindow(QMainWindow):
             label = FINAL_COMBINE_LABELS.get(state.stack_final_combine)
             if label is not None:
                 self.final_combine_combo.setCurrentText(label)
+            self.max_hq_mem_spin.setValue(int(state.max_hq_mem_gb))
             self.drizzle_check.setChecked(bool(state.use_drizzle))
             if state.drizzle_mode in DRIZZLE_MODES:
                 self.drizzle_mode_combo.setCurrentText(state.drizzle_mode)
             self.drizzle_group_spin.setValue(int(state.drizzle_group_size))
+            self.use_gpu_check.setChecked(bool(state.use_gpu))
             if state.local_solver_preference in SOLVER_PREFERENCES:
                 self.solver_combo.setCurrentText(state.local_solver_preference)
 
