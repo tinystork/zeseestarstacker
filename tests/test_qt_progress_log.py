@@ -136,7 +136,7 @@ def test_copy_log_stays_enabled_after_run_finishes():
         win._on_run_finished()
 
         assert win.copy_log_button.isEnabled()
-        assert win.log_view.toPlainText() == "line before run\nRun finished."
+        assert win.log_view.toPlainText() == "line before run\nRun finished with no output."
     finally:
         win.shutdown()
 

@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import importlib
 
-__version__ = "7.0.2"
-__codename__ = "Boring ostentus"  # including zenalyser and hierarchical auto stacking
+__version__ = "8.0.0"
+__codename__ = "Phoenix consedit"  # including zenalyser and hierarchical auto stacking
 __author__ = "Tinystork"
 
 # Public name -> (module, attribute).  ``attribute=None`` means "return the

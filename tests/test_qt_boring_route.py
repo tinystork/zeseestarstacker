@@ -509,7 +509,10 @@ def test_boring_finished_resets_state(qapp, tmp_path):
         assert win.start_button.isEnabled()
         assert not win.stop_button.isEnabled()
         assert win.progress.value() == 100
-        assert "Boring stack finished" in win.log_view.toPlainText()
+        # No summary payload was emitted by the fake, so this terminal
+        # finish is the EMPTY/NO OUTPUT presentation, not an ordinary
+        # success ("Boring stack finished.").
+        assert "Boring stack finished with no output." in win.log_view.toPlainText()
     finally:
         win.shutdown()
 

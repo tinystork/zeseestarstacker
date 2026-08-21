@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import enum
 import importlib
+import os
 from queue import Empty, Queue
 import time
 from typing import Any, Callable, Optional
@@ -590,12 +591,22 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             output_dir = getattr(stacker, "output_folder", None) or start_kwargs.get(
                 "output_dir"
             )
+            # The real final FITS path is the source of truth for the summary.
+            # Only forward it when the file actually exists on disk; otherwise
+            # fall back to the legacy <output_dir>/final.fits convention so a
+            # missing attribute or a not-yet-written file never breaks the run.
+            final_stack_path = getattr(stacker, "final_stacked_path", None)
+            if final_stack_path and os.path.isfile(final_stack_path):
+                final_path_for_summary = final_stack_path
+            else:
+                final_path_for_summary = None
             files_attempted = getattr(stacker, "processed_files_count", None)
             payload = build_summary_payload(
                 status="finished",
                 duration_seconds=duration_seconds,
                 files_attempted=files_attempted,
                 output_dir=output_dir,
+                final_stack_path=final_path_for_summary,
             )
             summary_callback(payload)
         except Exception:

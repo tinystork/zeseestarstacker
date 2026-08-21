@@ -62,7 +62,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "stacking_mode": {"en": "Stacking mode", "fr": "Mode d'empilement"},
     "final_combine": {"en": "Final combine", "fr": "Combinaison finale"},
     "drizzle_mode": {"en": "Drizzle mode", "fr": "Mode drizzle"},
-    "drizzle_group_size": {"en": "Drizzle group size", "fr": "Taille du groupe drizzle"},
+    "drizzle_group_size": {
+        "en": "Preview group size",
+        "fr": "Taille du groupe d'aperçu",
+    },
     # Drizzle processing mode combo labels (Tk ``drizzle_processing_*`` parity,
     # R3b): the user-facing labels are "Standard" / "Large dataset" while the
     # combo's item data keeps the backend values "Final" / "Incremental".
@@ -80,18 +83,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "drizzle_check": {"en": "Enable drizzle", "fr": "Activer le drizzle"},
     "hq_ram_limit": {"en": "HQ RAM limit (GB)", "fr": "Limite RAM HQ (Go)"},
     "drizzle_use_gpu": {"en": "Use GPU", "fr": "Utiliser le GPU"},
-    "drizzle_policy_hint": {
-        "en": (
-            "Standard and Large dataset share the same M3 accumulator; "
-            "Large dataset only adds grouped preview/progress. "
-            "Final result is identical."
-        ),
-        "fr": (
-            "Standard et Large dataset partagent le même accumulateur M3 ; "
-            "Large dataset ajoute seulement un aperçu/progression groupés. "
-            "Le résultat final est identique."
-        ),
-    },
     # Right panel.
     "preview_group": {"en": "Preview", "fr": "Aperçu"},
     "view_group": {"en": "View", "fr": "Vue"},
@@ -238,7 +229,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     },
     "field_weight_by_snr": {"en": "Weight by SNR", "fr": "Pondérer par SNR"},
     "field_weight_by_stars": {"en": "Weight by stars", "fr": "Pondérer par étoiles"},
+    "field_drizzle_scale": {"en": "Drizzle scale", "fr": "Échelle du drizzle"},
+    "field_drizzle_wht_threshold": {"en": "WHT threshold", "fr": "Seuil WHT"},
     "field_drizzle_kernel": {"en": "Kernel", "fr": "Noyau"},
+    "field_drizzle_pixfrac": {"en": "Pixfrac", "fr": "Pixfrac"},
     "field_master_tile_crop": {
         "en": "Master tile crop",
         "fr": "Rognage des tuiles maîtresses",
@@ -355,6 +349,23 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Low-weight soften (px)",
         "fr": "Adoucissement bas poids (px)",
     },
+    # Terminal run-outcome labels (ZSSS-QT-RELIABILITY-LIFECYCLE): a run that
+    # finished without cancellation but produced no final output must never be
+    # presented as an ordinary success.
+    "run_finished_empty": {
+        "en": "No output produced.",
+        "fr": "Aucune sortie produite.",
+    },
+    "run_finished_empty_log": {
+        "en": "Run finished with no output.",
+        "fr": "Exécution terminée sans sortie.",
+    },
+    "boring_finished_empty": {
+        "en": "Boring stack finished with no output.",
+        "fr": "Empilement Boring terminé sans sortie.",
+    },
+    "summary_status_success": {"en": "SUCCESS", "fr": "SUCCÈS"},
+    "summary_status_empty": {"en": "EMPTY/NO OUTPUT", "fr": "VIDE/AUCUNE SORTIE"},
 }
 
 

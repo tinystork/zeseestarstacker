@@ -138,7 +138,15 @@ class QProcessBoringRunner(BoringRunnerBase):
             return None
 
     def _emit_summary(self) -> None:
-        """Build and emit the terminal summary payload for a successful run."""
+        """Build and emit the terminal summary payload for a successful run.
+
+        The boring subprocess has no in-process stacker, so there is no
+        ``final_stacked_path`` to read.  However, ``boring_stack.py`` copies
+        its final FITS (whatever the engine named it, e.g.
+        ``stack_final_classic_sumw.fit``) to ``<output_dir>/final.fits`` on
+        every successful run, so the legacy ``output_dir`` fallback here is
+        the reliable source of truth for the boring route.
+        """
         request = self._request
         output_dir = request.output_dir if request is not None else None
         duration = (

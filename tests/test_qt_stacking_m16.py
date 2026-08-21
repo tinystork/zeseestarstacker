@@ -2,13 +2,14 @@
 
 Offscreen tests for the Stacking-tab closure (Tk ``tab_stacking`` → Qt):
 
-* every Stacking-tab control (including the newly added ``Use GPU`` checkbox,
-  the ``HQ RAM limit (GB)`` spinbox and the drizzle-policy hint) exists as a
-  real widget with the Tk type / range / ``QtSettingsState`` default,
+* every Stacking-tab control (including the newly added ``Use GPU`` checkbox
+  and the ``HQ RAM limit (GB)`` spinbox) exists as a real widget with the Tk
+  type / range / ``QtSettingsState`` default,
 * the Enable-drizzle checkbox gates the drizzle mode / group-size / GPU and the
-  Expert-tab "Drizzle Advanced" sub-options exactly like the Tk
-  ``_update_drizzle_options_state`` method, and the group-size spinbox is
-  enabled only in the Large-dataset (``Incremental``) mode,
+  Stacking-tab Drizzle-advanced sub-options (scale / WHT threshold / kernel /
+  pixfrac) exactly like the Tk ``_update_drizzle_options_state`` method, and
+  the group-size spinbox is enabled only in the Large-dataset (``Incremental``)
+  mode,
 * the "Apply Final SCNR" checkbox gates its target-channel / amount /
   preserve-luminosity sub-options (Tk ``_update_final_scnr_options_state``),
 * the newly added labels localize FR/EN via the Qt-local ``localization``
@@ -35,12 +36,12 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QLabel,
     QSpinBox,
 )
 
 from seestar.gui_qt import MainWindow, create_application
 from seestar.gui_qt import localization
+from seestar.gui_qt.main_window import DRIZZLE_KERNELS
 from seestar.gui_qt.settings_state import QtSettingsState
 
 
@@ -58,8 +59,14 @@ def window(qapp):
     win.shutdown()
 
 
-def _drizzle_advanced_attrs():
-    return ("drizzle_scale", "drizzle_wht_threshold", "drizzle_kernel", "drizzle_pixfrac")
+def _drizzle_advanced_widgets(window):
+    """Return the four Drizzle-advanced widgets on the Stacking-tab Drizzle block."""
+    return (
+        window.drizzle_scale_spin,
+        window.drizzle_wht_spin,
+        window.drizzle_kernel_combo,
+        window.drizzle_pixfrac_spin,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -78,8 +85,10 @@ def test_stacking_controls_exist_with_tk_ranges_and_defaults(window):
     assert window.max_hq_mem_spin.singleStep() == 1
     assert window.max_hq_mem_spin.value() == int(defaults["max_hq_mem_gb"])  # 8
 
-    assert isinstance(window.drizzle_policy_hint, QLabel)
-    assert window.drizzle_policy_hint.text() == localization.translate("drizzle_policy_hint", "en")
+    # Part C: the architecture hint ("Standard and Large dataset share the same
+    # M3 accumulator...") was removed from the Qt UI; the attribute must not
+    # exist anymore (the Tk oracle keeps its own hint, untouched).
+    assert not hasattr(window, "drizzle_policy_hint")
 
     # Pre-existing Stacking-tab controls (Tk parity defaults / ranges).
     assert window.batch_spin.value() == 0
@@ -94,27 +103,43 @@ def test_stacking_controls_exist_with_tk_ranges_and_defaults(window):
     assert window.solver_combo.currentText() == "none"
 
 
-def test_expert_drizzle_and_scnr_controls_have_tk_defaults(window):
+def test_stacking_drizzle_and_scnr_controls_have_tk_defaults(window):
     defaults = QtSettingsState.defaults()
     widgets = window._settings_widgets
 
-    # Expert-tab "Drizzle Advanced" sub-options share the Enable-drizzle gate.
-    scale = widgets["drizzle_scale"]
-    assert isinstance(scale, QSpinBox)
-    assert scale.value() == defaults["drizzle_scale"]  # 2
-    assert scale.minimum() == 2 and scale.maximum() == 4
+    # Stacking-tab Drizzle-advanced sub-options (D3) share the Enable-drizzle
+    # gate and keep the exact former Expert widget specs.
+    assert isinstance(window.drizzle_scale_spin, QSpinBox)
+    assert window.drizzle_scale_spin.value() == defaults["drizzle_scale"]  # 2
+    assert window.drizzle_scale_spin.minimum() == 2
+    assert window.drizzle_scale_spin.maximum() == 4
+    assert window.drizzle_scale_spin.singleStep() == 1
 
-    wht = widgets["drizzle_wht_threshold"]
-    assert isinstance(wht, QDoubleSpinBox)
-    assert wht.value() == pytest.approx(defaults["drizzle_wht_threshold"])  # 0.7
+    assert isinstance(window.drizzle_wht_spin, QDoubleSpinBox)
+    assert window.drizzle_wht_spin.value() == pytest.approx(
+        defaults["drizzle_wht_threshold"]
+    )  # 0.7
+    assert window.drizzle_wht_spin.minimum() == 0.0
+    assert window.drizzle_wht_spin.maximum() == 1.0
+    assert window.drizzle_wht_spin.decimals() == 3
 
-    kernel = widgets["drizzle_kernel"]
-    assert isinstance(kernel, QComboBox)
-    assert kernel.currentText() == defaults["drizzle_kernel"]  # "square"
+    assert isinstance(window.drizzle_kernel_combo, QComboBox)
+    assert window.drizzle_kernel_combo.currentText() == defaults["drizzle_kernel"]  # "square"
+    assert [
+        window.drizzle_kernel_combo.itemText(i)
+        for i in range(window.drizzle_kernel_combo.count())
+    ] == DRIZZLE_KERNELS
 
-    pixfrac = widgets["drizzle_pixfrac"]
-    assert isinstance(pixfrac, QDoubleSpinBox)
-    assert pixfrac.value() == pytest.approx(defaults["drizzle_pixfrac"])  # 1.0
+    assert isinstance(window.drizzle_pixfrac_spin, QDoubleSpinBox)
+    assert window.drizzle_pixfrac_spin.value() == pytest.approx(
+        defaults["drizzle_pixfrac"]
+    )  # 1.0
+    assert window.drizzle_pixfrac_spin.minimum() == 0.01
+    assert window.drizzle_pixfrac_spin.maximum() == 2.0
+
+    # No duplication: the four controls are no longer in the Expert surface.
+    for attr in ("drizzle_scale", "drizzle_wht_threshold", "drizzle_kernel", "drizzle_pixfrac"):
+        assert attr not in widgets, f"{attr} should not be in Expert _settings_widgets"
 
     # SCNR sub-options.
     assert widgets["apply_final_scnr"].isChecked() is defaults["apply_final_scnr"]  # True
@@ -151,8 +176,7 @@ def test_drizzle_mode_label_switches_value_to_state(window):
 
 def test_drizzle_scale_restricted_to_x2_x3_x4(window):
     """drizzle_scale cannot be x1 (widget range 2-4) and defaults to 2."""
-    widgets = window._settings_widgets
-    scale = widgets["drizzle_scale"]
+    scale = window.drizzle_scale_spin
     assert isinstance(scale, QSpinBox)
     assert scale.minimum() == 2 and scale.maximum() == 4
     assert scale.value() == 2
@@ -178,23 +202,21 @@ def test_stacking_new_labels_localize_fr_en(window):
     assert localization.translate("drizzle_use_gpu", "en") == "Use GPU"
     assert localization.translate("drizzle_use_gpu", "fr") == "Utiliser le GPU"
 
-    en_hint = localization.translate("drizzle_policy_hint", "en")
-    fr_hint = localization.translate("drizzle_policy_hint", "fr")
-    assert en_hint and fr_hint and en_hint != fr_hint
+    # Part C: "Drizzle group size" label renamed to "Preview group size" on the
+    # presentation side (state key ``drizzle_group_size`` unchanged).
+    assert localization.translate("drizzle_group_size", "en") == "Preview group size"
+    assert localization.translate("drizzle_group_size", "fr") == "Taille du groupe d'aperçu"
 
-    # The live hint label re-labels on language switch.
-    assert window.drizzle_policy_hint.text() == en_hint
+    # The GPU toggle label still re-labels on language switch.
     assert window.use_gpu_check.text() == "Use GPU"
     window.language_combo.setCurrentText("Français")
-    assert window.drizzle_policy_hint.text() == fr_hint
     assert window.use_gpu_check.text() == "Utiliser le GPU"
     window.language_combo.setCurrentText("English")
-    assert window.drizzle_policy_hint.text() == en_hint
     assert window.use_gpu_check.text() == "Use GPU"
 
 
 def test_stacking_localization_keys_have_full_parity():
-    for key in ("hq_ram_limit", "drizzle_use_gpu", "drizzle_policy_hint"):
+    for key in ("hq_ram_limit", "drizzle_use_gpu", "drizzle_group_size"):
         entry = localization.TRANSLATIONS[key]
         assert set(entry) == {"en", "fr"}, key
         assert entry["en"] and entry["fr"], key
@@ -204,23 +226,21 @@ def test_stacking_localization_keys_have_full_parity():
 # (2) drizzle enabler gating mirrors Tk + (3) group-size / mode interaction
 # --------------------------------------------------------------------------
 def test_drizzle_enabler_gates_suboptions(window):
-    widgets = window._settings_widgets
-
     # Default: drizzle off -> every sub-option disabled.
     assert window.drizzle_check.isChecked() is False
     assert not window.drizzle_mode_combo.isEnabled()
     assert not window.drizzle_group_spin.isEnabled()
     assert not window.use_gpu_check.isEnabled()
-    for attr in _drizzle_advanced_attrs():
-        assert not widgets[attr].isEnabled(), attr
+    for w in _drizzle_advanced_widgets(window):
+        assert not w.isEnabled()
 
     # Enable drizzle -> mode / GPU / advanced sub-options re-enable; the
     # group-size spin stays disabled in Standard (Final) mode.
     window.drizzle_check.setChecked(True)
     assert window.drizzle_mode_combo.isEnabled()
     assert window.use_gpu_check.isEnabled()
-    for attr in _drizzle_advanced_attrs():
-        assert widgets[attr].isEnabled(), attr
+    for w in _drizzle_advanced_widgets(window):
+        assert w.isEnabled()
     assert not window.drizzle_group_spin.isEnabled()
 
     # Large-dataset (Incremental) mode re-enables the group-size spin.
@@ -236,8 +256,8 @@ def test_drizzle_enabler_gates_suboptions(window):
     assert not window.drizzle_mode_combo.isEnabled()
     assert not window.use_gpu_check.isEnabled()
     assert not window.drizzle_group_spin.isEnabled()
-    for attr in _drizzle_advanced_attrs():
-        assert not widgets[attr].isEnabled(), attr
+    for w in _drizzle_advanced_widgets(window):
+        assert not w.isEnabled()
 
 
 def test_group_size_mode_interaction_only_large_dataset(window):

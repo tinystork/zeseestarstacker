@@ -19,11 +19,11 @@ def _read_version_from_init() -> str:
     return m.group(1)
 
 
-def test_version_is_pep440_7_0_2():
+def test_version_is_pep440_8_0_0():
     from packaging.version import Version
 
     v = _read_version_from_init()
-    assert v == "7.0.2"
+    assert v == "8.0.0"
     # Raises if the version is not valid PEP 440.
     Version(v)
 

@@ -158,7 +158,7 @@ from .settings_state import QtSettingsState
 from .solver_config_bridge import write_solver_config
 from .solver_dialog import SolverSettingsDialog
 from .solver_probe import probe_zesolver_operational
-from .summary_payload import SummaryPayload
+from .summary_payload import SummaryPayload, derive_terminal_status
 
 from .resources import load_empty_preview_pixmap, load_window_icon
 
@@ -175,7 +175,7 @@ DEFAULT_TITLE = PRODUCT_TITLE
 
 
 def product_version() -> str:
-    """Return the product version string (``"7.0.2 Boring ostentus"``), or ``""``.
+    """Return the product version string (``"8.0.0 Phoenix consedit"``), or ``""``.
 
     Lazy and hygiene-safe: it imports the already-imported ``seestar`` parent
     package (whose ``__init__`` only binds ``__version__`` / ``__codename__``
@@ -199,7 +199,7 @@ def default_window_title() -> str:
 
     Tk sets ``f"{self.tr('title')}  –  {self.app_version}"`` where
     ``tr('title')`` is ``"Seestar Stacker"`` and ``app_version`` is
-    ``"7.0.2 Boring ostentus"`` (``__version__ + " " + __codename__``).  The
+    ``"8.0.0 Phoenix consedit"`` (``__version__ + " " + __codename__``).  The
     separator is two spaces, an EN DASH (U+2013), two spaces.
     """
     version = product_version()
@@ -411,18 +411,6 @@ SETTINGS_SECTIONS = [
         ],
     ),
     (
-        "Drizzle Advanced",
-        [
-            # R3b: drizzle scale is restricted to x2 / x3 / x4 (Tk radios
-            # 2/3/4, default 2).  ``QtSettingsState.drizzle_scale`` default
-            # stays 2; the spinbox range no longer admits x1 or >x4.
-            _field("drizzle_scale", "Drizzle scale", "int", 2, 4, 1),
-            _field("drizzle_wht_threshold", "WHT threshold", "float", 0.0, 1.0, 0.01, 3),
-            _field("drizzle_kernel", "Kernel", "combo", DRIZZLE_KERNELS),
-            _field("drizzle_pixfrac", "Pixfrac", "float", 0.01, 2.0, 0.05, 2),
-        ],
-    ),
-    (
         "Colour / Post-processing",
         [
             _field("apply_chroma_correction", "Chroma correction", "bool"),
@@ -527,7 +515,6 @@ SECTION_TITLE_KEYS = {
     "Stacking / Paths": "section_stacking_paths",
     "Calibration / Hot Pixels": "section_calibration",
     "Quality Weighting": "section_quality_weighting",
-    "Drizzle Advanced": "section_drizzle_advanced",
     "Colour / Post-processing": "section_colour_post",
     "Cropping": "section_cropping",
     "Photutils BN": "section_photutils_bn",
@@ -1060,12 +1047,32 @@ class MainWindow(QMainWindow):
         self.drizzle_group_spin.setSingleStep(10)
         self.drizzle_group_spin.setValue(50)
 
-        # Drizzle policy hint (Tk ``drizzle_policy_hint``) — a grey, wrapped,
-        # display-only note about the Standard / Large-dataset accumulator.
-        self.drizzle_policy_hint = QLabel(self._tr("drizzle_policy_hint"))
-        self._bind_text(self.drizzle_policy_hint, "drizzle_policy_hint")
-        self.drizzle_policy_hint.setWordWrap(True)
-        self.drizzle_policy_hint.setStyleSheet("color: #666666;")
+        # Drizzle advanced sub-options (D3 contract): moved from the Expert-tab
+        # "Drizzle Advanced" section into the Drizzle block of the Stacking tab,
+        # in the exact Tk "Options Drizzle" order, before local solver.
+        # Same widget specs as the former Expert fields.
+        self.drizzle_scale_spin = QSpinBox()
+        self.drizzle_scale_spin.setRange(2, 4)
+        self.drizzle_scale_spin.setSingleStep(1)
+        self.drizzle_scale_spin.setValue(int(self.settings_state.drizzle_scale))
+
+        self.drizzle_wht_spin = QDoubleSpinBox()
+        self.drizzle_wht_spin.setRange(0.0, 1.0)
+        self.drizzle_wht_spin.setSingleStep(0.01)
+        self.drizzle_wht_spin.setDecimals(3)
+        self.drizzle_wht_spin.setValue(float(self.settings_state.drizzle_wht_threshold))
+
+        self.drizzle_kernel_combo = QComboBox()
+        self.drizzle_kernel_combo.addItems(list(DRIZZLE_KERNELS))
+        kernel_text = str(self.settings_state.drizzle_kernel)
+        if kernel_text in DRIZZLE_KERNELS:
+            self.drizzle_kernel_combo.setCurrentText(kernel_text)
+
+        self.drizzle_pixfrac_spin = QDoubleSpinBox()
+        self.drizzle_pixfrac_spin.setRange(0.01, 2.0)
+        self.drizzle_pixfrac_spin.setSingleStep(0.05)
+        self.drizzle_pixfrac_spin.setDecimals(2)
+        self.drizzle_pixfrac_spin.setValue(float(self.settings_state.drizzle_pixfrac))
 
         self.solver_combo = QComboBox()
         self.solver_combo.addItems(SOLVER_PREFERENCES)
@@ -1106,7 +1113,10 @@ class MainWindow(QMainWindow):
         form.addRow("", self.drizzle_check)
         self._add_form_row(form, "drizzle_mode", self.drizzle_mode_combo)
         self._add_form_row(form, "drizzle_group_size", self.drizzle_group_spin)
-        form.addRow("", self.drizzle_policy_hint)
+        self._add_form_row(form, "field_drizzle_scale", self.drizzle_scale_spin)
+        self._add_form_row(form, "field_drizzle_wht_threshold", self.drizzle_wht_spin)
+        self._add_form_row(form, "field_drizzle_kernel", self.drizzle_kernel_combo)
+        self._add_form_row(form, "field_drizzle_pixfrac", self.drizzle_pixfrac_spin)
         self._add_form_row(form, "local_solver", self.solver_combo)
         layout.addLayout(form)
         layout.addStretch(1)
@@ -1859,6 +1869,12 @@ class MainWindow(QMainWindow):
         )
         self.drizzle_mode_combo.currentIndexChanged.connect(self._update_drizzle_gating)
         self.drizzle_group_spin.valueChanged.connect(self._sync_state_from_controls)
+        self.drizzle_scale_spin.valueChanged.connect(self._sync_state_from_controls)
+        self.drizzle_wht_spin.valueChanged.connect(self._sync_state_from_controls)
+        self.drizzle_kernel_combo.currentIndexChanged.connect(
+            self._sync_state_from_controls
+        )
+        self.drizzle_pixfrac_spin.valueChanged.connect(self._sync_state_from_controls)
         self.use_gpu_check.stateChanged.connect(self._sync_state_from_controls)
         self.solver_combo.currentIndexChanged.connect(self._sync_state_from_controls)
 
@@ -2015,8 +2031,16 @@ class MainWindow(QMainWindow):
         self._running = False
         self._update_run_state()
         self.progress.setValue(100)
-        self.statusBar().showMessage("Boring stack finished.")
-        self.log("Boring stack finished.")
+        if derive_terminal_status(self._last_summary_payload) == "success":
+            self.statusBar().showMessage("Boring stack finished.")
+            self.log("Boring stack finished.")
+        else:
+            message = self._tr(
+                "boring_finished_empty",
+                default="Boring stack finished with no output.",
+            )
+            self.statusBar().showMessage(message)
+            self.log(message)
         self._mark_time_terminal("0:00")
         self._show_pending_summary()
 
@@ -2120,17 +2144,12 @@ class MainWindow(QMainWindow):
 
         self.use_gpu_check.setEnabled(drizzle)
 
-        # Expert-tab "Drizzle Advanced" sub-options share the same global
-        # Enable-drizzle gate (Tk parity).
-        for attr in (
-            "drizzle_scale",
-            "drizzle_wht_threshold",
-            "drizzle_kernel",
-            "drizzle_pixfrac",
-        ):
-            widget = self._settings_widgets.get(attr)
-            if widget is not None:
-                widget.setEnabled(drizzle)
+        # Drizzle advanced sub-options (Stacking-tab Drizzle block, D3) share
+        # the same global Enable-drizzle gate (Tk parity).
+        self.drizzle_scale_spin.setEnabled(drizzle)
+        self.drizzle_wht_spin.setEnabled(drizzle)
+        self.drizzle_kernel_combo.setEnabled(drizzle)
+        self.drizzle_pixfrac_spin.setEnabled(drizzle)
 
     def _toggle_kappa_visibility(self, *_ignored) -> None:
         """Show/hide the Kappa Low/High + Winsor-Limits widgets (Tk parity, M17).
@@ -2555,6 +2574,10 @@ class MainWindow(QMainWindow):
     def _on_run_started(self) -> None:
         self._running = True
         self._run_started_at = self._now()
+        # A second run must not reuse the previous run's terminal progress:
+        # reset the bar (and the elapsed/remaining surface) before the first
+        # progress signal of the new run arrives.
+        self.progress.setValue(0)
         self._update_run_state()
         self.statusBar().showMessage("Running…")
         # Elapsed starts at 0 and remaining is unknown until the first
@@ -3165,8 +3188,19 @@ class MainWindow(QMainWindow):
         self._running = False
         self._update_run_state()
         self.progress.setValue(100)
-        self.statusBar().showMessage("Finished.")
-        self.log("Run finished.")
+        if derive_terminal_status(self._last_summary_payload) == "success":
+            self.statusBar().showMessage("Finished.")
+            self.log("Run finished.")
+        else:
+            self.statusBar().showMessage(
+                self._tr("run_finished_empty", default="No output produced.")
+            )
+            self.log(
+                self._tr(
+                    "run_finished_empty_log",
+                    default="Run finished with no output.",
+                )
+            )
         self._mark_time_terminal("0:00")
         self._show_pending_summary()
 
@@ -3203,10 +3237,22 @@ class MainWindow(QMainWindow):
         self._last_summary_payload = None
         self._show_summary_dialog(payload)
 
+    def _derived_status_label(self, payload: SummaryPayload) -> str:
+        """Return the localized terminal-status label shown by the summary dialog.
+
+        Derives ``"SUCCESS"`` vs ``"EMPTY/NO OUTPUT"`` from the payload via
+        :func:`~seestar.gui_qt.summary_payload.derive_terminal_status`, leaving
+        ``payload.status`` free to keep the backend's raw ``"finished"`` label.
+        """
+        if derive_terminal_status(payload) == "success":
+            return self._tr("summary_status_success", default="SUCCESS")
+        return self._tr("summary_status_empty", default="EMPTY/NO OUTPUT")
+
     def _format_summary_text(self, payload: SummaryPayload) -> str:
         """Render the summary payload into the plain text shown by the dialog."""
         lines = [
-            f"{self._tr('summary_status', default='Status')}: {payload.status}",
+            f"{self._tr('summary_status', default='Status')}: "
+            f"{self._derived_status_label(payload)}",
             (
                 f"{self._tr('summary_total_time', default='Total Processing Time')}: "
                 f"{format_duration(payload.duration_seconds)}"
@@ -3313,6 +3359,10 @@ class MainWindow(QMainWindow):
         state.use_drizzle = self.drizzle_check.isChecked()
         state.drizzle_mode = self.drizzle_mode_combo.currentData()
         state.drizzle_group_size = self.drizzle_group_spin.value()
+        state.drizzle_scale = self.drizzle_scale_spin.value()
+        state.drizzle_wht_threshold = self.drizzle_wht_spin.value()
+        state.drizzle_kernel = self.drizzle_kernel_combo.currentText()
+        state.drizzle_pixfrac = self.drizzle_pixfrac_spin.value()
         state.use_gpu = self.use_gpu_check.isChecked()
         state.max_hq_mem_gb = float(self.max_hq_mem_spin.value())
         state.local_solver_preference = self.solver_combo.currentText()
@@ -3423,6 +3473,10 @@ class MainWindow(QMainWindow):
             self.drizzle_check,
             self.drizzle_mode_combo,
             self.drizzle_group_spin,
+            self.drizzle_scale_spin,
+            self.drizzle_wht_spin,
+            self.drizzle_kernel_combo,
+            self.drizzle_pixfrac_spin,
             self.use_gpu_check,
             self.solver_combo,
             self.mosaic_active_check,
@@ -3451,6 +3505,11 @@ class MainWindow(QMainWindow):
                     DRIZZLE_MODES.index(state.drizzle_mode)
                 )
             self.drizzle_group_spin.setValue(int(state.drizzle_group_size))
+            self.drizzle_scale_spin.setValue(int(state.drizzle_scale))
+            self.drizzle_wht_spin.setValue(float(state.drizzle_wht_threshold))
+            if state.drizzle_kernel in DRIZZLE_KERNELS:
+                self.drizzle_kernel_combo.setCurrentText(state.drizzle_kernel)
+            self.drizzle_pixfrac_spin.setValue(float(state.drizzle_pixfrac))
             self.use_gpu_check.setChecked(bool(state.use_gpu))
             if state.local_solver_preference in SOLVER_PREFERENCES:
                 self.solver_combo.setCurrentText(state.local_solver_preference)

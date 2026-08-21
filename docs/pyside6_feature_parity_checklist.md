@@ -629,14 +629,14 @@ package version.  `[x]` = delivered this lot.
 |---|---|---|---|
 | 21.1 | Window icon from ``seestar/icon/icon.png`` | `[x]` | `gui_qt.resources.load_window_icon` (stdlib `importlib.resources`, decode-once) → `MainWindow.setWindowIcon` (window-level, Tk `root.iconphoto(True, ...)` parity); best-effort — a missing/undecodable icon leaves the default empty icon, no raise |
 | 21.2 | Empty-preview placeholder from ``seestar/icon/back.png`` | `[x]` | `gui_qt.resources.load_empty_preview_pixmap` → `MainWindow._show_empty_preview` scales it to *fit* the preview label (aspect preserved, centred); replaces the former cleared (null) empty pixmap in both empty branches of `_refresh_preview_view` and at construction; a missing/undecodable resource keeps the cleared null pixmap |
-| 21.3 | Real window title ``"Seestar Stacker  –  <version>"`` | `[x]` | `default_window_title()` = `f"{PRODUCT_TITLE}  –  {product_version()}"` (Tk byte-identical: ``tr('title')`` ``"Seestar Stacker"`` + ``app_version`` ``"7.0.2 Boring ostentus"``, separator two spaces + EN DASH + two spaces); `product_version()` lazily reads `seestar.__version__` + `__codename__` (cheap parent package, no engine/Tk/astropy, works source + wheel); the `title=` constructor arg still overrides |
+| 21.3 | Real window title ``"Seestar Stacker  –  <version>"`` | `[x]` | `default_window_title()` = `f"{PRODUCT_TITLE}  –  {product_version()}"` (Tk byte-identical: ``tr('title')`` ``"Seestar Stacker"`` + ``app_version`` ``"8.0.0 Phoenix consedit"``, separator two spaces + EN DASH + two spaces); `product_version()` lazily reads `seestar.__version__` + `__codename__` (cheap parent package, no engine/Tk/astropy, works source + wheel); the `title=` constructor arg still overrides |
 
 Notes / decisions:
 
 - **Title parity decision.**  Tk sets `f"{self.tr('title')}  –  {self.app_version}"`
   where `tr('title')` is `"Seestar Stacker"` (localization key, en/fr identical)
   and `app_version` is `GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG` =
-  `"7.0.2 Boring ostentus"` (= `__version__ + " " + __codename__`).  The Qt shell
+  `"8.0.0 Phoenix consedit"` (= `__version__ + " " + __codename__`).  The Qt shell
   reproduces that string byte-identically, reading the version from the cheap
   `seestar` parent package (`__version__` + `__codename__`) — no engine import
   and no hardcoded version.  `DEFAULT_TITLE` is now the bare product name
@@ -1372,7 +1372,7 @@ No GUI behaviour was changed; no backend semantic was added.
 - **2026-08-21 — lot ZSSS-PYSIDE6-M25.5-D**: visual resources (window chrome) —
   packaged window icon (`seestar/icon/icon.png`), packaged `back.png`
   empty-preview placeholder, and the real window title
-  `"Seestar Stacker  –  7.0.2 Boring ostentus"` read lazily from
+  `"Seestar Stacker  –  8.0.0 Phoenix consedit"` read lazily from
   `seestar.__version__` + `__codename__` (no engine/Tk/astropy import, works
   from source and from the wheel).  New `gui_qt.resources` seam (stdlib
   `importlib.resources`, decode-once, best-effort → `None`); `MainWindow` sets

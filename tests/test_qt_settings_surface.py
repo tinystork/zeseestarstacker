@@ -88,9 +88,21 @@ def test_settings_tab_is_not_placeholder(window):
     assert len(groups) >= 11, f"expected grouped sections, got {len(groups)}"
 
 
+def test_drizzle_advanced_section_removed_from_expert(window):
+    """The four drizzle sub-options moved to the Stacking tab (D3), so the
+    Expert surface must no longer expose a "Drizzle Advanced" group or the
+    drizzle_scale / drizzle_wht_threshold / drizzle_kernel / drizzle_pixfrac
+    widget keys."""
+    tab = _settings_tab_widget(window)
+    titles = [g.title() for g in tab.findChildren(QGroupBox)]
+    assert "Drizzle Advanced" not in titles
+    for attr in ("drizzle_scale", "drizzle_wht_threshold", "drizzle_kernel", "drizzle_pixfrac"):
+        assert attr not in window._settings_widgets, attr
+
+
 def test_settings_surface_has_real_controls(window):
     assert isinstance(window._settings_widgets, dict)
-    assert len(window._settings_widgets) >= 59
+    assert len(window._settings_widgets) >= 58
     assert len(window._mosaic_widgets) == 14
 
 
@@ -100,7 +112,6 @@ def test_representative_control_per_section(window):
         "kappa": QDoubleSpinBox,                  # Stacking / Paths
         "correct_hot_pixels": QCheckBox,          # Calibration / Hot Pixels
         "weight_by_snr": QCheckBox,               # Quality Weighting
-        "drizzle_kernel": QComboBox,              # Drizzle Advanced
         "apply_chroma_correction": QCheckBox,     # Colour / Post-processing
         "apply_master_tile_crop": QCheckBox,      # Cropping
         "apply_photutils_bn": QCheckBox,          # Photutils BN

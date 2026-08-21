@@ -13,8 +13,9 @@ later batch-plan commit ``1cf6450``) introduced unguarded
 ``0358f88`` design guarded every move with ``if self.move_stacked``.
 
 These tests lock the invariant:
-    ``move_stacked=False`` (default) -> NO source file is ever moved;
-    ``move_stacked=True``          -> explicit historical move behaviour.
+    ``move_stacked=False`` (explicit safety mode) -> NO source file is ever moved;
+    ``move_stacked=True``  (historical default)    -> source moved to ``stacked/``
+        only after successful consumption.
 """
 
 import importlib
@@ -33,7 +34,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # Stub GUI modules to avoid Tk dependence during import (same pattern as
-# test_m3d_policy.py / test_worker_incremental_drizzle.py).
+# test_m3d_policy.py / test_worker_incremental_drizzle.py).  The stubs are
+# restored right after the queue-manager import so a full ``pytest tests/``
+# collection never leaks a fake ``seestar.gui`` (empty ``__path__``) into
+# sibling engine tests that import ``seestar.gui.run_config`` etc.
+_saved_sys_modules = {
+    name: sys.modules.get(name)
+    for name in ("seestar", "seestar.gui", "seestar.gui.settings", "seestar.gui.histogram_widget")
+}
 if "seestar.gui" not in sys.modules:
     seestar_pkg = types.ModuleType("seestar")
     seestar_pkg.__path__ = [str(ROOT / "seestar")]
@@ -56,6 +64,14 @@ if "seestar.gui" not in sys.modules:
     sys.modules["seestar.gui.histogram_widget"] = hist_mod
 
 qm = importlib.import_module("seestar.queuep.queue_manager")
+
+# Restore the real packages so this module's import never pollutes the rest
+# of the test session (see comment above).
+for _name, _mod in _saved_sys_modules.items():
+    if _mod is None:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _mod
 
 
 def make_wcs(shape=(2, 2)):
@@ -119,7 +135,7 @@ def test_move_stacked_false_ignores_missing_paths(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _make_minimal_worker(tmp_path):
+def _make_minimal_worker(tmp_path, move_stacked=None):
     """Full-init stacker driven through one drizzle-standard worker iteration.
 
     Mirrors ``tests/test_worker_incremental_drizzle.py`` but deliberately does
@@ -158,7 +174,10 @@ def _make_minimal_worker(tmp_path):
     obj.astrometry_net_timeout_sec = 5
     obj.drizzle_fillval = "0.0"
     obj.update_progress = lambda *a, **k: None
-    obj.move_stacked = False  # explicit invariant (already the constructor default)
+    # Closure-B restore: the constructor default is now True (historical
+    # filesystem checkpoint).  Zero-mutation tests must opt out explicitly.
+    if move_stacked is not None:
+        obj.move_stacked = bool(move_stacked)
 
     # Stub simple reference FITS for _get_reference_image
     ref_path = Path(tmp_path) / "temp_processing" / "reference_image.fit"
@@ -234,7 +253,7 @@ def _make_minimal_worker(tmp_path):
 
 def test_worker_minimal_run_keeps_source_when_move_stacked_false(tmp_path):
     src = Path(tmp_path) / "Light_001.fit"
-    obj, calls = _make_minimal_worker(tmp_path)
+    obj, calls = _make_minimal_worker(tmp_path, move_stacked=False)
     qm.SeestarQueuedStacker._worker(obj)
 
     assert calls["add_frame"] == 1
@@ -245,3 +264,39 @@ def test_worker_minimal_run_keeps_source_when_move_stacked_false(tmp_path):
     assert not (Path(tmp_path) / "stacked").exists(), (
         "no 'stacked' subdir may be created when move_stacked=False"
     )
+
+
+def test_constructor_default_move_stacked_is_true():
+    obj = qm.SeestarQueuedStacker()
+    try:
+        assert obj.move_stacked is True, (
+            "closure-B restore: the constructor default must be True "
+            "(historical filesystem checkpoint)"
+        )
+    finally:
+        # Avoid leaving background pools alive beyond the test.
+        for attr in ("drizzle_executor", "quality_executor"):
+            ex = getattr(obj, attr, None)
+            if ex is not None:
+                try:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+
+
+def test_worker_minimal_run_moves_source_by_default(tmp_path):
+    """Mirror of the immutability test: with the restored default
+    (move_stacked left unset -> True), a successfully consumed source RAW
+    must be moved into <src>/stacked/.
+    """
+    src = Path(tmp_path) / "Light_001.fit"
+    obj, calls = _make_minimal_worker(tmp_path)  # constructor default (True)
+    assert obj.move_stacked is True
+    qm.SeestarQueuedStacker._worker(obj)
+
+    assert calls["add_frame"] == 1
+    assert not src.exists(), (
+        "with the default move_stacked=True the consumed source RAW must be moved"
+    )
+    moved = Path(tmp_path) / "stacked" / src.name
+    assert moved.exists(), "moved file must land in <src>/stacked/<base>"

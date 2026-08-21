@@ -850,7 +850,7 @@ logger.debug("Configuration warnings OK.")
 # Global version string to make sure it's always the same
 # M3-D OBSOLETE LEGACY: only referenced by the invalidated
 # ``_process_incremental_drizzle_batch`` (forensic compatibility).
-GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "7.0.2 Boring ostentus"
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "8.0.0 Phoenix consedit"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
@@ -2119,7 +2119,7 @@ class SeestarQueuedStacker:
 
         self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
-        self.move_stacked = False
+        self.move_stacked = True
         self._current_batch_paths = []
         self.batch_count_path = None
         self._resume_requested = False
@@ -2210,7 +2210,7 @@ class SeestarQueuedStacker:
         self.stacked_subdir_name = "stacked"
         self.batch_count_path = None
         self._current_batch_paths = []
-        self.move_stacked = False
+        self.move_stacked = True
 
         self.use_quality_weighting = False
         self.weight_by_snr = True
@@ -9778,12 +9778,24 @@ class SeestarQueuedStacker:
     def _move_to_stacked(self, paths: list[str]):
         """Déplace chaque fichier vers un sous-dossier 'stacked'.
 
-        Gate on ``move_stacked``: the whole feature (moving processed RAW
-        files aside) is opt-in.  When ``move_stacked`` is False (the default),
-        no source file is ever moved, whatever the caller.  This is the single
-        choke point for all batch-completion / flush / end-of-run callers, so
-        guarding here restores the original ``0358f88`` invariant that
-        ``move_stacked=False`` must not mutate the source folder.
+        Historical default (filesystem checkpoint): ``move_stacked`` is True by
+        default, so a successfully consumed image is moved into a ``stacked/``
+        sub-folder of its source directory, while images still to process stay
+        in ``input/``.  After a stop/crash the ``input/`` folder therefore
+        approximates the remaining work — a rudimentary but robust checkpoint.
+        No resume redesign, no journal/DB is implied.
+
+        ``move_stacked=False`` is an explicit safety mode for tests/harnesses
+        that require zero mutation of the source folder.  This method is the
+        single choke point for every batch-completion / flush / end-of-run
+        caller, so the guard below preserves the ``0358f88`` invariant that
+        ``move_stacked=False`` must never mutate the source folder.
+
+        The move only ever happens *after* a batch was consumed successfully
+        (all callers are on success paths, after ``_add_frame_to_drizzle_accumulators``
+        / ``_process_completed_batch`` / last-batch combine succeeded) — never
+        prematurely, and never for rejected/unaligned images (those go to
+        ``unaligned_by_stacker``, handled separately).
         """
         if not self.move_stacked:
             return
@@ -14310,7 +14322,7 @@ class SeestarQueuedStacker:
         astap_downsample=1,
         astap_sensitivity=100,
         local_solver_preference="none",
-        move_stacked=False,
+        move_stacked=True,
         partial_save_interval=1,
         temp_folder=None,
         *,

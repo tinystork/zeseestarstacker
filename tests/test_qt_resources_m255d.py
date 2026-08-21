@@ -116,14 +116,14 @@ def test_empty_preview_missing_resource_keeps_old_behavior(qapp, monkeypatch):
 # Real product title (Tk byte-identical)
 # --------------------------------------------------------------------------
 def test_product_version_from_source():
-    assert product_version() == "7.0.2 Boring ostentus"
+    assert product_version() == "8.0.0 Phoenix consedit"
 
 
 def test_default_title_matches_tk_exactly():
     # Tk: f"{self.tr('title')}  –  {self.app_version}" where tr('title') is
-    # "Seestar Stacker" and app_version is "7.0.2 Boring ostentus"; separator
+    # "Seestar Stacker" and app_version is "8.0.0 Phoenix consedit"; separator
     # is two spaces, EN DASH (U+2013), two spaces.
-    expected = "Seestar Stacker  \u2013  7.0.2 Boring ostentus"
+    expected = "Seestar Stacker  \u2013  8.0.0 Phoenix consedit"
     assert default_window_title() == expected
     assert PRODUCT_TITLE == "Seestar Stacker"
 
@@ -132,8 +132,8 @@ def test_bare_main_window_title_includes_version(qapp):
     win = MainWindow()
     try:
         assert win.windowTitle() == default_window_title()
-        assert win.windowTitle() == "Seestar Stacker  \u2013  7.0.2 Boring ostentus"
-        assert "7.0.2" in win.windowTitle()
+        assert win.windowTitle() == "Seestar Stacker  \u2013  8.0.0 Phoenix consedit"
+        assert "8.0.0" in win.windowTitle()
     finally:
         win.shutdown()
 

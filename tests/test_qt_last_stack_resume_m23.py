@@ -55,6 +55,7 @@ from seestar.gui_qt.boring_runner import BoringRunnerBase
 from seestar.gui_qt.summary_payload import (
     SummaryPayload,
     build_summary_payload,
+    derive_terminal_status,
     read_final_fits_header,
 )
 
@@ -160,7 +161,43 @@ def test_persisted_load_does_not_clobber_nonempty_output(tmp_path):
 # --------------------------------------------------------------------------
 # (b) summary payload + dialog
 # --------------------------------------------------------------------------
-def test_build_summary_payload_reads_final_fits_header(tmp_path):
+REAL_OUTPUT_NAMES = [
+    "final.fits",
+    "stack_final_classic_sumw.fit",
+    "stack_final_drizzle_final.fit",
+    "stack_final_classic_reproject.fit",
+]
+
+
+@pytest.mark.parametrize("filename", REAL_OUTPUT_NAMES)
+def test_build_summary_payload_reads_final_fits_header(tmp_path, filename):
+    from astropy.io import fits
+
+    out = tmp_path / "out"
+    out.mkdir()
+    hdu = fits.PrimaryHDU(data=np.zeros((2, 2), dtype=np.float32))
+    hdu.header["NIMAGES"] = 12
+    hdu.header["TOTEXP"] = 30.0
+    real = out / filename
+    hdu.writeto(real, overwrite=True)
+
+    # The real product path is the source of truth (not <output>/final.fits).
+    payload = build_summary_payload(
+        status="finished",
+        duration_seconds=65.0,
+        files_attempted=12,
+        output_dir=str(out),
+        final_stack_path=str(real),
+    )
+    assert payload.status == "finished"
+    assert payload.final_stack_file == str(real)
+    assert payload.final_stack_exists is True
+    assert payload.images_in_final_stack == 12
+    assert payload.total_exposure_seconds == pytest.approx(30.0)
+    assert payload.can_open_output is True
+
+
+def test_build_summary_payload_legacy_final_fits_fallback(tmp_path):
     from astropy.io import fits
 
     out = tmp_path / "out"
@@ -170,6 +207,7 @@ def test_build_summary_payload_reads_final_fits_header(tmp_path):
     hdu.header["TOTEXP"] = 30.0
     hdu.writeto(out / "final.fits", overwrite=True)
 
+    # No final_stack_path -> legacy <output>/final.fits convention is kept.
     payload = build_summary_payload(
         status="finished",
         duration_seconds=65.0,
@@ -177,11 +215,31 @@ def test_build_summary_payload_reads_final_fits_header(tmp_path):
         output_dir=str(out),
     )
     assert payload.status == "finished"
+    assert payload.final_stack_file == str(out / "final.fits")
     assert payload.final_stack_exists is True
     assert payload.images_in_final_stack == 12
     assert payload.total_exposure_seconds == pytest.approx(30.0)
     assert payload.can_open_output is True
-    assert payload.final_stack_file == str(out / "final.fits")
+
+
+def test_build_summary_payload_missing_final_stack_path(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    missing = out / "stack_final_drizzle_final.fit"
+
+    payload = build_summary_payload(
+        status="finished",
+        duration_seconds=65.0,
+        files_attempted=12,
+        output_dir=str(out),
+        final_stack_path=str(missing),
+    )
+    assert payload.final_stack_file == str(missing)
+    assert payload.final_stack_exists is False
+    assert payload.images_in_final_stack is None
+    assert payload.total_exposure_seconds is None
+    # The existing presentation helper maps the missing product to empty/no-output.
+    assert derive_terminal_status(payload) == "empty"
 
 
 def test_read_final_fits_header_missing_path_returns_empty():
@@ -279,7 +337,7 @@ def test_regular_run_end_shows_summary_dialog(qapp):
         assert backend.summary_calls == [payload]
         assert win._summary_dialog is not None
         text = _summary_label(win._summary_dialog)
-        assert "Status: finished" in text
+        assert "Status: SUCCESS" in text
         assert "Total Processing Time: 1:05" in text
         assert "Files Attempted: 12" in text
         assert "Images in Final Stack: 12" in text
@@ -385,7 +443,7 @@ def test_boring_run_end_shows_summary_dialog(qapp, tmp_path):
         assert win.is_running is False
         assert win._summary_dialog is not None
         text = _summary_label(win._summary_dialog)
-        assert "Status: finished" in text
+        assert "Status: SUCCESS" in text
         assert "Files Attempted: 1" in text
     finally:
         win.shutdown()
@@ -458,6 +516,62 @@ def test_qt_run_path_forwards_output_dir_to_engine():
     assert len(summaries) == 1
     assert summaries[0].final_stack_file == "/out/final.fits"
     assert summaries[0].files_attempted == 7
+
+
+def test_backend_emit_summary_uses_final_stacked_path(tmp_path):
+    """The real engine product path (final_stacked_path) becomes the summary's
+    source of truth, replacing the hardcoded <output_dir>/final.fits."""
+    from astropy.io import fits
+
+    out = tmp_path / "out"
+    out.mkdir()
+    real = out / "stack_final_drizzle_final.fit"
+    hdu = fits.PrimaryHDU(data=np.zeros((2, 2), dtype=np.float32))
+    hdu.header["NIMAGES"] = 5
+    hdu.header["TOTEXP"] = 45.0
+    hdu.writeto(real, overwrite=True)
+
+    class FinalPathStacker:
+        def __init__(self, **kwargs):
+            self.align_on_disk = None
+            self.output_folder = str(out)
+            self.final_stacked_path = str(real)
+            self.processed_files_count = 5
+            self.stop_called = False
+
+        def set_progress_callback(self, cb):
+            pass
+
+        def start_processing(self, **kwargs):
+            return True
+
+        def is_running(self):
+            return False
+
+        def stop(self):
+            self.stop_called = True
+
+    backend = SeestarQueuedStackerBackend(
+        stacker_factory=lambda **kw: FinalPathStacker(**kw), poll_interval=0.001
+    )
+    summaries = []
+    result = backend.run(
+        _request(output_folder=str(out)),
+        lambda p: None,
+        lambda m: None,
+        lambda: False,
+        summary_callback=summaries.append,
+    )
+    assert result is BackendRunResult.FINISHED
+    assert len(summaries) == 1
+    payload = summaries[0]
+    assert payload.final_stack_file == str(real)
+    assert payload.final_stack_exists is True
+    assert payload.images_in_final_stack == 5
+    assert payload.total_exposure_seconds == pytest.approx(45.0)
+    assert payload.can_open_output is True
+    # derive_terminal_status works with the new payload: a real product -> success.
+    assert derive_terminal_status(payload) == "success"
 
 
 def test_auto_resume_condition_matches_forwarded_output_dir(tmp_path):
