@@ -9776,7 +9776,17 @@ class SeestarQueuedStacker:
             logger.debug(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
 
     def _move_to_stacked(self, paths: list[str]):
-        """Déplace chaque fichier vers un sous-dossier 'stacked'."""
+        """Déplace chaque fichier vers un sous-dossier 'stacked'.
+
+        Gate on ``move_stacked``: the whole feature (moving processed RAW
+        files aside) is opt-in.  When ``move_stacked`` is False (the default),
+        no source file is ever moved, whatever the caller.  This is the single
+        choke point for all batch-completion / flush / end-of-run callers, so
+        guarding here restores the original ``0358f88`` invariant that
+        ``move_stacked=False`` must not mutate the source folder.
+        """
+        if not self.move_stacked:
+            return
         for p in paths:
             if not p or not os.path.exists(p):
                 continue

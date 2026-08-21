@@ -55,3 +55,8 @@ seestar.txt
 build/
 dist/
 *.egg-info/
+
+# === Fixture master reference dataset (EXCEPTION: committed, immutable) ===
+!fixture/master/
+!fixture/master/*.fit
+!fixture/master/*.fits
