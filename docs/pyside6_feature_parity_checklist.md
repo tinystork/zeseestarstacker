@@ -75,7 +75,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 6.4 | Histogram | `[x]` | single live surface in the persistent right panel (`HistogramView` QWidget) fed by the *WB-only* derived image (Tk `image_data_wb` source); reproduces the Tk auto-zoom / reset-view / zoom / reset-zoom interactions + BP/WP line dragging → `rangeChanged`; localized stats label; the M10 duplicated Preview-controls-tab histogram was removed (M10/M14) |
 | 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
 | 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
-| 6.7 | Pan | `[ ]` | |
+| 6.7 | Pan | `[x]` | continuous mouse-wheel zoom (Tk `zoom_factor` 1.15, `MIN_ZOOM` 0.05 / `MAX_ZOOM` 15.0) + left-drag pan (viewport offset, unbounded) layered on the existing `preview_view` render path via `PreviewImageView` + `render_view(zoom_factor=…, pan_offset=…)`; display-only, never mutates `_preview_source` (M18, see §17) |
 | 6.8 | Auto-load first FITS of the input folder (initial preview) | `[x]` | `MainWindow._try_show_first_input_image` + `seestar/gui_qt/initial_preview.py` (M12): folder restored from settings or chosen via Browse Input non-blockingly loads the first sorted `.fit`/`.fits` on a daemon thread (lazy `importlib` engine import), debayers 2D Bayer data (header `BAYERPAT` else `settings.bayer_pattern`), and delivers the image back via a queued Qt signal; missing/empty folder clears the preview with a localized message; redundant-reload guard skips an unchanged folder |
 | 6.9 | Brightness / contrast / saturation + reset (display-only) | `[x]` | slider + numeric spinbox pairs with Tk defaults 1.0/1.0/1.0 and ranges/steps 0.1–3.0/0.01, 0.1–3.0/0.01, 0.0–3.0/0.01 + `Reset Adjust.`; pure-numpy reproduction of the Tk image-enhancement behaviour; display-only (M13) |
 
@@ -341,7 +341,7 @@ equivalent with the backend part deferred.
 | 16.14 | `zoom_100_button` "Zoom 100%" / `zoom_fit_button` "Zoom Fit" | discrete zoom (engine-free) | `zoom_combo` (`Fit`/`100%`/`200%`/`50%`) | `[x]` (shape diff) |
 | 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` (display-only) | `[x]` display-only, `[ ]` backend E2E |
 | 16.16 | `rotate_left_button` / `rotate_right_button` | rotate preview ±90° (engine-free) | `rotate_left_button` / `rotate_right_button` | `[x]` |
-| 16.17 | Pan (left-drag / scroll) via `PreviewManager` | canvas pan + scroll-zoom (engine-free) | — | `[ ]` (checklist 6.7) |
+| 16.17 | Pan (left-drag / scroll) via `PreviewManager` | canvas pan + scroll-zoom (engine-free) | `PreviewImageView` + `render_view(zoom_factor=…, pan_offset=…)` | `[x]` (M18, checklist 6.7, §17) |
 | 16.18 | Save / export | no dedicated right-panel button; the run saves FITS/PNG via the engine | run backend + `open_output_button` | `[x]` (N/A) |
 
 Notes / gaps:
@@ -368,18 +368,69 @@ Notes / gaps:
   `stack_kappa_low` / `stack_kappa_high` / `winsor_limits` regardless of
   visibility.  The standalone `kappa` field is **not** part of the Tk kappa
   frame and stays always visible.  `[x]`
-- **Pan (16.17, checklist 6.7) feasibility.**  Tk pan/scroll-zoom is a pure
-  display interaction inside `PreviewManager` (mouse-wheel zoom, left-drag pan
-  on the Canvas) with **no** engine coupling — only the `_preview_source`
-  pixmap/view transform is involved.  The Qt shell would need mouse-event
-  handling on the preview surface (e.g. `preview_view` gain drag/scroll state,
-  or wrap the label in a scroll area); it is display-only and feasible without
-  touching the engine, so it is deferred (not implemented this lot).  `[ ]`
+- **Pan (16.17, checklist 6.7).**  Tk pan/scroll-zoom is a pure display
+  interaction inside `PreviewManager` (mouse-wheel zoom, left-drag pan on the
+  Canvas) with **no** engine coupling.  Delivered in M18 (§17): the Qt preview
+  surface (`preview_image_label`) is now a `PreviewImageView` that emits
+  wheel-zoom / pan-delta signals, and `render_view` layers a continuous
+  `zoom_factor` + `pan_offset` on top of the existing render path.  `[x]`
 - **Solver-config persistence (3.6) feasibility.**  Still `[ ]`.  The Qt solver
   dialog already round-trips its accepted values into the live Qt controls /
   `QtSettingsState` (M2), so persistence is a matter of adding the ASTAP /
   ZeSolver fields to the M8 settings JSON surface (or a `solver_config`-backed
   load/save seam); no engine coupling blocks it.  Deferred.  `[ ]`
+
+---
+
+## 17. Preview pan / zoom parity (M18)
+
+Per-behaviour Tk `PreviewManager` pan/zoom → Qt parity.  The Tk interaction
+source is `PreviewManager` in `seestar/gui/preview.py` (mouse-wheel zoom +
+left-drag pan over `preview_canvas`, a pure view transform); the Qt surface is
+`preview_image_view.PreviewImageView` (a `QLabel` emitting `wheelZoom` /
+`panDelta`) plus `preview_view.render_view(zoom_factor=…, pan_offset=…)`.
+`[x]` = delivered this lot (present + correct semantics); "engine-coupled"
+marks behaviours that reach the stacking engine — none are expected here.
+
+| # | Tk `PreviewManager` behaviour | Semantics | Qt equivalent | Status |
+|---|---|---|---|---|
+| 17.1 | `_zoom_on_scroll` (`<MouseWheel>`/`<Button-4>`/`<Button-5>`) | wheel zoom ×1.15 (up) / ÷1.15 (down), clipped to `[0.05, 15.0]`, cursor-anchored | `PreviewImageView.wheelZoom` → `MainWindow._on_wheel_zoom` (uses `ZOOM_STEP`/`MIN_ZOOM`/`MAX_ZOOM` + cursor-anchored pan shift) | `[x]` |
+| 17.2 | `_start_pan`/`_pan_image`/`_stop_pan` (`<ButtonPress-1>`/`<B1-Motion>`) | left-drag pan, viewport offset, **no clamping** | `PreviewImageView.panDelta` → `MainWindow._on_pan_delta` (unbounded `_view_offset_x/y`) | `[x]` |
+| 17.3 | `reset_zoom_and_pan` | zoom → 1.0, pan → (0,0) | `MainWindow._reset_view_transform` (on new preview image / clear) | `[x]` |
+| 17.4 | `zoom_fit` | fit to canvas + reset pan | `zoom_combo` "Fit" (fit render + pan reset) | `[x]` |
+| 17.5 | `zoom_full_size` | 100% (`zoom_level = 1.0`) | `zoom_combo` "100%" preset (`_preview_zoom_factor = 1.0`) | `[x]` (shape diff: combo) |
+| 17.6 | `rotate_left` / `rotate_right` reset pan | rotation resets pan (aspect flip) | `_on_rotate_left/right` reset `_view_offset_x/y`, keep zoom | `[x]` |
+| 17.7 | engine coupling | **none** — pure view transform | **none** — no engine/Tk/backend import or call | `[x]` (confirmed) |
+
+Notes / rules:
+
+- **Single continuous zoom factor.**  `MainWindow._preview_zoom_factor` (default
+  `1.0`, range `[0.05, 15.0]`) is the single source of truth for the numeric
+  zoom, mirroring Tk `zoom_level`.  The `zoom_combo` percent presets
+  (`100%`/`200%`/`50%`) and the mouse-wheel both set this same factor; "Fit" is
+  a combo *mode* (not a numeric factor) handled by the aspect-fit render path.
+- **Wheel zoom ↔ combo interaction rule.**  A wheel turn multiplies/divides the
+  continuous factor by `ZOOM_STEP` (1.15) and re-syncs the combo: an exact
+  preset match shows that preset, anything else shows a blank (custom) combo so
+  the combo never lies about a non-preset zoom.  Picking any combo preset
+  returns to that preset **and recentres** (resets pan to 0).  Wheeling from
+  "Fit" exits Fit and continues from the current fit scale (Tk `zoom_fit` sets
+  `zoom_level` to the fit scale).  This is the documented "wheel zoom sets a
+  level outside the presets; the combo returns to a preset" option.
+- **Pan is unbounded** (Tk applies no clamping); the offset is a pure viewport
+  translation, and `compose_panned_pixmap` clips the scaled image to the
+  viewport.  When not panned, the pixmap stays the exact scaled image size
+  (existing M5/M13/M17 dimension tests are preserved); a non-zero pan composes
+  into a viewport-sized canvas.
+- **Reset semantics.**  Pan/zoom reset to `100%` + centred on every new preview
+  image (`_on_preview` / `_on_initial_preview_result` / `_clear_preview`), and
+  "Zoom Fit" (combo "Fit") recentres (resets pan).  Rotation resets pan but
+  keeps the zoom factor (Tk parity).
+- **Display-only / engine-coupled.**  `[x]` confirmed engine-free: `_preview_source`
+  is never mutated (all helpers copy), no FITS/PNG writes, no settings-file /
+  backend changes, and `preview_image_view.py` / `preview_view.py` contain no
+  engine/Tk/zesolver import path (asserted by the M18 tests + the existing
+  import-hygiene tests).
 
 ---
 
@@ -668,3 +719,26 @@ Notes / gaps:
   (6.7) and solver-config persistence (3.6) remain `[ ]` with feasibility
   notes.  Covered by `tests/test_qt_preview_ergonomics_m17.py` (12 tests) +
   the existing import-hygiene tests; `git diff --check` clean.
+- **2026-08-21 — lot ZSSS-QT-FP-M18**: preview pan/zoom parity (checklist 6.7,
+  new section 17) — display-only.  Reproduced the Tk `PreviewManager`
+  mouse-wheel zoom + left-drag pan as a pure Qt view transform on top of the
+  existing `preview_view` render path.  The preview surface is now a
+  `PreviewImageView` (`seestar/gui_qt/preview_image_view.py`, a `QLabel`
+  emitting `wheelZoom`/`panDelta`); `MainWindow` keeps a single continuous
+  `_preview_zoom_factor` (default 1.0, `[MIN_ZOOM 0.05, MAX_ZOOM 15.0]`) and a
+  `_view_offset_x/y` pan offset (unbounded, Tk clamps nothing), and
+  `render_view` gained an optional `zoom_factor` + `pan_offset` (plus
+  `scaled_image` / `compose_panned_pixmap` / `clamp_zoom_factor` /
+  `preset_label_for_factor` / `zoomed_image_size` / `fit_scale` helpers).  Wheel
+  zoom mirrors the Tk 1.15 step with cursor anchoring; the `zoom_combo` presets
+  set the same factor and recentre, while a non-preset wheel zoom shows a blank
+  (custom) combo — the documented interaction rule (wheel zoom sets a level
+  outside the presets; the combo returns to a preset).  Pan/zoom reset on every
+  new preview image and on "Zoom Fit"; rotation resets pan but keeps zoom (Tk
+  parity).  Strictly display-only: `_preview_source` is never mutated, no
+  FITS/PNG writes, no engine/Tk/backend/settings-file changes, and the new
+  modules are engine/Tk/zesolver-free (asserted by the M18 tests + the existing
+  import-hygiene tests).  Engine-coupled gaps: none.  Gaps left for later:
+  solver-config persistence (3.6) and backend-E2E items.  Covered by
+  `tests/test_qt_preview_pan_zoom_m18.py` (28 tests) + the existing
+  import-hygiene tests; `git diff --check` clean.

@@ -51,7 +51,7 @@ from dataclasses import replace
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import QByteArray, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImage, QPixmap
+from PySide6.QtGui import QDesktopServices, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -138,7 +138,17 @@ from .preview_adjust import (
     compute_histogram_stats,
 )
 from .histogram_view import HistogramView
-from .preview_view import ZOOM_LABELS, render_view
+from .preview_image_view import PreviewImageView
+from .preview_view import (
+    ZOOM_FACTORS,
+    ZOOM_LABELS,
+    ZOOM_STEP,
+    clamp_zoom_factor,
+    fit_scale,
+    preset_label_for_factor,
+    render_view,
+    zoomed_image_size,
+)
 from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
@@ -664,6 +674,18 @@ class MainWindow(QMainWindow):
         # M17).  Display-only GUI state; never touches the engine or
         # ``_preview_source``.  Default 1 (native) — see the module comment.
         self._preview_res_factor: int = DEFAULT_PREVIEW_RES_FACTOR
+        # Continuous zoom factor (Tk ``PreviewManager.zoom_level`` parity, M18).
+        # The ``zoom_combo`` percent presets and the mouse-wheel zoom both set
+        # this single factor; "Fit" is a combo *mode* (not a numeric factor)
+        # handled separately.  Range ``[MIN_ZOOM, MAX_ZOOM]``.
+        self._preview_zoom_factor: float = 1.0
+        # Pan offset in viewport pixels, relative to a centred image (Tk
+        # ``_view_offset_x`` / ``_view_offset_y`` parity).  Unbounded — Tk
+        # applies no clamping, so neither does the Qt shell.
+        self._view_offset_x: float = 0.0
+        self._view_offset_y: float = 0.0
+        # Re-entrancy guard for the combo <-> continuous-factor sync loop.
+        self._zoom_sync_guard: bool = False
         # Input folder whose first FITS was last successfully auto-loaded
         # (M12).  Avoids redundant reloads on repeated settings restore; it is
         # cleared when the folder changes or the load fails.
@@ -1149,9 +1171,7 @@ class MainWindow(QMainWindow):
         self._render_preview_label()
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.preview_label)
-        self.preview_image_label = QLabel()
-        self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_image_label.setMinimumSize(256, 256)
+        self.preview_image_label = PreviewImageView()
         preview_layout.addWidget(self.preview_image_label, 1)
         layout.addWidget(preview_group, 1)
 
@@ -1546,6 +1566,9 @@ class MainWindow(QMainWindow):
         self.rotate_left_button.clicked.connect(self._on_rotate_left)
         self.rotate_right_button.clicked.connect(self._on_rotate_right)
         self.preview_res_button.clicked.connect(self._on_preview_res_cycle)
+        # Mouse-wheel zoom + left-drag pan over the preview surface (M18).
+        self.preview_image_label.wheelZoom.connect(self._on_wheel_zoom)
+        self.preview_image_label.panDelta.connect(self._on_pan_delta)
         # WB gains / stretch black-white-gamma / B-C-S are wired through
         # ``_make_slider_spin_pair`` (slider <-> spinbox sync + a single
         # ``on_change`` callback), so only the discrete buttons are connected
@@ -2272,6 +2295,10 @@ class MainWindow(QMainWindow):
         else:
             self._preview_source = None
             self._preview_rotation = 0
+        # A new preview image resets zoom + pan to the Tk defaults (100%,
+        # centred) before re-rendering — ``PreviewManager.reset_zoom_and_pan``
+        # parity on a new ``_preview_source`` / new render.
+        self._reset_view_transform()
         self._refresh_preview_view()
 
     # ------------------------------------------------ initial preview (M12)
@@ -2365,6 +2392,7 @@ class MainWindow(QMainWindow):
         self._last_preview_folder = result.folder
         self._preview_detail = f"{self._tr('preview_loaded')} {result.filename}"
         self._render_preview_label()
+        self._reset_view_transform()
         self._refresh_preview_view()
 
     def _clear_preview(self, message: str) -> None:
@@ -2373,11 +2401,27 @@ class MainWindow(QMainWindow):
         self._render_preview_label()
         self._preview_source = None
         self._preview_rotation = 0
+        self._reset_view_transform()
         self._refresh_preview_view()
 
     # ------------------------------------------------- preview view controls
     def _on_zoom_changed(self, _index: int) -> None:
-        """Recompute the displayed pixmap/resolution when the zoom label changes."""
+        """Recompute the view when the zoom combo changes (user preset pick).
+
+        Any user preset pick recentres the view (resets pan to 0): the combo
+        returns the view to a discrete preset (Tk ``zoom_fit`` /
+        ``zoom_full_size`` parity).  "Fit" is a mode; the percent presets set
+        the single continuous factor to their literal value.  A blank combo
+        (custom wheel zoom, only ever set programmatically) is a no-op.
+        """
+        if self._zoom_sync_guard:
+            return
+        self._view_offset_x = 0.0
+        self._view_offset_y = 0.0
+        label = self.zoom_combo.currentText()
+        factor = ZOOM_FACTORS.get(label)
+        if factor is not None:
+            self._preview_zoom_factor = factor
         self._refresh_preview_view()
 
     def _on_rotate_left(self) -> None:
@@ -2385,6 +2429,9 @@ class MainWindow(QMainWindow):
         if self._preview_source is None:
             return
         self._preview_rotation = (self._preview_rotation - 90) % 360
+        # Tk ``rotate_left`` resets pan to avoid disorientation on aspect flip.
+        self._view_offset_x = 0.0
+        self._view_offset_y = 0.0
         self._refresh_preview_view()
 
     def _on_rotate_right(self) -> None:
@@ -2392,6 +2439,79 @@ class MainWindow(QMainWindow):
         if self._preview_source is None:
             return
         self._preview_rotation = (self._preview_rotation + 90) % 360
+        self._view_offset_x = 0.0
+        self._view_offset_y = 0.0
+        self._refresh_preview_view()
+
+    def _reset_view_transform(self) -> None:
+        """Reset zoom + pan to the Tk defaults (100%, centred) without a redraw.
+
+        Mirrors ``PreviewManager.reset_zoom_and_pan``: continuous zoom → 1.0 and
+        pan offset → (0, 0), then re-syncs the combo to the ``100%`` preset.
+        """
+        self._preview_zoom_factor = 1.0
+        self._view_offset_x = 0.0
+        self._view_offset_y = 0.0
+        self._sync_zoom_combo_to_factor()
+
+    def _sync_zoom_combo_to_factor(self) -> None:
+        """Re-sync the combo to the current continuous factor (blank = custom)."""
+        label = preset_label_for_factor(self._preview_zoom_factor)
+        self._zoom_sync_guard = True
+        try:
+            if label is None:
+                self.zoom_combo.setCurrentIndex(-1)
+            else:
+                self.zoom_combo.setCurrentText(label)
+        finally:
+            self._zoom_sync_guard = False
+
+    def _on_wheel_zoom(self, direction: int, x: float, y: float) -> None:
+        """Mouse-wheel zoom over the preview surface (Tk ``_zoom_on_scroll``).
+
+        Multiplies/divides the continuous factor by ``ZOOM_STEP`` (1.15), clamps
+        to ``[MIN_ZOOM, MAX_ZOOM]`` and anchors the zoom at the cursor (the pan
+        offset shifts so the pixel under the cursor stays put).  Wheeling from
+        "Fit" exits Fit and continues from the current fit scale (Tk ``zoom_fit``
+        sets ``zoom_level`` to the fit scale).  Display-only: ``_preview_source``
+        is never touched.
+        """
+        if self._preview_source is None or self._preview_source.isNull():
+            return
+        if self.zoom_combo.currentText() == "Fit":
+            self._preview_zoom_factor = fit_scale(
+                self._preview_source,
+                self._preview_rotation,
+                self._preview_res_factor,
+                self.preview_image_label.size(),
+            )
+        old_zoom = self._preview_zoom_factor
+        new_zoom = old_zoom * ZOOM_STEP if direction > 0 else old_zoom / ZOOM_STEP
+        new_zoom = clamp_zoom_factor(new_zoom)
+        if abs(new_zoom - old_zoom) < 1e-6:
+            return
+        zoom_ratio = new_zoom / old_zoom
+        # Cursor-anchored zoom (Tk parity): keep the pixel under the cursor fixed.
+        cx = self.preview_image_label.width() / 2.0
+        cy = self.preview_image_label.height() / 2.0
+        rel_x = x - (cx + self._view_offset_x)
+        rel_y = y - (cy + self._view_offset_y)
+        self._view_offset_x += rel_x * (1.0 - zoom_ratio)
+        self._view_offset_y += rel_y * (1.0 - zoom_ratio)
+        self._preview_zoom_factor = new_zoom
+        self._sync_zoom_combo_to_factor()
+        self._refresh_preview_view()
+
+    def _on_pan_delta(self, dx: float, dy: float) -> None:
+        """Left-drag pan: shift the viewport offset (Tk ``_pan_image`` parity).
+
+        The offset is unbounded (Tk applies no clamping); it is applied by
+        ``render_view`` via ``compose_panned_pixmap``.
+        """
+        if self._preview_source is None or self._preview_source.isNull():
+            return
+        self._view_offset_x += float(dx)
+        self._view_offset_y += float(dy)
         self._refresh_preview_view()
 
     def _preview_res_text(self) -> str:
@@ -2555,12 +2675,20 @@ class MainWindow(QMainWindow):
         )
         if adjusted is None or adjusted.isNull():
             adjusted = source
+        zoom_text = self.zoom_combo.currentText()
+        if zoom_text == "Fit":
+            zoom_factor = None
+        else:
+            zoom_factor = self._preview_zoom_factor
+        pan_offset = (self._view_offset_x, self._view_offset_y)
         pixmap = render_view(
             adjusted,
             self._preview_rotation,
-            self.zoom_combo.currentText(),
+            zoom_text,
             self.preview_image_label.size(),
             downsample_factor=self._preview_res_factor,
+            zoom_factor=zoom_factor,
+            pan_offset=pan_offset,
         )
         if pixmap is None or pixmap.isNull():
             self.preview_image_label.clear()
@@ -2572,20 +2700,35 @@ class MainWindow(QMainWindow):
         self.preview_image_label.setPixmap(pixmap)
         self._set_view_controls_enabled(True)
         self._set_preview_controls_enabled(True)
-        self.resolution_label.setText(self._resolution_text(source, pixmap))
+        if zoom_text == "Fit":
+            disp_w, disp_h = pixmap.width(), pixmap.height()
+        else:
+            disp_w, disp_h = zoomed_image_size(
+                adjusted,
+                self._preview_rotation,
+                self._preview_res_factor,
+                self._preview_zoom_factor,
+            )
+        self.resolution_label.setText(self._resolution_text(source, disp_w, disp_h))
         self._refresh_histogram(wb_only)
 
-    def _resolution_text(self, source: QImage, pixmap: QPixmap) -> str:
+    def _resolution_text(self, source: QImage, disp_w: int, disp_h: int) -> str:
         """Build the resolution label: original → displayed size + zoom + rotation."""
-        zoom = self.zoom_combo.currentText()
+        zoom = self._zoom_label()
         text = (
             f"{source.width()}x{source.height()} → "
-            f"{pixmap.width()}x{pixmap.height()} · {zoom}"
+            f"{disp_w}x{disp_h} · {zoom}"
         )
         rotation = self._preview_rotation % 360
         if rotation:
             text += f" · {rotation}°"
         return text
+
+    def _zoom_label(self) -> str:
+        """Return the language-neutral zoom label for the current view state."""
+        if self.zoom_combo.currentText() == "Fit":
+            return "Fit"
+        return f"{int(round(self._preview_zoom_factor * 100))}%"
 
     def _set_view_controls_enabled(self, enabled: bool) -> None:
         """Enable/disable the zoom + rotation view controls together."""
