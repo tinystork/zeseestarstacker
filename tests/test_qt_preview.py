@@ -634,3 +634,189 @@ def test_preview_import_hygiene_fresh_process():
         f"preview import hygiene violated: stdout={proc.stdout!r} "
         f"stderr={proc.stderr!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# M5: preview view controls (zoom / resolution / rotation) — display-only
+# --------------------------------------------------------------------------
+def _preview_uint8(width: int, height: int):
+    """Build a ``width x height`` RGB uint8 array (width=W, height=H)."""
+    return np.zeros((height, width, 3), dtype=np.uint8)
+
+
+def test_view_controls_initially_disabled_and_reset(qapp):
+    win = MainWindow()
+    try:
+        assert not win.zoom_combo.isEnabled()
+        assert not win.rotate_left_button.isEnabled()
+        assert not win.rotate_right_button.isEnabled()
+        assert win.resolution_label.text() == "—"
+        assert win.has_preview_image is False
+        assert win.preview_rotation == 0
+        assert win.zoom_combo.currentText() == "100%"
+    finally:
+        win.shutdown()
+
+
+def test_image_preview_enables_view_controls_and_sets_resolution(qapp):
+    win = MainWindow(backend_factory=lambda: ImagePreviewBackend(_preview_uint8(20, 10)))
+    try:
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+
+        # After a finished run the view controls stay usable (image retained).
+        assert win.has_preview_image is True
+        assert win.zoom_combo.isEnabled()
+        assert win.rotate_left_button.isEnabled()
+        assert win.rotate_right_button.isEnabled()
+        assert win.zoom_combo.currentText() == "100%"
+        assert win.resolution_label.text() == "20x10 → 20x10 · 100%"
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 10
+    finally:
+        win.shutdown()
+
+
+def test_zoom_percent_levels_produce_expected_dimensions(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="z"))
+
+        win.zoom_combo.setCurrentText("100%")
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 10
+        assert win.resolution_label.text() == "20x10 → 20x10 · 100%"
+
+        win.zoom_combo.setCurrentText("200%")
+        assert win.preview_image_label.pixmap().width() == 40
+        assert win.preview_image_label.pixmap().height() == 20
+        assert win.resolution_label.text() == "20x10 → 40x20 · 200%"
+
+        win.zoom_combo.setCurrentText("50%")
+        assert win.preview_image_label.pixmap().width() == 10
+        assert win.preview_image_label.pixmap().height() == 5
+        assert win.resolution_label.text() == "20x10 → 10x5 · 50%"
+    finally:
+        win.shutdown()
+
+
+def test_zoom_fit_preserves_aspect_ratio(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="f"))
+
+        # Square label (>= the 256px minimum): 20x10 (2:1) fits into 400x400
+        # width-limited -> 400x200.
+        win.preview_image_label.resize(400, 400)
+        win.zoom_combo.setCurrentText("Fit")
+        pixmap = win.preview_image_label.pixmap()
+        assert pixmap.width() == 400
+        assert pixmap.height() == 200
+        assert win.resolution_label.text() == "20x10 → 400x200 · Fit"
+
+        # Height-limited label re-fits against the new target, still 2:1.
+        win.preview_image_label.resize(1000, 300)
+        win._refresh_preview_view()
+        pixmap = win.preview_image_label.pixmap()
+        assert pixmap.width() == 600
+        assert pixmap.height() == 300
+        assert win.resolution_label.text() == "20x10 → 600x300 · Fit"
+    finally:
+        win.shutdown()
+
+
+def test_rotation_swaps_dimensions_and_is_cumulative(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="r"))
+        win.zoom_combo.setCurrentText("100%")
+
+        win.rotate_right_button.click()
+        assert win.preview_rotation == 90
+        assert win.preview_image_label.pixmap().width() == 10
+        assert win.preview_image_label.pixmap().height() == 20
+        assert "90°" in win.resolution_label.text()
+
+        win.rotate_right_button.click()
+        assert win.preview_rotation == 180
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 10
+
+        win.rotate_left_button.click()
+        assert win.preview_rotation == 90
+        assert win.preview_image_label.pixmap().width() == 10
+        assert win.preview_image_label.pixmap().height() == 20
+
+        # Full 360 accumulation wraps back to 0 and the native orientation.
+        win.rotate_right_button.click()  # 180
+        win.rotate_right_button.click()  # 270
+        win.rotate_right_button.click()  # 0
+        assert win.preview_rotation == 0
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 10
+        assert "90°" not in win.resolution_label.text()
+    finally:
+        win.shutdown()
+
+
+def test_rotation_resets_on_new_image_and_clear(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="a"))
+        win.rotate_right_button.click()
+        assert win.preview_rotation == 90
+
+        # A new image starts unrotated and re-renders at the current zoom.
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(8, 12), stack_name="b"))
+        assert win.preview_rotation == 0
+        assert win.preview_image_label.pixmap().width() == 8
+        assert win.preview_image_label.pixmap().height() == 12
+
+        # Clearing the image resets rotation and disables the controls.
+        win._on_preview(BackendPreviewPayload(data=None, stack_name="none"))
+        assert win.preview_rotation == 0
+        assert win.has_preview_image is False
+    finally:
+        win.shutdown()
+
+
+def test_non_image_payload_clears_and_disables_view_controls(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="ok"))
+        assert win.has_preview_image is True
+        assert win.zoom_combo.isEnabled()
+        assert win.rotate_left_button.isEnabled()
+        assert win.rotate_right_button.isEnabled()
+
+        win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
+        assert win.has_preview_image is False
+        assert win.preview_image_label.pixmap().isNull()
+        assert not win.zoom_combo.isEnabled()
+        assert not win.rotate_left_button.isEnabled()
+        assert not win.rotate_right_button.isEnabled()
+        assert win.resolution_label.text() == "—"
+        assert win.preview_rotation == 0
+        # Metadata label still reflects the (invalid-data) payload.
+        assert "bad" in win.preview_label.text()
+    finally:
+        win.shutdown()
+
+
+def test_view_controls_do_not_alter_metadata_label(qapp):
+    win = MainWindow(backend_factory=lambda: ImagePreviewBackend(_preview_uint8(20, 10), "meta"))
+    try:
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+        before = win.preview_label.text()
+        assert "meta" in before
+        assert "1 img" in before
+
+        win.zoom_combo.setCurrentText("200%")
+        win.rotate_left_button.click()
+        win.rotate_right_button.click()
+        win.zoom_combo.setCurrentText("Fit")
+
+        assert win.preview_label.text() == before
+    finally:
+        win.shutdown()

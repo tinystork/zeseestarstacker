@@ -73,8 +73,9 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 6.2 | White-balance controls | `[ ]` | |
 | 6.3 | Stretch controls (linear / asinh / log / auto) | `[ ]` | |
 | 6.4 | Histogram | `[ ]` | |
-| 6.5 | Zoom / pan | `[ ]` | |
-| 6.6 | Rotation | `[ ]` | |
+| 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
+| 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
+| 6.7 | Pan | `[ ]` | |
 
 ## 7. Progress / log / copy
 
@@ -130,7 +131,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 13.3 | Left tabs `Stacking` / `Expert` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs |
 | 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches |
 | 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
-| 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[ ]` | basic disabled placeholders only |
+| 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[x]` | zoom (Fit/100/200/50), resolution label (orig → displayed + zoom + rotation), rotate left/right; display-only, offscreen-tested |
 | 13.7 | Language switch (FR/EN) | `[ ]` | placeholder combo (disabled) |
 
 ---
@@ -173,3 +174,13 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   (tests inject a fake runner and never spawn the subprocess); the CSV weight
   column is parsed but the command builder does not consume it (the subprocess
   re-reads the CSV itself).
+- **2026-08-21 — lot ZSSS-QT-FP-M5**: delivered items 6.5, 6.6 and 13.6
+  (first real preview view interactivity).  The right-panel View controls now
+  drive a display-only zoom (`Fit`/`100%`/`200%`/`50%`), a resolution label
+  (original → displayed size + zoom + rotation), and left/right rotation
+  (±90° cumulative modulo 360) applied only to the displayed preview pixmap.
+  The rendered `QImage` is stored as the copied transform source and never
+  mutated; invalid/missing data clears the source, pixmap, rotation and
+  disables the view controls.  New Qt-only helper `seestar/gui_qt/preview_view.py`
+  keeps the transform math out of `main_window.py`.  White-balance / stretch /
+  histogram (6.2/6.3/6.4) and pan (6.7) remain `[ ]`.

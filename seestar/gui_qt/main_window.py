@@ -19,11 +19,12 @@ Topology mirrors the historical Tk window (``0d9af8b``): a horizontal
 ``QSplitter`` with a scrollable left control panel (language placeholder +
 ``QTabWidget`` with ``Stacking`` / ``Expert`` / ``Preview controls`` tabs +
 progress/status/log area) and a persistent right preview/action panel
-(preview image + metadata, zoom/resolution/rotation placeholders, histogram
+(preview image + metadata, zoom/resolution/rotation controls, histogram
 placeholder and the action buttons Start / Stop / Analyse / Solver /
-View Inputs / Add Folder / Open Output).  Start/Stop are functional; the other
-action buttons and the preview view/histogram controls are topology
-placeholders for later milestones.
+View Inputs / Add Folder / Open Output).  Start/Stop are functional, as are the
+display-only preview zoom / rotation / resolution controls (M5); the histogram
+controls, the left "Preview controls" tab and the Analyse button remain
+topology placeholders for later milestones.
 
 The Stacking tab exposes input/output/temp/filename, batch size, stacking mode,
 the final-combination business selector, drizzle and local-solver controls; the
@@ -44,7 +45,7 @@ from dataclasses import replace
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -85,6 +86,7 @@ from .final_combine import (
     final_combine_flags,
 )
 from .preview_render import render_preview_image
+from .preview_view import ZOOM_LABELS, render_view
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
@@ -365,6 +367,11 @@ class MainWindow(QMainWindow):
         # ``additional_folders_to_process`` parity).  Passed as a copied list
         # into the RunRequest on Start.
         self._additional_folders: List[str] = []
+        # Preview view state (M5): the copied original display image used as
+        # the source for all display-only view transformations, plus the
+        # accumulated clockwise rotation in degrees (0/90/180/270).
+        self._preview_source: Optional[QImage] = None
+        self._preview_rotation: int = 0
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
 
@@ -564,7 +571,10 @@ class MainWindow(QMainWindow):
         view_layout = QGridLayout(view_group)
         view_layout.addWidget(QLabel("Zoom:"), 0, 0)
         self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["Fit", "100%", "200%", "50%"])
+        self.zoom_combo.addItems(list(ZOOM_LABELS))
+        # Default view is 100% (native size) — Tk parity: the preview starts at
+        # full resolution, not fitted into the (not-yet-laid-out) label.
+        self.zoom_combo.setCurrentText("100%")
         self.zoom_combo.setEnabled(False)
         view_layout.addWidget(self.zoom_combo, 0, 1)
         view_layout.addWidget(QLabel("Resolution:"), 0, 2)
@@ -824,6 +834,9 @@ class MainWindow(QMainWindow):
         self.view_inputs_button.clicked.connect(self._show_input_folder_list)
         self.add_folder_button.clicked.connect(self._add_folder)
         self.open_output_button.clicked.connect(self._open_output_folder)
+        self.zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
+        self.rotate_left_button.clicked.connect(self._on_rotate_left)
+        self.rotate_right_button.clicked.connect(self._on_rotate_right)
         self._update_run_state()
 
     def _wire_controller(self) -> None:
@@ -1316,8 +1329,10 @@ class MainWindow(QMainWindow):
         The metadata label is updated unconditionally (stack name and counts).
         Additionally, when ``payload.data`` is image-like, it is converted
         (strictly display-only, via :func:`preview_render.render_preview_image`)
-        and shown as a pixmap.  Invalid/missing data never raises and clears
-        the image area, so no stale preview survives a failed render.
+        and kept as the copied source image for the view transforms (zoom /
+        rotation / resolution).  Invalid/missing data never raises and clears
+        the stored source, the image area, the rotation state and the view
+        controls, so no stale preview survives a failed render.
         """
         name = payload.stack_name or "(no stack)"
         text = f"Preview: {name}"
@@ -1333,9 +1348,79 @@ class MainWindow(QMainWindow):
 
         image = render_preview_image(payload.data)
         if image is not None and not image.isNull():
-            self.preview_image_label.setPixmap(QPixmap.fromImage(image))
+            # ``render_preview_image`` already returns a deep copy, so storing
+            # it here is safe and independent of the payload's buffers.
+            self._preview_source = image
+            self._preview_rotation = 0
         else:
+            self._preview_source = None
+            self._preview_rotation = 0
+        self._refresh_preview_view()
+
+    # ------------------------------------------------- preview view controls
+    def _on_zoom_changed(self, _index: int) -> None:
+        """Recompute the displayed pixmap/resolution when the zoom label changes."""
+        self._refresh_preview_view()
+
+    def _on_rotate_left(self) -> None:
+        """Rotate the preview 90° counter-clockwise (cumulative, modulo 360)."""
+        if self._preview_source is None:
+            return
+        self._preview_rotation = (self._preview_rotation - 90) % 360
+        self._refresh_preview_view()
+
+    def _on_rotate_right(self) -> None:
+        """Rotate the preview 90° clockwise (cumulative, modulo 360)."""
+        if self._preview_source is None:
+            return
+        self._preview_rotation = (self._preview_rotation + 90) % 360
+        self._refresh_preview_view()
+
+    def _refresh_preview_view(self) -> None:
+        """Repaint the preview image + resolution label from the stored source.
+
+        The source :class:`QImage` is never mutated: ``render_view`` applies the
+        current rotation and zoom to a copy, so zoom reapplies cleanly after
+        rotation and the original display image stays pristine.
+        """
+        source = self._preview_source
+        if source is None or source.isNull():
             self.preview_image_label.clear()
+            self._set_view_controls_enabled(False)
+            self.resolution_label.setText("—")
+            return
+        pixmap = render_view(
+            source,
+            self._preview_rotation,
+            self.zoom_combo.currentText(),
+            self.preview_image_label.size(),
+        )
+        if pixmap is None or pixmap.isNull():
+            self.preview_image_label.clear()
+            self._set_view_controls_enabled(False)
+            self.resolution_label.setText("—")
+            return
+        self.preview_image_label.setPixmap(pixmap)
+        self._set_view_controls_enabled(True)
+        self.resolution_label.setText(self._resolution_text(source, pixmap))
+
+    def _resolution_text(self, source: QImage, pixmap: QPixmap) -> str:
+        """Build the resolution label: original → displayed size + zoom + rotation."""
+        zoom = self.zoom_combo.currentText()
+        text = (
+            f"{source.width()}x{source.height()} → "
+            f"{pixmap.width()}x{pixmap.height()} · {zoom}"
+        )
+        rotation = self._preview_rotation % 360
+        if rotation:
+            text += f" · {rotation}°"
+        return text
+
+    def _set_view_controls_enabled(self, enabled: bool) -> None:
+        """Enable/disable the zoom + rotation view controls together."""
+        self.zoom_combo.setEnabled(enabled)
+        self.rotate_left_button.setEnabled(enabled)
+        self.rotate_right_button.setEnabled(enabled)
 
     def _on_run_finished(self) -> None:
         self._running = False
@@ -1500,6 +1585,16 @@ class MainWindow(QMainWindow):
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def has_preview_image(self) -> bool:
+        """True while a renderable preview source image is stored."""
+        return self._preview_source is not None and not self._preview_source.isNull()
+
+    @property
+    def preview_rotation(self) -> int:
+        """Accumulated preview rotation in clockwise degrees (0/90/180/270)."""
+        return self._preview_rotation
 
     @property
     def shutdown_called(self) -> bool:
