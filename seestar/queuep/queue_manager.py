@@ -850,7 +850,7 @@ logger.debug("Configuration warnings OK.")
 # Global version string to make sure it's always the same
 # M3-D OBSOLETE LEGACY: only referenced by the invalidated
 # ``_process_incremental_drizzle_batch`` (forensic compatibility).
-GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "7.0.2 Boring ostentus"
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = "7.1.0 Boring ostentus"
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
