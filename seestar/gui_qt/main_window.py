@@ -1426,9 +1426,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.right_histogram_group)
 
         # Action buttons (Start/Stop/Analyse/Solver/path actions functional).
-        actions_group = QGroupBox(self._tr("actions_group"))
-        self._bind_text(actions_group, "actions_group")
-        actions_layout = QGridLayout(actions_group)
+        # M25.5-E: a compact single-band QHBoxLayout mirrors the Tk right-panel
+        # ``control_frame`` side-by-side packing instead of the former dense
+        # 2-column grid — run controls (Start / Stop / Analyse / Solver) packed
+        # on the left, folder actions (View Inputs / Add Folder / Open Output)
+        # on the right, with a stretch between them so no button is ever forced
+        # to the full group width (Open Output loses its former 2-column span).
+        self.actions_group = QGroupBox(self._tr("actions_group"))
+        self._bind_text(self.actions_group, "actions_group")
+        actions_layout = QHBoxLayout(self.actions_group)
+        actions_layout.setSpacing(6)
+        actions_layout.setContentsMargins(4, 4, 4, 4)
         self.start_button = QPushButton(self._tr("start"))
         self._bind_text(self.start_button, "start")
         self.stop_button = QPushButton(self._tr("stop"))
@@ -1447,14 +1455,19 @@ class MainWindow(QMainWindow):
         # Output are all wired to user-triggered actions; their enablement is
         # driven by ``_update_path_action_state``.
         self.analyse_button.setEnabled(False)
-        actions_layout.addWidget(self.start_button, 0, 0)
-        actions_layout.addWidget(self.stop_button, 0, 1)
-        actions_layout.addWidget(self.analyse_button, 1, 0)
-        actions_layout.addWidget(self.solver_button, 1, 1)
-        actions_layout.addWidget(self.view_inputs_button, 2, 0)
-        actions_layout.addWidget(self.add_folder_button, 2, 1)
-        actions_layout.addWidget(self.open_output_button, 3, 0, 1, 2)
-        layout.addWidget(actions_group)
+        # Start is the primary action: mark it the default button (Tk
+        # ``Accent.TButton`` parity — the emphasized action).  This is a
+        # property only; no stylesheet, no wiring change.
+        self.start_button.setDefault(True)
+        actions_layout.addWidget(self.start_button)
+        actions_layout.addWidget(self.stop_button)
+        actions_layout.addWidget(self.analyse_button)
+        actions_layout.addWidget(self.solver_button)
+        actions_layout.addStretch(1)
+        actions_layout.addWidget(self.view_inputs_button)
+        actions_layout.addWidget(self.add_folder_button)
+        actions_layout.addWidget(self.open_output_button)
+        layout.addWidget(self.actions_group)
 
         # Honest backend-mode notice (M9 fix): always visible next to Start so
         # a witness knows the default Start click is simulated.

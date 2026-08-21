@@ -135,7 +135,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 13.2 | Scrollable left panel (tabs + progress/log) | `[x]` | `QScrollArea` wrapping `QTabWidget` (incl. the System tab, which now hosts the language combo), progress, log |
 | 13.3 | Left tabs `Stacking` / `Expert` / `System` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs; `System` is Qt-only (M25.5-C) and groups language + GPU + theme |
 | 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches; the right-panel histogram surface (`right_histogram_group` / `right_histogram_status` / `right_histogram_view`) is the *single* live histogram surface (the duplicated Preview-controls-tab histogram was removed in M14) |
-| 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
+| 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled; compact single-band action row (M25.5-E, §22) |
 | 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[x]` | zoom (Fit/100/200/50), resolution label (orig → displayed + zoom + rotation), rotate left/right; display-only, offscreen-tested |
 | 13.7 | Language switch (FR/EN) | `[x]` | placeholder combo is now enabled and participates in the FR/EN switch (M9); moved into the System tab in M25.5-C |
 
@@ -655,6 +655,41 @@ Covered by `tests/test_qt_resources_m255d.py` (new) + adjusted
 `test_qt_shell.py` (default-title assertion) and `test_qt_preview.py` (two
 invalid/non-image-data assertions now expect the non-null placeholder) +
 `git diff --check` clean.  Remaining gaps: actions ergonomics E, audit F, M26.
+
+---
+
+## 22. Action band ergonomics (M25.5-E)
+
+Turns the right-panel "Actions" group from a dense 2-column `QGridLayout`
+(every button full-width in its cell, `open_output_button` spanning both
+columns) into a compact, airy single-band `QHBoxLayout` mirroring the Tk
+right-panel `control_frame` (Start / Stop / Analyze Input Folder / Local
+Solvers… packed `side=LEFT`, View Inputs / Add Folder / Open Output packed
+`side=RIGHT`, `padx=5 pady=5 ipady=2`, `Accent.TButton` on Start).  Layout-only:
+same signals, same enablement, same state keys, same translations, no
+stylesheet.  `[x]` = delivered this lot.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 22.1 | Single-band `QHBoxLayout` (no grid, no full-width buttons) | `[x]` | `self.actions_group` now hosts a `QHBoxLayout` (spacing 6, margins 4); `open_output_button` is the last button instead of a 2-column span |
+| 22.2 | Tk-packing hierarchy: run controls left, folder actions right | `[x]` | Start / Stop / Analyse / Solver packed left, `addStretch(1)`, then View Inputs / Add Folder / Open Output — mirrors Tk `side=LEFT`/`side=RIGHT` |
+| 22.3 | Start emphasized as the default button | `[x]` | `start_button.setDefault(True)` (Tk `Accent.TButton` parity); property-only, no stylesheet, `isDefault()` True |
+| 22.4 | Buttons size naturally (never expanding) | `[x]` | no button has an `Expanding` horizontal policy; the mid-band stretch absorbs extra width |
+
+Notes / decisions:
+
+- **Placement (not moved).**  The action band was already in the persistent
+  right panel (`_build_right_panel`), exactly like Tk's right-panel
+  `control_frame`; the change is internal layout only — no panel redesign and
+  the backend-notice label stays directly below the group.
+- **No stylesheet.**  Start's emphasis uses only `setDefault(True)` (the Qt
+  "default button" accent), consistent with the M25.5-C no-stylesheet policy.
+- **No behaviour change.**  `_wire_controls`, `_update_path_action_state`,
+  `_update_run_state` and the `_running` gating are untouched; the analyse
+  button stays construction-disabled; translations stay keyed and live-switch.
+
+Covered by `tests/test_qt_actions_ergonomics_m255e.py` (new, 15 tests) +
+`git diff --check` clean.  Remaining gaps: audit F, M26.
 
 ---
 
@@ -1215,3 +1250,26 @@ invalid/non-image-data assertions now expect the non-null placeholder) +
   preview/localization/system-tab/worker-lifecycle suites + the import-hygiene
   tests; `git diff --check` clean.  Remaining gaps: actions ergonomics E,
   audit F, M26.
+- **2026-08-21 — lot ZSSS-PYSIDE6-M25.5-E**: action-band ergonomics — the
+  right-panel "Actions" group moves from a dense 2-column `QGridLayout` (every
+  button full-width in its cell, `open_output_button` spanning both columns)
+  to a compact, airy single-band `QHBoxLayout` mirroring the Tk right-panel
+  `control_frame` (checklist 13.5 updated, §22 added).  Start / Stop / Analyse
+  / Solver are packed on the left and View Inputs / Add Folder / Open Output on
+  the right, separated by a mid-band stretch, so no button is ever forced to
+  the full group width and Open Output loses its former 2-column span; the band
+  uses `spacing=6` and `contentsMargins=(4,4,4,4)` (Tk `padx=5 pady=5 ipady=2`
+  feel).  Start is emphasized via `start_button.setDefault(True)` (Tk
+  `Accent.TButton` parity) — a property only, no stylesheet (M25.5-C policy) —
+  and is the sole default button.  Purely a layout change: the button
+  attributes/keys, `_wire_controls` signal connections, `_update_path_action_state`
+  enablement, `_update_run_state` / `_running` gating and the `_refresh_language`
+  translation bindings are all byte-identical; the analyse button stays
+  construction-disabled, and the backend-notice label stays directly below the
+  group.  Tk and the engine are untouched.  Covered by
+  `tests/test_qt_actions_ergonomics_m255e.py` (new, 15 tests) + the existing
+  shell/file-actions/analyzer-launch/expert/stacking/localization/system-tab/
+  resources/worker-lifecycle suites + the import-hygiene tests; full Qt suite
+  `test_qt_*.py` = 543 passed + 1 known pre-existing failure
+  (`test_tk_gui_still_imports`, TkAgg headless); `git diff --check` clean.
+  Remaining gaps: audit F, M26.
