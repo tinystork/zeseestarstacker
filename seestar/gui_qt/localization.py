@@ -89,6 +89,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "stretch_white": {"en": "White point", "fr": "Point blanc"},
     "stretch_gamma": {"en": "Gamma", "fr": "Gamma"},
     "stretch_reset": {"en": "Reset Stretch", "fr": "Réinitialiser l'étirement"},
+    "auto_stretch": {"en": "Auto Stretch", "fr": "Étirement auto"},
     "bcs_group": {"en": "Image Adjustments", "fr": "Ajustements d'image"},
     "brightness": {"en": "Brightness", "fr": "Luminosité"},
     "contrast": {"en": "Contrast", "fr": "Contraste"},
@@ -96,6 +97,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "bcs_reset": {"en": "Reset Adjust.", "fr": "Réinitialiser"},
     "histogram_empty": {"en": "No preview", "fr": "Aucun aperçu"},
     "histogram_stats": {"en": "Stats:", "fr": "Stats :"},
+    "histo_auto_zoom": {"en": "Auto zoom histogram", "fr": "Zoom auto histogramme"},
+    "histo_reset": {"en": "Reset Histogram", "fr": "Réinitialiser l'histogramme"},
+    "histo_zoom": {"en": "Zoom Histogram", "fr": "Zoom histogramme"},
     # Initial preview auto-load states (M12): auto-load first FITS.
     "preview_no_input_folder": {
         "en": "Input folder not found or not set",

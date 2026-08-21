@@ -255,34 +255,39 @@ def test_settings_state_invalid_language_falls_back():
 def test_preview_controls_labels_localize(window):
     assert window.wb_group.title() == "White balance"
     assert window.stretch_group.title() == "Stretch"
-    assert window.histogram_group.title() == "Histogram"
-    assert window.histogram_status.text() == "No preview"
     assert window.wb_reset_button.text() == "Reset"
+    assert window.auto_stretch_button.text() == "Auto Stretch"
 
     window.language_combo.setCurrentText("Français")
 
     assert window.wb_group.title() == "Balance des blancs"
     assert window.stretch_group.title() == "Étirement"
-    assert window.histogram_group.title() == "Histogramme"
-    assert window.histogram_status.text() == "Aucun aperçu"
     assert window.wb_reset_button.text() == "Réinitialiser"
+    assert window.auto_stretch_button.text() == "Étirement auto"
 
     # Round-trip back to English.
     window.language_combo.setCurrentText("English")
     assert window.wb_group.title() == "White balance"
-    assert window.histogram_status.text() == "No preview"
+    assert window.auto_stretch_button.text() == "Auto Stretch"
 
 
 def test_right_panel_histogram_labels_localize(window):
     assert window.right_histogram_group.title() == "Histogram"
     assert window.right_histogram_status.text() == "No preview"
+    assert window.auto_zoom_histo_check.text() == "Auto zoom histogram"
+    assert window.hist_reset_view_button.text() == "Reset Histogram"
+    assert window.hist_zoom_button.text() == "Zoom Histogram"
 
     window.language_combo.setCurrentText("Français")
 
     assert window.right_histogram_group.title() == "Histogramme"
     assert window.right_histogram_status.text() == "Aucun aperçu"
+    assert window.auto_zoom_histo_check.text() == "Zoom auto histogramme"
+    assert window.hist_reset_view_button.text() == "Réinitialiser l'histogramme"
+    assert window.hist_zoom_button.text() == "Zoom histogramme"
 
     # Round-trip back to English.
     window.language_combo.setCurrentText("English")
     assert window.right_histogram_group.title() == "Histogram"
     assert window.right_histogram_status.text() == "No preview"
+    assert window.auto_zoom_histo_check.text() == "Auto zoom histogram"

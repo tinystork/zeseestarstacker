@@ -296,7 +296,7 @@ def test_right_panel_has_persistent_histogram_surface():
             assert hasattr(win, attr), f"missing right-panel histogram {attr}"
         assert win.right_histogram_group.title() == "Histogram"
         assert win.right_histogram_status.text() == "No preview"
-        assert win.right_histogram_view.pixmap().isNull()
+        assert not win.right_histogram_view.has_data
         # The group is owned by the persistent right panel, not a left tab.
         assert win.right_histogram_group.parent() is win.right_panel
         # It persists across left-tab switches (same widget identity).

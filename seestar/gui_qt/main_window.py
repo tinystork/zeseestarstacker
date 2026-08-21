@@ -23,7 +23,8 @@ progress/status/log area) and a persistent right preview/action panel
 display histogram and the action buttons Start / Stop / Analyse / Solver /
 View Inputs / Add Folder / Open Output).  Start/Stop are functional, as are the
 display-only preview zoom / rotation / resolution controls (M5) and the
-display-only preview WB / stretch / histogram controls (M10).  The Analyse
+display-only preview WB / stretch / histogram controls (M10/M14, with the
+single interactive right-panel histogram).  The Analyse
 button launches the standalone ZeAnalyser
 product on the current input folder (M7) via a stdlib-only launch seam; it
 never touches the stacking backend.
@@ -131,10 +132,12 @@ from .preview_adjust import (
     WHITE_POINT_MIN,
     WHITE_POINT_STEP,
     apply_preview_adjustments,
+    apply_preview_wb,
     compute_auto_wb,
+    compute_auto_stretch,
     compute_histogram_stats,
-    render_histogram_pixmap,
 )
+from .histogram_view import HistogramView
 from .preview_view import ZOOM_LABELS, render_view
 from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
 from .run_bridge import RunRequest, build_run_request as _build_run_request
@@ -910,9 +913,17 @@ class MainWindow(QMainWindow):
         self._add_form_row(stretch_form, "stretch_black", self.stretch_bp_row)
         self._add_form_row(stretch_form, "stretch_white", self.stretch_wp_row)
         self._add_form_row(stretch_form, "stretch_gamma", self.stretch_gamma_row)
+        self.auto_stretch_button = QPushButton(self._tr("auto_stretch"))
+        self._bind_text(self.auto_stretch_button, "auto_stretch")
         self.stretch_reset_button = QPushButton(self._tr("stretch_reset"))
         self._bind_text(self.stretch_reset_button, "stretch_reset")
-        stretch_form.addRow("", self.stretch_reset_button)
+        stretch_buttons = QWidget()
+        stretch_btn_row = QHBoxLayout(stretch_buttons)
+        stretch_btn_row.setContentsMargins(0, 0, 0, 0)
+        stretch_btn_row.addWidget(self.auto_stretch_button)
+        stretch_btn_row.addWidget(self.stretch_reset_button)
+        stretch_btn_row.addStretch(1)
+        stretch_form.addRow("", stretch_buttons)
         layout.addWidget(self.stretch_group)
 
         # Image adjustments: brightness / contrast / saturation (Tk parity).
@@ -963,19 +974,6 @@ class MainWindow(QMainWindow):
         bcs_form.addRow("", self.bcs_reset_button)
         layout.addWidget(self.bcs_group)
 
-        # Display histogram surface (real signal, not a placeholder).
-        self.histogram_group = QGroupBox(self._tr("histogram_group"))
-        self._bind_text(self.histogram_group, "histogram_group")
-        histo_layout = QVBoxLayout(self.histogram_group)
-        self.histogram_status = QLabel(self._tr("histogram_empty"))
-        self.histogram_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        histo_layout.addWidget(self.histogram_status)
-        self.histogram_view = QLabel()
-        self.histogram_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.histogram_view.setMinimumSize(256, 64)
-        histo_layout.addWidget(self.histogram_view)
-        layout.addWidget(self.histogram_group)
-
         self._set_preview_controls_enabled(False)
         layout.addStretch(1)
         return panel
@@ -985,9 +983,9 @@ class MainWindow(QMainWindow):
         + view + histogram + action buttons).
 
         The histogram group here is the persistent right-panel surface required
-        by checklist item 13.4.  It mirrors the Preview controls tab histogram:
-        both are fed by the same display-only pixmap/stats in
-        :meth:`_refresh_histogram`, so they update and clear together.
+        by checklist item 13.4.  It is the *single* live histogram surface (the
+        duplicated Preview-controls-tab histogram was removed in M14) and gains
+        the Tk histogram interactions via :class:`HistogramView`.
         """
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -1034,20 +1032,43 @@ class MainWindow(QMainWindow):
         layout.addWidget(view_group)
 
         # Persistent display histogram (Tk parity, checklist item 13.4).  This
-        # is the *right-panel* surface; the Preview controls tab keeps its own
-        # ``histogram_group`` / ``histogram_status`` / ``histogram_view``.  The
-        # two surfaces share the same derived preview data via
-        # ``_refresh_histogram`` / ``_render_histogram_status``.
+        # is now the *single* live histogram surface: the duplicated tab
+        # histogram was removed in M14, and this right-panel surface gained the
+        # Tk histogram interactions (auto-zoom / reset view / zoom / reset zoom
+        # + BP/WP line dragging via ``HistogramView``).
         self.right_histogram_group = QGroupBox(self._tr("histogram_group"))
         self._bind_text(self.right_histogram_group, "histogram_group")
         right_histo_layout = QVBoxLayout(self.right_histogram_group)
         self.right_histogram_status = QLabel(self._tr("histogram_empty"))
         self.right_histogram_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_histo_layout.addWidget(self.right_histogram_status)
-        self.right_histogram_view = QLabel()
-        self.right_histogram_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.right_histogram_view = HistogramView()
         self.right_histogram_view.setMinimumSize(256, 64)
-        right_histo_layout.addWidget(self.right_histogram_view)
+        right_histo_layout.addWidget(self.right_histogram_view, 1)
+        # Histogram toolbar (Tk ``histo_toolbar`` parity).
+        histo_toolbar = QWidget()
+        histo_toolbar_row = QHBoxLayout(histo_toolbar)
+        histo_toolbar_row.setContentsMargins(0, 0, 0, 0)
+        self.auto_zoom_histo_check = QCheckBox(self._tr("histo_auto_zoom"))
+        self._bind_text(self.auto_zoom_histo_check, "histo_auto_zoom")
+        self.hist_reset_view_button = QPushButton(self._tr("histo_reset"))
+        self._bind_text(self.hist_reset_view_button, "histo_reset")
+        self.hist_zoom_button = QPushButton(self._tr("histo_zoom"))
+        self._bind_text(self.hist_zoom_button, "histo_zoom")
+        self.hist_reset_button = QPushButton("R")
+        self.hist_reset_button.setToolTip("Reset zoom")
+        # Inert until a renderable preview arrives (matches the WB/stretch
+        # controls); ``_set_preview_controls_enabled`` re-arms them.
+        self.auto_zoom_histo_check.setEnabled(False)
+        self.hist_reset_view_button.setEnabled(False)
+        self.hist_zoom_button.setEnabled(False)
+        self.hist_reset_button.setEnabled(False)
+        histo_toolbar_row.addWidget(self.auto_zoom_histo_check)
+        histo_toolbar_row.addWidget(self.hist_reset_view_button)
+        histo_toolbar_row.addWidget(self.hist_zoom_button)
+        histo_toolbar_row.addWidget(self.hist_reset_button)
+        histo_toolbar_row.addStretch(1)
+        right_histo_layout.addWidget(histo_toolbar)
         layout.addWidget(self.right_histogram_group)
 
         # Action buttons (Start/Stop/Analyse/Solver/path actions functional).
@@ -1315,8 +1336,23 @@ class MainWindow(QMainWindow):
         self.auto_wb_button.clicked.connect(self._on_auto_wb)
         self.wb_reset_button.clicked.connect(self._on_wb_reset)
         self.stretch_combo.currentIndexChanged.connect(self._on_stretch_changed)
+        self.auto_stretch_button.clicked.connect(self._on_auto_stretch)
         self.stretch_reset_button.clicked.connect(self._on_stretch_reset)
         self.bcs_reset_button.clicked.connect(self._on_bcs_reset)
+        # Histogram interactions (M14): the persistent right-panel histogram
+        # reproduces the Tk auto-zoom / reset / zoom / reset-zoom behaviours and
+        # mirrors BP/WP line drags back into the stretch sliders.
+        self.auto_zoom_histo_check.toggled.connect(self._on_hist_auto_zoom_toggled)
+        self.hist_reset_view_button.clicked.connect(
+            lambda *_: self.right_histogram_view.reset_histogram_view()
+        )
+        self.hist_zoom_button.clicked.connect(
+            lambda *_: self.right_histogram_view.zoom_histogram()
+        )
+        self.hist_reset_button.clicked.connect(
+            lambda *_: self.right_histogram_view.reset_zoom()
+        )
+        self.right_histogram_view.rangeChanged.connect(self._on_hist_range_changed)
         # Initial-preview auto-load delivery: the daemon worker thread emits
         # this signal; the explicit queued connection guarantees the slot runs
         # on the GUI thread even though the emitter is not a QThread.
@@ -2101,6 +2137,38 @@ class MainWindow(QMainWindow):
         self.stretch_wp_spin.setValue(DEFAULT_WHITE_POINT)
         self.stretch_gamma_spin.setValue(DEFAULT_GAMMA)
 
+    def _on_auto_stretch(self) -> None:
+        """Auto Stretch (Tk ``apply_auto_stretch`` parity, display-only).
+
+        Black/white points are computed from the *WB-only* derived image (the
+        same source the Tk ``image_data_wb`` uses), written into the black/
+        white slider+spin controls, and the stretch method is switched to
+        ``asinh`` (Asinh).  The change callbacks then refresh the display.
+        """
+        if self._preview_source is None or self._preview_source.isNull():
+            return
+        wb_only = apply_preview_wb(self._preview_source, wb=self._wb)
+        if wb_only is None or wb_only.isNull():
+            return
+        bp, wp = compute_auto_stretch(wb_only)
+        self.stretch_combo.setCurrentText("asinh")
+        self.stretch_bp_spin.setValue(round(float(bp), 4))
+        self.stretch_wp_spin.setValue(round(float(wp), 4))
+
+    def _on_hist_range_changed(self, bp: float, wp: float) -> None:
+        """Mirror a histogram BP/WP drag into the stretch sliders (Tk
+        ``update_stretch_from_histogram``)."""
+        self.stretch_bp_spin.setValue(round(float(bp), 4))
+        self.stretch_wp_spin.setValue(round(float(wp), 4))
+
+    def _on_hist_auto_zoom_toggled(self, checked: bool) -> None:
+        """Toggle auto-zoom on the histogram (Tk ``auto_zoom_histogram_var``)."""
+        self.right_histogram_view.auto_zoom_enabled = bool(checked)
+        if checked:
+            self.right_histogram_view.zoom_histogram()
+        else:
+            self.right_histogram_view.reset_zoom()
+
     def _on_bcs_changed(self, *_ignored) -> None:
         """Update brightness/contrast/saturation and re-render (display-only)."""
         self._brightness = self.brightness_spin.value()
@@ -2123,8 +2191,10 @@ class MainWindow(QMainWindow):
         saturation) is produced from it, then ``render_view`` applies the
         current rotation and zoom to that derived image, so zoom reapplies
         cleanly after rotation and the original display image stays pristine.
-        The display histogram is computed from the same derived (displayed)
-        image, so it tracks every adjustment too.
+        The display histogram is computed from a *WB-only* derived image (the
+        Tk ``image_data_wb`` source), so it tracks white balance but not the
+        stretch / gamma / brightness-contrast-saturation (M14 histogram-source
+        alignment).
         """
         source = self._preview_source
         if source is None or source.isNull():
@@ -2134,6 +2204,9 @@ class MainWindow(QMainWindow):
             self.resolution_label.setText("—")
             self._refresh_histogram(None)
             return
+        # Histogram source: WB-only (Tk ``image_data_wb``), never the fully
+        # stretched display image.
+        wb_only = apply_preview_wb(source, wb=self._wb)
         adjusted = apply_preview_adjustments(
             source,
             wb=self._wb,
@@ -2164,7 +2237,7 @@ class MainWindow(QMainWindow):
         self._set_view_controls_enabled(True)
         self._set_preview_controls_enabled(True)
         self.resolution_label.setText(self._resolution_text(source, pixmap))
-        self._refresh_histogram(adjusted)
+        self._refresh_histogram(wb_only)
 
     def _resolution_text(self, source: QImage, pixmap: QPixmap) -> str:
         """Build the resolution label: original → displayed size + zoom + rotation."""
@@ -2193,6 +2266,7 @@ class MainWindow(QMainWindow):
         self.auto_wb_button.setEnabled(enabled)
         self.wb_reset_button.setEnabled(enabled)
         self.stretch_combo.setEnabled(enabled)
+        self.auto_stretch_button.setEnabled(enabled)
         for spin in (
             self.stretch_bp_spin,
             self.stretch_wp_spin,
@@ -2215,38 +2289,43 @@ class MainWindow(QMainWindow):
         ):
             slider.setEnabled(enabled)
         self.bcs_reset_button.setEnabled(enabled)
+        # Histogram interaction toolbar (M14).
+        # Guarded with ``hasattr``: the Preview controls tab is built before
+        # the right panel that owns the histogram toolbar.
+        for attr in (
+            "auto_zoom_histo_check",
+            "hist_reset_view_button",
+            "hist_zoom_button",
+            "hist_reset_button",
+        ):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
 
     def _refresh_histogram(self, image: Optional[QImage]) -> None:
-        """Update both display histogram surfaces from the (adjusted) preview.
+        """Update the single persistent histogram surface from the WB-only image.
 
-        The Preview controls tab surface (``histogram_view``) and the persistent
-        right-panel surface (``right_histogram_view``) are fed the same pixmap;
-        the status labels are re-rendered together by
-        :meth:`_render_histogram_status`.
+        The right-panel ``HistogramView`` is the only live histogram surface
+        (the M10 duplicated tab histogram was removed in M14).  It is fed the
+        *WB-only* derived image (Tk ``image_data_wb`` source) and its BP/WP
+        lines are re-synced to the current stretch slider values.
         """
         if image is None or image.isNull():
-            self.histogram_view.clear()
             self.right_histogram_view.clear()
             self._histogram_stats = None
             self._render_histogram_status()
             return
-        pixmap = render_histogram_pixmap(image)
-        if pixmap is not None and not pixmap.isNull():
-            self.histogram_view.setPixmap(pixmap)
-            self.right_histogram_view.setPixmap(pixmap)
-        else:
-            self.histogram_view.clear()
-            self.right_histogram_view.clear()
+        self.right_histogram_view.set_data(image)
+        self.right_histogram_view.set_range(self._black_point, self._white_point)
         self._histogram_stats = compute_histogram_stats(image)
         self._render_histogram_status()
 
     def _render_histogram_status(self) -> None:
-        """Render both histogram status labels from stored raw stats + language."""
+        """Render the single histogram status label from stored stats + language."""
         if self._histogram_stats is None:
             text = self._tr("histogram_empty")
         else:
             text = f"{self._tr('histogram_stats')} {self._histogram_stats}"
-        self.histogram_status.setText(text)
         self.right_histogram_status.setText(text)
 
     def _on_run_finished(self) -> None:

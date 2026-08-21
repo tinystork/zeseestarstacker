@@ -823,9 +823,10 @@ def test_view_controls_do_not_alter_metadata_label(qapp):
 
 
 # --------------------------------------------------------------------------
-# M10: preview controls (WB / stretch / histogram) — display-only
+# M10/M14: preview controls (WB / stretch) — display-only.  The duplicated tab
+# histogram was removed in M14; the right-panel histogram is the single surface.
 # --------------------------------------------------------------------------
-def test_preview_controls_tab_has_real_wb_stretch_histogram(qapp):
+def test_preview_controls_tab_has_wb_stretch_and_no_histogram(qapp):
     win = MainWindow()
     try:
         for attr in (
@@ -836,11 +837,13 @@ def test_preview_controls_tab_has_real_wb_stretch_histogram(qapp):
             "wb_reset_button",
             "stretch_group",
             "stretch_combo",
-            "histogram_group",
-            "histogram_status",
-            "histogram_view",
+            "auto_stretch_button",
         ):
             assert hasattr(win, attr), f"missing preview-control {attr}"
+        # M14: the duplicated tab histogram is removed (not merely hidden), so
+        # the tab no longer owns any histogram widgets.
+        for removed in ("histogram_group", "histogram_status", "histogram_view"):
+            assert not hasattr(win, removed), f"tab histogram {removed} should be gone"
         assert [
             win.stretch_combo.itemText(i)
             for i in range(win.stretch_combo.count())
@@ -855,7 +858,8 @@ def test_preview_controls_tab_has_real_wb_stretch_histogram(qapp):
         assert not win.wb_r_spin.isEnabled()
         assert not win.wb_reset_button.isEnabled()
         assert not win.stretch_combo.isEnabled()
-        assert win.histogram_view.pixmap().isNull()
+        assert not win.auto_stretch_button.isEnabled()
+        assert not win.right_histogram_view.has_data
     finally:
         win.shutdown()
 
@@ -867,12 +871,13 @@ def test_preview_controls_enable_with_renderable_preview(qapp):
         assert win.wb_r_spin.isEnabled()
         assert win.wb_reset_button.isEnabled()
         assert win.stretch_combo.isEnabled()
-        assert not win.histogram_view.pixmap().isNull()
+        assert win.auto_stretch_button.isEnabled()
+        assert win.right_histogram_view.has_data
         # Clearing disables them again.
         win._on_preview(BackendPreviewPayload(data=None, stack_name="none"))
         assert not win.wb_r_spin.isEnabled()
         assert not win.stretch_combo.isEnabled()
-        assert win.histogram_view.pixmap().isNull()
+        assert not win.right_histogram_view.has_data
     finally:
         win.shutdown()
 
@@ -977,20 +982,20 @@ def test_auto_stretch_expands_low_contrast_gradient(qapp):
 def test_histogram_updates_and_clears(qapp):
     win = MainWindow()
     try:
-        assert win.histogram_view.pixmap().isNull()
+        assert not win.right_histogram_view.has_data
         assert win._histogram_stats is None
 
         arr = np.zeros((4, 4, 3), dtype=np.uint8)
         arr[:, :, 0] = 200
         win._on_preview(BackendPreviewPayload(data=arr, stack_name="h"))
-        assert not win.histogram_view.pixmap().isNull()
+        assert win.right_histogram_view.has_data
         assert win._histogram_stats is not None
         assert "R" in win._histogram_stats
-        assert "255" in win._histogram_stats
+        assert "200" in win._histogram_stats
 
         # Non-image preview clears the histogram without crashing.
         win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
-        assert win.histogram_view.pixmap().isNull()
+        assert not win.right_histogram_view.has_data
         assert win._histogram_stats is None
     finally:
         win.shutdown()
@@ -1018,30 +1023,29 @@ def test_histogram_updates_when_controls_change(qapp):
         win.shutdown()
 
 
-def test_right_panel_histogram_mirrors_tab_surface(qapp):
-    """Both histogram surfaces (tab + persistent right panel) update/clear together."""
+def test_right_panel_is_single_histogram_surface(qapp):
+    """M14: the right-panel histogram is the single live surface (no duplicate)."""
     win = MainWindow()
     try:
-        assert win.histogram_view.pixmap().isNull()
-        assert win.right_histogram_view.pixmap().isNull()
+        # The former tab surface no longer exists.
+        assert not hasattr(win, "histogram_view")
+        assert not hasattr(win, "histogram_status")
+        assert not hasattr(win, "histogram_group")
+        assert not win.right_histogram_view.has_data
         assert win.right_histogram_status.text() == "No preview"
 
         arr = np.zeros((4, 4, 3), dtype=np.uint8)
         arr[:, :, 0] = 200
         win._on_preview(BackendPreviewPayload(data=arr, stack_name="rh"))
 
-        assert not win.histogram_view.pixmap().isNull()
-        assert not win.right_histogram_view.pixmap().isNull()
-        # Both status labels are driven by the same stored stats.
+        assert win.right_histogram_view.has_data
         assert win._histogram_stats is not None
-        assert win.right_histogram_status.text() == win.histogram_status.text()
         assert "Stats:" in win.right_histogram_status.text()
-        assert "255" in win.right_histogram_status.text()
+        assert "200" in win.right_histogram_status.text()
 
-        # Non-image preview clears both surfaces together.
+        # Non-image preview clears the single surface.
         win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
-        assert win.histogram_view.pixmap().isNull()
-        assert win.right_histogram_view.pixmap().isNull()
+        assert not win.right_histogram_view.has_data
         assert win._histogram_stats is None
         assert win.right_histogram_status.text() == "No preview"
     finally:

@@ -309,6 +309,39 @@ def apply_preview_adjustments(
     return _array_to_qimage(np, out)
 
 
+def apply_preview_wb(
+    source: Optional[QImage],
+    *,
+    wb=NEUTRAL_WB,
+) -> Optional[QImage]:
+    """Return a WB-only copy of ``source`` (white balance applied, no stretch).
+
+    The Tk GUI computes its preview histogram from the *WB-only* image
+    (``PreviewManager.image_data_wb``), i.e. after white balance but *before*
+    the display stretch / gamma / brightness-contrast-saturation.  This helper
+    reproduces exactly that intermediate image so the Qt histogram can share
+    the Tk data source (M14 histogram-source alignment).  Grayscale data is
+    unaffected by white balance, so it returns a plain copy.  The input image
+    is never mutated.
+    """
+    if source is None or source.isNull():
+        return None
+    wb = tuple(float(x) for x in wb)
+    if wb == NEUTRAL_WB:
+        return source.copy()
+    np = _load_numpy()
+    if np is None:
+        return source.copy()
+    arr = _image_to_array(np, source)
+    if arr is None:
+        return source.copy()
+    f = arr.astype(np.float64) / 255.0
+    f = _apply_wb(np, f, wb)
+    f = np.clip(f, 0.0, 1.0)
+    out = np.clip(np.rint(f * 255.0), 0, 255).astype(np.uint8)
+    return _array_to_qimage(np, out)
+
+
 def compute_auto_wb(image: Optional[QImage]) -> tuple:
     """Compute auto white-balance gains from a display image (Tk parity).
 
@@ -350,6 +383,57 @@ def compute_auto_wb(image: Optional[QImage]) -> tuple:
     return (gain_r, gain_g, gain_b)
 
 
+def compute_auto_stretch(image: Optional[QImage]) -> tuple:
+    """Compute auto-stretch black/white points (0-1) from a WB-only image.
+
+    Mirrors ``seestar.tools.stretch.apply_auto_stretch`` plus the normalisation
+    performed in ``SeestarStackerGUI.apply_auto_stretch``: the luminance is
+    built from the (WB-only) image, the black/white points are the 1st / 99th
+    percentiles of the finite luminance, then both are mapped through the
+    full-image min/max into the ``[0, 1]`` UI scale the stretch sliders use
+    (with a ``1e-4`` minimum separation).  Missing/non-image/too-small input
+    returns the neutral defaults and never raises.
+    """
+    np = _load_numpy()
+    if np is None:
+        return (DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT)
+    arr = _image_to_array(np, image)
+    if arr is None:
+        return (DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT)
+    f = arr.astype(np.float64) / 255.0
+    if f.ndim == 3 and f.shape[2] >= 3:
+        luminance = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
+    elif f.ndim == 2:
+        luminance = f
+    else:
+        return (DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT)
+
+    finite_lum = luminance[np.isfinite(luminance)]
+    if finite_lum.size < 20:
+        return (DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT)
+
+    bp_calc = float(np.percentile(finite_lum, 1.0))
+    wp_calc = float(np.percentile(finite_lum, 99.0))
+    min_separation = 1e-4
+    bp_calc = float(np.clip(bp_calc, 0.0, 1.0 - min_separation))
+    wp_calc = float(np.clip(wp_calc, bp_calc + min_separation, 1.0))
+
+    # Normalise through the full-image min/max (Tk maps the percentile values
+    # into the UI 0-1 slider scale using the whole WB image's data range).
+    min_data_val = float(np.nanmin(f))
+    max_data_val = float(np.nanmax(f))
+    range_data = max_data_val - min_data_val
+    if range_data < 1e-9:
+        range_data = 1.0
+    bp_ui = float(np.clip((bp_calc - min_data_val) / range_data, 0.0, 1.0))
+    wp_ui = float(np.clip((wp_calc - min_data_val) / range_data, 0.0, 1.0))
+    if wp_ui <= bp_ui + 1e-4:
+        wp_ui = min(1.0, bp_ui + 1e-4)
+    if bp_ui >= wp_ui - 1e-4:
+        bp_ui = max(0.0, wp_ui - 1e-4)
+    return (bp_ui, wp_ui)
+
+
 # --------------------------------------------------------------------------
 # Display histogram (unchanged M10 surface).
 # --------------------------------------------------------------------------
@@ -377,6 +461,30 @@ def compute_histogram(image: Optional[QImage], bins: int = 256) -> Optional[Dict
         hist, _ = np.histogram(plane, bins=bins, range=(0, 256))
         result[name] = hist.astype(np.int64)
     return result
+
+
+def compute_histogram_percentile(
+    image: Optional[QImage], percentile: float = 99.5
+) -> Optional[float]:
+    """Return the ``percentile`` pixel level (0-1) of the image, or ``None``.
+
+    Used by the interactive histogram's auto-zoom / zoom actions (Tk
+    ``HistogramWidget.zoom_histogram`` takes the 99.5th percentile of the
+    flattened pixel data as the zoomed right edge).  Computed over the finite
+    pixels of every channel (grayscale included); empty/invalid input returns
+    ``None`` and never raises.
+    """
+    np = _load_numpy()
+    if np is None:
+        return None
+    arr = _image_to_array(np, image)
+    if arr is None:
+        return None
+    f = arr.astype(np.float64) / 255.0
+    finite = f[np.isfinite(f)]
+    if finite.size == 0:
+        return None
+    return float(np.percentile(finite, float(percentile)))
 
 
 def compute_histogram_stats(image: Optional[QImage]) -> Optional[str]:

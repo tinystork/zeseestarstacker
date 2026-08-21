@@ -71,8 +71,8 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 |---|---|---|---|
 | 6.1 | Preview image rendering (array → `QImage`) | `[x]` | `preview_render` (display-only) |
 | 6.2 | White-balance controls | `[x]` | `preview_adjust` per-channel R/G/B gains (neutral 1.0) shown as slider + numeric spinbox pairs, `Auto WB` (mode-based gains from the display image, Tk parity) + `Reset`; Tk range 0.1–5.0 step 0.01; display-only, re-renders the derived preview immediately (M10/M13) |
-| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (Asinh default, Tk parity) + black/white/gamma slider + numeric spinbox controls (Tk defaults 0.01/0.99/1.0, ranges/steps 0–1/0.001 and 0.1–5/0.01) + `Reset Stretch`; `preview_adjust` tone curves reproduce the Tk `StretchPresets` math; display-only, re-renders the derived preview (M10/M13) |
-| 6.4 | Histogram | `[x]` | `preview_adjust` computes per-channel histograms + stats from the displayed image; `histogram_view` (QPixmap bars) + `histogram_status` (localized empty/stats) update on preview/control changes and clear on non-image input |
+| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (Asinh default, Tk parity) + black/white/gamma slider + numeric spinbox controls (Tk defaults 0.01/0.99/1.0, ranges/steps 0–1/0.001 and 0.1–5/0.01) + `Auto Stretch` (percentile bp/wp from the WB-only image → Asinh) + `Reset Stretch`; `preview_adjust` tone curves reproduce the Tk `StretchPresets` math; display-only, re-renders the derived preview (M10/M13/M14) |
+| 6.4 | Histogram | `[x]` | single live surface in the persistent right panel (`HistogramView` QWidget) fed by the *WB-only* derived image (Tk `image_data_wb` source); reproduces the Tk auto-zoom / reset-view / zoom / reset-zoom interactions + BP/WP line dragging → `rangeChanged`; localized stats label; the M10 duplicated Preview-controls-tab histogram was removed (M10/M14) |
 | 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
 | 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
 | 6.7 | Pan | `[ ]` | |
@@ -133,7 +133,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 13.1 | Left/right `QSplitter` (control panel + persistent preview/action panel) | `[x]` | `_build_central` + `_build_left_panel` / `_build_right_panel` |
 | 13.2 | Scrollable left panel (language + tabs + progress/log) | `[x]` | `QScrollArea` wrapping language combo, `QTabWidget`, progress, log |
 | 13.3 | Left tabs `Stacking` / `Expert` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs |
-| 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches; the right-panel histogram surface (`right_histogram_group` / `right_histogram_status` / `right_histogram_view`) is live and fed by the same display-only pixmap/stats as the Preview controls tab histogram (M10/C1) |
+| 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches; the right-panel histogram surface (`right_histogram_group` / `right_histogram_status` / `right_histogram_view`) is the *single* live histogram surface (the duplicated Preview-controls-tab histogram was removed in M14) |
 | 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
 | 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[x]` | zoom (Fit/100/200/50), resolution label (orig → displayed + zoom + rotation), rotate left/right; display-only, offscreen-tested |
 | 13.7 | Language switch (FR/EN) | `[x]` | placeholder combo is now enabled and participates in the FR/EN switch (M9) |
@@ -341,3 +341,28 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   and no FITS/PNG writes.  Covered by `tests/test_qt_initial_preview.py` (real
   FITS load, missing/empty folder, 2D Bayer debayer → 3 channels, GUI-thread
   responsiveness smoke, redundant-reload guard).
+- **2026-08-21 — lot ZSSS-QT-FP-M14**: histogram surface consolidation +
+  Auto Stretch action + histogram-source alignment (display-only).  The
+  duplicated Preview-controls-tab histogram was **removed** (not merely
+  hidden); the persistent right-panel histogram is now the single live
+  surface (checklist item 13.4 stays true).  A new Qt-only
+  `seestar/gui_qt/histogram_view.py` `HistogramView` (pure `QPainter`, lazy
+  numpy) reproduces the Tk `HistogramWidget` interactions — auto-zoom
+  (`Auto zoom histogram` checkbox), `Reset Histogram`, `Zoom Histogram` and
+  `Reset zoom` (`R`) plus BP/WP line dragging that emits `rangeChanged` (the
+  Qt equivalent of Tk `update_stretch_from_histogram`
+  `V_HistoCallbackRefreshLight_1`), which mirrors the dragged values back into
+  the black/white slider+spin controls.  The stretch group gains an
+  `Auto Stretch` button (Tk `apply_auto_stretch` parity): it computes the
+  black/white points from the *WB-only* derived image (percentile 1%/99% of
+  the luminance, normalised into the 0-1 slider scale via the WB image's
+  min/max) and switches the stretch method to `Asinh`, updating the bp/wp
+  slider+spin values and refreshing the display.  Histogram source aligned to
+  Tk: the right-panel histogram is now computed from the WB-only derived
+  image (`apply_preview_wb`, Tk `image_data_wb`) instead of the fully-stretched
+  display image, so it reacts to white balance but not to stretch / gamma /
+  brightness-contrast-saturation.  No engine/Tk/settings changes; no FITS/PNG
+  writes; `_preview_source` is never mutated (all helpers operate on copies).
+  Covered by `tests/test_qt_histogram_m14.py` (+ re-pointed
+  `tests/test_qt_preview.py`, `tests/test_qt_localization.py` and
+  `tests/test_qt_shell.py`), and the existing import-hygiene tests.
