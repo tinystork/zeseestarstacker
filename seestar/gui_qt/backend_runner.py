@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import enum
 import importlib
+from queue import Empty
 import time
 from typing import Any, Callable, Optional
 
@@ -363,6 +364,48 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             except Exception:
                 pass
 
+    @staticmethod
+    def _drain_gui_event_queue(stacker: Any) -> None:
+        """Drain the stacker's deferred GUI event queue, invoking each callback.
+
+        The real ``SeestarQueuedStacker`` does **not** call its progress
+        callback directly: :meth:`SeestarQueuedStacker.update_progress` pushes a
+        closure onto ``stacker.gui_event_queue`` (a thread-safe ``Queue``) and
+        expects the GUI layer to drain it (the Tk GUI does this from a periodic
+        ``after`` loop).  The Qt bridge has no such loop, so without this drain
+        the progress/log callbacks installed by
+        :meth:`SeestarQueuedStackerBackend.run` would never fire and the Qt GUI
+        would never see progress or log lines.
+
+        The queued items are the engine's own closures that already carry the
+        right signature (``cb(message, progress, level)``); invoking them here
+        on the worker thread re-enters the backend's progress adapter, which
+        forwards to the worker's ``progress_callback``/``log_callback`` (queued
+        Qt signals to the GUI thread).  This is byte-for-byte the role the Tk
+        GUI plays, moved into the backend so no Qt widget ever needs the queue.
+        """
+        queue = getattr(stacker, "gui_event_queue", None)
+        if queue is None:
+            return
+        while True:
+            try:
+                cb = queue.get_nowait()
+            except Empty:
+                break
+            try:
+                if callable(cb):
+                    cb()
+            except Exception:
+                # A single malformed callback must never abort the drain loop
+                # or the run: progress delivery is best-effort, and the run's
+                # own terminal state is decided independently of it.
+                pass
+            finally:
+                try:
+                    queue.task_done()
+                except Exception:
+                    pass
+
     def run(
         self,
         request: RunRequest,
@@ -392,13 +435,22 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
 
         while not (is_cancel_requested() or self._cancel_requested):
             if not stacker.is_running():
-                return BackendRunResult.FINISHED
+                break
+            self._drain_gui_event_queue(stacker)
             time.sleep(self._poll_interval)
 
-        # Cancellation observed (worker flag or backend.cancel()).  stop() is
-        # idempotent, so the double call on this path is harmless.
-        self._stop_stackers()
-        return BackendRunResult.CANCELLED
+        # Flush any callbacks the engine queued in the instant before its
+        # processing thread finished, so the GUI receives the terminal
+        # progress/log/preview state even when the thread ended between two
+        # polls.
+        self._drain_gui_event_queue(stacker)
+
+        if is_cancel_requested() or self._cancel_requested:
+            # Cancellation observed (worker flag or backend.cancel()).  stop()
+            # is idempotent, so the double call on this path is harmless.
+            self._stop_stackers()
+            return BackendRunResult.CANCELLED
+        return BackendRunResult.FINISHED
 
     def cancel(self) -> None:
         """Request the real backend to stop (callable from the GUI thread)."""

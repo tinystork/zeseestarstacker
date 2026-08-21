@@ -122,6 +122,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 12.2 | Cancel / stop | `[x]` | `cancel()` → worker/backend |
 | 12.3 | Shutdown retains live thread on timeout (no destroy-while-running) | `[x]` | `shutdown()` returns `bool`, defers cleanup |
 | 12.4 | Backend activation (`simulated` / `seestar`) | `[x]` | lazy `SeestarQueuedStackerBackend` |
+| 12.5 | Real backend (`seestar`) progress/log bridge drains the engine's deferred `gui_event_queue` | `[x]` | `SeestarQueuedStackerBackend.run` drains the stacker's thread-safe queue (the Tk GUI drains it from a periodic `after` loop; the Qt bridge had no equivalent) so progress/log/preview callbacks reach the Qt GUI (M11) |
 
 ## 13. Shell topology (Tk layout parity)
 
@@ -274,3 +275,24 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   `histogram_empty`, `histogram_stats`) were added with full parity.  Pan (6.7)
   remains `[ ]`.
   Covered by `tests/test_qt_preview.py` and `tests/test_qt_localization.py`.
+- **2026-08-21 — lot ZSSS-QT-FP-M11**: delivered item 12.5 (real backend
+  progress/log bridge).  A real end-to-end witness (`--backend seestar` on the
+  mini M16 dataset) showed the engine's `SeestarQueuedStacker.update_progress`
+  never calls the installed callback directly — it pushes closures onto
+  `stacker.gui_event_queue` (a thread-safe `Queue`) and relies on the GUI layer
+  to drain it.  The Tk GUI drains it from a periodic `root.after` loop
+  (`_poll_gui_events`); the Qt bridge had no such loop, so the progress bar and
+  log view were starved (0 numeric progress / 8 stray aligner log lines) while
+  the backend still produced the final FITS + preview.  Fix: a minimal Qt-only
+  change in `SeestarQueuedStackerBackend.run` that drains `gui_event_queue` on
+  the worker thread both while polling and once the processing thread finishes
+  (final flush), tolerating malformed items.  Verified with a programmatic
+  offscreen `MainWindow(backend_mode="seestar")` witness: progress
+  `[5, 25, 50, 75, 100]` (monotonic), 35 log lines (reference selection →
+  final FITS/PNG save), 1 final preview payload rendered to the Qt preview pane
+  (right-panel histogram updated), `finished` terminal state, `_thread`/
+  `_worker` reaped, Start/Stop/Analyse/View/Add/Open re-enabled, `shutdown()`
+  → `True` with no live thread.  No scientific code touched.  Covered by
+  `tests/test_qt_backend_runner.py` (queue-drain + malformed-item resilience);
+  see the witness report under `~/.openclaw/workspace/review/`
+  `zsss-pyside6-m11-real-backend-e2e/`.

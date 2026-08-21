@@ -451,3 +451,105 @@ def test_controller_cancel_drives_real_backend_stop(qapp):
         assert not controller.has_live_thread
     finally:
         controller.shutdown()
+
+
+# --------------------------------------------------------------------------
+# M11: the backend must drain the stacker's deferred ``gui_event_queue``
+# --------------------------------------------------------------------------
+def test_seestar_backend_drains_gui_event_queue_for_progress():
+    """The real engine defers progress/log via ``gui_event_queue``.
+
+    The Tk GUI drains that queue from a periodic ``after`` loop; the Qt bridge
+    has no such loop, so ``SeestarQueuedStackerBackend.run`` must drain it
+    itself (both while polling and once the processing thread finishes) or the
+    Qt GUI would never receive progress or log lines.  This uses a fake stacker
+    that reproduces the engine's deferred-callback contract.
+    """
+    import queue as _queue
+
+    instances = []
+
+    class QueueStacker(FakeStacker):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.gui_event_queue = _queue.Queue()
+
+        def start_processing(self, **kwargs):
+            super().start_processing(**kwargs)
+            # Simulate the engine pushing closures (not calling directly).
+            self.gui_event_queue.put(
+                lambda: self.progress_cb("Aligned: 1/4", 25, None)
+            )
+            self.gui_event_queue.put(
+                lambda: self.progress_cb("Aligned: 4/4", 100, None)
+            )
+            self.gui_event_queue.put(
+                lambda: self.progress_cb("banner only", None, None)
+            )
+            return True
+
+    def factory(**kwargs):
+        stacker = QueueStacker(**kwargs)
+        instances.append(stacker)
+        return stacker
+
+    backend = SeestarQueuedStackerBackend(
+        stacker_factory=factory, poll_interval=0.001
+    )
+    request = _make_request(batch_size=4)
+    progress = []
+    logs = []
+
+    result = backend.run(request, progress.append, logs.append, lambda: False)
+
+    assert result is BackendRunResult.FINISHED
+    # Queued progress callbacks were drained and forwarded to the adapters.
+    assert progress == [25, 100]
+    assert "Aligned: 1/4" in logs
+    assert "Aligned: 4/4" in logs
+    assert "banner only" in logs
+    # The queue is fully drained after the run.
+    assert instances[0].gui_event_queue.qsize() == 0
+
+
+def test_seestar_backend_drain_tolerates_bad_queue_items():
+    """A malformed queued item must not abort the drain loop or the run."""
+    import queue as _queue
+
+    instances = []
+
+    class BadItemStacker(FakeStacker):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.gui_event_queue = _queue.Queue()
+
+        def start_processing(self, **kwargs):
+            super().start_processing(**kwargs)
+            self.gui_event_queue.put(None)  # not callable
+            self.gui_event_queue.put(lambda: 1 / 0)  # raises when called
+            self.gui_event_queue.put(
+                lambda: self.progress_cb("after bad items", 50, None)
+            )
+            return True
+
+    def factory(**kwargs):
+        stacker = BadItemStacker(**kwargs)
+        instances.append(stacker)
+        return stacker
+
+    backend = SeestarQueuedStackerBackend(
+        stacker_factory=factory, poll_interval=0.001
+    )
+    progress = []
+    logs = []
+
+    result = backend.run(request=_make_request(batch_size=4),
+                         progress_callback=progress.append,
+                         log_callback=logs.append,
+                         is_cancel_requested=lambda: False)
+
+    assert result is BackendRunResult.FINISHED
+    # The malformed items were skipped, but the valid one still delivered.
+    assert progress == [50]
+    assert "after bad items" in logs
+    assert instances[0].gui_event_queue.qsize() == 0
