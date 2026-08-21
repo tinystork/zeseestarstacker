@@ -15489,24 +15489,32 @@ class SeestarQueuedStacker:
     def _drizzle_group_tick(self):
         """Increment the drizzle frame counter for every accumulated pose.
 
-        In the ``incremental`` policy only, emit a DISPLAY-ONLY group preview
-        + log whenever a full group is reached.  In ``standard`` policy the
-        counter still advances (so a manual preview reports an exact pose
-        count) but no automatic group preview is triggered.  The accumulation
-        science is unaffected in both policies.
+        Emit a DISPLAY-ONLY preview in both policies so a Drizzle run never
+        leaves the Preview tab empty (anomaly C):
+
+        * ``incremental`` (Large dataset): a group preview + log whenever a
+          full group is reached (plus the trailing partial group via
+          ``_drizzle_flush_partial_group``).
+        * ``standard``: a live preview after each accumulated pose (parity
+          with the classic per-batch preview), derived from the single
+          accumulator and never reinjected into the science.
+
+        The accumulation science is unaffected in both policies.
         """
         self._drizzle_frame_count += 1
-        if getattr(self, "drizzle_processing_policy", "standard") != "incremental":
-            return
-        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
-        if self._drizzle_frame_count % group_size == 0:
-            self._drizzle_group_index += 1
+        if getattr(self, "drizzle_processing_policy", "standard") == "incremental":
+            group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+            if self._drizzle_frame_count % group_size == 0:
+                self._drizzle_group_index += 1
+                self._update_preview_drizzle_accumulator()
+                logger.info(
+                    "DRIZZLE POLICY: INCREMENTAL group %d/... frames accumulated: %d preview updated",
+                    self._drizzle_group_index,
+                    self._drizzle_frame_count,
+                )
+        else:
+            # Standard policy: live, display-only preview after each pose.
             self._update_preview_drizzle_accumulator()
-            logger.info(
-                "DRIZZLE POLICY: INCREMENTAL group %d/... frames accumulated: %d preview updated",
-                self._drizzle_group_index,
-                self._drizzle_frame_count,
-            )
 
     def _drizzle_flush_partial_group(self):
         """Preview the final partial group (if any) at end of run.

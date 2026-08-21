@@ -354,8 +354,9 @@ def test_accumulator_memory_constant():
 
 
 # --------------------------------------------------------------------------
-# G) _drizzle_group_tick: standard counts poses but never auto-previews;
-#    incremental auto-previews per group. (M3-D-2 counter fix.)
+# G) _drizzle_group_tick: standard counts every pose AND emits a live preview
+#    per pose (parity with the classic per-batch preview); incremental
+#    auto-previews per full group. (R3: anomaly C fix.)
 # --------------------------------------------------------------------------
 
 
@@ -368,7 +369,7 @@ def _collector():
     return collected, _collect
 
 
-def test_tick_standard_counts_but_no_preview():
+def test_tick_standard_counts_and_previews_per_pose():
     frames = _synthetic_frames(n=6)
     shape = frames[0][0].shape[:2]
     collected, collector = _collector()
@@ -380,8 +381,10 @@ def test_tick_standard_counts_but_no_preview():
         obj._drizzle_group_tick()
     # Standard must still count every pose (manual preview reports exact count)...
     assert obj._drizzle_frame_count == 6
-    # ...but must NOT trigger any automatic group preview.
-    assert len(collected) == 0
+    # ...and, per the R3 contract, must emit a live display-only preview after
+    # each accumulated pose (parity with the classic per-batch preview) so a
+    # Standard drizzle run never leaves the Preview tab empty.
+    assert len(collected) == 6
 
 
 def test_tick_incremental_previews_per_group():
