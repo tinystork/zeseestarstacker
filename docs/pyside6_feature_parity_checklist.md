@@ -90,8 +90,8 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 8.1 | FR / EN language switch | `[ ]` | |
-| 8.2 | `Localization` key parity | `[ ]` | |
+| 8.1 | FR / EN language switch | `[x]` | `language_combo` enabled + user-triggered; switching updates `_current_language_code()` (feeds ZeAnalyser `--lang`) and re-labels visible Qt strings in place (tabs, path/action buttons, progress/log labels, preview/View/Histogram/Actions group titles, section titles + representative Settings/Mosaic field labels) without rebuilding the window; English default, French ↔ English round-trip (M9) |
+| 8.2 | `Localization` key parity | `[x]` | Qt-local `seestar/gui_qt/localization.py` (pure stdlib) holds a compact FR/EN mapping for the Qt shell surface; a parity guard asserts every registered key has both `en` and `fr`, and missing-key/unknown-language fallback never raises. Delta: the full Tk `Localization` dictionaries are intentionally NOT imported (kept Qt/Tk/engine-free); the remaining ~unmapped Settings field labels stay English |
 
 ## 9. Settings / geometry persistence
 
@@ -133,7 +133,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches |
 | 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
 | 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[x]` | zoom (Fit/100/200/50), resolution label (orig → displayed + zoom + rotation), rotate left/right; display-only, offscreen-tested |
-| 13.7 | Language switch (FR/EN) | `[ ]` | placeholder combo (disabled) |
+| 13.7 | Language switch (FR/EN) | `[x]` | placeholder combo is now enabled and participates in the FR/EN switch (M9) |
 
 ---
 
@@ -233,3 +233,21 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   derived `reproject_*` flags are re-derived from the combo on apply), no
   seam-only key is passed to the backend, and no Tk/engine/scientific code was
   touched.  Solver config persistence (item 3.6) remains `[ ]`.
+- **2026-08-21 — lot ZSSS-QT-FP-M9**: delivered items 8.1, 8.2 and 13.7
+  (Qt FR/EN language switch + localization surface).  The previously disabled
+  `language_combo` is now enabled and user-triggered: switching re-labels the
+  visible Qt shell strings in place (tabs, Stacking-tab path labels and
+  Browse/checkbox labels, Start/Stop/Analyse/Solver/View Inputs/Add Folder/Open
+  Output/Copy Log, progress/log + elapsed/remaining labels, Preview/View/
+  Histogram/Actions group titles, the 12 Expert section titles and the Mosaic
+  sub-labels plus a representative subset of Settings field labels) without
+  rebuilding the window, and `_current_language_code()` feeds the ZeAnalyser
+  launch `--lang` argument.  A new pure-stdlib helper
+  `seestar/gui_qt/localization.py` holds the compact FR/EN mapping with safe
+  key/fallback logic; `QtSettingsState` gains a `language: str = "en"` field
+  normalised on load (unknown/corrupt → English) and persisted through the
+  existing M8 settings JSON round-trip.  Remaining deltas: the remaining
+  Settings field labels stay English (no full mapping yet), the backend-mode
+  notice and transient log/status/dialog strings stay English, and the
+  full Tk `Localization` dictionaries are intentionally not imported (kept
+  Qt/Tk/engine-free).  Covered by `tests/test_qt_localization.py`.

@@ -77,7 +77,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import analyzer_launch, boring_route, settings_persistence
+from . import analyzer_launch, boring_route, localization, settings_persistence
 from .backend_runner import (
     BackendPreviewPayload,
     BaseRunBackend,
@@ -126,9 +126,8 @@ DRIZZLE_MODES = ["Final", "Incremental"]
 SOLVER_PREFERENCES = ["none", "astap", "zesolver"]
 
 # Language combo label -> ZeAnalyser ``--lang`` code (Tk settings default is
-# ``"en"``).  The combo is currently disabled, but this keeps the launch
-# command's language argument honest and testable.
-LANGUAGE_CODE_BY_TEXT = {"English": "en", "Français": "fr"}
+# ``"en"``).  Sourced from the Qt-local ``localization`` module (M9).
+LANGUAGE_CODE_BY_TEXT = localization.LANGUAGE_CODE_BY_TEXT
 
 # File-dialog filter for reference / last-stack images (Tk parity).
 FITS_FILE_FILTER = "FITS files (*.fit *.fits)"
@@ -323,6 +322,61 @@ MOSAIC_FIELDS = [
 ]
 
 
+# English section title -> Qt-local translation key (M9).  The ``Mosaic``
+# section (fields ``None``) is handled separately in ``_build_mosaic_section``.
+SECTION_TITLE_KEYS = {
+    "Stacking / Paths": "section_stacking_paths",
+    "Calibration / Hot Pixels": "section_calibration",
+    "Quality Weighting": "section_quality_weighting",
+    "Drizzle Advanced": "section_drizzle_advanced",
+    "Colour / Post-processing": "section_colour_post",
+    "Cropping": "section_cropping",
+    "Photutils BN": "section_photutils_bn",
+    "Feathering / Low-weight Mask": "section_feathering",
+    "Solver": "section_solver",
+    "Output / Reprojection": "section_output_reprojection",
+    "Final Background Matching": "section_final_bg_matching",
+}
+
+# attr -> translation key for the *representative* Settings field labels we
+# localise (M9).  Remaining field labels stay English until a fuller mapping
+# lands; the key-parity test only guards the keys actually registered here.
+LOCALIZED_SETTINGS_FIELD_KEYS = {
+    "kappa": "field_kappa",
+    "stack_norm_method": "field_normalize_method",
+    "stack_weight_method": "field_weighting_method",
+    "correct_hot_pixels": "field_correct_hot_pixels",
+    "bayer_pattern": "field_bayer_pattern",
+    "cleanup_temp": "field_cleanup_temp",
+    "weight_by_snr": "field_weight_by_snr",
+    "weight_by_stars": "field_weight_by_stars",
+    "drizzle_kernel": "field_drizzle_kernel",
+    "apply_master_tile_crop": "field_master_tile_crop",
+    "save_final_as_float32": "field_save_as_float32",
+    "preserve_linear_output": "field_preserve_linear_output",
+    "match_background_for_final": "field_match_bg",
+}
+
+# Mosaic sub-field key -> translation key (M9).  Explicit (rather than a plain
+# ``mosaic_`` prefix) because ``MOSAIC_FIELDS`` already prefixes one key.
+MOSAIC_FIELD_KEYS = {
+    "kernel": "mosaic_kernel",
+    "pixfrac": "mosaic_pixfrac",
+    "use_gpu": "mosaic_use_gpu",
+    "fillval": "mosaic_fillval",
+    "wht_threshold": "mosaic_wht_threshold",
+    "alignment_mode": "mosaic_alignment_mode",
+    "fastalign_orb_features": "mosaic_fastalign_orb_features",
+    "fastalign_min_abs_matches": "mosaic_fastalign_min_abs_matches",
+    "fastalign_min_ransac": "mosaic_fastalign_min_ransac",
+    "fastalign_ransac_thresh": "mosaic_fastalign_ransac_thresh",
+    "fastalign_dao_fwhm": "mosaic_fastalign_dao_fwhm",
+    "fastalign_dao_thr_sig": "mosaic_fastalign_dao_thr_sig",
+    "fastalign_dao_max_stars": "mosaic_fastalign_dao_max_stars",
+    "mosaic_scale_factor": "mosaic_scale_factor",
+}
+
+
 class MainWindow(QMainWindow):
     """Minimal side-by-side Qt main window used for offscreen smoke tests.
 
@@ -408,6 +462,15 @@ class MainWindow(QMainWindow):
         # the Qt entry point passes the CWD ``seestar_settings.json`` default.
         self._settings_path = os.path.abspath(settings_path) if settings_path else None
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
+        # Qt-local localization state (M9).  English by default; a persisted
+        # ``language`` field (when present) overrides this after controls are
+        # built.  ``_last_*`` / ``_preview_detail`` keep the raw value behind
+        # the dynamic labels so a language switch can re-render them.
+        self._language: str = localization.normalize_language("en")
+        self._text_bindings: List[tuple] = []
+        self._last_elapsed_seconds: Optional[float] = 0.0
+        self._last_remaining_text: str = UNKNOWN
+        self._preview_detail: str = "—"
         self._running: bool = False
         # True while the boring (single-batch CSV) subprocess route is active.
         self._boring_active: bool = False
@@ -454,25 +517,33 @@ class MainWindow(QMainWindow):
         container = QWidget()
         outer = QVBoxLayout(container)
 
-        # Language control placeholder (real Localization switch is a later
-        # milestone).
+        # Language control (M9): user-triggered FR/EN switch.
         lang_row = QHBoxLayout()
-        lang_row.addWidget(QLabel("Language:"))
+        self.language_label = QLabel(self._tr("language_label"))
+        self._bind_text(self.language_label, "language_label")
+        lang_row.addWidget(self.language_label)
         self.language_combo = QComboBox()
-        self.language_combo.addItems(["English", "Français"])
-        self.language_combo.setEnabled(False)
+        self.language_combo.addItems(
+            [localization.LANGUAGE_LABELS[code] for code in localization.SUPPORTED_LANGUAGES]
+        )
+        self.language_combo.setEnabled(True)
         lang_row.addWidget(self.language_combo)
         lang_row.addStretch(1)
         outer.addLayout(lang_row)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_stacking_tab(), TAB_STACKING)
-        self.tabs.addTab(self._build_settings_tab(), TAB_EXPERT)
-        self.tabs.addTab(self._build_preview_controls_tab(), TAB_PREVIEW_CONTROLS)
+        self._stacking_tab = self._build_stacking_tab()
+        self._settings_tab = self._build_settings_tab()
+        self._preview_controls_tab = self._build_preview_controls_tab()
+        self.tabs.addTab(self._stacking_tab, self._tr("tab_stacking"))
+        self.tabs.addTab(self._settings_tab, self._tr("tab_expert"))
+        self.tabs.addTab(self._preview_controls_tab, self._tr("tab_preview_controls"))
         outer.addWidget(self.tabs)
 
         # Progress / status area (Tk ``progress_frame``).
-        outer.addWidget(QLabel("Progression:"))
+        self.progress_label = QLabel(self._tr("progress_label"))
+        self._bind_text(self.progress_label, "progress_label")
+        outer.addWidget(self.progress_label)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -481,8 +552,10 @@ class MainWindow(QMainWindow):
         # Elapsed / remaining time surface (M6).  Driven only by the existing
         # progress lifecycle signals; unknown values render as "—".
         time_row = QHBoxLayout()
-        self.elapsed_label = QLabel(f"Elapsed: {format_duration(0.0)}")
-        self.remaining_label = QLabel(f"Remaining: {UNKNOWN}")
+        self.elapsed_label = QLabel()
+        self.remaining_label = QLabel()
+        self._render_elapsed_label()
+        self._render_remaining_label()
         time_row.addWidget(self.elapsed_label)
         time_row.addStretch(1)
         time_row.addWidget(self.remaining_label)
@@ -490,9 +563,12 @@ class MainWindow(QMainWindow):
 
         # Log area (Tk ``status_text``) + Copy Log action (M6).
         log_header = QHBoxLayout()
-        log_header.addWidget(QLabel("Log:"))
+        self.log_label = QLabel(self._tr("log_label"))
+        self._bind_text(self.log_label, "log_label")
+        log_header.addWidget(self.log_label)
         log_header.addStretch(1)
-        self.copy_log_button = QPushButton("Copy Log")
+        self.copy_log_button = QPushButton(self._tr("copy_log"))
+        self._bind_text(self.copy_log_button, "copy_log")
         self.copy_log_button.setEnabled(False)
         log_header.addWidget(self.copy_log_button)
         outer.addLayout(log_header)
@@ -515,10 +591,14 @@ class MainWindow(QMainWindow):
         self.reference_edit = QLineEdit()
         self.last_stack_edit = QLineEdit()
 
-        self.browse_input_button = QPushButton("Browse...")
-        self.browse_output_button = QPushButton("Browse...")
-        self.browse_temp_button = QPushButton("Browse...")
-        self.browse_reference_button = QPushButton("Browse...")
+        self.browse_input_button = QPushButton(self._tr("browse"))
+        self._bind_text(self.browse_input_button, "browse")
+        self.browse_output_button = QPushButton(self._tr("browse"))
+        self._bind_text(self.browse_output_button, "browse")
+        self.browse_temp_button = QPushButton(self._tr("browse"))
+        self._bind_text(self.browse_temp_button, "browse")
+        self.browse_reference_button = QPushButton(self._tr("browse"))
+        self._bind_text(self.browse_reference_button, "browse")
         self.browse_last_stack_button = QPushButton("…")
 
         self.batch_spin = QSpinBox()
@@ -528,7 +608,8 @@ class MainWindow(QMainWindow):
 
         # Boring (single-batch CSV) mode toggle — Tk ``boring_thread_check``
         # parity.  Checked <=> batch_size == 1.
-        self.boring_check = QCheckBox("Threaded Boring Stack")
+        self.boring_check = QCheckBox(self._tr("boring_check"))
+        self._bind_text(self.boring_check, "boring_check")
         self.boring_check.setChecked(False)
 
         self.stacking_mode_combo = QComboBox()
@@ -545,7 +626,8 @@ class MainWindow(QMainWindow):
         )
         self.final_combine_combo.setCurrentText(default_label)
 
-        self.drizzle_check = QCheckBox("Enable drizzle")
+        self.drizzle_check = QCheckBox(self._tr("drizzle_check"))
+        self._bind_text(self.drizzle_check, "drizzle_check")
         self.drizzle_check.setChecked(False)
 
         self.drizzle_mode_combo = QComboBox()
@@ -561,35 +643,40 @@ class MainWindow(QMainWindow):
         self.solver_combo.setCurrentText("none")
 
         form = QFormLayout()
-        form.addRow(
-            "Input folder",
+        self._add_form_row(
+            form,
+            "input_folder",
             self._path_row(self.input_edit, self.browse_input_button),
         )
-        form.addRow(
-            "Output folder",
+        self._add_form_row(
+            form,
+            "output_folder",
             self._path_row(self.output_edit, self.browse_output_button),
         )
-        form.addRow(
-            "Temp folder",
+        self._add_form_row(
+            form,
+            "temp_folder",
             self._path_row(self.temp_edit, self.browse_temp_button),
         )
-        form.addRow("Output filename", self.output_filename_edit)
-        form.addRow(
-            "Reference image",
+        self._add_form_row(form, "output_filename", self.output_filename_edit)
+        self._add_form_row(
+            form,
+            "reference_image",
             self._path_row(self.reference_edit, self.browse_reference_button),
         )
-        form.addRow(
-            "Last stack",
+        self._add_form_row(
+            form,
+            "last_stack",
             self._path_row(self.last_stack_edit, self.browse_last_stack_button),
         )
-        form.addRow("Batch size", self.batch_spin)
+        self._add_form_row(form, "batch_size", self.batch_spin)
         form.addRow("", self.boring_check)
-        form.addRow("Stacking mode", self.stacking_mode_combo)
-        form.addRow("Final combine", self.final_combine_combo)
+        self._add_form_row(form, "stacking_mode", self.stacking_mode_combo)
+        self._add_form_row(form, "final_combine", self.final_combine_combo)
         form.addRow("", self.drizzle_check)
-        form.addRow("Drizzle mode", self.drizzle_mode_combo)
-        form.addRow("Drizzle group size", self.drizzle_group_spin)
-        form.addRow("Local solver", self.solver_combo)
+        self._add_form_row(form, "drizzle_mode", self.drizzle_mode_combo)
+        self._add_form_row(form, "drizzle_group_size", self.drizzle_group_spin)
+        self._add_form_row(form, "local_solver", self.solver_combo)
         layout.addLayout(form)
         layout.addStretch(1)
 
@@ -625,9 +712,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
 
         # Preview (persistent across left-tab switches).
-        preview_group = QGroupBox("Preview")
+        preview_group = QGroupBox(self._tr("preview_group"))
+        self._bind_text(preview_group, "preview_group")
         preview_layout = QVBoxLayout(preview_group)
-        self.preview_label = QLabel("Preview: —")
+        self.preview_label = QLabel()
+        self._render_preview_label()
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.preview_label)
         self.preview_image_label = QLabel()
@@ -637,9 +726,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(preview_group, 1)
 
         # Zoom / resolution / rotation controls (basic/disabled placeholders).
-        view_group = QGroupBox("View")
+        view_group = QGroupBox(self._tr("view_group"))
+        self._bind_text(view_group, "view_group")
         view_layout = QGridLayout(view_group)
-        view_layout.addWidget(QLabel("Zoom:"), 0, 0)
+        self.zoom_caption = QLabel(self._tr("zoom_label"))
+        self._bind_text(self.zoom_caption, "zoom_label")
+        view_layout.addWidget(self.zoom_caption, 0, 0)
         self.zoom_combo = QComboBox()
         self.zoom_combo.addItems(list(ZOOM_LABELS))
         # Default view is 100% (native size) — Tk parity: the preview starts at
@@ -647,7 +739,9 @@ class MainWindow(QMainWindow):
         self.zoom_combo.setCurrentText("100%")
         self.zoom_combo.setEnabled(False)
         view_layout.addWidget(self.zoom_combo, 0, 1)
-        view_layout.addWidget(QLabel("Resolution:"), 0, 2)
+        self.resolution_caption = QLabel(self._tr("resolution_label"))
+        self._bind_text(self.resolution_caption, "resolution_label")
+        view_layout.addWidget(self.resolution_caption, 0, 2)
         self.resolution_label = QLabel("—")
         view_layout.addWidget(self.resolution_label, 0, 3)
         self.rotate_left_button = QPushButton("⟲")
@@ -659,23 +753,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(view_group)
 
         # Histogram placeholder.
-        histo_group = QGroupBox("Histogram")
+        histo_group = QGroupBox(self._tr("histogram_group"))
+        self._bind_text(histo_group, "histogram_group")
         histo_layout = QVBoxLayout(histo_group)
-        self.histogram_placeholder = QLabel("[ ] Histogram placeholder")
+        self.histogram_placeholder = QLabel(self._tr("histogram_placeholder"))
+        self._bind_text(self.histogram_placeholder, "histogram_placeholder")
         self.histogram_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         histo_layout.addWidget(self.histogram_placeholder)
         layout.addWidget(histo_group)
 
         # Action buttons (Start/Stop/Analyse/Solver/path actions functional).
-        actions_group = QGroupBox("Actions")
+        actions_group = QGroupBox(self._tr("actions_group"))
+        self._bind_text(actions_group, "actions_group")
         actions_layout = QGridLayout(actions_group)
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
-        self.analyse_button = QPushButton("Analyse")
-        self.solver_button = QPushButton("Solver")
-        self.view_inputs_button = QPushButton("View Inputs")
-        self.add_folder_button = QPushButton("Add Folder")
-        self.open_output_button = QPushButton("Open Output")
+        self.start_button = QPushButton(self._tr("start"))
+        self._bind_text(self.start_button, "start")
+        self.stop_button = QPushButton(self._tr("stop"))
+        self._bind_text(self.stop_button, "stop")
+        self.analyse_button = QPushButton(self._tr("analyse"))
+        self._bind_text(self.analyse_button, "analyse")
+        self.solver_button = QPushButton(self._tr("solver"))
+        self._bind_text(self.solver_button, "solver")
+        self.view_inputs_button = QPushButton(self._tr("view_inputs"))
+        self._bind_text(self.view_inputs_button, "view_inputs")
+        self.add_folder_button = QPushButton(self._tr("add_folder"))
+        self._bind_text(self.add_folder_button, "add_folder")
+        self.open_output_button = QPushButton(self._tr("open_output"))
+        self._bind_text(self.open_output_button, "open_output")
         # Analyse (ZeAnalyser launch, M7), View Inputs / Add Folder / Open
         # Output are all wired to user-triggered actions; their enablement is
         # driven by ``_update_path_action_state``.
@@ -719,22 +823,27 @@ class MainWindow(QMainWindow):
             if fields is None:
                 group = self._build_mosaic_section()
             else:
-                group = self._build_generic_section(section_title, fields)
+                group = self._build_generic_section(SECTION_TITLE_KEYS[section_title], fields)
             outer.addWidget(group)
 
         outer.addStretch(1)
         scroll.setWidget(container)
         return scroll
 
-    def _build_generic_section(self, title: str, fields) -> QGroupBox:
+    def _build_generic_section(self, title_key: str, fields) -> QGroupBox:
         """Build one QGroupBox section from a list of field specs."""
-        group = QGroupBox(title)
+        group = QGroupBox(self._tr(title_key))
+        self._bind_text(group, title_key)
         form = QFormLayout(group)
         for field in fields:
             attr, label, kind = field[0], field[1], field[2]
             params = field[3:]
             widget = self._make_settings_widget(attr, kind, *params)
-            form.addRow(label, widget)
+            key = LOCALIZED_SETTINGS_FIELD_KEYS.get(attr)
+            if key is not None:
+                self._add_form_row(form, key, widget)
+            else:
+                form.addRow(label, widget)
             self._settings_widgets[attr] = widget
             self._settings_kinds[attr] = kind
         return group
@@ -743,10 +852,12 @@ class MainWindow(QMainWindow):
         """Build the Mosaic section (top-level flag + nested dict sub-fields)."""
         state = self.settings_state
         ms = state.mosaic_settings if isinstance(state.mosaic_settings, dict) else {}
-        group = QGroupBox("Mosaic")
+        group = QGroupBox(self._tr("section_mosaic"))
+        self._bind_text(group, "section_mosaic")
         form = QFormLayout(group)
 
-        self.mosaic_active_check = QCheckBox("Mosaic mode active")
+        self.mosaic_active_check = QCheckBox(self._tr("mosaic_mode_active"))
+        self._bind_text(self.mosaic_active_check, "mosaic_mode_active")
         self.mosaic_active_check.setChecked(bool(state.mosaic_mode_active))
         form.addRow("", self.mosaic_active_check)
         self._settings_widgets["mosaic_mode_active"] = self.mosaic_active_check
@@ -754,7 +865,7 @@ class MainWindow(QMainWindow):
 
         for key, label, kind, params in MOSAIC_FIELDS:
             widget = self._make_mosaic_widget(kind, ms.get(key), params)
-            form.addRow(label, widget)
+            self._add_form_row(form, MOSAIC_FIELD_KEYS[key], widget)
             self._mosaic_widgets[key] = (kind, widget)
 
         return group
@@ -897,6 +1008,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Idle")
 
     def _wire_controls(self) -> None:
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
         self.start_button.clicked.connect(self._on_start)
         self.stop_button.clicked.connect(self._on_stop)
         self.analyse_button.clicked.connect(self._on_analyse)
@@ -1491,16 +1603,17 @@ class MainWindow(QMainWindow):
         controls, so no stale preview survives a failed render.
         """
         name = payload.stack_name or "(no stack)"
-        text = f"Preview: {name}"
+        detail = name
         if payload.image_count is not None:
-            text += f" — {payload.image_count} img"
+            detail += f" — {payload.image_count} img"
             if payload.total_images is not None:
-                text += f" / {payload.total_images}"
+                detail += f" / {payload.total_images}"
         if payload.current_batch is not None:
-            text += f" — batch {payload.current_batch}"
+            detail += f" — batch {payload.current_batch}"
             if payload.total_batches is not None:
-                text += f" / {payload.total_batches}"
-        self.preview_label.setText(text)
+                detail += f" / {payload.total_batches}"
+        self._preview_detail = detail
+        self._render_preview_label()
 
         image = render_preview_image(payload.data)
         if image is not None and not image.isNull():
@@ -1633,6 +1746,7 @@ class MainWindow(QMainWindow):
         directly.
         """
         state = self.settings_state
+        state.language = self._language
         state.input_folder = self.input_edit.text()
         state.output_folder = self.output_edit.text()
         state.temp_folder = self.temp_edit.text()
@@ -1796,6 +1910,10 @@ class MainWindow(QMainWindow):
         self.boring_check.setChecked(self.batch_spin.value() == 1)
         self._update_boring_gating()
         self.settings_state = state
+        # Apply the persisted UI language (M9).  ``state.language`` is already
+        # normalised by ``QtSettingsState.from_dict``; ``_set_language`` is
+        # idempotent for the default English path.
+        self._set_language(getattr(state, "language", "en"))
         self._sync_state_from_controls()
         self._update_path_action_state()
 
@@ -1891,10 +2009,24 @@ class MainWindow(QMainWindow):
         return max(0.0, self._now() - self._run_started_at)
 
     def _set_elapsed_label(self, seconds: Optional[float]) -> None:
-        self.elapsed_label.setText(f"Elapsed: {format_duration(seconds)}")
+        self._last_elapsed_seconds = seconds
+        self._render_elapsed_label()
 
     def _set_remaining_label(self, text: str) -> None:
-        self.remaining_label.setText(f"Remaining: {text}")
+        self._last_remaining_text = text
+        self._render_remaining_label()
+
+    def _render_elapsed_label(self) -> None:
+        """Render the elapsed label from its stored raw value + active language."""
+        self.elapsed_label.setText(
+            f"{self._tr('elapsed')} {format_duration(self._last_elapsed_seconds)}"
+        )
+
+    def _render_remaining_label(self) -> None:
+        """Render the remaining label from its stored raw value + active language."""
+        self.remaining_label.setText(
+            f"{self._tr('remaining')} {self._last_remaining_text}"
+        )
 
     def _refresh_time_surface(self, percent: Optional[int]) -> None:
         """Update the elapsed/remaining labels from elapsed time + percent.
@@ -1937,6 +2069,71 @@ class MainWindow(QMainWindow):
         never mutates the log view or the run state.
         """
         QApplication.clipboard().setText(self.log_view.toPlainText())
+
+    # -------------------------------------------------------- localization
+    def _tr(self, key: str, default: Optional[str] = None) -> str:
+        """Return the visible string for ``key`` in the active language."""
+        return localization.translate(key, self._language, default=default)
+
+    def _bind_text(self, widget, key: str) -> None:
+        """Track ``widget`` so ``_refresh_language`` can re-apply its label."""
+        self._text_bindings.append((widget, key))
+
+    def _add_form_row(self, form: QFormLayout, key: str, widget: QWidget) -> None:
+        """Add a localized ``label + widget`` row to a form and track the label."""
+        label = QLabel(self._tr(key))
+        self._bind_text(label, key)
+        form.addRow(label, widget)
+
+    def _on_language_changed(self, _index: Optional[int] = None) -> None:
+        """Handle a user language-combo change (M9)."""
+        code = self._current_language_code()
+        if code != self._language:
+            self._set_language(code)
+
+    def _set_language(self, code: Optional[str]) -> None:
+        """Activate ``code`` (normalized), sync the combo/model and refresh labels."""
+        self._language = localization.normalize_language(code)
+        self.settings_state.language = self._language
+        label = localization.language_label_for(self._language)
+        if self.language_combo.currentText() != label:
+            self.language_combo.blockSignals(True)
+            try:
+                self.language_combo.setCurrentText(label)
+            finally:
+                self.language_combo.blockSignals(False)
+        self._refresh_language()
+
+    def _refresh_language(self) -> None:
+        """Re-apply the active language to every localized visible string.
+
+        Runs without rebuilding the window: static labels/buttons/group titles
+        are re-set from the stored ``(widget, key)`` bindings, the tab labels
+        are re-labelled by index, and the dynamic elapsed/remaining/preview
+        labels are re-rendered from their stored raw values.
+        """
+        for widget, key in self._text_bindings:
+            if isinstance(widget, QGroupBox):
+                widget.setTitle(self._tr(key))
+            else:
+                widget.setText(self._tr(key))
+        for tab_widget, key in (
+            (self._stacking_tab, "tab_stacking"),
+            (self._settings_tab, "tab_expert"),
+            (self._preview_controls_tab, "tab_preview_controls"),
+        ):
+            idx = self.tabs.indexOf(tab_widget)
+            if idx >= 0:
+                self.tabs.setTabText(idx, self._tr(key))
+        self._render_elapsed_label()
+        self._render_remaining_label()
+        self._render_preview_label()
+
+    def _render_preview_label(self) -> None:
+        """Render the preview metadata label from its stored detail + language."""
+        self.preview_label.setText(
+            f"{self._tr('preview_prefix')} {self._preview_detail}"
+        )
 
     # ------------------------------------------------------------- helpers
     def log(self, message: str) -> None:

@@ -27,6 +27,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 
+# Closed vocabulary for the UI language field (M9).  An unknown persisted value
+# degrades to English so a corrupt settings file can never leave the shell in an
+# unrecognised language.  Kept inline (not imported from ``gui_qt.localization``)
+# so this module stays a pure, dependency-free stdlib model.
+_SUPPORTED_LANGUAGES = ("en", "fr")
+
+
 def _default_mosaic_settings() -> Dict[str, Any]:
     """Return a fresh copy of the default mosaic settings dict."""
     return {
@@ -238,6 +245,9 @@ class QtSettingsState:
     # --- Final background matching (may be None when unset) ---
     match_background_for_final: Any = None
 
+    # --- UI language (M9; persisted via the M8 settings JSON round-trip) ---
+    language: str = "en"
+
     @classmethod
     def defaults(cls) -> Dict[str, Any]:
         """Return a fresh dict of field name -> default value.
@@ -273,6 +283,10 @@ class QtSettingsState:
             name = f.name
             if name in data:
                 setattr(state, name, _coerce_value(data[name], defaults[name]))
+        # Normalise the UI language field: a supported code is kept, anything
+        # else (unknown, corrupt, or non-string) falls back to English.
+        if state.language not in _SUPPORTED_LANGUAGES:
+            state.language = "en"
         return state
 
     def to_dict(self) -> Dict[str, Any]:
