@@ -260,11 +260,11 @@ def test_right_panel_has_preview_view_histogram_and_actions():
             "open_output_button",
         ):
             assert hasattr(win, attr), f"missing right-panel control {attr}"
-        # Stub action buttons are present but disabled; Start/Stop are live.
+        # Stub action buttons are present but disabled; Start/Stop/Solver are live.
         assert win.start_button.isEnabled()
         assert not win.stop_button.isEnabled()
         assert not win.analyse_button.isEnabled()
-        assert not win.solver_button.isEnabled()
+        assert win.solver_button.isEnabled()
         assert not win.view_inputs_button.isEnabled()
         assert not win.add_folder_button.isEnabled()
         assert not win.open_output_button.isEnabled()

@@ -43,7 +43,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 3.2 | Solver gate truth table (ZeSolver operational / ASTAP fallback / block) | `[x]` | `settings_validation` reproduces `resolve_solver_gate` |
 | 3.3 | ZeSolver operational-readiness probe (lazy, engine-free at import) | `[x]` | `solver_probe.probe_zesolver_operational`; injected into preflight |
 | 3.4 | ASTAP selected but absent → block | `[x]` | preflight rejects empty `astap_path` |
-| 3.5 | Solver settings *dialog* (Local Solvers window, readiness refresh UI) | `[ ]` | dialog UI not built |
+| 3.5 | Solver settings *dialog* (Local Solvers window, readiness refresh UI) | `[x]` | `solver_dialog.SolverSettingsDialog` + `solver_service` (lazy public boundary); ASTAP frame gating, ZeSolver status/configure + deferred readiness refresh |
 | 3.6 | ASTAP/ZeSolver config persistence via `solver_config` | `[ ]` | |
 
 ## 4. Browse / paths
@@ -144,3 +144,9 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 - **2026-08-21 — lot ZSSS-QT-FP-P0**: delivered items 1.1–1.5, 3.1–3.4, 12.3
   (batch-size contract, solver gate + readiness probe injection, shutdown
   robustness). Everything else remains `[ ]`.
+- **2026-08-21 — lot ZSSS-QT-FP-M2**: delivered item 3.5 (first real Qt solver
+  configuration dialog: None/ASTAP/ZeSolver choice, ASTAP path/data/numeric
+  fields with Browse, ZeSolver status label + configuration button driven by the
+  public `zesolver_ui_state(check_zesolver_readiness())` contract, in-dialog
+  ASTAP-path validation, OK→`MainWindow` state round-trip, lazy engine-free
+  import). Solver *persistence* via `solver_config` (item 3.6) remains `[ ]`.

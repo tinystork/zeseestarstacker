@@ -47,6 +47,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -83,6 +84,7 @@ from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
 from .settings_state import QtSettingsState
+from .solver_dialog import SolverSettingsDialog
 from .solver_probe import probe_zesolver_operational
 
 DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
@@ -535,9 +537,9 @@ class MainWindow(QMainWindow):
         self.add_folder_button = QPushButton("Add Folder")
         self.open_output_button = QPushButton("Open Output")
         # Stub action buttons: present for topology, no external action yet.
+        # (Solver is functional now; it is wired in _wire_controls.)
         for stub in (
             self.analyse_button,
-            self.solver_button,
             self.view_inputs_button,
             self.add_folder_button,
             self.open_output_button,
@@ -762,6 +764,7 @@ class MainWindow(QMainWindow):
     def _wire_controls(self) -> None:
         self.start_button.clicked.connect(self._on_start)
         self.stop_button.clicked.connect(self._on_stop)
+        self.solver_button.clicked.connect(self._on_solver)
         self._update_run_state()
 
     def _wire_controller(self) -> None:
@@ -853,6 +856,47 @@ class MainWindow(QMainWindow):
         self.controller.cancel()
         self.statusBar().showMessage("Cancelling…")
         self.log("Stop requested.")
+
+    def _on_solver(self) -> None:
+        """Open the solver configuration dialog and apply accepted values.
+
+        This never starts the backend and never imports the engine: the dialog
+        is a pure view/controller over the existing solver boundaries (reached
+        lazily), and accepted values are written back into the live Qt controls
+        so a subsequent ``collect_settings_state()`` / ``build_run_request()``
+        sees them.
+        """
+        dialog = SolverSettingsDialog(self, self.collect_settings_state())
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_solver_dialog_values(dialog.values())
+
+    def _apply_solver_dialog_values(self, values: dict) -> None:
+        """Apply accepted solver-dialog values back to the live Qt controls.
+
+        Setting the widgets triggers the already-wired change signals, which
+        keep ``settings_state`` in sync (the single source of truth), so the
+        values survive the next ``collect_settings_state()``.
+        """
+        pref = str(values.get("local_solver_preference", "none"))
+        if pref in SOLVER_PREFERENCES:
+            self.solver_combo.setCurrentText(pref)
+        for attr in (
+            "astap_path",
+            "astap_data_dir",
+            "astap_search_radius",
+            "astap_downsample",
+            "astap_sensitivity",
+        ):
+            if attr not in values or attr not in self._settings_widgets:
+                continue
+            widget = self._settings_widgets[attr]
+            value = values[attr]
+            if attr in ("astap_path", "astap_data_dir"):
+                widget.setText(str(value))
+            elif attr == "astap_search_radius":
+                widget.setValue(float(value))
+            else:
+                widget.setValue(int(value))
 
     # ------------------------------------------------- lifecycle callbacks
     def _on_run_started(self) -> None:
