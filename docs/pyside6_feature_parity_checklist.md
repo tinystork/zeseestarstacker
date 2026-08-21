@@ -44,7 +44,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 3.3 | ZeSolver operational-readiness probe (lazy, engine-free at import) | `[x]` | `solver_probe.probe_zesolver_operational`; injected into preflight |
 | 3.4 | ASTAP selected but absent → block | `[x]` | preflight rejects empty `astap_path` |
 | 3.5 | Solver settings *dialog* (Local Solvers window, readiness refresh UI) | `[x]` | `solver_dialog.SolverSettingsDialog` + `solver_service` (lazy public boundary); ASTAP frame gating, ZeSolver status/configure + deferred readiness refresh |
-| 3.6 | ASTAP/ZeSolver config persistence via `solver_config` | `[ ]` | |
+| 3.6 | ASTAP/ZeSolver config persistence via `solver_config` (engine bridge) | `[ ]` | Engine `seestar.core.solver_config` read/write bridge remains a backend-E2E gap; the Qt-side JSON persistence is delivered in §18 (M19) |
 
 ## 4. Browse / paths
 
@@ -374,11 +374,12 @@ Notes / gaps:
   surface (`preview_image_label`) is now a `PreviewImageView` that emits
   wheel-zoom / pan-delta signals, and `render_view` layers a continuous
   `zoom_factor` + `pan_offset` on top of the existing render path.  `[x]`
-- **Solver-config persistence (3.6) feasibility.**  Still `[ ]`.  The Qt solver
-  dialog already round-trips its accepted values into the live Qt controls /
-  `QtSettingsState` (M2), so persistence is a matter of adding the ASTAP /
-  ZeSolver fields to the M8 settings JSON surface (or a `solver_config`-backed
-  load/save seam); no engine coupling blocks it.  Deferred.  `[ ]`
+- **Solver-config persistence (3.6) feasibility.**  The Qt-side JSON
+  persistence is now delivered (M19, §18): the ASTAP / ZeSolver fields already
+  live in `QtSettingsState` and round-trip through the M8 settings surface
+  (dialog prefill ⇄ accept → JSON).  What remains `[ ]` is the *engine*
+  `solver_config` bridge (writing/reading `seestar.core.solver_config`), which
+  stays a backend-E2E gap.  `[x]` Qt JSON surface (M19), `[ ]` engine bridge.
 
 ---
 
@@ -431,6 +432,48 @@ Notes / rules:
   backend changes, and `preview_image_view.py` / `preview_view.py` contain no
   engine/Tk/zesolver import path (asserted by the M18 tests + the existing
   import-hygiene tests).
+
+---
+
+## 18. Solver settings persistence (Qt JSON surface) (M19)
+
+Settings-only persistence of the solver-dialog fields through the M8 JSON
+settings surface.  The ASTAP / ZeSolver values are held in `QtSettingsState`
+and round-trip through `settings_persistence` (the Qt shell's own
+`seestar_settings.json`), never through the engine `solver_config` (which stays
+a backend-E2E gap — checklist 3.6 remains `[ ]`).  `[x]` = delivered this lot.
+
+| Field | Tk GUI default (`SettingsManager`) | Engine default (`solver_config.DEFAULT_CONFIG`) | Qt default (`QtSettingsState`) | Persisted key | Round-trip test |
+|---|---|---|---|---|---|
+| solver preference | `none` | (n/a — legacy `ansvr`/`astrometry` map to `zesolver`) | `none` | `local_solver_preference` | `test_solver_fields_round_trip_through_settings_persistence` |
+| ASTAP executable | `""` | `astap_executable_path` = `""` | `""` | `astap_path` | same |
+| ASTAP data dir | `""` | `astap_data_directory_path` = `""` | `""` | `astap_data_dir` | same |
+| search radius (deg) | `3.0` | `astap_default_search_radius` = `3.0` | `3.0` | `astap_search_radius` | same |
+| downsample | `1` | `astap_default_downsample` = `2` | `1` | `astap_downsample` | same |
+| sensitivity | `100` | `astap_default_sensitivity` = `100` | `100` | `astap_sensitivity` | same |
+
+Notes / decisions:
+
+- **Default-value divergence (documented).**  The Qt `astap_downsample` default
+  is `1` (matching the Tk `SettingsManager` default and the Qt solver dialog),
+  while the engine `solver_config` `astap_default_downsample` default is `2`.
+  The Qt shell keeps `1` because it is the canonical Tk GUI default
+  (enforced by `test_defaults_aligned_with_settings_manager`) and because the
+  Qt shell never reads/writes the engine config — the delta is therefore
+  harmless and self-consistent.  `[x]` (documented divergence).
+- **Engine-coupling decision (settings-only).**  Persistence goes through the
+  M8 JSON surface only; no `check_zesolver_readiness` /
+  `probe_zesolver_operational` / `open_zesolver_configuration` is called for
+  persistence, no engine/Tk file is written, and `seestar/core/solver_config.py`
+  is untouched (asserted by `test_no_writes_to_engine_solver_config`).  The
+  bridge to `solver_config` remains an explicit backend-E2E gap (checklist 3.6
+  `[ ]`).  `[x]` settings-only.
+- **Dialog wiring.**  `MainWindow._on_solver` opens
+  `SolverSettingsDialog(self, self.collect_settings_state())` (prefill from the
+  current `QtSettingsState`); on accept it writes the dialog values back into
+  the live Qt controls via `_apply_solver_dialog_values`, which fold into
+  `settings_state` and thus survive the `_save_persisted_settings` save →
+  `_load_persisted_settings` load round-trip.  `[x]`.
 
 ---
 
@@ -741,4 +784,26 @@ Notes / rules:
   import-hygiene tests).  Engine-coupled gaps: none.  Gaps left for later:
   solver-config persistence (3.6) and backend-E2E items.  Covered by
   `tests/test_qt_preview_pan_zoom_m18.py` (28 tests) + the existing
+  import-hygiene tests; `git diff --check` clean.
+- **2026-08-21 — lot ZSSS-QT-FP-M19**: solver settings persistence via the Qt
+  JSON settings surface (checklist 3.6 → §18) — settings-only.  The six
+  solver-dialog fields (`local_solver_preference`, `astap_path`,
+  `astap_data_dir`, `astap_search_radius`, `astap_downsample`,
+  `astap_sensitivity`) were already present in `QtSettingsState` and the
+  `Expert`-tab "Solver" section, and already round-trip through the generic M8
+  `settings_persistence` surface; M19 hardens and documents that contract and
+  closes the remaining checklist gap.  `MainWindow._on_solver` prefills
+  `SolverSettingsDialog` from `collect_settings_state()` and writes accepted
+  values back into the live controls (`_apply_solver_dialog_values`), so
+  accepted values survive a `_save_persisted_settings` →
+  `_load_persisted_settings` round-trip.  Documented default divergence:
+  `astap_downsample` defaults to `1` (Tk `SettingsManager` + Qt dialog) vs the
+  engine `astap_default_downsample` `2`; the Qt shell keeps `1` and never
+  touches the engine config.  **Engine bridge (checklist 3.6) stays `[ ]`**:
+  no read/write of `seestar.core.solver_config`, and no
+  `check_zesolver_readiness` / `probe_zesolver_operational` /
+  `open_zesolver_configuration` is invoked for persistence; `solver_config.py`
+  is untouched (asserted).  No Tk/engine/backend files changed;
+  `_preview_source` never mutated.  Covered by
+  `tests/test_qt_solver_persistence_m19.py` (new) + the existing
   import-hygiene tests; `git diff --check` clean.

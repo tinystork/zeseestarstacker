@@ -244,7 +244,22 @@ class QtSettingsState:
     mosaic_mode_active: bool = False
     mosaic_settings: Dict[str, Any] = field(default_factory=_default_mosaic_settings)
 
-    # --- Local solver ---
+    # --- Local solver (M19: persisted via the M8 JSON settings surface) ---
+    # Display/settings-only parity with the Tk ``SettingsManager`` solver
+    # defaults (``get_default_values``): the Qt shell persists these fields in
+    # its *own* ``seestar_settings.json`` surface (``settings_persistence``)
+    # and never writes the engine solver config (``solver_config``) — bridging
+    # to the engine config is a documented backend-E2E gap.  The engine
+    # ``solver_config.DEFAULT_CONFIG`` uses different key names
+    # (``astap_executable_path`` / ``astap_data_directory_path`` /
+    # ``astap_default_search_radius`` / ``astap_default_downsample`` /
+    # ``astap_default_sensitivity``) and is deliberately NOT imported here.
+    # Documented default divergence: ``astap_downsample`` defaults to ``1``
+    # (matching the Tk ``SettingsManager`` default and the Qt solver dialog),
+    # whereas the engine ``astap_default_downsample`` defaults to ``2``; the Qt
+    # shell keeps ``1`` because that is the canonical Tk GUI default and the Qt
+    # shell never touches the engine config (asserted by
+    # ``tests/test_qt_solver_persistence_m19.py``).
     astap_path: str = ""
     astap_data_dir: str = ""
     local_solver_preference: str = "none"
