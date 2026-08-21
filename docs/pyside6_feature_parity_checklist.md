@@ -71,7 +71,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 |---|---|---|---|
 | 6.1 | Preview image rendering (array → `QImage`) | `[x]` | `preview_render` (display-only) |
 | 6.2 | White-balance controls | `[x]` | `preview_adjust` per-channel R/G/B gains (neutral 1.0) shown as slider + numeric spinbox pairs, `Auto WB` (mode-based gains from the display image, Tk parity) + `Reset`; Tk range 0.1–5.0 step 0.01; display-only, re-renders the derived preview immediately (M10/M13) |
-| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (Asinh default, Tk parity) + black/white/gamma slider + numeric spinbox controls (Tk defaults 0.01/0.99/1.0, ranges/steps 0–1/0.001 and 0.1–5/0.01) + `Auto Stretch` (percentile bp/wp from the WB-only image → Asinh) + `Reset Stretch`; `preview_adjust` tone curves reproduce the Tk `StretchPresets` math; display-only, re-renders the derived preview (M10/M13/M14) |
+| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (Asinh default, Tk parity) + black/white/gamma slider + numeric spinbox controls (Tk defaults 0.01/0.99/1.0, ranges/steps 0–1/0.001 and 0.1–5/0.01) + `Auto Stretch` (percentile bp/wp from the WB-only image → Asinh) + `Reset Stretch`; `preview_adjust` tone curves reproduce the Tk `StretchPresets` math for the three Tk modes (`linear`/`asinh`/`log`; the `auto` combo entry is a Qt-only convenience mode — Tk's combo is 3-mode Linear/Asinh/Log plus a separate `Auto Stretch` button, not an `auto` tone curve); display-only, re-renders the derived preview (M10/M13/M14) |
 | 6.4 | Histogram | `[x]` | single live surface in the persistent right panel (`HistogramView` QWidget) fed by the *WB-only* derived image (Tk `image_data_wb` source); reproduces the Tk auto-zoom / reset-view / zoom / reset-zoom interactions + BP/WP line dragging → `rangeChanged`; localized stats label; the M10 duplicated Preview-controls-tab histogram was removed (M10/M14) |
 | 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
 | 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
@@ -205,6 +205,11 @@ Notes / gaps:
   now** (gating + persistence): `build_backend_kwargs` does not consume them
   today (verified), so wiring them to the engine is deferred to a later
   backend E2E milestone if needed.  `[ ]` backend E2E for enabler flags.
+  **NON-BLOCKER (M25.5-F, §23):** `apply_bn` / `apply_cb` / `apply_final_crop`
+  are *GUI gating only* — the engine does not consume them today, and the Tk
+  GUI likewise never forwards them (both sides share `build_backend_kwargs`,
+  which omits the three flags, so Qt is Tk-identical, not a gap).  Documented
+  here and in §23 rather than implemented as new backend semantics.
 - **Default-value divergence (Tk init vars vs `SettingsManager`).**  The Tk
   `init_variables` seeds a few Expert vars with values that differ from
   `SettingsManager.get_default_values` (e.g. `bn_grid_size_str` `"16x16"` vs
@@ -690,6 +695,138 @@ Notes / decisions:
 
 Covered by `tests/test_qt_actions_ergonomics_m255e.py` (new, 15 tests) +
 `git diff --check` clean.  Remaining gaps: audit F, M26.
+
+---
+
+## 23. Final parity audit (M25.5-F)
+
+Closing audit for sprint M25.5.  Verdicts are per-control / per-row against
+the Tk source (`seestar/gui/main_window.py`) and the Qt source
+(`seestar/gui_qt/main_window.py`).  `PARITY` = the matrix row is truthful;
+`DIVERGENCE` = a real behavioural difference (reported, not silently fixed).
+No GUI behaviour was changed; no backend semantic was added.
+
+### (a) Expert tab — control-by-control verdict
+
+**Verdict: PARITY** across all §14 rows (14.1–14.31).  Evidence:
+
+* Every Tk `tab_expert` control (Tk l.1520–1942) has a Qt widget in the data
+  driven `SETTINGS_SECTIONS` surface built by `_build_settings_tab` (Qt
+  l.1480): warning banner → `expert_warning_label` (red italic, 14.1),
+  `apply_batch_feathering` (14.2), `apply_feathering` + `feather_blur_px`
+  (14.3–14.4), `apply_low_wht_mask` + `low_wht_percentile`/`low_wht_soften_px`
+  (14.5–14.7), `apply_bn` + `bn_*` (14.8–14.14), `apply_cb` + `cb_*`
+  (14.15–14.19), `apply_final_crop` + `final_edge_crop_percent`
+  (14.20–14.21), `apply_master_tile_crop` + `master_tile_crop_percent`
+  (14.22–14.23), `apply_photutils_bn` + `photutils_*` (14.24–14.28),
+  `save_final_as_float32` (14.29), `preserve_linear_output` (14.30),
+  `reset_expert_button` (14.31).
+* **Ranges** match the Tk spinboxes exactly (verified against `_field` specs,
+  e.g. `bn_std_factor` 0.5–5.0 step 0.1, `cb_border_size` 5–150 step 5,
+  `photutils_bn_filter_size` 1–15 step 2, `final_edge_crop_percent` 0.0–25.0
+  step 0.5) and are locked by `tests/test_qt_expert_m15.py`.
+* **Defaults** are the canonical `SettingsManager.get_default_values` values
+  (`QtSettingsState` in `seestar/gui_qt/settings_state.py`), not the transient
+  Tk `init_variables` values — the §14 "Default-value divergence" note is
+  accurate (e.g. `bn_grid_size_str` 24x24 vs 16x16, `bn_perc_high` 40 vs 30,
+  `photutils_bn_filter_size` 11 vs 5).
+* **Enabler logic** mirrors Tk.  Tk uses `command=` on each checkbutton →
+  `_update_*_options_state` (Tk l.2323–2470), gating every child except the
+  checkbox itself.  Qt uses `EXPERT_ENABLER_GATES` (Qt l.597–627) +
+  `_update_expert_enabler_states` (Qt l.1693) wired via `stateChanged`
+  (Qt l.1852–1861).  All eight enablers (incl. `apply_final_scnr`) are present.
+* **Reset** mirrors Tk `_reset_expert_settings` (Tk l.3523): `EXPERT_RESET_ATTRS`
+  (Qt l.643) restores BN/CB/crop/feathering/batch-feathering/low-weight/
+  Photutils; output-format fields are deliberately not reset (Tk parity); the
+  Qt button additionally resets the Low WHT group (documented Tk-oversight fix).
+* **Observation (not a blocker):** Qt field labels are slugified (e.g. "BN grid
+  size" vs Tk "Grid Size:", "CB border size" vs "Border Size (px):"), fully
+  FR/EN localised.  Semantically equivalent; the §14 table maps Tk label → Qt
+  equivalent and never claims byte-identical labels.
+
+### (b) System tab — verdict on rows 8.1 / 9.4 / 13.2 / 13.3 / 13.7 / 15.30
+
+**Verdict: PARITY.**  Evidence:
+
+* **8.1 / 13.7** Language switch: `language_combo` (enabled, user-triggered)
+  lives in `_build_system_tab` (Qt l.934) with the same `_on_language_changed`
+  → `_set_language` → `_refresh_language` live re-translation + close-time
+  persistence (no duplicate).  FR/EN round-trip tested.
+* **9.4** Appearance theme: `theme_combo` (System/Dark/Light, default System)
+  → `QtSettingsState.theme` (closed vocabulary `system|dark|light`, unknown →
+  `system`, `settings_state.py`) round-trips through `to_dict`/`from_dict`;
+  applied via a compact `QPalette` (`_apply_theme_palette`), `system` re-reads
+  the style's standard palette.  Presentation-only.
+* **13.2** `QScrollArea` wraps the `QTabWidget` (incl. the System tab, which
+  hosts the language combo) + progress/log — `_build_left_panel` (Qt l.877).
+* **13.3** Tab order `Stacking | Expert | System | Preview controls`
+  (`_build_left_panel` addTab order, Qt l.885–891).
+* **15.30** Use GPU: `use_gpu_check` moved to System with the *same* `use_gpu`
+  state key + M20 RunRequest/seam plumbing (drizzle gating preserved).  Verified
+  by `tests/test_qt_system_tab_m255c.py`.
+
+### (c) Preview controls tab — verdict on rows 6.x / 16.x / 17.x + M24
+
+**Verdict: PARITY.**  Evidence:
+
+* **6.2/6.3/6.9** WB / stretch / brightness-contrast-saturation: slider +
+  numeric spinbox pairs with Tk ranges/steps/defaults (constants in
+  `preview_adjust.py` l.50–56; `_make_slider_spin_pair` builds the pair),
+  `Auto WB` / `Reset`, `Auto Stretch` / `Reset Stretch`, `Reset Adjust.`.  All
+  act on a *derived* copy (`apply_preview_adjustments`), never `_preview_source`.
+* **6.4 / 16.8–16.12** Histogram: single live surface `HistogramView`
+  (`histogram_view.py`) with auto-zoom / reset-view / zoom / reset-zoom and
+  BP/WP drag → `rangeChanged` mirrored into the bp/wp controls
+  (`_on_hist_range_changed`).  Source is the WB-only derived image (M14).
+* **6.5/6.6/16.14/16.16** Zoom (`Fit`/100/200/50 combo) + rotation
+  (cumulative ±90°, pan reset) — `_on_zoom_changed` / `_on_rotate_left/right`.
+* **6.7 / 16.17 / §17** Pan/zoom: `_on_wheel_zoom` (×1.15, `[0.05, 15.0]`,
+  cursor-anchored), `_on_pan_delta` (unbounded), `_reset_view_transform`
+  (100% + centred on new image), `zoom_combo` "Fit" recentres.  Display-only
+  (`_preview_source` never mutated; asserted by M18 hygiene tests).
+* **16.15 + M24** Res-cycle: `_on_preview_res_cycle` (1→2→3→4→1) is
+  display-only while idle and forwards the factor through the M22 control
+  channel during an active run.  `_effective_preview_downsample_factor` (Qt
+  l.2938) returns `1` while `_running` (the engine already pushed frames at
+  its own factor — Tk renders engine frames directly) and the local
+  `_preview_res_factor` when idle.  Reconciliation is derived from `_running`
+  alone, so run end restores idle behaviour with no stale state.
+* **Correction made this lot:** §6.3 note now states that the `auto` stretch
+  combo entry is a Qt-only convenience mode (Tk's combo is 3-mode
+  Linear/Asinh/Log + a separate `Auto Stretch` button); linear/asinh/log are
+  the Tk-parity tone curves.
+
+### (d) `apply_bn` / `apply_cb` / `apply_final_crop` — NON-BLOCKER (Tk-identical)
+
+**Verdict: NON-BLOCKER (GUI gating only, Tk parity — not a gap).**  Evidence:
+
+* The shared builder `seestar/gui/run_config.py::build_backend_kwargs` does
+  **not** emit `apply_bn` / `apply_cb` / `apply_final_crop` (it *does* emit
+  the sibling enablers `apply_photutils_bn` / `apply_master_tile_crop` /
+  `apply_feathering` / `apply_batch_feathering` / `apply_low_wht_mask`, which
+  the engine already reads).
+* **Tk side:** `apply_bn_var` / `apply_cb_var` / `apply_final_crop_var` are
+  used *only* as the checkbutton `variable=` (Tk l.1665/1751/1812), in the
+  `_update_*_options_state` gating (Tk l.2434–2463) and in
+  `_reset_expert_settings` (Tk l.3549–3573).  `start_processing` builds its run
+  snapshot through the same `build_run_request` (Tk l.6687) →
+  `split_backend_kwargs` (Tk l.6732) → `start_processing(**start_kwargs)` (Tk
+  l.6735), so Tk also never forwards the three flags to the engine.
+* **Qt side:** `MainWindow.build_run_request` uses the *same* shared builder
+  (`run_bridge` → `run_config.build_run_request`) plus `attach_run_settings`
+  (Qt l.3538), so the three flags are likewise absent.
+* **Conclusion:** the Qt behaviour is exact Tk parity.  Documented separately
+  (here + §14 note + `tests/test_qt_audit_m255f.py`); explicitly **not**
+  implemented as new backend semantics.
+
+### (e) Checklist completeness verdict
+
+* Final counts: **187 checked matrix rows / 1 open matrix row** — the sole
+  open row is 11.2 (official Qt entry point; human gate, left open).
+* Note corrections made this lot: §6.3 (the `auto` stretch mode is Qt-only),
+  §14 (explicit NON-BLOCKER + Tk-parity evidence for the three enabler flags).
+* No over-claims found in the three audited tabs beyond those two wording
+  clarifications.  No behaviour changed.
 
 ---
 
@@ -1273,3 +1410,23 @@ Covered by `tests/test_qt_actions_ergonomics_m255e.py` (new, 15 tests) +
   `test_qt_*.py` = 543 passed + 1 known pre-existing failure
   (`test_tk_gui_still_imports`, TkAgg headless); `git diff --check` clean.
   Remaining gaps: audit F, M26.
+- **2026-08-21 — lot ZSSS-PYSIDE6-M25.5-F**: final parity audit (new section
+  23).  Line-by-line audit of the Preview controls / System / Expert tabs
+  against the Tk source: **Expert tab PARITY** (all §14 rows 14.1–14.31 —
+  widget, range, `SettingsManager`-aligned default, enabler gating and reset),
+  **System tab PARITY** (8.1/9.4/13.2/13.3/13.7/15.30), **Preview controls tab
+  PARITY** (6.x/16.x/17.x + the M24 `_effective_preview_downsample_factor`
+  reconciliation).  Documented `apply_bn` / `apply_cb` / `apply_final_crop` as
+  an explicit **NON-BLOCKER**: GUI gating only — the engine does not consume
+  them, and the Tk GUI likewise never forwards them (both sides share
+  `build_backend_kwargs`, which omits the three flags), so Qt is Tk-identical
+  rather than a gap; deliberately not implemented as new backend semantics.
+  Completeness verdict: 187 checked rows / 1 open row (11.2 remains the sole
+  open matrix row).  Note corrections: §6.3 (`auto` stretch combo entry is a Qt-only
+  convenience mode; Tk's combo is 3-mode + a separate Auto Stretch button) and
+  §14 (explicit NON-BLOCKER + Tk-parity evidence for the three enabler flags).
+  New documentation-truth test `tests/test_qt_audit_m255f.py` (3 tests: the
+  three flags are absent from `build_backend_kwargs`, present as persisted GUI
+  state, and present as gating enablers).  No GUI/behaviour change, no new
+  backend semantic, no new dependency.  Remaining gaps: Qt entry point (11.2),
+  M26.
