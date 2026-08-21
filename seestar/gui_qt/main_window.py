@@ -155,6 +155,7 @@ from .run_controller import RunController
 from .run_handoff import attach_run_settings
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
 from .settings_state import QtSettingsState
+from .solver_config_bridge import write_solver_config
 from .solver_dialog import SolverSettingsDialog
 from .solver_probe import probe_zesolver_operational
 
@@ -1959,15 +1960,29 @@ class MainWindow(QMainWindow):
     def _on_solver(self) -> None:
         """Open the solver configuration dialog and apply accepted values.
 
-        This never starts the backend and never imports the engine: the dialog
-        is a pure view/controller over the existing solver boundaries (reached
-        lazily), and accepted values are written back into the live Qt controls
-        so a subsequent ``collect_settings_state()`` / ``build_run_request()``
-        sees them.
+        This never starts the backend.  The dialog is a pure view/controller
+        over the existing solver boundaries (reached lazily), and accepted
+        values are written back into the live Qt controls so a subsequent
+        ``collect_settings_state()`` / ``build_run_request()`` sees them.
+
+        On accept only, the values are also bridged into the engine solver
+        config (the module defining ``load_config`` / ``save_config``) via a
+        lazy, function-scoped import — mirroring the Tk ``_on_ok`` timing,
+        which writes the engine config only when OK is pressed.  Cancel/ESC
+        never reaches this branch.
         """
         dialog = SolverSettingsDialog(self, self.collect_settings_state())
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._apply_solver_dialog_values(dialog.values())
+            values = dialog.values()
+            self._apply_solver_dialog_values(values)
+            # M21: persist the accepted solver fields into the engine solver
+            # config (the same file the Tk GUI writes) with Tk-identical
+            # load/overlay/save semantics.  Defensive: a write failure never
+            # blocks the dialog's OK flow (Tk parity).
+            try:
+                write_solver_config(values)
+            except Exception:
+                pass
 
     def _apply_solver_dialog_values(self, values: dict) -> None:
         """Apply accepted solver-dialog values back to the live Qt controls.

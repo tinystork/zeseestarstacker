@@ -264,6 +264,17 @@ def test_dialog_prefills_from_persisted_state_and_accept_updates_state(qapp):
 def test_dialog_accept_values_survive_save_load_round_trip(qapp, tmp_path, monkeypatch):
     settings_file = str(tmp_path / "qt_settings.json")
 
+    # M21: accepting the solver dialog now also writes the engine solver
+    # config; isolate it so this test never touches the user's real config.
+    engine = _load_engine_solver_config()
+    monkeypatch.setattr(
+        engine, "get_config_path", lambda: str(tmp_path / "engine_config.json")
+    )
+    monkeypatch.setattr(engine, "_legacy_config_candidates", lambda: [])
+    monkeypatch.setattr(
+        "seestar.gui_qt.solver_config_bridge._solver_config_module", lambda: engine
+    )
+
     win1 = MainWindow(backend_mode="simulated", settings_path=settings_file)
 
     class AcceptedDialog:

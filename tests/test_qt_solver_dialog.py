@@ -15,6 +15,9 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import importlib.util
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +32,8 @@ from seestar.gui_qt.solver_dialog import (
     SolverSettingsDialog,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 @pytest.fixture(scope="session", autouse=True)
 def qapp():
@@ -36,6 +41,20 @@ def qapp():
     app = create_application([])
     assert app is QApplication.instance()
     return app
+
+
+def _load_engine_solver_config():
+    """Load ``seestar.core.solver_config`` by file path (no package init)."""
+    name = "engine_solver_config_dialog_m21"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "seestar" / "core" / "solver_config.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _ui_state(label="ZeSolver : non installé", color="gray", show_button=False):
@@ -338,9 +357,20 @@ def test_mainwindow_applies_solver_dialog_values(qapp):
         win.shutdown()
 
 
-def test_on_solver_opens_dialog_and_applies(qapp, monkeypatch):
+def test_on_solver_opens_dialog_and_applies(qapp, monkeypatch, tmp_path):
     win = MainWindow()
     captured = {}
+
+    # M21: accepting the solver dialog now also writes the engine solver
+    # config; isolate it so this test never touches the user's real config.
+    engine = _load_engine_solver_config()
+    monkeypatch.setattr(
+        engine, "get_config_path", lambda: str(tmp_path / "engine_config.json")
+    )
+    monkeypatch.setattr(engine, "_legacy_config_candidates", lambda: [])
+    monkeypatch.setattr(
+        "seestar.gui_qt.solver_config_bridge._solver_config_module", lambda: engine
+    )
 
     class FakeDialog:
         def __init__(self, parent, initial):
