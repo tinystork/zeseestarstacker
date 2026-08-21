@@ -250,25 +250,34 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
     def _apply_seam_kwargs(stacker: Any, seam_kwargs: dict) -> None:
         """Apply seam-only snapshot fields to the stacker before processing.
 
-        The final-combination value is read by the queue manager from its own
-        instance attribute (initialised from a settings object in its
-        ``__init__``), *not* from a ``start_processing`` argument.  We therefore
-        set it on the stacker instance and, when a settings object is attached
-        to the stacker, mirror it there so a later settings re-read cannot
-        clobber the selected value.
+        These fields are read by the queue manager from its *instance*
+        attributes, *not* from ``start_processing`` arguments:
+
+        * ``stack_final_combine`` — set on the stacker and (when a settings
+          object is attached) mirrored there so a later settings re-read cannot
+          clobber the selected value.
+        * ``use_gpu`` — drizzle GPU toggle; the engine reads ``stacker.use_gpu``
+          at run time.
+        * ``max_hq_mem_gb`` — HQ RAM limit in GB; the engine reads
+          ``stacker.max_hq_mem`` in bytes, so the GB value is converted here.
         """
         combine = seam_kwargs.get("stack_final_combine")
-        if combine is None:
-            return
-        stacker.stack_final_combine = combine
+        if combine is not None:
+            stacker.stack_final_combine = combine
         settings = getattr(stacker, "settings", None)
-        if settings is not None:
+        if combine is not None and settings is not None:
             try:
                 setattr(settings, "stack_final_combine", combine)
             except Exception:
                 # A settings object that rejects the write must not break the
                 # run; the instance attribute above is the authoritative path.
                 pass
+
+        if "use_gpu" in seam_kwargs:
+            stacker.use_gpu = bool(seam_kwargs["use_gpu"])
+
+        if "max_hq_mem_gb" in seam_kwargs:
+            stacker.max_hq_mem = int(float(seam_kwargs["max_hq_mem_gb"]) * 1024 ** 3)
 
     @staticmethod
     def _make_progress_callback(

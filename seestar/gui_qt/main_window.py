@@ -152,6 +152,7 @@ from .preview_view import (
 from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
+from .run_handoff import attach_run_settings
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
 from .settings_state import QtSettingsState
 from .solver_dialog import SolverSettingsDialog
@@ -3114,14 +3115,22 @@ class MainWindow(QMainWindow):
 
         This does **not** start the backend: it only collects the visible
         controls into a :class:`QtSettingsState` and forwards it to the
-        Qt/Tk-independent ``run_config.build_run_request``.
+        Qt/Tk-independent ``run_config.build_run_request``, then attaches the
+        Qt-collected seam settings (``use_gpu`` / ``max_hq_mem_gb``) that the
+        canonical builder intentionally does not emit (M20).  The canonical
+        builder's output is unchanged, so the Tk flow stays byte-identical.
         """
         state = self._effective_settings_state()
-        return _build_run_request(
+        request = _build_run_request(
             state,
             initial_additional_folders=initial_additional_folders,
             auto_chunk_size=auto_chunk_size,
             special_single=special_single,
+        )
+        return attach_run_settings(
+            request,
+            use_gpu=bool(state.use_gpu),
+            max_hq_mem_gb=float(state.max_hq_mem_gb),
         )
 
     # ------------------------------------------- progress/log time + copy

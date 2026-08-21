@@ -44,7 +44,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 3.3 | ZeSolver operational-readiness probe (lazy, engine-free at import) | `[x]` | `solver_probe.probe_zesolver_operational`; injected into preflight |
 | 3.4 | ASTAP selected but absent → block | `[x]` | preflight rejects empty `astap_path` |
 | 3.5 | Solver settings *dialog* (Local Solvers window, readiness refresh UI) | `[x]` | `solver_dialog.SolverSettingsDialog` + `solver_service` (lazy public boundary); ASTAP frame gating, ZeSolver status/configure + deferred readiness refresh |
-| 3.6 | ASTAP/ZeSolver config persistence via `solver_config` (engine bridge) | `[ ]` | Engine `seestar.core.solver_config` read/write bridge remains a backend-E2E gap; the Qt-side JSON persistence is delivered in §18 (M19) |
+| 3.6 | ASTAP/ZeSolver config persistence via `solver_config` (engine bridge) | `[ ]` | Engine `seestar.core.solver_config` read/write bridge remains a backend-E2E gap; the Qt-side JSON persistence is delivered in §18 (M19). Unchanged by M20 (still `[ ]`) |
 
 ## 4. Browse / paths
 
@@ -242,7 +242,7 @@ label/default/range/enabler); `[ ]` = gap with a note.
 | 15.12 | "Kappa High:" → `stacking_kappa_high_var` | 0.1–10 step 0.1, `3.0` | `stack_kappa_high` (Expert tab, 0.0–10.0) | `[x]` (range diff) |
 | 15.13 | "Winsor Limits:" → `stacking_winsor_limits_str_var` | str `0.05,0.05` | `stack_winsor_limits` (Expert tab) | `[x]` |
 | 15.14 | "Final Combine:" → `stack_final_combine_var` | combo mean/median/winsorized_sigma_clip/reproject/reproject_coadd, `mean` | `final_combine_combo` (Stacking tab) | `[x]` |
-| 15.15 | "HQ RAM limit (GB)" → `max_hq_mem_var` | 1–64 step 1, `8.0` | `max_hq_mem_spin` (Stacking tab) | `[x]` display-only, `[ ]` backend |
+| 15.15 | "HQ RAM limit (GB)" → `max_hq_mem_var` | 1–64 step 1, `8.0` | `max_hq_mem_spin` (Stacking tab) | `[x]` display-only, `[x]` backend (M20) |
 | 15.16 | "Method:" → `stack_method_var` | combo mean/median/kappa_sigma/winsorized_sigma_clip/linear_fit_clip, `kappa_sigma` | `stacking_mode_combo` (Stacking tab, backend keys) | `[x]` (label diff) |
 | 15.17 | "Apply Final SCNR (Green)" → `apply_final_scnr_var` | bool, `False` | `apply_final_scnr` checkbox (enabler, Expert tab) | `[x]` (enabler; default diff) |
 | 15.18 | SCNR amount → `final_scnr_amount_var` | 0–1 step 0.05, `0.8` | `final_scnr_amount` (Expert tab) | `[x]` (default diff) |
@@ -257,7 +257,7 @@ label/default/range/enabler); `[ ]` = gap with a note.
 | 15.27 | "WHT Threshold %:" → `drizzle_wht_display_var`→`drizzle_wht_threshold_var` | 10–100 step 5 (%), `0.7` | `drizzle_wht_threshold` (Expert tab, float 0–1) | `[x]` (% vs float) |
 | 15.28 | "Kernel:" → `drizzle_kernel_var` | combo 7 kernels, `square` | `drizzle_kernel` combo (Expert tab) | `[x]` |
 | 15.29 | "Pixfrac:" → `drizzle_pixfrac_var` | 0.01–2.00 step 0.05, `1.0` | `drizzle_pixfrac` (Expert tab) | `[x]` |
-| 15.30 | "Use GPU" → `use_gpu_var` | bool, `False` | `use_gpu_check` (Stacking tab) | `[x]` display-only, `[ ]` backend |
+| 15.30 | "Use GPU" → `use_gpu_var` | bool, `False` | `use_gpu_check` (Stacking tab) | `[x]` display-only, `[x]` backend (M20) |
 | 15.31 | "Correct hot pixels" → `correct_hot_pixels` | bool, `True` | `correct_hot_pixels` checkbox (Expert tab) | `[x]` |
 | 15.32 | "Threshold:" → `hot_pixel_threshold` | 1–10 step 0.1, `3.0` | `hot_pixel_threshold` (Expert tab, 0.5–10) | `[x]` (range diff) |
 | 15.33 | "Neighborhood:" → `neighborhood_size` | 3–15 step 2, `5` | `neighborhood_size` (Expert tab, 1–20 step 1) | `[x]` (range/step diff) |
@@ -280,12 +280,18 @@ Notes / gaps:
   `final_scnr_target_channel` / `final_scnr_amount` /
   `final_scnr_preserve_luminosity` (added to `EXPERT_ENABLER_GATES`), mirroring
   the Tk `_update_final_scnr_options_state`.  `[x]`
-- **Engine-coupled gaps (display-only now, backend E2E later).**
+- **Engine-coupled handoff (15.15 / 15.30 backend, M20).**
   `use_gpu` (15.30) and `max_hq_mem_gb` (15.15) are added to `QtSettingsState`
-  and surfaced on the Stacking tab (persisted/collected like Tk) but are **not**
-  consumed by `build_backend_kwargs` — `use_gpu` has no backend kwarg today and
-  the boring CLI `--max-mem` stays fixed at the 8.0 GB default (pre-existing M4
-  delta).  `[ ]` backend E2E for both.
+  and surfaced on the Stacking tab (persisted/collected like Tk).  M20 wires
+  them into the Qt run path as *seam-only* fields on the `RunRequest` (the
+  canonical `build_backend_kwargs` is deliberately left unchanged, so the Tk
+  flow stays byte-identical): `MainWindow.build_run_request` attaches them via
+  `run_handoff.attach_run_settings`, and `SeestarQueuedStackerBackend` applies
+  `use_gpu` → `stacker.use_gpu` and `max_hq_mem_gb` →
+  `stacker.max_hq_mem` (bytes) before `start_processing`, never as
+  `start_processing` kwargs (see §19).  The boring single-batch subprocess
+  route's `--max-mem` stays fixed at the 8.0 GB default (pre-existing M4 delta,
+  a separate subprocess path, not the `RunController` run flow).  `[x]` backend.
 - **Kappa / Winsor visibility (Tk `_toggle_kappa_visibility`) is not reproduced.**
   The Tk Stacking tab hides the Kappa Low/High and Winsor-Limits controls unless
   the stacking method or final-combine is `kappa_sigma` /
@@ -339,7 +345,7 @@ equivalent with the backend part deferred.
 | 16.12 | `hist_reset_btn` "R" | reset zoom | `hist_reset_button` | `[x]` |
 | 16.13 | `preview_canvas` (Canvas) | preview image surface | `preview_image_label` (QLabel) | `[x]` |
 | 16.14 | `zoom_100_button` "Zoom 100%" / `zoom_fit_button` "Zoom Fit" | discrete zoom (engine-free) | `zoom_combo` (`Fit`/`100%`/`200%`/`50%`) | `[x]` (shape diff) |
-| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` (display-only) | `[x]` display-only, `[ ]` backend E2E |
+| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` (display-only) | `[x]` display-only, `[ ]` backend E2E (unchanged by M20) |
 | 16.16 | `rotate_left_button` / `rotate_right_button` | rotate preview ±90° (engine-free) | `rotate_left_button` / `rotate_right_button` | `[x]` |
 | 16.17 | Pan (left-drag / scroll) via `PreviewManager` | canvas pan + scroll-zoom (engine-free) | `PreviewImageView` + `render_view(zoom_factor=…, pan_offset=…)` | `[x]` (M18, checklist 6.7, §17) |
 | 16.18 | Save / export | no dedicated right-panel button; the run saves FITS/PNG via the engine | run backend + `open_output_button` | `[x]` (N/A) |
@@ -474,6 +480,45 @@ Notes / decisions:
   the live Qt controls via `_apply_solver_dialog_values`, which fold into
   `settings_state` and thus survive the `_save_persisted_settings` save →
   `_load_persisted_settings` load round-trip.  `[x]`.
+
+---
+
+## 19. Qt run-settings handoff — `use_gpu` / `max_hq_mem_gb` (M20)
+
+Backend E2E part 1: the Qt run flow consumes the Qt-collected `use_gpu` (15.30)
+and `max_hq_mem_gb` (15.15) settings.  The canonical shared builder
+`seestar.gui.run_config.build_backend_kwargs` is deliberately **unchanged** (so
+the Tk flow stays byte-identical); the Qt shell attaches the two values to its
+`RunRequest` as *seam-only* fields (the same pattern as `stack_final_combine`)
+and the Qt backend adapter applies them to the stacker *instance*.
+
+| Setting | Qt control | Collected field | Consumed where | Test |
+|---|---|---|---|---|
+| Use GPU (drizzle) | `use_gpu_check` (Stacking tab) | `QtSettingsState.use_gpu` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.use_gpu` | `test_qt_run_settings_handoff_m20.py` |
+| HQ RAM limit (GB) | `max_hq_mem_spin` (Stacking tab) | `QtSettingsState.max_hq_mem_gb` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["max_hq_mem_gb"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.max_hq_mem` (bytes) | `test_qt_run_settings_handoff_m20.py` |
+
+Mechanics:
+
+* `MainWindow.build_run_request` collects `QtSettingsState` →
+  `run_config.build_run_request` (canonical) → `attach_run_settings(request,
+  use_gpu=..., max_hq_mem_gb=...)`, producing a still-immutable `RunRequest`
+  whose `backend_kwargs` carry the two seam fields.
+* `seestar.gui.run_config.SEAM_ONLY_KWARGS` gains `use_gpu` / `max_hq_mem_gb`
+  (additive, default-preserving): `split_backend_kwargs` filters them out of the
+  `start_processing` kwargs, so the engine never receives them as keywords.
+* `SeestarQueuedStackerBackend._apply_seam_kwargs` applies `use_gpu` →
+  `stacker.use_gpu` and `max_hq_mem_gb` → `stacker.max_hq_mem =
+  int(gb * 1024**3)`; the GB→bytes conversion lives in the adapter, not the
+  snapshot.
+* Fallback: a bare surface (no persisted settings / untouched controls) attaches
+  the Qt/Tk defaults (`use_gpu=False`, `max_hq_mem_gb=8.0`), so behaviour equals
+  today's defaults.
+
+Explicitly out of scope this lot (deferred gaps, unchanged `[ ]`):
+the engine solver bridge (3.6), the Res-factor E2E (16.15), last-stack resume
+(10.1) and the official Qt entry point (11.2).  The boring single-batch
+subprocess `--max-mem` also stays fixed at 8.0 GB (pre-existing M4 delta, a
+separate subprocess route outside the `RunController` run flow).
 
 ---
 
@@ -806,4 +851,22 @@ Notes / decisions:
   is untouched (asserted).  No Tk/engine/backend files changed;
   `_preview_source` never mutated.  Covered by
   `tests/test_qt_solver_persistence_m19.py` (new) + the existing
+  import-hygiene tests; `git diff --check` clean.
+- **2026-08-21 — lot ZSSS-QT-FP-M20**: backend E2E part 1 — Qt run-settings
+  handoff for `use_gpu` (15.30) and `max_hq_mem_gb` (15.15).  The canonical
+  shared builder `seestar.gui.run_config.build_backend_kwargs` stays unchanged
+  (Tk flow byte-identical); the Qt shell attaches the two collected values to
+  its `RunRequest` as seam-only fields via a new engine/Tk-free
+  `seestar/gui_qt/run_handoff.py` (`attach_run_settings`), and
+  `SeestarQueuedStackerBackend._apply_seam_kwargs` applies `use_gpu` →
+  `stacker.use_gpu` and `max_hq_mem_gb` → `stacker.max_hq_mem` (bytes) before
+  `start_processing` — never as `start_processing` kwargs.
+  `seestar.gui.run_config.SEAM_ONLY_KWARGS` gains the two names (additive,
+  default-preserving) so `split_backend_kwargs` filters them out.  Fallback
+  degrades to the Qt/Tk defaults.  The boring single-batch subprocess `--max-mem`
+  stays fixed at 8.0 GB (pre-existing M4 delta); solver bridge (3.6), Res-factor
+  E2E (16.15), last-stack resume (10.1) and the Qt entry point (11.2) remain
+  `[ ]`.  Re-pointed one M16 assertion (`test_engine_coupled_items_are_wired_into_run_request`
+  replaces the old "display-only" assertion).  Covered by
+  `tests/test_qt_run_settings_handoff_m20.py` (new, 14 tests) + the existing
   import-hygiene tests; `git diff --check` clean.

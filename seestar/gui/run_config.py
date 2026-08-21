@@ -91,10 +91,17 @@ def _copy_dict_or_none(value: Any) -> Any:
 # Snapshot fields carried in ``backend_kwargs`` for adapters/tests but *not*
 # accepted by ``SeestarQueuedStacker.start_processing``.  The runner/adapter
 # must filter these out before calling ``start_processing(**kwargs)`` and apply
-# them to the stacker instance instead.  ``stack_final_combine`` is the
-# seam-only business value: the QueueManager reads it from its instance (or its
-# settings object) — never from a ``start_processing`` argument.
-SEAM_ONLY_KWARGS = frozenset({"stack_final_combine"})
+# them to the stacker instance instead.
+#
+# * ``stack_final_combine`` — the QueueManager reads it from its instance (or
+#   its settings object), never from a ``start_processing`` argument.
+# * ``use_gpu`` / ``max_hq_mem_gb`` — Qt-collected seam fields (M20).  The
+#   engine reads ``use_gpu`` and ``max_hq_mem`` (bytes) from the stacker
+#   instance, never from ``start_processing``; the Qt backend adapter applies
+#   them to the stacker after this split.  They are *not* emitted by
+#   ``build_backend_kwargs`` (so the Tk flow is byte-identical) — the Qt shell
+#   attaches them to its ``RunRequest`` at the call site.
+SEAM_ONLY_KWARGS = frozenset({"stack_final_combine", "use_gpu", "max_hq_mem_gb"})
 
 
 def split_backend_kwargs(
@@ -104,9 +111,9 @@ def split_backend_kwargs(
 
     ``start_kwargs`` is safe to forward verbatim to
     ``SeestarQueuedStacker.start_processing(**start_kwargs)``; ``seam_kwargs``
-    holds the snapshot fields (``stack_final_combine``) that must be applied to
-    the stacker instance (and its settings object, when present) instead of
-    being passed through as keyword arguments.
+    holds the snapshot fields (``stack_final_combine`` and the Qt-collected
+    ``use_gpu`` / ``max_hq_mem_gb``) that must be applied to the stacker
+    instance instead of being passed through as keyword arguments.
     """
     start_kwargs: Dict[str, Any] = {}
     seam_kwargs: Dict[str, Any] = {}

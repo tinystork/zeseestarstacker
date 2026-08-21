@@ -13,9 +13,10 @@ Offscreen tests for the Stacking-tab closure (Tk ``tab_stacking`` → Qt):
   preserve-luminosity sub-options (Tk ``_update_final_scnr_options_state``),
 * the newly added labels localize FR/EN via the Qt-local ``localization``
   module,
-* engine-coupled items (``use_gpu`` / ``max_hq_mem_gb``) stay display-only:
-  they exist in ``QtSettingsState`` and round-trip through persistence but are
-  NOT consumed by ``build_backend_kwargs``,
+* engine-coupled items (``use_gpu`` / ``max_hq_mem_gb``) exist in
+  ``QtSettingsState``, round-trip through persistence, and (M20) are wired into
+  the Qt run request as seam-only fields while ``build_backend_kwargs`` itself
+  stays unchanged (Tk parity),
 * the Stacking tab has no reset button (the Tk Stacking tab has none).
 
 No real stacking, no engine, no Tk.  ``QT_QPA_PLATFORM=offscreen`` is set
@@ -232,9 +233,10 @@ def test_scnr_enabler_gating(window):
 
 
 # --------------------------------------------------------------------------
-# (5) engine-coupled items are display-only (not in build_backend_kwargs)
+# (5) engine-coupled items: collected in the model, wired into the run request
+#     as seam-only fields (M20).  ``build_backend_kwargs`` itself is unchanged.
 # --------------------------------------------------------------------------
-def test_engine_coupled_items_are_display_only(window):
+def test_engine_coupled_items_are_wired_into_run_request(window):
     window.use_gpu_check.setChecked(True)
     window.max_hq_mem_spin.setValue(32)
 
@@ -243,10 +245,12 @@ def test_engine_coupled_items_are_display_only(window):
     assert state.use_gpu is True
     assert state.max_hq_mem_gb == 32.0
 
-    # ...but they are NOT wired to the backend.
+    # ...and M20 wires them into the Qt run request as seam-only fields.  The
+    # byte conversion (``max_hq_mem``) happens in the backend adapter, not in
+    # the snapshot, so the request still carries the GB value.
     kw = window.build_run_request().backend_kwargs
-    assert "use_gpu" not in kw
-    assert "max_hq_mem_gb" not in kw
+    assert kw["use_gpu"] is True
+    assert kw["max_hq_mem_gb"] == 32.0
     assert "max_hq_mem" not in kw
 
 
