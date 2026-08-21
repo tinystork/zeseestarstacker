@@ -36,10 +36,14 @@ class RunRequest:
     Attributes
     ----------
     backend_kwargs:
-        Read-only keyword mapping forwarded verbatim to
-        ``SeestarQueuedStacker.start_processing(**backend_kwargs)``.  Mutable
-        settings-owned containers are shallow-copied while the snapshot is
-        built, so later GUI/settings mutations cannot change the run request.
+        Read-only keyword mapping handed to the backend starter.  Every key
+        except the seam-only fields (see ``SEAM_ONLY_KWARGS`` /
+        ``split_backend_kwargs``) is forwarded verbatim to
+        ``SeestarQueuedStacker.start_processing(**backend_kwargs)``; the
+        seam-only ``stack_final_combine`` value is applied to the stacker
+        instance instead.  Mutable settings-owned containers are shallow-copied
+        while the snapshot is built, so later GUI/settings mutations cannot
+        change the run request.
     align_on_disk:
         Value to assign to ``SeestarQueuedStacker.align_on_disk`` before the
         worker thread starts (``batch_size >= 1``).
@@ -82,6 +86,36 @@ def _copy_dict_or_none(value: Any) -> Any:
     if isinstance(value, dict):
         return dict(value)
     return value
+
+
+# Snapshot fields carried in ``backend_kwargs`` for adapters/tests but *not*
+# accepted by ``SeestarQueuedStacker.start_processing``.  The runner/adapter
+# must filter these out before calling ``start_processing(**kwargs)`` and apply
+# them to the stacker instance instead.  ``stack_final_combine`` is the
+# seam-only business value: the QueueManager reads it from its instance (or its
+# settings object) — never from a ``start_processing`` argument.
+SEAM_ONLY_KWARGS = frozenset({"stack_final_combine"})
+
+
+def split_backend_kwargs(
+    backend_kwargs: Mapping[str, Any],
+) -> tuple:
+    """Partition a run snapshot into ``(start_kwargs, seam_kwargs)``.
+
+    ``start_kwargs`` is safe to forward verbatim to
+    ``SeestarQueuedStacker.start_processing(**start_kwargs)``; ``seam_kwargs``
+    holds the snapshot fields (``stack_final_combine``) that must be applied to
+    the stacker instance (and its settings object, when present) instead of
+    being passed through as keyword arguments.
+    """
+    start_kwargs: Dict[str, Any] = {}
+    seam_kwargs: Dict[str, Any] = {}
+    for key, value in backend_kwargs.items():
+        if key in SEAM_ONLY_KWARGS:
+            seam_kwargs[key] = value
+        else:
+            start_kwargs[key] = value
+    return start_kwargs, seam_kwargs
 
 
 def build_backend_kwargs(
@@ -185,6 +219,7 @@ def build_backend_kwargs(
         "astap_sensitivity": settings.astap_sensitivity,
         "save_as_float32": settings.save_final_as_float32,
         "preserve_linear_output": settings.preserve_linear_output,
+        "stack_final_combine": settings.stack_final_combine,
         "reproject_between_batches": settings.reproject_between_batches,
         "reproject_coadd_final": settings.reproject_coadd_final,
         "match_background_for_final": match_background_for_final,

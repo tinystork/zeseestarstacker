@@ -31,8 +31,8 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 2.1 | Final-combine choices (mean / reproject / reproject_coadd / reject) | `[ ]` | no `stack_final_combine` widget in the Qt shell yet |
-| 2.2 | `reproject_between_batches` ⇄ `reproject_coadd_final` mutual exclusion | `[ ]` | |
+| 2.1 | Final-combine choices (mean / median / winsorized_sigma_clip / reproject / reproject_coadd) | `[x]` | `final_combine_combo` (Stacking tab) with the five historical Tk keys |
+| 2.2 | `reproject_between_batches` ⇄ `reproject_coadd_final` mutual exclusion | `[x]` | single source of truth: `stack_final_combine` drives both flags via `final_combine_flags` |
 | 2.3 | Drizzle / reproject / boring-thread interdependencies (button gating) | `[ ]` | |
 
 ## 3. Solver dialog / readiness
@@ -121,10 +121,26 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 12.3 | Shutdown retains live thread on timeout (no destroy-while-running) | `[x]` | `shutdown()` returns `bool`, defers cleanup |
 | 12.4 | Backend activation (`simulated` / `seestar`) | `[x]` | lazy `SeestarQueuedStackerBackend` |
 
+## 13. Shell topology (Tk layout parity)
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 13.1 | Left/right `QSplitter` (control panel + persistent preview/action panel) | `[x]` | `_build_central` + `_build_left_panel` / `_build_right_panel` |
+| 13.2 | Scrollable left panel (language + tabs + progress/log) | `[x]` | `QScrollArea` wrapping language combo, `QTabWidget`, progress, log |
+| 13.3 | Left tabs `Stacking` / `Expert` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs |
+| 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches |
+| 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop functional; the rest are disabled topology stubs |
+| 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[ ]` | basic disabled placeholders only |
+| 13.7 | Language switch (FR/EN) | `[ ]` | placeholder combo (disabled) |
+
 ---
 
 ## Last updated
 
+- **2026-08-21 — lot ZSSS-QT-FP-M1**: delivered items 2.1, 2.2 and section 13
+  (Tk-like splitter topology + persistent right panel + final-combination
+  business selector).  Detailed solver dialog, browse actions, preview
+  WB/stretch/histogram and zoom/rotation interactivity remain `[ ]`.
 - **2026-08-21 — lot ZSSS-QT-FP-P0**: delivered items 1.1–1.5, 3.1–3.4, 12.3
   (batch-size contract, solver gate + readiness probe injection, shutdown
   robustness). Everything else remains `[ ]`.

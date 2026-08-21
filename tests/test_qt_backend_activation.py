@@ -426,7 +426,7 @@ def test_seestar_mode_reproject_without_solver_blocks_start(qapp):
     try:
         win.input_edit.setText("/inputs")
         win.output_edit.setText("/outputs")
-        win._settings_widgets["reproject_between_batches"].setChecked(True)
+        win.final_combine_combo.setCurrentText("Reproject")
         win.solver_combo.setCurrentText("none")
         win.start_button.click()
 
@@ -460,7 +460,7 @@ def test_seestar_mode_reproject_with_astap_path_reaches_controller(qapp):
     try:
         win.input_edit.setText("/inputs")
         win.output_edit.setText("/outputs")
-        win._settings_widgets["reproject_between_batches"].setChecked(True)
+        win.final_combine_combo.setCurrentText("Reproject")
         win.solver_combo.setCurrentText("astap")
         win._settings_widgets["astap_path"].setText("/usr/bin/astap")
         win.start_button.click()
@@ -510,7 +510,7 @@ def test_batch_size_zero_with_reproject_coadd_stays_zero(qapp):
     win.controller.start = spy_start
     try:
         win.batch_spin.setValue(0)
-        win._settings_widgets["reproject_coadd_final"].setChecked(True)
+        win.final_combine_combo.setCurrentText("Reproject & Coadd")
         win.start_button.click()
         assert _pump_until(qapp, lambda: win.is_running is False)
         assert len(seen) == 1
@@ -539,7 +539,7 @@ def test_seestar_mode_zesolver_operational_without_astap_reaches_controller(qapp
     try:
         win.input_edit.setText("/inputs")
         win.output_edit.setText("/outputs")
-        win._settings_widgets["reproject_between_batches"].setChecked(True)
+        win.final_combine_combo.setCurrentText("Reproject")
         win.solver_combo.setCurrentText("zesolver")
         # astap_path left empty on purpose.
         win.start_button.click()

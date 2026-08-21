@@ -16,15 +16,14 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QTabWidget
+from PySide6.QtWidgets import QApplication, QScrollArea, QSplitter
 
 import seestar.gui_qt as gui_qt
 from seestar.gui_qt import DEFAULT_TITLE, MainWindow, create_application
 from seestar.gui_qt.main_window import (
-    TAB_LOG,
-    TAB_PREVIEW,
-    TAB_SETTINGS,
-    TAB_STACK,
+    TAB_EXPERT,
+    TAB_PREVIEW_CONTROLS,
+    TAB_STACKING,
 )
 from seestar.gui_qt.run_bridge import RunRequest
 from seestar.gui_qt.settings_state import QtSettingsState
@@ -42,9 +41,13 @@ def _pump_until(qapp, predicate, timeout_ms: int = 5000) -> bool:
     return bool(predicate())
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def qapp():
-    """Single process-wide QApplication for the whole session."""
+    """Single process-wide QApplication for the whole session.
+
+    Autouse keeps tests that construct ``MainWindow()`` directly safe when they
+    are selected in isolation (``QWidget`` requires an existing application).
+    """
     app = create_application([])
     assert app is QApplication.instance()
     return app
@@ -185,8 +188,8 @@ def test_main_window_constructs_offscreen(qapp):
     win = MainWindow()
     try:
         assert win.windowTitle() == DEFAULT_TITLE
-        assert isinstance(win.centralWidget(), QTabWidget)
-        assert win.tabs.count() >= 4
+        assert isinstance(win.centralWidget(), QSplitter)
+        assert win.tabs.count() >= 3
     finally:
         win.shutdown()
 
@@ -195,10 +198,9 @@ def test_tab_labels():
     win = MainWindow()
     try:
         labels = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert TAB_STACK in labels
-        assert TAB_SETTINGS in labels
-        assert TAB_PREVIEW in labels
-        assert TAB_LOG in labels
+        assert TAB_STACKING in labels
+        assert TAB_EXPERT in labels
+        assert TAB_PREVIEW_CONTROLS in labels
     finally:
         win.shutdown()
 
@@ -223,6 +225,129 @@ def test_custom_title():
         assert win.windowTitle() == "Custom Qt Shell"
     finally:
         win.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Tk-like topology: left scrollable panel + persistent right panel
+# --------------------------------------------------------------------------
+def test_left_panel_is_scrollable_and_holds_tabs():
+    win = MainWindow()
+    try:
+        assert isinstance(win.left_panel, QScrollArea)
+        assert win.left_panel.widget() is not None
+        assert win.tabs.parent() is not None
+    finally:
+        win.shutdown()
+
+
+def test_right_panel_has_preview_view_histogram_and_actions():
+    win = MainWindow()
+    try:
+        for attr in (
+            "preview_label",
+            "preview_image_label",
+            "zoom_combo",
+            "resolution_label",
+            "rotate_left_button",
+            "rotate_right_button",
+            "histogram_placeholder",
+            "start_button",
+            "stop_button",
+            "analyse_button",
+            "solver_button",
+            "view_inputs_button",
+            "add_folder_button",
+            "open_output_button",
+        ):
+            assert hasattr(win, attr), f"missing right-panel control {attr}"
+        # Stub action buttons are present but disabled; Start/Stop are live.
+        assert win.start_button.isEnabled()
+        assert not win.stop_button.isEnabled()
+        assert not win.analyse_button.isEnabled()
+        assert not win.solver_button.isEnabled()
+        assert not win.view_inputs_button.isEnabled()
+        assert not win.add_folder_button.isEnabled()
+        assert not win.open_output_button.isEnabled()
+    finally:
+        win.shutdown()
+
+
+def test_right_panel_is_not_a_tab_and_persists_across_switches():
+    win = MainWindow()
+    try:
+        tab_widgets = [win.tabs.widget(i) for i in range(win.tabs.count())]
+        assert win.right_panel not in tab_widgets
+        identity = win.right_panel
+        for i in range(win.tabs.count()):
+            win.tabs.setCurrentIndex(i)
+            assert win.right_panel is identity
+    finally:
+        win.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Final-combination business mapping
+# --------------------------------------------------------------------------
+def test_final_combine_combo_has_five_historical_choices():
+    win = MainWindow()
+    try:
+        labels = [
+            win.final_combine_combo.itemText(i)
+            for i in range(win.final_combine_combo.count())
+        ]
+        assert labels == [
+            "Mean",
+            "Median",
+            "Winsorized Sigma Clip",
+            "Reproject",
+            "Reproject & Coadd",
+        ]
+    finally:
+        win.shutdown()
+
+
+def test_final_combine_mapping_table():
+    from seestar.gui_qt.final_combine import FINAL_COMBINE_LABELS
+
+    expected = {
+        "mean": ("mean", False, False),
+        "median": ("median", False, False),
+        "winsorized_sigma_clip": ("winsorized_sigma_clip", False, False),
+        "reproject": ("reproject", True, False),
+        "reproject_coadd": ("reproject_coadd", False, True),
+    }
+    win = MainWindow()
+    try:
+        for key, (combine, rbb, rcf) in expected.items():
+            win.final_combine_combo.setCurrentText(FINAL_COMBINE_LABELS[key])
+            state = win.collect_settings_state()
+            assert state.stack_final_combine == combine
+            assert state.reproject_between_batches is rbb
+            assert state.reproject_coadd_final is rcf
+            kw = win.build_run_request().backend_kwargs
+            assert kw["stack_final_combine"] == combine
+            assert kw["reproject_between_batches"] is rbb
+            assert kw["reproject_coadd_final"] is rcf
+    finally:
+        win.shutdown()
+
+
+def test_final_combine_helper_flags_and_reconstruction():
+    from seestar.gui_qt.final_combine import (
+        final_combine_flags,
+        final_combine_key_from_flags,
+    )
+
+    assert final_combine_flags("mean") == (False, False)
+    assert final_combine_flags("median") == (False, False)
+    assert final_combine_flags("winsorized_sigma_clip") == (False, False)
+    assert final_combine_flags("reproject") == (True, False)
+    assert final_combine_flags("reproject_coadd") == (False, True)
+
+    assert final_combine_key_from_flags(True, False) == "reproject"
+    assert final_combine_key_from_flags(False, True) == "reproject_coadd"
+    assert final_combine_key_from_flags(False, False, fallback="median") == "median"
+    assert final_combine_key_from_flags(False, False) == "mean"
 
 
 # --------------------------------------------------------------------------

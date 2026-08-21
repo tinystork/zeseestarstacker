@@ -47,7 +47,7 @@ from seestar.gui_qt import MainWindow, create_application
 from seestar.gui_qt.main_window import (
     SEESTAR_BACKEND_NOTICE,
     SIMULATED_BACKEND_NOTICE,
-    TAB_SETTINGS,
+    TAB_EXPERT,
 )
 from seestar.gui_qt.settings_state import QtSettingsState
 
@@ -70,9 +70,9 @@ def window(qapp):
 
 def _settings_tab_widget(win) -> QWidget:
     for i in range(win.tabs.count()):
-        if win.tabs.tabText(i) == TAB_SETTINGS:
+        if win.tabs.tabText(i) == TAB_EXPERT:
             return win.tabs.widget(i)
-    raise AssertionError("no Settings tab found")
+    raise AssertionError("no Expert tab found")
 
 
 # --------------------------------------------------------------------------

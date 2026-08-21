@@ -180,7 +180,7 @@ from .histogram_widget import HistogramWidget
 from .preview import PreviewManager
 from .progress import ProgressManager
 from .settings import SettingsManager
-from .run_config import build_run_request
+from .run_config import build_run_request, split_backend_kwargs
 
 
 class SeestarStackerGUI:
@@ -6724,8 +6724,16 @@ class SeestarStackerGUI:
             self.thread.start()
 
             try:
+                # The run snapshot now also carries the seam-only
+                # ``stack_final_combine`` field.  It is already applied to the
+                # stacker through ``settings`` at construction time, so it must
+                # be filtered out of the keyword surface passed to
+                # ``start_processing`` (which does not accept it).
+                start_kwargs, _seam_kwargs = split_backend_kwargs(
+                    run_request.backend_kwargs
+                )
                 started = self.queued_stacker.start_processing(
-                    **run_request.backend_kwargs
+                    **start_kwargs
                 )
             except Exception as e:
                 started = False

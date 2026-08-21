@@ -1,4 +1,4 @@
-"""Minimal PySide6 main-window shell for ZeSeestarStacker.
+"""PySide6 main-window shell for ZeSeestarStacker (Tk-like topology).
 
 This is a *non-default* GUI shell.  The default entry point remains the Tk
 ``seestar.main:main`` application; this module is an architectural foothold for
@@ -15,10 +15,21 @@ widgets off the GUI thread.  The worker communicates with this window
 exclusively through Qt queued signals — never by touching widgets directly, and
 never by receiving or storing widget references.
 
-The Stack tab exposes input/output/temp/filename, batch size, stacking mode,
-drizzle and local-solver controls; the Settings tab (M10) exposes the rest of
-the backend-relevant :class:`~seestar.gui_qt.settings_state.QtSettingsState`
-surface in a scrollable, grouped form.  Both feed the same model, which
+Topology mirrors the historical Tk window (``0d9af8b``): a horizontal
+``QSplitter`` with a scrollable left control panel (language placeholder +
+``QTabWidget`` with ``Stacking`` / ``Expert`` / ``Preview controls`` tabs +
+progress/status/log area) and a persistent right preview/action panel
+(preview image + metadata, zoom/resolution/rotation placeholders, histogram
+placeholder and the action buttons Start / Stop / Analyse / Solver /
+View Inputs / Add Folder / Open Output).  Start/Stop are functional; the other
+action buttons and the preview view/histogram controls are topology
+placeholders for later milestones.
+
+The Stacking tab exposes input/output/temp/filename, batch size, stacking mode,
+the final-combination business selector, drizzle and local-solver controls; the
+Expert tab (M10) exposes the rest of the backend-relevant
+:class:`~seestar.gui_qt.settings_state.QtSettingsState` surface in a scrollable,
+grouped form.  Both feed the same model, which
 :meth:`MainWindow.build_run_request` turns into a validated, immutable
 :class:`~seestar.gui_qt.run_bridge.RunRequest`, which the Start button hands to
 the lifecycle controller.  The default backend remains simulated (and is
@@ -39,6 +50,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -47,6 +59,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QStatusBar,
     QTabWidget,
     QTextEdit,
@@ -58,6 +71,12 @@ from .backend_runner import (
     BackendPreviewPayload,
     BaseRunBackend,
     SeestarQueuedStackerBackend,
+)
+from .final_combine import (
+    FINAL_COMBINE_LABELS,
+    FINAL_COMBINE_LABEL_TO_KEY,
+    FINAL_COMBINE_KEYS,
+    final_combine_flags,
 )
 from .preview_render import render_preview_image
 from .run_bridge import RunRequest, build_run_request as _build_run_request
@@ -72,11 +91,11 @@ DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
 BACKEND_MODES = ("simulated", "seestar")
 DEFAULT_BACKEND_MODE = "simulated"
 
-# Placeholder tab labels used by the smoke test and future parity migration.
-TAB_STACK = "Stack"
-TAB_SETTINGS = "Settings"
-TAB_PREVIEW = "Preview"
-TAB_LOG = "Log"
+# Left-panel tab labels (Tk ``control_notebook`` parity: Stacking / Expert /
+# Preview controls).
+TAB_STACKING = "Stacking"
+TAB_EXPERT = "Expert"
+TAB_PREVIEW_CONTROLS = "Preview controls"
 
 # Minimal visible subset of stacking modes, drizzle modes and local-solver
 # preferences.  Values are the *backend* keys, not display labels.
@@ -251,8 +270,6 @@ SETTINGS_SECTIONS = [
         [
             _field("save_final_as_float32", "Save final as float32", "bool"),
             _field("preserve_linear_output", "Preserve linear output", "bool"),
-            _field("reproject_between_batches", "Reproject between batches", "bool"),
-            _field("reproject_coadd_final", "Reproject + coadd final", "bool"),
         ],
     ),
     (
@@ -338,28 +355,58 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ UI
     def _build_central(self) -> None:
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.left_panel = self._build_left_panel()
+        self.right_panel = self._build_right_panel()
+        self.splitter.addWidget(self.left_panel)
+        self.splitter.addWidget(self.right_panel)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 2)
+        self.setCentralWidget(self.splitter)
+
+    def _build_left_panel(self) -> QScrollArea:
+        """Build the scrollable left control panel (Tk ``control_notebook``)."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        outer = QVBoxLayout(container)
+
+        # Language control placeholder (real Localization switch is a later
+        # milestone).
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel("Language:"))
+        self.language_combo = QComboBox()
+        self.language_combo.addItems(["English", "Français"])
+        self.language_combo.setEnabled(False)
+        lang_row.addWidget(self.language_combo)
+        lang_row.addStretch(1)
+        outer.addLayout(lang_row)
+
         self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_stacking_tab(), TAB_STACKING)
+        self.tabs.addTab(self._build_settings_tab(), TAB_EXPERT)
+        self.tabs.addTab(self._build_preview_controls_tab(), TAB_PREVIEW_CONTROLS)
+        outer.addWidget(self.tabs)
 
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
+        # Progress / status area (Tk ``progress_frame``).
+        outer.addWidget(QLabel("Progression:"))
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        outer.addWidget(self.progress)
 
-        self.tabs.addTab(self._build_stack_tab(), TAB_STACK)
-        self.tabs.addTab(self._build_settings_tab(), TAB_SETTINGS)
-        self.tabs.addTab(self._build_preview_tab(), TAB_PREVIEW)
-
+        # Log area (Tk ``status_text``).
+        outer.addWidget(QLabel("Log:"))
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        self.tabs.addTab(self.log_view, TAB_LOG)
+        outer.addWidget(self.log_view, 1)
 
-        self.setCentralWidget(self.tabs)
+        scroll.setWidget(container)
+        return scroll
 
-    def _build_stack_tab(self) -> QWidget:
+    def _build_stacking_tab(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
-
-        label = QLabel("Stacking pipeline placeholder — no real work is performed.")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(label)
 
         # --- Minimal settings form (visible subset only) ---
         self.input_edit = QLineEdit()
@@ -375,6 +422,16 @@ class MainWindow(QMainWindow):
         self.stacking_mode_combo = QComboBox()
         self.stacking_mode_combo.addItems(STACKING_MODES)
         self.stacking_mode_combo.setCurrentText("kappa-sigma")
+
+        # Final-combination business control (Tk ``stack_final_combo``).
+        self.final_combine_combo = QComboBox()
+        self.final_combine_combo.addItems(
+            [FINAL_COMBINE_LABELS[k] for k in FINAL_COMBINE_KEYS]
+        )
+        default_label = FINAL_COMBINE_LABELS.get(
+            self.settings_state.stack_final_combine, "Mean"
+        )
+        self.final_combine_combo.setCurrentText(default_label)
 
         self.drizzle_check = QCheckBox("Enable drizzle")
         self.drizzle_check.setChecked(False)
@@ -398,11 +455,102 @@ class MainWindow(QMainWindow):
         form.addRow("Output filename", self.output_filename_edit)
         form.addRow("Batch size", self.batch_spin)
         form.addRow("Stacking mode", self.stacking_mode_combo)
+        form.addRow("Final combine", self.final_combine_combo)
         form.addRow("", self.drizzle_check)
         form.addRow("Drizzle mode", self.drizzle_mode_combo)
         form.addRow("Drizzle group size", self.drizzle_group_spin)
         form.addRow("Local solver", self.solver_combo)
         layout.addLayout(form)
+        layout.addStretch(1)
+
+        return panel
+
+    def _build_preview_controls_tab(self) -> QWidget:
+        """Left-panel "Preview controls" tab (topology placeholder).
+
+        Full WB / stretch / histogram interactivity is a later milestone; the
+        tab exists only to hold its place in the Tk-like left panel.
+        """
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        label = QLabel("Preview controls placeholder — no interactivity yet.")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+        layout.addStretch(1)
+        return panel
+
+    def _build_right_panel(self) -> QWidget:
+        """Build the persistent right preview/action panel (Tk ``preview_frame``
+        + histogram + action buttons)."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+
+        # Preview (persistent across left-tab switches).
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_group)
+        self.preview_label = QLabel("Preview: —")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.addWidget(self.preview_label)
+        self.preview_image_label = QLabel()
+        self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_image_label.setMinimumSize(256, 256)
+        preview_layout.addWidget(self.preview_image_label, 1)
+        layout.addWidget(preview_group, 1)
+
+        # Zoom / resolution / rotation controls (basic/disabled placeholders).
+        view_group = QGroupBox("View")
+        view_layout = QGridLayout(view_group)
+        view_layout.addWidget(QLabel("Zoom:"), 0, 0)
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.addItems(["Fit", "100%", "200%", "50%"])
+        self.zoom_combo.setEnabled(False)
+        view_layout.addWidget(self.zoom_combo, 0, 1)
+        view_layout.addWidget(QLabel("Resolution:"), 0, 2)
+        self.resolution_label = QLabel("—")
+        view_layout.addWidget(self.resolution_label, 0, 3)
+        self.rotate_left_button = QPushButton("⟲")
+        self.rotate_left_button.setEnabled(False)
+        self.rotate_right_button = QPushButton("⟳")
+        self.rotate_right_button.setEnabled(False)
+        view_layout.addWidget(self.rotate_left_button, 1, 0)
+        view_layout.addWidget(self.rotate_right_button, 1, 1)
+        layout.addWidget(view_group)
+
+        # Histogram placeholder.
+        histo_group = QGroupBox("Histogram")
+        histo_layout = QVBoxLayout(histo_group)
+        self.histogram_placeholder = QLabel("[ ] Histogram placeholder")
+        self.histogram_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        histo_layout.addWidget(self.histogram_placeholder)
+        layout.addWidget(histo_group)
+
+        # Action buttons (Start/Stop functional; the rest are topology stubs).
+        actions_group = QGroupBox("Actions")
+        actions_layout = QGridLayout(actions_group)
+        self.start_button = QPushButton("Start")
+        self.stop_button = QPushButton("Stop")
+        self.analyse_button = QPushButton("Analyse")
+        self.solver_button = QPushButton("Solver")
+        self.view_inputs_button = QPushButton("View Inputs")
+        self.add_folder_button = QPushButton("Add Folder")
+        self.open_output_button = QPushButton("Open Output")
+        # Stub action buttons: present for topology, no external action yet.
+        for stub in (
+            self.analyse_button,
+            self.solver_button,
+            self.view_inputs_button,
+            self.add_folder_button,
+            self.open_output_button,
+        ):
+            stub.setEnabled(False)
+        actions_layout.addWidget(self.start_button, 0, 0)
+        actions_layout.addWidget(self.stop_button, 0, 1)
+        actions_layout.addWidget(self.analyse_button, 1, 0)
+        actions_layout.addWidget(self.solver_button, 1, 1)
+        actions_layout.addWidget(self.view_inputs_button, 2, 0)
+        actions_layout.addWidget(self.add_folder_button, 2, 1)
+        actions_layout.addWidget(self.open_output_button, 3, 0, 1, 2)
+        layout.addWidget(actions_group)
 
         # Honest backend-mode notice (M9 fix): always visible next to Start so
         # a witness knows the default Start click is simulated.
@@ -410,27 +558,6 @@ class MainWindow(QMainWindow):
         self.backend_notice_label.setWordWrap(True)
         layout.addWidget(self.backend_notice_label)
 
-        controls = QHBoxLayout()
-        controls.addWidget(self.start_button)
-        controls.addWidget(self.stop_button)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-        layout.addStretch(1)
-
-        return panel
-
-    def _build_preview_tab(self) -> QWidget:
-        """Build the Preview tab (metadata label + display-only image area)."""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        self.preview_label = QLabel("Preview: —")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.preview_label)
-        self.preview_image_label = QLabel()
-        self.preview_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_image_label.setMinimumSize(64, 64)
-        layout.addWidget(self.preview_image_label)
-        layout.addStretch(1)
         return panel
 
     def _build_settings_tab(self) -> QWidget:
@@ -629,10 +756,6 @@ class MainWindow(QMainWindow):
 
     def _build_status_bar(self) -> None:
         status = QStatusBar()
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        status.addPermanentWidget(self.progress)
         self.setStatusBar(status)
         self.statusBar().showMessage("Idle")
 
@@ -664,6 +787,9 @@ class MainWindow(QMainWindow):
         self.output_filename_edit.textChanged.connect(self._sync_state_from_controls)
         self.batch_spin.valueChanged.connect(self._sync_state_from_controls)
         self.stacking_mode_combo.currentIndexChanged.connect(
+            self._sync_state_from_controls
+        )
+        self.final_combine_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
         self.drizzle_check.stateChanged.connect(self._sync_state_from_controls)
@@ -807,12 +933,27 @@ class MainWindow(QMainWindow):
         state.drizzle_group_size = self.drizzle_group_spin.value()
         state.local_solver_preference = self.solver_combo.currentText()
 
+        # Final-combination business control drives the derived reproject flags
+        # (exactly like Tk SettingsManager.update_from_ui).  There is no
+        # separate user-facing checkbox for these flags, so the two cannot fall
+        # out of sync.
+        key = self._final_combine_key()
+        state.stack_final_combine = key
+        state.reproject_between_batches, state.reproject_coadd_final = (
+            final_combine_flags(key)
+        )
+
         # Settings tab controls (scalar fields).
         for attr in self._settings_widgets:
             setattr(state, attr, self._read_settings_widget_value(attr))
 
         # Mosaic nested dict.
         self._sync_mosaic_settings(state)
+
+    def _final_combine_key(self) -> str:
+        """Return the current final-combine backend key from the combo label."""
+        label = self.final_combine_combo.currentText()
+        return FINAL_COMBINE_LABEL_TO_KEY.get(label, "mean")
 
     def resolve_backend(self) -> Optional[BaseRunBackend]:
         """Return the run backend for a Start, or ``None`` for the default.

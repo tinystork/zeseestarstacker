@@ -317,13 +317,48 @@ def test_seestar_backend_maps_request_to_stackers():
 
     # align_on_disk came from the canonical RunRequest (batch_size 4 -> True).
     assert stacker.align_on_disk is True
-    # start_processing received exactly the canonical backend kwargs.
-    assert stacker.start_kwargs == dict(request.backend_kwargs)
+    # start_processing must NOT receive the unsupported seam-only field; it is
+    # applied to the stacker instance instead.
+    assert "stack_final_combine" not in stacker.start_kwargs
+    expected_start_kwargs = dict(request.backend_kwargs)
+    expected_start_kwargs.pop("stack_final_combine")
+    assert stacker.start_kwargs == expected_start_kwargs
+    assert stacker.stack_final_combine == request.backend_kwargs["stack_final_combine"]
     assert stacker.start_count == 1
     # progress callback was installed and is callable.
     assert callable(stacker.progress_cb)
     # init kwargs forwarded (settings).
     assert stacker.init_kwargs.get("settings") == "FAKE_SETTINGS"
+
+
+def test_seestar_backend_applies_stack_final_combine_to_settings():
+    """The selected final-combine value reaches the stacker and its settings."""
+
+    class Settings:
+        def __init__(self) -> None:
+            self.stack_final_combine = "mean"
+
+    instances = []
+
+    def factory(**kwargs):
+        stacker = FakeStacker(**kwargs)
+        stacker.settings = Settings()
+        instances.append(stacker)
+        return stacker
+
+    backend = SeestarQueuedStackerBackend(
+        stacker_factory=factory,
+        poll_interval=0.001,
+    )
+    request = _make_request(stack_final_combine="winsorized_sigma_clip")
+
+    result = backend.run(request, lambda p: None, lambda m: None, lambda: False)
+
+    assert result is BackendRunResult.FINISHED
+    stacker = instances[0]
+    assert stacker.stack_final_combine == "winsorized_sigma_clip"
+    assert stacker.settings.stack_final_combine == "winsorized_sigma_clip"
+    assert "stack_final_combine" not in stacker.start_kwargs
 
 
 def test_seestar_backend_align_on_disk_false_and_progress_cb_mapping():

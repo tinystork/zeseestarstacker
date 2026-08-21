@@ -21,6 +21,7 @@ from seestar.gui.run_config import (
     build_backend_kwargs,
     build_run_request,
     compute_align_on_disk,
+    split_backend_kwargs,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "build_run_request",
     "build_backend_kwargs",
     "compute_align_on_disk",
+    "split_backend_kwargs",
 ]

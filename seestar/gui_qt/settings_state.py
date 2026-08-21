@@ -73,6 +73,11 @@ class QtSettingsState:
     stack_winsor_limits: str = "0.05,0.05"
     stack_norm_method: str = "none"
     stack_weight_method: str = "none"
+    # Final-combination business choice.  One of
+    # ``mean`` / ``median`` / ``winsorized_sigma_clip`` / ``reproject`` /
+    # ``reproject_coadd``.  Drives the two reproject flags below exactly like
+    # the Tk ``SettingsManager.update_from_ui`` derivation.
+    stack_final_combine: str = "mean"
     batch_size: int = 0
     order_file_list: List[str] = field(default_factory=list)
 

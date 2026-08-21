@@ -26,6 +26,7 @@ run_config_spec.loader.exec_module(run_config)
 build_backend_kwargs = run_config.build_backend_kwargs
 build_run_request = run_config.build_run_request
 compute_align_on_disk = run_config.compute_align_on_disk
+split_backend_kwargs = run_config.split_backend_kwargs
 RunRequest = run_config.RunRequest
 
 # --- Load seestar.gui.settings standalone (for a real SettingsManager) ---
@@ -114,6 +115,7 @@ DIRECT_MAP = {
     "preserve_linear_output": "preserve_linear_output",
     "reproject_between_batches": "reproject_between_batches",
     "reproject_coadd_final": "reproject_coadd_final",
+    "stack_final_combine": "stack_final_combine",
 }
 
 EXPECTED_BASE_KEYS = frozenset(
@@ -152,6 +154,35 @@ def test_direct_attribute_passthrough():
     kwargs = build_backend_kwargs(sm)
     for key, attr in DIRECT_MAP.items():
         assert kwargs[key] is sentinels[key], f"{key} != {attr}"
+
+
+def test_stack_final_combine_preserved_in_backend_kwargs():
+    """The selected final-combine key is carried in the run snapshot."""
+    sm = _make_sm()
+    for key in (
+        "mean",
+        "median",
+        "winsorized_sigma_clip",
+        "reproject",
+        "reproject_coadd",
+    ):
+        sm.stack_final_combine = key
+        assert build_backend_kwargs(sm)["stack_final_combine"] == key
+
+
+def test_split_backend_kwargs_partitions_seam_only_field():
+    """``split_backend_kwargs`` filters seam-only fields out of start kwargs."""
+    sm = _make_sm()
+    sm.stack_final_combine = "median"
+    kwargs = build_backend_kwargs(sm)
+    start_kwargs, seam_kwargs = split_backend_kwargs(kwargs)
+
+    assert "stack_final_combine" not in start_kwargs
+    assert seam_kwargs == {"stack_final_combine": "median"}
+    # Everything else is forwarded verbatim (same object identity).
+    for key, value in kwargs.items():
+        if key != "stack_final_combine":
+            assert start_kwargs[key] is value
 
 
 def test_use_weighting_derived():

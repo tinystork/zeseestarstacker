@@ -40,7 +40,7 @@ import importlib
 import time
 from typing import Any, Callable, Optional
 
-from .run_bridge import RunRequest
+from .run_bridge import RunRequest, split_backend_kwargs
 
 
 class BackendRunResult(enum.Enum):
@@ -246,6 +246,30 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         return stacker
 
     @staticmethod
+    def _apply_seam_kwargs(stacker: Any, seam_kwargs: dict) -> None:
+        """Apply seam-only snapshot fields to the stacker before processing.
+
+        The final-combination value is read by the queue manager from its own
+        instance attribute (initialised from a settings object in its
+        ``__init__``), *not* from a ``start_processing`` argument.  We therefore
+        set it on the stacker instance and, when a settings object is attached
+        to the stacker, mirror it there so a later settings re-read cannot
+        clobber the selected value.
+        """
+        combine = seam_kwargs.get("stack_final_combine")
+        if combine is None:
+            return
+        stacker.stack_final_combine = combine
+        settings = getattr(stacker, "settings", None)
+        if settings is not None:
+            try:
+                setattr(settings, "stack_final_combine", combine)
+            except Exception:
+                # A settings object that rejects the write must not break the
+                # run; the instance attribute above is the authoritative path.
+                pass
+
+    @staticmethod
     def _make_progress_callback(
         progress_callback: ProgressCallback,
         log_callback: LogCallback,
@@ -349,6 +373,8 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
     ) -> BackendRunResult:
         self._cancel_requested = False
         stacker = self._ensure_stackers(request)
+        start_kwargs, seam_kwargs = split_backend_kwargs(request.backend_kwargs)
+        self._apply_seam_kwargs(stacker, seam_kwargs)
         stacker.set_progress_callback(
             self._make_progress_callback(progress_callback, log_callback)
         )
@@ -357,7 +383,7 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             if callable(setter):
                 setter(self._make_preview_callback(preview_callback))
 
-        started = stacker.start_processing(**request.backend_kwargs)
+        started = stacker.start_processing(**start_kwargs)
         if not started:
             self._stop_stackers()
             raise RuntimeError(
