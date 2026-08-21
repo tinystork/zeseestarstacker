@@ -160,7 +160,52 @@ from .solver_dialog import SolverSettingsDialog
 from .solver_probe import probe_zesolver_operational
 from .summary_payload import SummaryPayload
 
-DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
+from .resources import load_empty_preview_pixmap, load_window_icon
+
+# Real product window-title *name* (the Tk ``localization`` "title" key, en/fr
+# identical).  The full default window title appends the lazily-read package
+# version via :func:`default_window_title`, so importing ``seestar.gui_qt``
+# never reads the version eagerly and stays engine/Tk/astropy-free.
+PRODUCT_TITLE = "Seestar Stacker"
+
+# Backward-compatible base title (no version).  ``MainWindow`` composes the
+# real title (name + version) at construction time via ``default_window_title``
+# so the version stays a lazy, hygiene-safe read.
+DEFAULT_TITLE = PRODUCT_TITLE
+
+
+def product_version() -> str:
+    """Return the product version string (``"7.0.2 Boring ostentus"``), or ``""``.
+
+    Lazy and hygiene-safe: it imports the already-imported ``seestar`` parent
+    package (whose ``__init__`` only binds ``__version__`` / ``__codename__``
+    and lazy re-exports — no engine, Tk or astropy) and reads the two
+    attributes.  Works identically from a source checkout and an installed
+    wheel.  Never raises: any failure degrades to ``""``.
+    """
+    try:
+        import seestar
+    except Exception:
+        return ""
+    version = getattr(seestar, "__version__", "") or ""
+    codename = getattr(seestar, "__codename__", "") or ""
+    if version and codename:
+        return f"{version} {codename}"
+    return version
+
+
+def default_window_title() -> str:
+    """Return the real product window title (byte-identical to the Tk title).
+
+    Tk sets ``f"{self.tr('title')}  –  {self.app_version}"`` where
+    ``tr('title')`` is ``"Seestar Stacker"`` and ``app_version`` is
+    ``"7.0.2 Boring ostentus"`` (``__version__ + " " + __codename__``).  The
+    separator is two spaces, an EN DASH (U+2013), two spaces.
+    """
+    version = product_version()
+    if version:
+        return f"{PRODUCT_TITLE}  \u2013  {version}"
+    return PRODUCT_TITLE
 
 # Backend selection modes understood by the shell's Start button.
 BACKEND_MODES = ("simulated", "seestar")
@@ -731,7 +776,13 @@ class MainWindow(QMainWindow):
         # the Qt entry point passes the platform-aware user-config default
         # (``settings_persistence.resolve_settings_path``, M25.5-B).
         self._settings_path = os.path.abspath(settings_path) if settings_path else None
-        self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
+        self.setWindowTitle(title if title is not None else default_window_title())
+        # Window icon (Tk ``root.iconphoto(True, ...)`` parity, M25.5-D).
+        # Best-effort: a missing/undecodable packaged icon leaves the default
+        # (empty) icon and the window still opens.
+        _icon = load_window_icon()
+        if _icon is not None:
+            self.setWindowIcon(_icon)
         # Qt-local localization state (M9).  English by default; a persisted
         # ``language`` field (when present) overrides this after controls are
         # built.  ``_last_*`` / ``_preview_detail`` keep the raw value behind
@@ -1294,6 +1345,10 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self.preview_label)
         self.preview_image_label = PreviewImageView()
         preview_layout.addWidget(self.preview_image_label, 1)
+        # Initial empty-preview placeholder: the packaged ``back.png`` (Tk
+        # ``PreviewManager`` background parity, M25.5-D).  Best-effort — a
+        # missing resource keeps the cleared (null) pixmap.
+        self._show_empty_preview()
         layout.addWidget(preview_group, 1)
 
         # Zoom / resolution / rotation controls (basic/disabled placeholders).
@@ -2885,6 +2940,28 @@ class MainWindow(QMainWindow):
         """
         return 1 if self._running else self._preview_res_factor
 
+    def _show_empty_preview(self) -> None:
+        """Render the packaged ``back.png`` as the empty-preview placeholder.
+
+        Tk ``PreviewManager._redraw_canvas`` draws ``back.png`` centred on the
+        preview canvas whenever there is no astro image (and as the background
+        behind one).  The Qt shell mirrors that for the empty state only: it
+        scales ``back.png`` to *fit* the preview label (aspect ratio preserved,
+        centred — the ``QLabel`` alignment is already ``AlignCenter``) and
+        leaves the label cleared (null pixmap) when the resource is missing or
+        undecodable.  Purely display — no engine / FITS / PNG write.
+        """
+        pixmap = load_empty_preview_pixmap()
+        if pixmap is None or pixmap.isNull():
+            self.preview_image_label.clear()
+            return
+        size = self.preview_image_label.size()
+        if size.width() > 1 and size.height() > 1:
+            pixmap = pixmap.scaled(
+                size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+        self.preview_image_label.setPixmap(pixmap)
+
     def _refresh_preview_view(self) -> None:
         """Repaint the preview image + resolution label + histogram from the
         stored source.
@@ -2901,7 +2978,7 @@ class MainWindow(QMainWindow):
         """
         source = self._preview_source
         if source is None or source.isNull():
-            self.preview_image_label.clear()
+            self._show_empty_preview()
             self._set_view_controls_enabled(False)
             self._set_preview_controls_enabled(False)
             self.resolution_label.setText("—")
@@ -2940,7 +3017,7 @@ class MainWindow(QMainWindow):
             pan_offset=pan_offset,
         )
         if pixmap is None or pixmap.isNull():
-            self.preview_image_label.clear()
+            self._show_empty_preview()
             self._set_view_controls_enabled(False)
             self._set_preview_controls_enabled(False)
             self.resolution_label.setText("—")

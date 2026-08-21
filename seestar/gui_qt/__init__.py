@@ -30,10 +30,14 @@ from .main_window import (
     DEFAULT_BACKEND_MODE,
     DEFAULT_TITLE,
     DRIZZLE_MODES,
+    PRODUCT_TITLE,
     SOLVER_PREFERENCES,
     STACKING_MODES,
+    default_window_title,
     MainWindow,
+    product_version,
 )
+from .resources import load_empty_preview_pixmap, load_window_icon
 from .run_controller import RunController
 from .run_worker import RunStatus, RunWorker
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
@@ -45,6 +49,11 @@ __all__ = [
     "BACKEND_MODES",
     "DEFAULT_BACKEND_MODE",
     "DEFAULT_TITLE",
+    "PRODUCT_TITLE",
+    "default_window_title",
+    "product_version",
+    "load_window_icon",
+    "load_empty_preview_pixmap",
     "QtSettingsState",
     "RunController",
     "RunStatus",

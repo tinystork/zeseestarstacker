@@ -614,6 +614,50 @@ lot.)
 
 ---
 
+## 21. Visual resources (window chrome) (M25.5-D)
+
+Makes the Qt shell look like a real product: packaged window icon, packaged
+``back.png`` empty-preview placeholder, and a real window title carrying the
+package version.  `[x]` = delivered this lot.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 21.1 | Window icon from ``seestar/icon/icon.png`` | `[x]` | `gui_qt.resources.load_window_icon` (stdlib `importlib.resources`, decode-once) → `MainWindow.setWindowIcon` (window-level, Tk `root.iconphoto(True, ...)` parity); best-effort — a missing/undecodable icon leaves the default empty icon, no raise |
+| 21.2 | Empty-preview placeholder from ``seestar/icon/back.png`` | `[x]` | `gui_qt.resources.load_empty_preview_pixmap` → `MainWindow._show_empty_preview` scales it to *fit* the preview label (aspect preserved, centred); replaces the former cleared (null) empty pixmap in both empty branches of `_refresh_preview_view` and at construction; a missing/undecodable resource keeps the cleared null pixmap |
+| 21.3 | Real window title ``"Seestar Stacker  –  <version>"`` | `[x]` | `default_window_title()` = `f"{PRODUCT_TITLE}  –  {product_version()}"` (Tk byte-identical: ``tr('title')`` ``"Seestar Stacker"`` + ``app_version`` ``"7.0.2 Boring ostentus"``, separator two spaces + EN DASH + two spaces); `product_version()` lazily reads `seestar.__version__` + `__codename__` (cheap parent package, no engine/Tk/astropy, works source + wheel); the `title=` constructor arg still overrides |
+
+Notes / decisions:
+
+- **Title parity decision.**  Tk sets `f"{self.tr('title')}  –  {self.app_version}"`
+  where `tr('title')` is `"Seestar Stacker"` (localization key, en/fr identical)
+  and `app_version` is `GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG` =
+  `"7.0.2 Boring ostentus"` (= `__version__ + " " + __codename__`).  The Qt shell
+  reproduces that string byte-identically, reading the version from the cheap
+  `seestar` parent package (`__version__` + `__codename__`) — no engine import
+  and no hardcoded version.  `DEFAULT_TITLE` is now the bare product name
+  (`"Seestar Stacker"`); the version is appended lazily by
+  `default_window_title()` so `import seestar.gui_qt` never reads the version
+  eagerly (fresh-process hygiene test).
+- **Icon placement.**  The icon is set on the `MainWindow` (not `QApplication`)
+  to mirror Tk's `root.iconphoto(True, ...)` window-level call and to be
+  directly testable via `window.windowIcon()`.  A single source
+  (`gui_qt.resources.load_window_icon`); no QApplication-level duplication.
+- **back.png scaling.**  Tk draws `back.png` at native size (750×750), centred
+  and clipped by the canvas.  The Qt shell instead scales it to *fit* the
+  preview label (aspect preserved, centred), matching the requested "fit the
+  preview area" behaviour and the `QLabel` surface (which does not clip the way
+  a Tk Canvas does).
+- **Empty-preview fallback.**  A missing/undecodable `back.png` leaves the
+  preview label cleared (null pixmap) — the exact pre-M25.5-D behaviour, so a
+  dev tree without packaged data still opens a working shell.
+
+Covered by `tests/test_qt_resources_m255d.py` (new) + adjusted
+`test_qt_shell.py` (default-title assertion) and `test_qt_preview.py` (two
+invalid/non-image-data assertions now expect the non-null placeholder) +
+`git diff --check` clean.  Remaining gaps: actions ergonomics E, audit F, M26.
+
+---
+
 ## Last updated
 
 - **2026-08-21 — lot ZSSS-QT-FP-M1**: delivered items 2.1, 2.2 and section 13
@@ -1153,3 +1197,21 @@ lot.)
   worker-lifecycle suites + the import-hygiene tests; `git diff --check` clean.
   Remaining gaps: Qt entry point (11.2), resources/actions ergonomics, audit F,
   M26.
+- **2026-08-21 — lot ZSSS-PYSIDE6-M25.5-D**: visual resources (window chrome) —
+  packaged window icon (`seestar/icon/icon.png`), packaged `back.png`
+  empty-preview placeholder, and the real window title
+  `"Seestar Stacker  –  7.0.2 Boring ostentus"` read lazily from
+  `seestar.__version__` + `__codename__` (no engine/Tk/astropy import, works
+  from source and from the wheel).  New `gui_qt.resources` seam (stdlib
+  `importlib.resources`, decode-once, best-effort → `None`); `MainWindow` sets
+  the window icon (window-level, Tk `root.iconphoto` parity) and renders the
+  empty preview from `back.png` scaled-to-fit (aspect preserved, centred);
+  `DEFAULT_TITLE` is now the bare product name and `default_window_title()`
+  appends the version lazily (fresh-process hygiene test proves no eager
+  `import seestar` version read at gui_qt import time).  Tk and the engine are
+  untouched.  Covered by `tests/test_qt_resources_m255d.py` (new, 12 tests) +
+  the adjusted `test_qt_shell.py` / `test_qt_preview.py` (default-title and
+  two invalid/non-image-data placeholder assertions) + the existing
+  preview/localization/system-tab/worker-lifecycle suites + the import-hygiene
+  tests; `git diff --check` clean.  Remaining gaps: actions ergonomics E,
+  audit F, M26.

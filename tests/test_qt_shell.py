@@ -188,7 +188,9 @@ def test_run_request_is_canonical():
 def test_main_window_constructs_offscreen(qapp):
     win = MainWindow()
     try:
-        assert win.windowTitle() == DEFAULT_TITLE
+        # M25.5-D: the default title is now the real product title (name +
+        # lazily-read version), composed via ``default_window_title``.
+        assert win.windowTitle() == gui_qt.default_window_title()
         assert isinstance(win.centralWidget(), QSplitter)
         assert win.tabs.count() >= 3
     finally:

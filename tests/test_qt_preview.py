@@ -538,7 +538,13 @@ def test_renderer_tuple_payload_skips_non_image_array_candidate():
 
 
 def test_main_window_preview_invalid_data_clears_pixmap(qapp):
-    """Invalid data never crashes and clears the image area (documented policy)."""
+    """Invalid data never crashes and resets the image area to the placeholder.
+
+    M25.5-D: the empty state now renders the packaged ``back.png`` placeholder
+    (Tk background parity) instead of a cleared null pixmap, so an invalid or
+    missing preview shows a non-null placeholder while the metadata label still
+    updates.
+    """
     win = MainWindow()
     try:
         arr = np.zeros((4, 4, 3), dtype=np.float32)
@@ -547,14 +553,15 @@ def test_main_window_preview_invalid_data_clears_pixmap(qapp):
         assert not win.preview_image_label.pixmap().isNull()
         assert "ok" in win.preview_label.text()
 
-        # Invalid data: metadata label still updates, image area clears.
+        # Invalid data: metadata label still updates, image area shows the
+        # back.png placeholder (non-null).
         win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
-        assert win.preview_image_label.pixmap().isNull()
+        assert not win.preview_image_label.pixmap().isNull()
         assert "bad" in win.preview_label.text()
 
-        # Missing data also clears without raising.
+        # Missing data also shows the placeholder without raising.
         win._on_preview(BackendPreviewPayload(data=None, stack_name="none"))
-        assert win.preview_image_label.pixmap().isNull()
+        assert not win.preview_image_label.pixmap().isNull()
         assert "none" in win.preview_label.text()
     finally:
         win.shutdown()
@@ -780,7 +787,7 @@ def test_rotation_resets_on_new_image_and_clear(qapp):
         win.shutdown()
 
 
-def test_non_image_payload_clears_and_disables_view_controls(qapp):
+def test_non_image_payload_resets_preview_and_disables_view_controls(qapp):
     win = MainWindow()
     try:
         win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="ok"))
@@ -791,7 +798,9 @@ def test_non_image_payload_clears_and_disables_view_controls(qapp):
 
         win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
         assert win.has_preview_image is False
-        assert win.preview_image_label.pixmap().isNull()
+        # M25.5-D: non-image data resets the preview to the packaged back.png
+        # placeholder (non-null), not a cleared null pixmap.
+        assert not win.preview_image_label.pixmap().isNull()
         assert not win.zoom_combo.isEnabled()
         assert not win.rotate_left_button.isEnabled()
         assert not win.rotate_right_button.isEnabled()
