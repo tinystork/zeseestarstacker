@@ -2519,7 +2519,7 @@ class MainWindow(QMainWindow):
             self._preview_zoom_factor = fit_scale(
                 self._preview_source,
                 self._preview_rotation,
-                self._preview_res_factor,
+                self._effective_preview_downsample_factor(),
                 self.preview_image_label.size(),
             )
         old_zoom = self._preview_zoom_factor
@@ -2684,6 +2684,24 @@ class MainWindow(QMainWindow):
         self.contrast_spin.setValue(DEFAULT_CONTRAST)
         self.saturation_spin.setValue(DEFAULT_SATURATION)
 
+    def _effective_preview_downsample_factor(self) -> int:
+        """Return the downsample factor to apply at preview render time.
+
+        Single source of truth for the rendered preview resolution (M24): the
+        engine pushes preview frames already downsampled by its own
+        ``preview_downsample_factor`` (default 2, changed live via the M22
+        control channel), so during an active run the local display-only
+        downsample must NOT be applied on top — the engine factor *is* the
+        displayed resolution (Tk parity: Tk renders the engine-pushed frames
+        directly, no second downsample).  When idle (no run), the local
+        display-only factor (M17/M18) applies unchanged.
+
+        The factor is derived from the run state (``_running``) alone; no
+        separate "engine factor" is stored, so run end restores idle behaviour
+        automatically with no stale state to clear.
+        """
+        return 1 if self._running else self._preview_res_factor
+
     def _refresh_preview_view(self) -> None:
         """Repaint the preview image + resolution label + histogram from the
         stored source.
@@ -2728,12 +2746,13 @@ class MainWindow(QMainWindow):
         else:
             zoom_factor = self._preview_zoom_factor
         pan_offset = (self._view_offset_x, self._view_offset_y)
+        display_downsample = self._effective_preview_downsample_factor()
         pixmap = render_view(
             adjusted,
             self._preview_rotation,
             zoom_text,
             self.preview_image_label.size(),
-            downsample_factor=self._preview_res_factor,
+            downsample_factor=display_downsample,
             zoom_factor=zoom_factor,
             pan_offset=pan_offset,
         )
@@ -2753,7 +2772,7 @@ class MainWindow(QMainWindow):
             disp_w, disp_h = zoomed_image_size(
                 adjusted,
                 self._preview_rotation,
-                self._preview_res_factor,
+                display_downsample,
                 self._preview_zoom_factor,
             )
         self.resolution_label.setText(self._resolution_text(source, disp_w, disp_h))

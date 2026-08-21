@@ -345,7 +345,7 @@ equivalent with the backend part deferred.
 | 16.12 | `hist_reset_btn` "R" | reset zoom | `hist_reset_button` | `[x]` |
 | 16.13 | `preview_canvas` (Canvas) | preview image surface | `preview_image_label` (QLabel) | `[x]` |
 | 16.14 | `zoom_100_button` "Zoom 100%" / `zoom_fit_button` "Zoom Fit" | discrete zoom (engine-free) | `zoom_combo` (`Fit`/`100%`/`200%`/`50%`) | `[x]` (shape diff) |
-| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` | `[x]` display-only, `[x]` backend E2E live control (M22) |
+| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` | `[x]` display-only, `[x]` backend E2E live control (M22), `[x]` display reconciliation (M24) |
 | 16.16 | `rotate_left_button` / `rotate_right_button` | rotate preview ±90° (engine-free) | `rotate_left_button` / `rotate_right_button` | `[x]` |
 | 16.17 | Pan (left-drag / scroll) via `PreviewManager` | canvas pan + scroll-zoom (engine-free) | `PreviewImageView` + `render_view(zoom_factor=…, pan_offset=…)` | `[x]` (M18, checklist 6.7, §17) |
 | 16.18 | Save / export | no dedicated right-panel button; the run saves FITS/PNG via the engine | run backend + `open_output_button` | `[x]` (N/A) |
@@ -362,18 +362,21 @@ Notes / gaps:
   channel (GUI → `RunController` → `RunWorker` → backend →
   `stacker.set_preview_downsample_factor` + `refresh_preview`, applied on the
   worker thread), matching the Tk `_cycle_preview_resolution` engine coupling;
-  idle clicks stay display-only.  **Display-path caveat:** the engine factor
-  changes the *resolution of the preview data* the engine pushes (via its
-  preview callback), while the Qt shell additionally applies its own local
-  display downsample (`_preview_res_factor`) to whatever it renders — the two
-  are not yet coordinated, so the on-screen preview does not yet reflect the
-  engine factor 1:1 (the engine-side application is verifiable on the stacker
-  instance; the live-preview-frame display reconciliation remains a documented
-  gap, no new preview-frame pipeline is built).  **Default deviation:** the Qt
-  default factor is `1` (native) because the Qt shell's display-only preview is
-  never engine-downsampled and the existing preview tests lock native
-  rendering; the Tk initial factor is `2` (engine `preview_downsample_factor`
-  default).  `[x]` display-only (M17), `[x]` backend E2E live control (M22).
+  idle clicks stay display-only.  **Display reconciliation (M24, delivered):**
+  the on-screen preview now reflects the engine factor 1:1 during an active
+  run — the render path (`_refresh_preview_view` /
+  `_effective_preview_downsample_factor`) uses factor `1` while a run is active
+  (the engine already pushed frames at its own `preview_downsample_factor`
+  resolution, Tk parity: Tk renders the engine-pushed frames directly with no
+  second downsample) and restores the local display-only factor
+  (`_preview_res_factor`) on run end; idle (no run) display-only local factor
+  behaviour is preserved byte-identically (M17/M18).  No new preview-frame
+  pipeline, no IPC/protocol change, no Res-button label/cycle change.
+  **Default deviation:** the Qt default factor is `1` (native) because the Qt
+  shell's display-only preview is never engine-downsampled and the existing
+  preview tests lock native rendering; the Tk initial factor is `2` (engine
+  `preview_downsample_factor` default).  `[x]` display-only (M17), `[x]`
+  backend E2E live control (M22), `[x]` display reconciliation (M24).
 - **Kappa/winsor visibility (M16 gap closed).**  `_toggle_kappa_visibility` now
   mirrors the Tk `_toggle_kappa_visibility` rule exactly: `stack_kappa_low` /
   `stack_kappa_high` show for stacking method `kappa-sigma` /
@@ -586,8 +589,9 @@ and no new engine import.
 covered by tests (`test_qt_last_stack_resume_m23.py`) and documented here.
 
 Explicitly out of scope this lot (unchanged `[ ]`): the official Qt entry point
-(11.2), the boring single-batch `--max-mem` 8.0 GB delta (pre-existing M4), and
-the live-preview-frame display reconciliation noted in M22.
+(11.2) and the boring single-batch `--max-mem` 8.0 GB delta (pre-existing M4).
+(The M22 live-preview-frame display reconciliation was closed by M24, after
+this lot.)
 
 ---
 
@@ -1014,3 +1018,24 @@ the live-preview-frame display reconciliation noted in M22.
   existing import-hygiene tests; `git diff --check` clean.  Remaining gaps:
   Qt entry point (11.2), the boring single-batch `--max-mem` 8.0 GB delta, and
   the M22 live-preview-frame display reconciliation.
+- **2026-08-21 — lot ZSSS-QT-FP-M24**: preview display reconciliation (closes
+  the M22 caveat; checklist 16.15 display half → `[x]`).  The on-screen preview
+  now reflects the engine factor 1:1 during an active run: a new
+  `MainWindow._effective_preview_downsample_factor()` makes the engine factor
+  the single source of truth at render time — while `_running` it returns `1`
+  (the engine already pushed frames at its own `preview_downsample_factor`
+  resolution, so no local display downsample is applied on top; Tk parity: Tk
+  renders the engine-pushed frames directly), and when idle it returns the
+  existing local display-only `_preview_res_factor` (M17/M18 behaviour
+  byte-identical).  The render path (`_refresh_preview_view`) and the Fit-exit
+  `fit_scale` in `_on_wheel_zoom` both consume the effective factor, so
+  resolution label, zoom, and pan all stay consistent during a run.  Run end
+  (finished/failed/cancelled) restores idle behaviour automatically because the
+  factor is derived from `_running` alone — no separate "engine factor" state is
+  stored, so nothing can go stale.  The Res-button cycle/label semantics and
+  the M22 control channel are unchanged; no new preview-frame pipeline, no new
+  IPC/protocol, no Tk/engine changes.  Covered by
+  `tests/test_qt_preview_reconcile_m24.py` (new, 8 tests) + the M17/M18 suites
+  + the existing import-hygiene tests; `git diff --check` clean.  Remaining
+  gaps: Qt entry point (11.2) and the boring single-batch `--max-mem` 8.0 GB
+  delta.
