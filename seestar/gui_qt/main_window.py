@@ -50,7 +50,7 @@ import time
 from dataclasses import replace
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import QByteArray, Qt, QUrl, Signal
+from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage
 from PySide6.QtWidgets import (
     QApplication,
@@ -165,6 +165,11 @@ DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
 # Backend selection modes understood by the shell's Start button.
 BACKEND_MODES = ("simulated", "seestar")
 DEFAULT_BACKEND_MODE = "simulated"
+
+# ZeAnalyser reference-return watcher poll interval (ms).  Matches the Tk
+# ``after(1000, ...)`` surveillance cadence exactly: one command-file check per
+# tick on the GUI thread, never a busy loop and never a worker thread.
+ANALYZER_WATCH_INTERVAL_MS = 1000
 
 # Left-panel tab labels (Tk ``control_notebook`` parity: Stacking / Expert /
 # Preview controls).
@@ -649,6 +654,15 @@ class MainWindow(QMainWindow):
         # set on launch and consumed (single-shot) by
         # ``_check_analyzer_command_file``.
         self._analyzer_command_file_path: Optional[str] = None
+        # ZeAnalyser reference-return watcher (M25.5-A).  A GUI-thread QTimer
+        # polls the command file written by the launched ZeAnalyser and applies
+        # the historical Tk consequences when ``REFERENCE=`` arrives.  It is
+        # parented to ``self`` so Qt destroys it with the window (no callback
+        # into a destroyed ``MainWindow``) and is explicitly stopped by
+        # :meth:`shutdown`.
+        self._analyzer_watch_timer = QTimer(self)
+        self._analyzer_watch_timer.setInterval(ANALYZER_WATCH_INTERVAL_MS)
+        self._analyzer_watch_timer.timeout.connect(self._analyzer_watch_tick)
         self._shutdown_wait_ms = shutdown_wait_ms
         # Settings/geometry persistence (M8).  ``None`` disables persistence so
         # bare ``MainWindow()`` constructions (tests) never touch a real file;
@@ -2075,15 +2089,21 @@ class MainWindow(QMainWindow):
 
         self.log(f"Analyzer launched on {input_folder}.")
         self.statusBar().showMessage("Analyzer launched.")
+        # Arm the ZeAnalyser reference-return watcher (Tk parity): the Tk shell
+        # starts its ``after(1000, ...)`` surveillance loop right after the
+        # non-blocking launch, so a late ``REFERENCE=`` return is consumed and
+        # acted upon without manual action.  The timer is parented to ``self``
+        # (Qt destroys it with the window) and stopped by :meth:`shutdown`.
+        self._analyzer_watch_timer.start()
 
     def _check_analyzer_command_file(self) -> Optional[str]:
         """Consume the ZeAnalyser command file once, if present (Qt-safe).
 
         Reads ``REFERENCE=<path>``, updates the reference field only for a
         non-empty reference, deletes the file best-effort, and returns the
-        reference (or ``None``).  The periodic re-arming watcher is a deferred
-        delta; this single-shot consumption seam is safe to call from the GUI
-        thread or from tests.
+        reference (or ``None``).  The periodic watcher (``_analyzer_watch_tick``
+        on a GUI-thread ``QTimer``) reuses this single-shot consumption seam, so
+        it is also safe to call directly from the GUI thread or from tests.
         """
         path = self._analyzer_command_file_path
         if not path or not os.path.exists(path):
@@ -2097,6 +2117,70 @@ class MainWindow(QMainWindow):
             self.log(f"Analyzer reference received: {ref}")
             self.statusBar().showMessage(f"Analyzer reference: {ref}")
         return ref
+
+    def _analyzer_watch_tick(self) -> None:
+        """One tick of the ZeAnalyser reference-return watcher (M25.5-A).
+
+        Mirrors the Tk ``_check_analyzer_command_file`` surveillance loop on a
+        GUI-thread ``QTimer``: one command-file check per tick, never a busy
+        loop and never a worker thread.  It stops the watcher when the Tk loop
+        would stop (no command-file path, or a run already active), applies the
+        historical consequences when a reference arrives, and keeps polling
+        otherwise.
+        """
+        # Tk stop conditions, checked first: no command-file path to watch, or
+        # a run is already active (``self.processing`` parity).
+        if not self._analyzer_command_file_path or self._running:
+            self._analyzer_watch_timer.stop()
+            return
+        ref = self._check_analyzer_command_file()
+        if ref is None:
+            # No reference yet (file absent or consumed without REFERENCE=):
+            # keep watching, exactly like Tk re-arming ``after(1000, ...)``.
+            return
+        # Reference arrived: apply the Tk-side consequences.  The reference
+        # field was already updated by ``_check_analyzer_command_file``.
+        if self._apply_analyzer_reference(ref):
+            # Settled (consequences applied / processing started): stop.
+            self._analyzer_watch_timer.stop()
+
+    def _apply_analyzer_reference(self, ref: str) -> bool:
+        """Apply the Tk-side consequences of a returned ZeAnalyser reference.
+
+        Matches Tk ``_check_analyzer_command_file`` exactly: re-sync the input
+        folder (reloading the first image when it differs), prepare a default
+        output folder when none is set, and start processing.  Returns ``True``
+        when the consequences were applied (the watcher should stop) and
+        ``False`` when the input folder became invalid (the watcher keeps
+        polling, matching Tk's re-arm branch).
+        """
+        current_input = self.input_edit.text().strip()
+        analyzed_folder = os.path.abspath(current_input) if current_input else None
+
+        if not (analyzed_folder and os.path.isdir(analyzed_folder)):
+            self.log(
+                f"Analyzer reference received but input folder invalid: "
+                f"{analyzed_folder!r}; keeping watcher active."
+            )
+            return False
+
+        # Tk: re-sync the input field if it differs and reload the first image.
+        if os.path.normpath(self.input_edit.text()) != os.path.normpath(
+            analyzed_folder
+        ):
+            self.input_edit.setText(analyzed_folder)
+            self._try_show_first_input_image()
+
+        # Tk: prepare a default output folder when none is set.
+        if not self.output_edit.text().strip():
+            default_output = os.path.join(analyzed_folder, "stack_output_analyzer")
+            self.output_edit.setText(default_output)
+
+        self.log(f"Analyzer reference received, starting processing: {ref}")
+        # Tk calls ``start_processing()`` here; the Qt equivalent is the Start
+        # handler (validation/preflight included, never raises).
+        self._on_start()
+        return True
 
     # ------------------------------------------------------ path / file actions
     def _browse_input(self) -> None:
@@ -3468,6 +3552,9 @@ class MainWindow(QMainWindow):
         """
         if wait_ms is None:
             wait_ms = self._shutdown_wait_ms
+        # Stop the ZeAnalyser reference-return watcher so a closing window never
+        # leaves a live QTimer callback behind (no zombie timer; M25.5-A).
+        self._analyzer_watch_timer.stop()
         # Cancel any active boring subprocess before tearing down the window.
         # The QProcess/runner is parented to the window, so a graceful SIGTERM
         # here (and Qt's own child cleanup on destroy) is the best-effort path;

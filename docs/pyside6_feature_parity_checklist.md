@@ -63,7 +63,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 5.1 | View inputs | `[x]` | non-backend Qt dialog (main + staged folders) |
 | 5.2 | Add folder | `[x]` | stage + validate (input/output/subfolder-of-output) |
 | 5.3 | Open output | `[x]` | `QDesktopServices.openUrl` (user-triggered) |
-| 5.4 | Analyze (ZeAnalyser launch) | `[x]` | stdlib-only `seestar/gui_qt/analyzer_launch.py` seam + `MainWindow._on_analyse`; button enabled only for an existing input dir; non-blocking launch with `ZEANALYSER_COMMAND_FILE`; reference-return *consumption* seam present, periodic re-arming watcher deferred |
+| 5.4 | Analyze (ZeAnalyser launch) | `[x]` | stdlib-only `seestar/gui_qt/analyzer_launch.py` seam + `MainWindow._on_analyse`; button enabled only for an existing input dir; non-blocking launch with `ZEANALYSER_COMMAND_FILE`; reference-return *consumption* seam + GUI-thread `QTimer` watcher (M25.5-A) that consumes a late `REFERENCE=`, updates the reference, prepares output and starts processing — Tk-parity, no busy-loop/thread |
 
 ## 6. Preview
 
@@ -1073,3 +1073,25 @@ lot.)
   `tests/test_qt_boring_mem_m25.py` (new, 6 tests) + the M4/M20 suites + the
   existing import-hygiene tests; `git diff --check` clean.  Remaining gap: Qt
   entry point (11.2).
+- **2026-08-21 — lot ZSSS-QT-FP-M25.5-A**: ZeAnalyser reference-return watcher
+  (closes the M7 deferral — "periodic analyzer reference-return watcher
+  deferred" → `[x]`).  The Qt shell now reproduces the complete historical Tk
+  workflow: `MainWindow._on_analyse` arms a GUI-thread `QTimer`
+  (`_analyzer_watch_timer`, interval 1000 ms — the exact Tk
+  `after(1000, ...)` cadence) right after a non-blocking launch, and each
+  `_analyzer_watch_tick` polls the command file once, reusing the existing
+  single-shot `_check_analyzer_command_file` consumption seam.  When
+  `REFERENCE=<path>` arrives it (a) updates the reference field/state, (b)
+  prepares a default output folder when empty (`<input>/stack_output_analyzer`,
+  Tk parity), and (c) starts processing via `_on_start` (the Qt equivalent of
+  Tk `start_processing()`); it then stops.  The watcher also stops when a run
+  is already active (`_running`, Tk `self.processing` parity) or on
+  shutdown/close (`shutdown()` stops the timer; the timer is parented to the
+  window so Qt's object tree also destroys it — no zombie callback into a
+  destroyed `MainWindow`).  Consumption is idempotent (the command file is
+  deleted on read, so one reference is consumed once).  No new thread, no busy
+  loop, no Tk/engine/`analyzer_launch.py` change.  Covered by
+  `tests/test_qt_analyzer_watcher_m255a.py` (new, 6 tests) + the M7
+  `test_qt_analyzer_launch.py` suite + shell/file-actions/localization/worker-
+  lifecycle suites + the import-hygiene tests; `git diff --check` clean.
+  Remaining gap: Qt entry point (11.2).
