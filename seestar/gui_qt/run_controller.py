@@ -187,17 +187,31 @@ class RunController(QObject):
         if worker is not None:
             worker.request_cancel()
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait_ms: int = 5000) -> bool:
         """Idempotent teardown: cancel any active run and reap its QThread.
 
-        Safe to call multiple times and safe when idle.  After this returns,
-        no QThread owned by this controller is running and the status is IDLE.
+        Safe to call multiple times and safe when idle.  Returns ``True`` when
+        no QThread owned by this controller is still running after the teardown
+        (fully shut down).  Returns ``False`` when the worker/thread refused to
+        finish within ``wait_ms``; in that case the thread and worker
+        references are **retained** (never destroyed while still running, so
+        the classic ``QThread: Destroyed while thread is still running`` crash
+        cannot happen) and cleanup is deferred: the worker's own
+        ``finished``/``failed``/``cancelled`` connections still delete it when
+        the thread eventually stops, and a later :meth:`shutdown` call retries.
         """
         if self._status is RunStatus.RUNNING or self.has_live_thread:
             self.cancel()
             thread = self._thread
             if thread is not None:
-                thread.wait(5000)
+                thread.requestInterruption()
+                thread.quit()
+                if not thread.wait(wait_ms):
+                    # Do NOT drop the references: dropping them would let the
+                    # QThread be destroyed while still running.
+                    self._status = RunStatus.CANCELLED
+                    return False
         self._thread = None
         self._worker = None
         self._status = RunStatus.IDLE
+        return True

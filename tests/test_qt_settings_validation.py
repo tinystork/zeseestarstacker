@@ -19,7 +19,10 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from seestar.gui_qt.settings_validation import validate_settings_for_backend
+from seestar.gui_qt.settings_validation import (
+    normalize_batch_size,
+    validate_settings_for_backend,
+)
 from seestar.gui_qt.run_bridge import build_run_request
 from seestar.gui_qt.settings_state import QtSettingsState
 
@@ -90,17 +93,17 @@ def test_batch_size_below_auto_sentinel_rejected():
 
 
 def test_batch_size_valid_sentinels_accepted():
-    for batch in (-1, 0, 2, 100):
+    for batch in (-1, 0, 1, 2, 100):
         state = _state(input_folder="/in", output_folder="/out", batch_size=batch)
         assert validate_settings_for_backend(state, "seestar") == [], batch
 
 
-def test_batch_size_one_rejected_in_seestar_mode():
-    errors = validate_settings_for_backend(
+def test_batch_size_one_accepted_in_seestar_mode():
+    """batch_size == 1 is the boring/single-batch path and must NOT be refused."""
+    assert validate_settings_for_backend(
         _state(input_folder="/in", output_folder="/out", batch_size=1),
         "seestar",
-    )
-    assert any("Batch size 1" in e for e in errors)
+    ) == []
 
 
 def test_batch_size_one_accepted_in_simulated_mode():
@@ -245,7 +248,45 @@ def test_reproject_zesolver_without_astap_rejected():
         ),
         "seestar",
     )
-    assert any("requires a configured ASTAP fallback" in e for e in errors)
+    assert any(
+        "requires ZeSolver to be operational" in e
+        or "no usable solver" in e
+        for e in errors
+    )
+
+
+def test_reproject_zesolver_operational_without_astap_accepted():
+    """ZeSolver operational must authorise Reproject even with no ASTAP fallback."""
+    state = _state(
+        input_folder="/in",
+        output_folder="/out",
+        reproject_between_batches=True,
+        local_solver_preference="zesolver",
+        astap_path="",
+    )
+    assert (
+        validate_settings_for_backend(
+            state, "seestar", zesolver_operational=True
+        )
+        == []
+    )
+
+
+def test_reproject_zesolver_unavailable_without_astap_blocked():
+    """ZeSolver unavailable + no ASTAP -> block (even with default probe)."""
+    errors = validate_settings_for_backend(
+        _state(
+            input_folder="/in",
+            output_folder="/out",
+            reproject_between_batches=True,
+            local_solver_preference="zesolver",
+            astap_path="",
+        ),
+        "seestar",
+    )
+    assert any(
+        "requires ZeSolver to be operational" in e for e in errors
+    )
 
 
 def test_reproject_gate_is_off_in_simulated_mode():
@@ -299,7 +340,38 @@ def test_run_request_reproject_solver_gate():
     assert any("requires a local astrometric solver" in e for e in errors)
 
 
-def test_run_request_batch_size_one_rejected():
+def test_run_request_batch_size_one_accepted():
     req = _request(input_folder="/in", output_folder="/out", batch_size=1)
-    errors = validate_settings_for_backend(req, "seestar")
-    assert any("Batch size 1" in e for e in errors)
+    assert validate_settings_for_backend(req, "seestar") == []
+
+
+# --------------------------------------------------------------------------
+# normalize_batch_size (UI value -> backend contract)
+# --------------------------------------------------------------------------
+def test_normalize_batch_size_zero_becomes_auto_sentinel():
+    assert normalize_batch_size(0) == -1
+    assert normalize_batch_size(0, reproject_coadd_final=False) == -1
+
+
+def test_normalize_batch_size_zero_with_reproject_coadd_stays_zero():
+    assert normalize_batch_size(0, reproject_coadd_final=True) == 0
+
+
+def test_normalize_batch_size_one_stays_one():
+    assert normalize_batch_size(1) == 1
+    assert normalize_batch_size(1, reproject_coadd_final=True) == 1
+
+
+def test_normalize_batch_size_explicit_unchanged():
+    for bs in (2, 5, 100):
+        assert normalize_batch_size(bs) == bs, bs
+
+
+def test_normalize_batch_size_negative_becomes_auto():
+    assert normalize_batch_size(-1) == -1
+    assert normalize_batch_size(-5) == -1
+
+
+def test_normalize_batch_size_non_integer_passthrough():
+    assert normalize_batch_size("abc") == "abc"
+    assert normalize_batch_size(None) is None

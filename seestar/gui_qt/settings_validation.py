@@ -19,19 +19,22 @@ Policy (kept deliberately small):
 * ``backend_mode == "seestar"`` applies the real-backend preflight: empty
   ``input_folder``/``output_folder`` are rejected, ``batch_size`` must be
   integer-like and ``>= -1`` (``-1`` = auto), and ``drizzle_group_size`` must be
-  ``> 0``.  ``batch_size == 1`` (single-batch/boring-stack mode) is rejected
-  outright: the Qt real backend does not yet implement that flow, while the Tk
-  GUI routes it through a dedicated CSV single-batch preparation step that the
-  Qt shell has no equivalent for.
+  ``> 0``.  ``batch_size == 1`` is the historical boring/single-batch path and
+  is **not** rejected here: the Qt real backend simply passes it through (its
+  CSV single-batch handling is a later milestone, not a preflight concern).
+  Callers normalise the UI ``0`` value via :func:`normalize_batch_size` before
+  building the request.
 * In ``backend_mode == "seestar"``, when either ``reproject_between_batches``
-  or ``reproject_coadd_final`` is true, a *solver* is required before start:
+  or ``reproject_coadd_final`` is true, a *solver* is required before start
+  (reproducing ``resolve_solver_gate`` semantics):
 
   - ``local_solver_preference == "none"`` (or any unknown value) is rejected;
   - ``"astap"`` requires a non-empty ``astap_path``;
-  - ``"zesolver"`` is accepted **only** with a non-empty ``astap_path``
-    fallback.  This module performs no ZeSolver operational-readiness check
-    (doing so would require importing the engine at preflight time, which is
-    forbidden here), so ZeSolver-without-ASTAP is conservatively rejected.
+  - ``"zesolver"`` is accepted when ZeSolver is operational **or** when an
+    ASTAP fallback is configured (``astap_path`` non-empty).  The ZeSolver
+    operational-readiness flag is injected by the caller (see
+    :func:`seestar.gui_qt.solver_probe.probe_zesolver_operational`) because
+    probing would require importing the engine, which is forbidden here.
   - Reprojection **off** never requires a solver.
 * The ``backend_factory`` injection path is **not** blocked by this preflight
   unless ``backend_mode == "seestar"`` (so fake-backend tests stay easy).  The
@@ -52,10 +55,35 @@ SOLVER_NONE = "none"
 SOLVER_ASTAP = "astap"
 SOLVER_ZESOLVER = "zesolver"
 
-BATCH_SIZE_ONE_ERROR = (
-    "Batch size 1 (single-batch/boring-stack mode) is not yet supported "
-    "by the Qt real backend."
-)
+
+def normalize_batch_size(batch_size, reproject_coadd_final: bool = False):
+    """Return the effective backend batch size for a UI batch-size value.
+
+    Reproduces the historical Tk ``validate_settings`` contract so the Qt
+    shell hands the backend the same sentinel/special values:
+
+    * ``0`` + not ``reproject_coadd_final``  -> ``-1`` (Auto sentinel: the
+      queue manager estimates the batch size dynamically),
+    * ``0`` + ``reproject_coadd_final``      -> ``0``  (special batch-zero /
+      "Reproject & Coadd" single in-memory batch — must NOT become Auto),
+    * ``1``                                  -> ``1``  (boring/single-batch
+      historical path — not refused by preflight),
+    * ``>= 2``                               -> unchanged (explicit batch).
+
+    Negative values (other than ``-1``) also become ``-1`` (Auto), matching the
+    historical ``<= 0`` coercion.  Non-integer values pass through unchanged so
+    validation can report them.
+    """
+    try:
+        requested = int(batch_size)
+    except (TypeError, ValueError):
+        return batch_size
+    allow_mode_zero = bool(reproject_coadd_final)
+    if requested == 0 and allow_mode_zero:
+        return 0
+    if requested <= 0:
+        return -1
+    return requested
 
 
 def _read(settings: Any, state_attr: str, runrequest_key: str, default: Any) -> Any:
@@ -100,12 +128,24 @@ def _reproject_enabled(settings: Any) -> bool:
     return _is_truthy(between) or _is_truthy(coadd)
 
 
-def _reproject_solver_errors(settings: Any) -> List[str]:
+def _reproject_solver_errors(
+    settings: Any, zesolver_operational: bool = False
+) -> List[str]:
     """Return preflight errors for the reproject solver gate (seestar mode).
 
-    This is a *pure* policy check: it never imports the engine or the Tk GUI,
-    and it never attempts a ZeSolver operational-readiness probe.  It only
-    reasons about the declared solver preference and the configured ASTAP path.
+    Reproduces the historical ``resolve_solver_gate`` truth table (as defined
+    in the core solver config), but is pure stdlib: it never imports the engine
+    or the Tk GUI.  The ZeSolver operational-readiness probe stays outside this
+    module (see :func:`seestar.gui_qt.solver_probe.probe_zesolver_operational`)
+    and is injected here as a plain boolean so the validator stays unit-testable
+    in complete isolation.
+
+    * ``"zesolver"`` + ZeSolver operational             -> allowed (no ASTAP needed),
+    * ``"zesolver"`` + ZeSolver unavailable + ASTAP     -> allowed (ASTAP fallback),
+    * ``"zesolver"`` + ZeSolver unavailable + no ASTAP  -> blocked,
+    * ``"astap"`` + ASTAP configured                    -> allowed,
+    * ``"astap"`` + no ASTAP                            -> blocked,
+    * ``"none"`` / unknown                              -> blocked (no solver).
     """
     errors: List[str] = []
     if not _reproject_enabled(settings):
@@ -118,25 +158,25 @@ def _reproject_solver_errors(settings: Any) -> List[str]:
     astap_path = str(
         _read(settings, "astap_path", "astap_path", "") or ""
     ).strip()
-
-    if pref == SOLVER_ASTAP:
-        if not astap_path:
-            errors.append(
-                "Reprojection requires ASTAP, but no ASTAP path is configured "
-                "(astap_path is empty)."
-            )
-        return errors
+    astap_configured = bool(astap_path)
 
     if pref == SOLVER_ZESOLVER:
-        # Conservative policy (no readiness probe here): ZeSolver is accepted
-        # only with a configured ASTAP fallback so a solve-requiring run never
-        # starts without at least one usable solver.
-        if not astap_path:
-            errors.append(
-                "Reprojection with ZeSolver requires a configured ASTAP "
-                "fallback (astap_path is empty); ZeSolver-only readiness is "
-                "not yet supported by the Qt real backend."
-            )
+        if zesolver_operational or astap_configured:
+            return errors
+        errors.append(
+            "Reprojection with ZeSolver requires ZeSolver to be operational "
+            "or an ASTAP fallback (astap_path is empty); no usable solver "
+            "is available."
+        )
+        return errors
+
+    if pref == SOLVER_ASTAP:
+        if astap_configured:
+            return errors
+        errors.append(
+            "Reprojection requires ASTAP, but no ASTAP path is configured "
+            "(astap_path is empty)."
+        )
         return errors
 
     # "none" (default) or any unknown preference -> no usable solver selected.
@@ -147,7 +187,12 @@ def _reproject_solver_errors(settings: Any) -> List[str]:
     return errors
 
 
-def validate_settings_for_backend(settings: Any, backend_mode: str) -> List[str]:
+def validate_settings_for_backend(
+    settings: Any,
+    backend_mode: str,
+    *,
+    zesolver_operational: bool = False,
+) -> List[str]:
     """Return human-readable preflight errors for starting ``backend_mode``.
 
     Parameters
@@ -165,6 +210,10 @@ def validate_settings_for_backend(settings: Any, backend_mode: str) -> List[str]
     backend_mode:
         One of ``"simulated"`` / ``"seestar"``.  Only ``"seestar"`` is
         preflighted; any other mode returns ``[]`` (permissive).
+    zesolver_operational:
+        Whether the ZeSolver public API reports itself operational.  Only used
+        by the reproject solver gate when ``local_solver_preference ==
+        "zesolver"``.  Defaults to ``False`` (the probe is left to the caller).
 
     Returns
     -------
@@ -192,8 +241,6 @@ def validate_settings_for_backend(settings: Any, backend_mode: str) -> List[str]
         errors.append(
             f"Batch size must be -1 (auto) or greater, got {batch_int!r}."
         )
-    elif batch_int == 1:
-        errors.append(BATCH_SIZE_ONE_ERROR)
 
     drizzle_group_size = _read(
         settings, "drizzle_group_size", "drizzle_group_size", None
@@ -214,6 +261,6 @@ def validate_settings_for_backend(settings: Any, backend_mode: str) -> List[str]
     # Reproject solver gate: only enforced for the real backend, and only when
     # reprojection is actually requested (a non-reprojecting run needs no
     # solver).
-    errors.extend(_reproject_solver_errors(settings))
+    errors.extend(_reproject_solver_errors(settings, zesolver_operational))
 
     return errors

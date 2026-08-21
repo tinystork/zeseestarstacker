@@ -36,8 +36,9 @@ from .main_window import (
 )
 from .run_controller import RunController
 from .run_worker import RunStatus, RunWorker
-from .settings_validation import validate_settings_for_backend
+from .settings_validation import normalize_batch_size, validate_settings_for_backend
 from .settings_state import QtSettingsState
+from .solver_probe import probe_zesolver_operational
 
 __all__ = [
     "MainWindow",
@@ -54,6 +55,8 @@ __all__ = [
     "SimulatedRunBackend",
     "SeestarQueuedStackerBackend",
     "validate_settings_for_backend",
+    "normalize_batch_size",
+    "probe_zesolver_operational",
     "STACKING_MODES",
     "DRIZZLE_MODES",
     "SOLVER_PREFERENCES",

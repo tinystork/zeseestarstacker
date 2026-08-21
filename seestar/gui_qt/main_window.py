@@ -28,6 +28,7 @@ explicit opt-in only.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt
@@ -61,8 +62,9 @@ from .backend_runner import (
 from .preview_render import render_preview_image
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
-from .settings_validation import validate_settings_for_backend
+from .settings_validation import normalize_batch_size, validate_settings_for_backend
 from .settings_state import QtSettingsState
+from .solver_probe import probe_zesolver_operational
 
 DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
 
@@ -301,6 +303,8 @@ class MainWindow(QMainWindow):
         *,
         backend_factory: Optional[Callable[[], BaseRunBackend]] = None,
         backend_mode: str = DEFAULT_BACKEND_MODE,
+        solver_probe: Optional[Callable[[], bool]] = None,
+        shutdown_wait_ms: int = 5000,
     ):
         super().__init__(parent)
         if backend_mode not in BACKEND_MODES:
@@ -309,8 +313,16 @@ class MainWindow(QMainWindow):
             )
         if backend_factory is not None and not callable(backend_factory):
             raise TypeError("backend_factory must be callable or None")
+        if solver_probe is not None and not callable(solver_probe):
+            raise TypeError("solver_probe must be callable or None")
+        if not isinstance(shutdown_wait_ms, int) or shutdown_wait_ms < 0:
+            raise ValueError("shutdown_wait_ms must be a non-negative int")
         self.backend_factory = backend_factory
         self.backend_mode = backend_mode
+        self.solver_probe = (
+            solver_probe if solver_probe is not None else probe_zesolver_operational
+        )
+        self._shutdown_wait_ms = shutdown_wait_ms
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         self._running: bool = False
         self._shutdown_called: bool = False
@@ -670,8 +682,20 @@ class MainWindow(QMainWindow):
     def _on_start(self) -> None:
         if self._running:
             return
-        state = self.collect_settings_state()
-        errors = validate_settings_for_backend(state, self.backend_mode)
+        state = self._effective_settings_state()
+        zesolver_operational = False
+        if (
+            self.backend_mode == "seestar"
+            and (state.reproject_between_batches or state.reproject_coadd_final)
+            and str(state.local_solver_preference or "").strip().lower()
+            == "zesolver"
+        ):
+            zesolver_operational = self.solver_probe()
+        errors = validate_settings_for_backend(
+            state,
+            self.backend_mode,
+            zesolver_operational=zesolver_operational,
+        )
         if errors:
             self._on_preflight_failed(errors)
             return
@@ -820,6 +844,23 @@ class MainWindow(QMainWindow):
         self._sync_state_from_controls()
         return self.settings_state
 
+    def _effective_settings_state(self) -> QtSettingsState:
+        """Return a settings snapshot with batch-size normalization applied.
+
+        Normalisation (UI ``0`` -> Auto sentinel ``-1``, or the special
+        batch-zero mode when ``reproject_coadd_final`` is set) is applied to a
+        *copy* of the model whenever it changes the value, so the shared
+        ``self.settings_state`` keeps the raw UI value and the special mode is
+        never lost across widget edits.
+        """
+        state = self.collect_settings_state()
+        normalized = normalize_batch_size(
+            state.batch_size, bool(state.reproject_coadd_final)
+        )
+        if normalized == state.batch_size:
+            return state
+        return replace(state, batch_size=normalized)
+
     def build_run_request(
         self,
         *,
@@ -833,7 +874,7 @@ class MainWindow(QMainWindow):
         controls into a :class:`QtSettingsState` and forwards it to the
         Qt/Tk-independent ``run_config.build_run_request``.
         """
-        state = self.collect_settings_state()
+        state = self._effective_settings_state()
         return _build_run_request(
             state,
             initial_additional_folders=initial_additional_folders,
@@ -854,21 +895,44 @@ class MainWindow(QMainWindow):
     def shutdown_called(self) -> bool:
         return self._shutdown_called
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait_ms: Optional[int] = None) -> bool:
         """Idempotent teardown hook.
 
         Called automatically by :meth:`closeEvent` and safe to call directly
         (e.g. from an application-level ``aboutToQuit`` handler).  It requests
         stop of any live run, waits for the worker QThread to finish, and
         resets UI state.  Safe to call multiple times.
+
+        Returns ``True`` when the window is fully shut down (no live worker
+        thread remains) and ``False`` when the controller is still stopping:
+        in that case the controller/thread references are intentionally
+        retained, completion is **not** recorded, and a later call (or
+        :meth:`closeEvent`) retries the teardown.  ``wait_ms`` overrides the
+        window's default shutdown timeout (``shutdown_wait_ms``).
         """
-        if self._shutdown_called:
-            return
-        self._shutdown_called = True
-        self.controller.shutdown()
-        self._running = False
+        if wait_ms is None:
+            wait_ms = self._shutdown_wait_ms
+        shutdown_complete = self.controller.shutdown(wait_ms=wait_ms)
+        if shutdown_complete:
+            self._shutdown_called = True
+            self._running = False
+            self._update_run_state()
+            return True
+        # Still stopping: keep the controller/thread references alive and do
+        # NOT record completion, so Start stays disabled and a later
+        # shutdown/close retries the teardown once the thread stops.
+        self._shutdown_called = False
+        self._running = True
         self._update_run_state()
+        self.statusBar().showMessage("Stopping…")
+        self.log("Shutdown incomplete — worker thread still running.")
+        return False
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
-        self.shutdown()
-        event.accept()
+        if self.shutdown():
+            event.accept()
+        else:
+            # Shutdown is incomplete: keep the window (and thus the controller
+            # and its live QThread) alive instead of accepting the close and
+            # destroying a still-running thread.
+            event.ignore()

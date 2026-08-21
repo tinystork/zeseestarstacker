@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import QApplication
 
 from seestar.gui_qt import MainWindow, RunController, RunStatus, RunWorker
 from seestar.gui_qt import create_application
+from seestar.gui_qt.backend_runner import BackendRunResult, BaseRunBackend
 from seestar.gui_qt.run_bridge import RunRequest, build_run_request
 from seestar.gui_qt.settings_state import QtSettingsState
 
@@ -176,16 +178,68 @@ def test_shutdown_cleans_live_run_idempotently(qapp):
         controller.start(_make_request(), steps=100_000, step_delay_ms=5)
         assert controller.is_running is True
 
-        controller.shutdown()
+        assert controller.shutdown() is True
         assert controller.is_running is False
         assert controller.status is RunStatus.IDLE
         assert not controller.has_live_thread
 
         # Idempotent: a second call must not raise or change state.
-        controller.shutdown()
+        assert controller.shutdown() is True
         assert controller.status is RunStatus.IDLE
     finally:
         controller.shutdown()
+
+
+class _NeverEndingBackend(BaseRunBackend):
+    """A backend that ignores cancellation and keeps its worker thread alive."""
+
+    def __init__(self) -> None:
+        self._release = threading.Event()
+
+    def run(
+        self,
+        request,
+        progress_callback,
+        log_callback,
+        is_cancel_requested,
+        preview_callback=None,
+    ):
+        # Deliberately ignore cancellation and run until externally released.
+        while not self._release.wait(0.01):
+            pass
+        return BackendRunResult.FINISHED
+
+    def cancel(self) -> None:
+        pass  # deliberately non-cooperative
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def test_shutdown_does_not_abandon_running_thread_after_timeout(qapp):
+    """A non-finishing worker must not be destroyed/abandoned after the timeout."""
+    backend = _NeverEndingBackend()
+    controller = RunController()
+    try:
+        controller.start(_make_request(), backend=backend)
+        assert controller.has_live_thread is True
+
+        # Short timeout so the (non-cooperative) worker is still running.
+        assert controller.shutdown(wait_ms=100) is False
+
+        # The references were retained, not dropped: the thread is still
+        # owned/observed and therefore cannot be destroyed while running.
+        assert controller.has_live_thread is True
+        assert controller._thread is not None
+        assert controller._worker is not None
+    finally:
+        # Release the worker and reap the thread so the test never leaks a
+        # live QThread into teardown.
+        backend.release()
+        assert _pump_until(qapp, lambda: not controller.has_live_thread)
+        assert controller.shutdown() is True
+        assert controller._thread is None
+        assert controller._worker is None
 
 
 def test_controller_rejects_non_runrequest(qapp):
@@ -269,6 +323,44 @@ def test_main_window_close_cleans_up_live_run_idempotently(qapp):
         assert win.shutdown_called is True
     finally:
         win.shutdown()
+
+
+def test_main_window_close_ignored_while_thread_live_after_timeout(qapp):
+    """A non-cooperative backend must not let close destroy a live QThread.
+
+    When ``controller.shutdown(wait_ms)`` times out, ``MainWindow.shutdown``
+    returns ``False`` and ``closeEvent`` must ignore the close: the window is
+    not considered shut down, Start stays disabled, and the controller/thread
+    references remain alive.  Once the backend is released the thread is
+    reaped and a retry completes the shutdown.
+    """
+    backend = _NeverEndingBackend()
+    win = MainWindow(backend_factory=lambda: backend, shutdown_wait_ms=100)
+    try:
+        win.start_button.click()
+        assert win.is_running is True
+        assert win.controller.has_live_thread is True
+
+        # closeEvent -> shutdown(wait_ms=100); the non-cooperative backend
+        # will not stop, so the close must be refused and refs retained.
+        closed = win.close()
+        assert closed is False
+        assert win.shutdown_called is False
+        assert win.is_running is True
+        assert win.controller.has_live_thread is True
+        assert win.controller._thread is not None
+        assert win.controller._worker is not None
+        assert "Stopping…" in win.statusBar().currentMessage()
+    finally:
+        # Release the worker and reap the thread, then prove a retry completes
+        # the shutdown and never leaks a live QThread.
+        backend.release()
+        assert _pump_until(qapp, lambda: not win.controller.has_live_thread)
+        assert win.shutdown() is True
+        assert win.shutdown_called is True
+        assert win.is_running is False
+        assert win.controller._thread is None
+        assert win.controller._worker is None
 
 
 def test_main_window_run_uses_canonical_run_request(qapp):

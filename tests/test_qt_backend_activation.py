@@ -381,15 +381,20 @@ def test_backend_factory_not_blocked_by_preflight_with_empty_folders(qapp):
 # --------------------------------------------------------------------------
 # M12: real-backend preflight hardening (batch size 1 + reproject solver gate)
 # --------------------------------------------------------------------------
-def test_seestar_mode_batch_size_one_blocks_start(qapp):
-    """batch_size == 1 must not start the real backend in seestar mode."""
+def test_seestar_mode_batch_size_one_reaches_controller(qapp):
+    """batch_size == 1 (boring/single-batch path) must NOT be refused at preflight.
+
+    The spy suppresses the real start (batch_size == 1 would drive the engine's
+    CSV single-batch path); reaching ``controller.start`` proves the preflight
+    accepted it and passed the historical value through unchanged.
+    """
     win = MainWindow(backend_mode="seestar")
-    calls = []
+    seen = []
     original_start = win.controller.start
 
     def spy_start(request, **kwargs):
-        calls.append((request, kwargs))
-        original_start(request, **kwargs)
+        seen.append((request, kwargs))
+        # Deliberately do NOT call original_start: that would run the engine.
 
     win.controller.start = spy_start
     try:
@@ -398,20 +403,14 @@ def test_seestar_mode_batch_size_one_blocks_start(qapp):
         win.batch_spin.setValue(1)
         win.start_button.click()
 
-        assert calls == []
-        assert win.is_running is False
-        assert win.start_button.isEnabled()
-        assert not win.stop_button.isEnabled()
-        assert win.controller.status is RunStatus.IDLE
-        assert not win.controller.has_live_thread
-
-        text = win.log_view.toPlainText()
-        assert "Cannot start real backend" in text
-        assert "Batch size 1" in text
-        assert "Cannot start real backend" in win.statusBar().currentMessage()
+        assert len(seen) == 1
+        request, kwargs = seen[0]
+        assert isinstance(request, CanonicalRunRequest)
+        assert request.backend_kwargs["batch_size"] == 1
+        assert isinstance(kwargs.get("backend"), SeestarQueuedStackerBackend)
+        assert "Cannot start real backend" not in win.log_view.toPlainText()
     finally:
         win.shutdown()
-
 
 def test_seestar_mode_reproject_without_solver_blocks_start(qapp):
     """Reproject enabled + solver 'none' must not start the real backend."""
@@ -469,6 +468,85 @@ def test_seestar_mode_reproject_with_astap_path_reaches_controller(qapp):
         assert len(seen) == 1
         assert "Cannot start real backend" not in win.log_view.toPlainText()
         assert win.is_running is False
+    finally:
+        win.shutdown()
+
+
+# --------------------------------------------------------------------------
+# M13: batch-size contract + ZeSolver-only solver gate at the shell level
+# --------------------------------------------------------------------------
+def test_batch_size_zero_normalizes_to_auto_sentinel(qapp):
+    """UI 0 on a normal stack becomes the -1 Auto sentinel before the request."""
+    win = MainWindow()
+    seen = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        seen.append(request)
+        original_start(request, **kwargs)
+
+    win.controller.start = spy_start
+    try:
+        win.batch_spin.setValue(0)
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+        assert len(seen) == 1
+        assert seen[0].backend_kwargs["batch_size"] == -1
+        assert seen[0].align_on_disk is False
+    finally:
+        win.shutdown()
+
+
+def test_batch_size_zero_with_reproject_coadd_stays_zero(qapp):
+    """UI 0 + 'Reproject and coadd' keeps the special batch-zero mode (0)."""
+    win = MainWindow()
+    seen = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        seen.append(request)
+        original_start(request, **kwargs)
+
+    win.controller.start = spy_start
+    try:
+        win.batch_spin.setValue(0)
+        win._settings_widgets["reproject_coadd_final"].setChecked(True)
+        win.start_button.click()
+        assert _pump_until(qapp, lambda: win.is_running is False)
+        assert len(seen) == 1
+        assert seen[0].backend_kwargs["batch_size"] == 0
+        assert seen[0].align_on_disk is False
+    finally:
+        win.shutdown()
+
+
+def test_seestar_mode_zesolver_operational_without_astap_reaches_controller(qapp):
+    """ZeSolver operational authorises Reproject with no ASTAP fallback.
+
+    The readiness probe is injected (``solver_probe=lambda: True``) so the gate
+    is exercised without importing the engine; reaching ``controller.start``
+    proves the gate accepted a ZeSolver-only configuration.
+    """
+    win = MainWindow(backend_mode="seestar", solver_probe=lambda: True)
+    seen = []
+    original_start = win.controller.start
+
+    def spy_start(request, **kwargs):
+        seen.append((request, kwargs))
+        # Suppress the real start (no engine run in this test).
+
+    win.controller.start = spy_start
+    try:
+        win.input_edit.setText("/inputs")
+        win.output_edit.setText("/outputs")
+        win._settings_widgets["reproject_between_batches"].setChecked(True)
+        win.solver_combo.setCurrentText("zesolver")
+        # astap_path left empty on purpose.
+        win.start_button.click()
+
+        assert len(seen) == 1
+        assert "Cannot start real backend" not in win.log_view.toPlainText()
+        assert seen[0][0].backend_kwargs["local_solver_preference"] == "zesolver"
     finally:
         win.shutdown()
 
