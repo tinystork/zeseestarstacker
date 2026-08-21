@@ -83,7 +83,8 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 |---|---|---|---|
 | 7.1 | Progress bar (0..100) | `[x]` | queued `progress_changed` |
 | 7.2 | Log view | `[x]` | read-only `QTextEdit` |
-| 7.3 | Copy log to clipboard | `[ ]` | |
+| 7.3 | Copy log to clipboard | `[x]` | `Copy Log` button next to the log area; copies the full plain-text log via `QApplication.clipboard()`, disabled while the log is empty, armed on the first log line, never mutates the log or run state |
+| 7.4 | Elapsed / remaining (ETA) time surface | `[x]` | `elapsed_label` / `remaining_label` driven only by the existing progress lifecycle signals + an injectable monotonic clock; `progress_time` helper (`format_duration` + naive `estimate_remaining_seconds`, no divide-by-zero at 0%) |
 
 ## 8. Localisation
 
@@ -184,3 +185,18 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   disables the view controls.  New Qt-only helper `seestar/gui_qt/preview_view.py`
   keeps the transform math out of `main_window.py`.  White-balance / stretch /
   histogram (6.2/6.3/6.4) and pan (6.7) remain `[ ]`.
+- **2026-08-21 — lot ZSSS-QT-FP-M6**: delivered items 7.3 and 7.4 (Copy Log +
+  elapsed/remaining time surface).  A `Copy Log` button next to the log area
+  copies the full plain-text log to the system clipboard via
+  `QApplication.clipboard()` (disabled while empty, armed on first log line,
+  never mutating log or run state).  Visible `Elapsed` / `Remaining` labels are
+  driven only by the existing progress lifecycle signals and an injectable
+  monotonic clock: elapsed starts at 0 on run start, remaining is `—` until a
+  usable percent arrives, updates from a naive
+  `elapsed * (100 − percent) / percent` estimate for 1..99, becomes `0:00` on
+  finish/100, and `failed`/`cancelled` on terminal non-success.  Boring
+  (single-batch CSV) runs feed the same log/copy surface and show honest time
+  labels (elapsed visible, remaining unknown throughout, `0:00`/`failed`/
+  `cancelled` at the end).  New Qt-only helper
+  `seestar/gui_qt/progress_time.py` keeps the math out of `main_window.py` and
+  is deterministic (no real sleeping in tests).

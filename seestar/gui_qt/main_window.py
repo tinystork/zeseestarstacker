@@ -41,12 +41,14 @@ explicit opt-in only.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import replace
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -87,6 +89,7 @@ from .final_combine import (
 )
 from .preview_render import render_preview_image
 from .preview_view import ZOOM_LABELS, render_view
+from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
 from .run_bridge import RunRequest, build_run_request as _build_run_request
 from .run_controller import RunController
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
@@ -333,6 +336,7 @@ class MainWindow(QMainWindow):
         backend_mode: str = DEFAULT_BACKEND_MODE,
         solver_probe: Optional[Callable[[], bool]] = None,
         boring_runner_factory: Optional[Callable[[], BoringRunnerBase]] = None,
+        clock: Optional[Callable[[], float]] = None,
         shutdown_wait_ms: int = 5000,
     ):
         super().__init__(parent)
@@ -346,11 +350,19 @@ class MainWindow(QMainWindow):
             raise TypeError("solver_probe must be callable or None")
         if boring_runner_factory is not None and not callable(boring_runner_factory):
             raise TypeError("boring_runner_factory must be callable or None")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable or None")
         if not isinstance(shutdown_wait_ms, int) or shutdown_wait_ms < 0:
             raise ValueError("shutdown_wait_ms must be a non-negative int")
         self.backend_factory = backend_factory
         self.backend_mode = backend_mode
         self.boring_runner_factory = boring_runner_factory
+        # Injectable monotonic clock (tests inject a controllable fake so the
+        # elapsed/remaining surface is testable without any real sleeping).
+        self._clock = clock if clock is not None else time.monotonic
+        # Start timestamp of the current run (None when idle); drives the
+        # elapsed/remaining time labels.
+        self._run_started_at: Optional[float] = None
         self.solver_probe = (
             solver_probe if solver_probe is not None else probe_zesolver_operational
         )
@@ -424,8 +436,24 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         outer.addWidget(self.progress)
 
-        # Log area (Tk ``status_text``).
-        outer.addWidget(QLabel("Log:"))
+        # Elapsed / remaining time surface (M6).  Driven only by the existing
+        # progress lifecycle signals; unknown values render as "—".
+        time_row = QHBoxLayout()
+        self.elapsed_label = QLabel(f"Elapsed: {format_duration(0.0)}")
+        self.remaining_label = QLabel(f"Remaining: {UNKNOWN}")
+        time_row.addWidget(self.elapsed_label)
+        time_row.addStretch(1)
+        time_row.addWidget(self.remaining_label)
+        outer.addLayout(time_row)
+
+        # Log area (Tk ``status_text``) + Copy Log action (M6).
+        log_header = QHBoxLayout()
+        log_header.addWidget(QLabel("Log:"))
+        log_header.addStretch(1)
+        self.copy_log_button = QPushButton("Copy Log")
+        self.copy_log_button.setEnabled(False)
+        log_header.addWidget(self.copy_log_button)
+        outer.addLayout(log_header)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         outer.addWidget(self.log_view, 1)
@@ -834,6 +862,7 @@ class MainWindow(QMainWindow):
         self.view_inputs_button.clicked.connect(self._show_input_folder_list)
         self.add_folder_button.clicked.connect(self._add_folder)
         self.open_output_button.clicked.connect(self._open_output_folder)
+        self.copy_log_button.clicked.connect(self._copy_log_to_clipboard)
         self.zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
         self.rotate_left_button.clicked.connect(self._on_rotate_left)
         self.rotate_right_button.clicked.connect(self._on_rotate_right)
@@ -1012,8 +1041,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------ boring lifecycle slots
     def _on_boring_started(self) -> None:
         self._running = True
+        self._run_started_at = self._now()
         self._update_run_state()
         self.statusBar().showMessage("Boring stack running…")
+        # Boring has no percent progress, so elapsed starts at 0 and remaining
+        # stays honestly unknown for the whole run.
+        self._refresh_time_surface(None)
 
     def _on_boring_finished(self, exit_code: int) -> None:
         self._boring_active = False
@@ -1022,6 +1055,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(100)
         self.statusBar().showMessage("Boring stack finished.")
         self.log("Boring stack finished.")
+        self._mark_time_terminal("0:00")
 
     def _on_boring_failed(self, message: str) -> None:
         self._boring_active = False
@@ -1029,6 +1063,7 @@ class MainWindow(QMainWindow):
         self._update_run_state()
         self.statusBar().showMessage(f"Boring stack failed: {message}")
         self.log(f"Boring stack failed: {message}")
+        self._mark_time_terminal("failed")
 
     def _on_boring_cancelled(self) -> None:
         self._boring_active = False
@@ -1036,6 +1071,7 @@ class MainWindow(QMainWindow):
         self._update_run_state()
         self.statusBar().showMessage("Boring stack cancelled.")
         self.log("Boring stack cancelled.")
+        self._mark_time_terminal("cancelled")
 
     def _on_stop(self) -> None:
         if not self._running:
@@ -1317,11 +1353,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------- lifecycle callbacks
     def _on_run_started(self) -> None:
         self._running = True
+        self._run_started_at = self._now()
         self._update_run_state()
         self.statusBar().showMessage("Running…")
+        # Elapsed starts at 0 and remaining is unknown until the first
+        # progress signal carries a usable percent (0 < percent < 100).
+        self._refresh_time_surface(None)
 
     def _on_progress(self, percent: int) -> None:
         self.progress.setValue(int(percent))
+        self._refresh_time_surface(int(percent))
 
     def _on_preview(self, payload: BackendPreviewPayload) -> None:
         """Update the Preview tab label from a preview payload (GUI thread only).
@@ -1428,18 +1469,21 @@ class MainWindow(QMainWindow):
         self.progress.setValue(100)
         self.statusBar().showMessage("Finished.")
         self.log("Run finished.")
+        self._mark_time_terminal("0:00")
 
     def _on_run_failed(self, message: str) -> None:
         self._running = False
         self._update_run_state()
         self.statusBar().showMessage(f"Failed: {message}")
         self.log(f"Run failed: {message}")
+        self._mark_time_terminal("failed")
 
     def _on_run_cancelled(self) -> None:
         self._running = False
         self._update_run_state()
         self.statusBar().showMessage("Cancelled.")
         self.log("Run cancelled.")
+        self._mark_time_terminal("cancelled")
 
     def _update_run_state(self) -> None:
         self.start_button.setEnabled(not self._running)
@@ -1577,10 +1621,70 @@ class MainWindow(QMainWindow):
             special_single=special_single,
         )
 
+    # ------------------------------------------- progress/log time + copy
+    def _now(self) -> float:
+        """Return the current time from the injected (or monotonic) clock."""
+        return self._clock()
+
+    def _elapsed_seconds(self) -> Optional[float]:
+        """Elapsed seconds since the current run started (None when idle)."""
+        if self._run_started_at is None:
+            return None
+        return max(0.0, self._now() - self._run_started_at)
+
+    def _set_elapsed_label(self, seconds: Optional[float]) -> None:
+        self.elapsed_label.setText(f"Elapsed: {format_duration(seconds)}")
+
+    def _set_remaining_label(self, text: str) -> None:
+        self.remaining_label.setText(f"Remaining: {text}")
+
+    def _refresh_time_surface(self, percent: Optional[int]) -> None:
+        """Update the elapsed/remaining labels from elapsed time + percent.
+
+        ``percent`` is ``None`` when unknown (run start, or a boring run with
+        no percent progress); ``0`` renders remaining as unknown (no division
+        by zero); ``>= 100`` renders remaining as ``0:00`` (done).
+        """
+        elapsed = self._elapsed_seconds()
+        self._set_elapsed_label(elapsed)
+        if percent is None:
+            self._set_remaining_label(UNKNOWN)
+            return
+        p = int(percent)
+        if p >= 100:
+            self._set_remaining_label("0:00")
+            return
+        if p <= 0:
+            self._set_remaining_label(UNKNOWN)
+            return
+        remaining = estimate_remaining_seconds(
+            elapsed if elapsed is not None else 0.0, p
+        )
+        self._set_remaining_label(format_duration(remaining))
+
+    def _mark_time_terminal(self, state: str) -> None:
+        """Show final elapsed time and a terminal remaining state.
+
+        Used on finish (``"0:00"``), failure (``"failed"``) and cancellation
+        (``"cancelled"``): elapsed stays visible and the remaining label never
+        shows a misleading estimate after a terminal outcome.
+        """
+        self._set_elapsed_label(self._elapsed_seconds())
+        self._set_remaining_label(state)
+
+    def _copy_log_to_clipboard(self) -> None:
+        """Copy the full plain-text log to the system clipboard (M6).
+
+        Uses only Qt clipboard APIs, copies the *entire* log verbatim, and
+        never mutates the log view or the run state.
+        """
+        QApplication.clipboard().setText(self.log_view.toPlainText())
+
     # ------------------------------------------------------------- helpers
     def log(self, message: str) -> None:
-        """Append a line to the read-only log tab."""
+        """Append a line to the read-only log tab and arm Copy Log."""
         self.log_view.append(message)
+        self.copy_log_button.setEnabled(True)
 
     @property
     def is_running(self) -> bool:
