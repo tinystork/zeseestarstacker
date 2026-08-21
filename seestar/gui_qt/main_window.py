@@ -158,6 +158,7 @@ from .settings_state import QtSettingsState
 from .solver_config_bridge import write_solver_config
 from .solver_dialog import SolverSettingsDialog
 from .solver_probe import probe_zesolver_operational
+from .summary_payload import SummaryPayload
 
 DEFAULT_TITLE = "ZeSeestarStacker — PySide6 shell"
 
@@ -619,6 +620,13 @@ class MainWindow(QMainWindow):
         # Start timestamp of the current run (None when idle); drives the
         # elapsed/remaining time labels.
         self._run_started_at: Optional[float] = None
+        # Terminal run-summary payload delivered by the backend/boring runner
+        # just before the ``finished`` signal (None when none arrived).  It is
+        # consumed once by ``_show_pending_summary`` at run end.
+        self._last_summary_payload: Optional[SummaryPayload] = None
+        # Currently shown (non-modal) summary dialog, retained so it stays
+        # alive and is inspectable by tests.
+        self._summary_dialog: Optional[QDialog] = None
         self.solver_probe = (
             solver_probe if solver_probe is not None else probe_zesolver_operational
         )
@@ -1614,6 +1622,7 @@ class MainWindow(QMainWindow):
         self.controller.progress_changed.connect(self._on_progress)
         self.controller.log_message.connect(self.log)
         self.controller.preview_updated.connect(self._on_preview)
+        self.controller.summary_updated.connect(self._on_summary_payload)
         self.controller.finished.connect(self._on_run_finished)
         self.controller.failed.connect(self._on_run_failed)
         self.controller.cancelled.connect(self._on_run_cancelled)
@@ -1626,6 +1635,7 @@ class MainWindow(QMainWindow):
         self.output_filename_edit.textChanged.connect(self._sync_state_from_controls)
         self.reference_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._sync_state_from_controls)
+        self.last_stack_edit.textChanged.connect(self._on_last_stack_changed)
         self.browse_input_button.clicked.connect(self._browse_input)
         self.browse_output_button.clicked.connect(self._browse_output)
         self.browse_temp_button.clicked.connect(self._browse_temp)
@@ -1791,6 +1801,7 @@ class MainWindow(QMainWindow):
             self._boring_runner.failed.connect(self._on_boring_failed)
             self._boring_runner.cancelled.connect(self._on_boring_cancelled)
             self._boring_runner.log_message.connect(self.log)
+            self._boring_runner.summary.connect(self._on_summary_payload)
         return self._boring_runner
 
     # ------------------------------------------------ boring lifecycle slots
@@ -1811,6 +1822,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Boring stack finished.")
         self.log("Boring stack finished.")
         self._mark_time_terminal("0:00")
+        self._show_pending_summary()
 
     def _on_boring_failed(self, message: str) -> None:
         self._boring_active = False
@@ -2136,11 +2148,7 @@ class MainWindow(QMainWindow):
             self.reference_edit.setText(os.path.abspath(filepath))
 
     def _browse_last_stack(self) -> None:
-        """Select the previous stack via a FITS file dialog (Tk parity).
-
-        When the output folder is empty, it is pre-filled from the selected
-        file's parent directory — mirroring Tk ``_on_last_stack_changed``.
-        """
+        """Select the previous stack via a FITS file dialog (Tk parity)."""
         start_dir = (
             self.output_edit.text().strip()
             or self.last_stack_edit.text().strip()
@@ -2152,8 +2160,21 @@ class MainWindow(QMainWindow):
         if filepath:
             abs_path = os.path.abspath(filepath)
             self.last_stack_edit.setText(abs_path)
-            if not self.output_edit.text().strip():
-                self.output_edit.setText(os.path.dirname(abs_path))
+
+    def _on_last_stack_changed(self, *_ignored) -> None:
+        """Pre-fill the output folder from the last-stack path when empty.
+
+        Tk ``_on_last_stack_changed`` parity: any last-stack change (browse,
+        manual edit, persisted-load) pre-fills the output folder with the
+        last-stack file's parent directory — but only when the output folder is
+        currently empty.  The guard mirrors Tk ``if not output_path.get()``
+        exactly, so an already-set output folder is never clobbered.
+        """
+        if self.output_edit.text().strip():
+            return
+        p = self.last_stack_edit.text().strip()
+        if p:
+            self.output_edit.setText(os.path.dirname(p))
 
     def _input_folder_summary_text(self) -> str:
         """Return the human-readable input-folder summary (main + staged)."""
@@ -2840,6 +2861,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Finished.")
         self.log("Run finished.")
         self._mark_time_terminal("0:00")
+        self._show_pending_summary()
 
     def _on_run_failed(self, message: str) -> None:
         self._running = False
@@ -2854,6 +2876,89 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Cancelled.")
         self.log("Run cancelled.")
         self._mark_time_terminal("cancelled")
+
+    # --------------------------------------------------- run summary (M23)
+    def _on_summary_payload(self, payload: SummaryPayload) -> None:
+        """Store the terminal summary payload until the run-end slot consumes it.
+
+        The backend/boring runner emits the payload just before its terminal
+        ``finished`` signal, so the payload always arrives first and the
+        corresponding run-end slot can show it with the run already marked
+        finished.
+        """
+        self._last_summary_payload = payload
+
+    def _show_pending_summary(self) -> None:
+        """Show the stored run summary (if any) and clear it for the next run."""
+        payload = self._last_summary_payload
+        if payload is None:
+            return
+        self._last_summary_payload = None
+        self._show_summary_dialog(payload)
+
+    def _format_summary_text(self, payload: SummaryPayload) -> str:
+        """Render the summary payload into the plain text shown by the dialog."""
+        lines = [
+            f"{self._tr('summary_status', default='Status')}: {payload.status}",
+            (
+                f"{self._tr('summary_total_time', default='Total Processing Time')}: "
+                f"{format_duration(payload.duration_seconds)}"
+            ),
+        ]
+        files = payload.files_attempted
+        lines.append(
+            f"{self._tr('summary_files_attempted', default='Files Attempted')}: "
+            f"{files if files is not None else '?'}"
+        )
+        if payload.final_stack_file:
+            not_found = (
+                ""
+                if payload.final_stack_exists
+                else f" ({self._tr('summary_not_found', default='Not Found!')})"
+            )
+            lines.append(
+                f"{self._tr('summary_final_stack_file', default='Final Stack File')}: "
+                f"{payload.final_stack_file}{not_found}"
+            )
+        if payload.images_in_final_stack is not None:
+            lines.append(
+                f"{self._tr('summary_images_in_final_stack', default='Images in Final Stack')}: "
+                f"{payload.images_in_final_stack}"
+            )
+        if payload.total_exposure_seconds is not None:
+            lines.append(
+                f"{self._tr('summary_total_exposure', default='Total Exposure (Final Stack)')}: "
+                f"{format_duration(payload.total_exposure_seconds)}"
+            )
+        return "\n".join(lines)
+
+    def _show_summary_dialog(self, payload: SummaryPayload) -> None:
+        """Show a non-modal processing-summary dialog (Tk parity, Qt-styled).
+
+        The dialog only *formats* the payload computed by the backend/boring
+        runner; it never reads ``final.fits`` or the engine.  "Open Output" is
+        offered only when the output folder holds a final stack.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            self._tr("processing_report_title", default="Processing Summary")
+        )
+        layout = QVBoxLayout(dialog)
+        label = QLabel(self._format_summary_text(payload))
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(label)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        if payload.can_open_output:
+            open_button = buttons.addButton(
+                self._tr("open_output", default="Open Output"),
+                QDialogButtonBox.ButtonRole.ActionRole,
+            )
+            open_button.clicked.connect(self._open_output_folder)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        self._summary_dialog = dialog
+        dialog.show()
 
     def _update_run_state(self) -> None:
         self.start_button.setEnabled(not self._running)
@@ -3065,6 +3170,10 @@ class MainWindow(QMainWindow):
         self._update_expert_enabler_states()
         self._toggle_kappa_visibility()
         self._sync_state_from_controls()
+        # Tk parity: a persisted last-stack path pre-fills the output folder
+        # when the output folder is empty (Tk ``_on_last_stack_changed`` fires
+        # on the persisted write through its StringVar trace).
+        self._on_last_stack_changed()
         self._update_path_action_state()
 
     def _load_persisted_settings(self) -> None:

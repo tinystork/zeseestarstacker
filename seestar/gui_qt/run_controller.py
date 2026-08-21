@@ -41,7 +41,10 @@ class RunController(QObject):
     * ``preview_updated(object)`` — a
       :class:`~seestar.gui_qt.backend_runner.BackendPreviewPayload` relayed
       from the backend (dropped after shutdown, see
-      :meth:`_on_worker_preview`).
+      :meth:`_on_worker_preview`),
+    * ``summary_updated(object)`` — a
+      :class:`~seestar.gui_qt.summary_payload.SummaryPayload` relayed from the
+      backend at the end of a successful run (see :meth:`_on_worker_summary`).
     """
 
     started = Signal()
@@ -51,6 +54,7 @@ class RunController(QObject):
     failed = Signal(str)
     cancelled = Signal()
     preview_updated = Signal(object)
+    summary_updated = Signal(object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -111,6 +115,7 @@ class RunController(QObject):
         worker.progress.connect(self._on_worker_progress)
         worker.log.connect(self._on_worker_log)
         worker.preview.connect(self._on_worker_preview)
+        worker.summary.connect(self._on_worker_summary)
         worker.finished.connect(self._on_worker_finished)
         worker.failed.connect(self._on_worker_failed)
         worker.cancelled.connect(self._on_worker_cancelled)
@@ -144,6 +149,12 @@ class RunController(QObject):
         if self._status is not RunStatus.RUNNING:
             return
         self.preview_updated.emit(payload)
+
+    @Slot(object)
+    def _on_worker_summary(self, payload) -> None:
+        if self._status is not RunStatus.RUNNING:
+            return
+        self.summary_updated.emit(payload)
 
     @Slot()
     def _on_worker_finished(self) -> None:

@@ -42,6 +42,7 @@ import time
 from typing import Any, Callable, Optional
 
 from .run_bridge import RunRequest, split_backend_kwargs
+from .summary_payload import SummaryPayload, build_summary_payload
 
 
 class BackendRunResult(enum.Enum):
@@ -55,6 +56,8 @@ class BackendRunResult(enum.Enum):
 ProgressCallback = Callable[[int], None]
 LogCallback = Callable[[str], None]
 IsCancelRequested = Callable[[], bool]
+# Plain callback type for the terminal run summary (no Qt types leak in).
+SummaryCallback = Callable[[SummaryPayload], None]
 
 
 @dataclass
@@ -114,6 +117,9 @@ class BaseRunBackend:
     * optionally call ``preview_callback(payload)`` with a
       :class:`BackendPreviewPayload` when a preview update is available,
     * poll ``is_cancel_requested()`` frequently,
+    * optionally call ``summary_callback(payload)`` with a
+      :class:`~seestar.gui_qt.summary_payload.SummaryPayload` at the end of a
+      successful run,
     * return :class:`BackendRunResult` (``FINISHED``/``CANCELLED``),
     * raise on terminal errors (the worker turns that into a ``failed`` signal).
 
@@ -128,6 +134,7 @@ class BaseRunBackend:
         log_callback: LogCallback,
         is_cancel_requested: IsCancelRequested,
         preview_callback: Optional[PreviewCallback] = None,
+        summary_callback: Optional[SummaryCallback] = None,
     ) -> BackendRunResult:
         raise NotImplementedError
 
@@ -165,9 +172,11 @@ class SimulatedRunBackend(BaseRunBackend):
         log_callback: LogCallback,
         is_cancel_requested: IsCancelRequested,
         preview_callback: Optional[PreviewCallback] = None,
+        summary_callback: Optional[SummaryCallback] = None,
     ) -> BackendRunResult:
         batch_size = request.backend_kwargs.get("batch_size")
         log_callback(f"Simulated run started (batch_size={batch_size}).")
+        start_time = time.monotonic()
 
         for step in range(self._steps):
             if is_cancel_requested() or self._cancel_requested:
@@ -180,6 +189,15 @@ class SimulatedRunBackend(BaseRunBackend):
 
         progress_callback(100)
         log_callback("Simulated run finished.")
+        if summary_callback is not None:
+            summary_callback(
+                build_summary_payload(
+                    status="finished",
+                    duration_seconds=time.monotonic() - start_time,
+                    files_attempted=self._steps,
+                    output_dir=request.backend_kwargs.get("output_dir"),
+                )
+            )
         return BackendRunResult.FINISHED
 
     def cancel(self) -> None:
@@ -501,8 +519,10 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         log_callback: LogCallback,
         is_cancel_requested: IsCancelRequested,
         preview_callback: Optional[PreviewCallback] = None,
+        summary_callback: Optional[SummaryCallback] = None,
     ) -> BackendRunResult:
         self._cancel_requested = False
+        start_time = time.monotonic()
         stacker = self._ensure_stackers(request)
         start_kwargs, seam_kwargs = split_backend_kwargs(request.backend_kwargs)
         self._apply_seam_kwargs(stacker, seam_kwargs)
@@ -542,7 +562,45 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             # is idempotent, so the double call on this path is harmless.
             self._stop_stackers()
             return BackendRunResult.CANCELLED
+        self._emit_summary(
+            stacker,
+            start_kwargs,
+            time.monotonic() - start_time,
+            summary_callback,
+        )
         return BackendRunResult.FINISHED
+
+    @staticmethod
+    def _emit_summary(
+        stacker: Any,
+        start_kwargs: dict,
+        duration_seconds: float,
+        summary_callback: Optional[SummaryCallback],
+    ) -> None:
+        """Build and forward the terminal run summary (best-effort, lazy).
+
+        The final-stack header is read lazily inside
+        :func:`~seestar.gui_qt.summary_payload.build_summary_payload` (never at
+        module level), so the heavy astropy import only happens here at run end
+        and never at ``import seestar.gui_qt`` time.
+        """
+        if summary_callback is None:
+            return
+        try:
+            output_dir = getattr(stacker, "output_folder", None) or start_kwargs.get(
+                "output_dir"
+            )
+            files_attempted = getattr(stacker, "processed_files_count", None)
+            payload = build_summary_payload(
+                status="finished",
+                duration_seconds=duration_seconds,
+                files_attempted=files_attempted,
+                output_dir=output_dir,
+            )
+            summary_callback(payload)
+        except Exception:
+            # A summary failure must never break an otherwise successful run.
+            pass
 
     def cancel(self) -> None:
         """Request the real backend to stop (callable from the GUI thread)."""

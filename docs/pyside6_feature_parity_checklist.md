@@ -107,7 +107,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 10.1 | Last stack display / resume | `[ ]` | |
+| 10.1 | Last stack display / resume | `[x]` | M23: last-stack → output pre-fill parity (Tk `_on_last_stack_changed` guard, browse/manual/persisted-load), run-end Processing Summary dialog (backend-computed payload via worker→controller→MainWindow signal; lazy `final.fits` NIMAGES/TOTEXP, never astropy at gui_qt module level; shown after regular + boring runs), and engine auto-resume seam verified (Qt run path forwards `output_folder` → `start_processing` `output_dir`, so `_can_resume` sees the memmap/batches_count artifact set) |
 
 ## 11. Entry point
 
@@ -539,10 +539,55 @@ Mechanics:
 
 Explicitly out of scope this lot (deferred gaps, unchanged `[ ]`):
 last-stack resume (10.1) and the official Qt entry point (11.2).  (The engine
-solver bridge (3.6) was closed by M21 and the Res-factor E2E (16.15) by M22,
-after this lot.)  The boring single-batch subprocess `--max-mem` also stays
-fixed at 8.0 GB (pre-existing M4 delta, a separate subprocess route outside the
-`RunController` run flow).
+solver bridge (3.6) was closed by M21, the Res-factor E2E (16.15) by M22, and
+last-stack resume (10.1) by M23, all after this lot.)  The boring single-batch
+subprocess `--max-mem` also stays fixed at 8.0 GB (pre-existing M4 delta, a
+separate subprocess route outside the `RunController` run flow).
+
+## 20. Last-stack display / resume parity (M23)
+
+Closes checklist 10.1 across three sub-items, all without touching the Tk GUI or
+the engine.
+
+**20.1 — Last-stack → output pre-fill parity.**  The Qt shell now mirrors Tk
+`_on_last_stack_changed` for *every* last-stack change path — Browse, manual
+edit, and persisted-load at launch.  `MainWindow._on_last_stack_changed`
+(connected to `last_stack_edit.textChanged` and invoked at the end of
+`_apply_state_to_controls`) pre-fills the output folder with the last-stack
+file's parent directory **only when the output folder is empty** (the exact Tk
+`if not output_path.get()` guard); a non-empty output is never clobbered.  The
+browse path no longer pre-fills separately (it relies on the same connected
+handler).  M8 settings persistence round-trips green: the pre-filled output is
+persisted on the next save, matching Tk.
+
+**20.2 — Run-end Processing Summary dialog.**  The Qt shell now shows a
+"Processing Summary" dialog at the end of a run (regular and boring), matching
+the Tk summary (Status, Total Processing Time, Files Attempted, Final Stack
+File, Images in Final Stack, Total Exposure (Final Stack), plus an "Open
+Output" button when applicable).  The summary **data** is computed outside the
+widget layer: a new pure dataclass
+`seestar.gui_qt.summary_payload.SummaryPayload` + lazy
+`read_final_fits_header` / `build_summary_payload` (astropy imported lazily via
+`importlib`, never at module level).  The regular-run backend adapter
+`SeestarQueuedStackerBackend.run` and the boring runner
+`QProcessBoringRunner._on_finished` each build the payload and emit it through a
+new `summary(object)` signal (`RunWorker` → `RunController.summary_updated` →
+`MainWindow`, and `BoringRunnerBase.summary` → `MainWindow`).  The Qt dialog
+only *formats* the payload — no astropy/engine import at `gui_qt` module level
+and no new engine import.
+
+**20.3 — Engine auto-resume verification.**  The Qt run path already forwards
+`output_folder` as `start_processing(output_dir=...)` (the canonical
+`build_backend_kwargs` emits `output_dir`, `split_backend_kwargs` leaves it in
+`start_kwargs`, and `SeestarQueuedStackerBackend.run` passes it verbatim), so
+`SeestarQueuedStacker.start_processing` sets `self.output_folder` and
+`_can_resume(Path(self.output_folder))` sees the exact memmap_accumulators /
+`batches_count.txt` artifact set.  No new resume UI is built; the seam is now
+covered by tests (`test_qt_last_stack_resume_m23.py`) and documented here.
+
+Explicitly out of scope this lot (unchanged `[ ]`): the official Qt entry point
+(11.2), the boring single-batch `--max-mem` 8.0 GB delta (pre-existing M4), and
+the live-preview-frame display reconciliation noted in M22.
 
 ---
 
@@ -942,3 +987,30 @@ fixed at 8.0 GB (pre-existing M4 delta, a separate subprocess route outside the
   import-hygiene tests; `git diff --check` clean.  Remaining gaps: last-stack
   resume (10.1), Qt entry point (11.2), and the boring single-batch `--max-mem`
   8.0 GB delta.
+- **2026-08-21 — lot ZSSS-QT-FP-M23**: last-stack display / resume parity
+  (checklist 10.1 → `[x]`, new section 20).  (a) last-stack → output pre-fill
+  parity: `MainWindow._on_last_stack_changed` (connected to
+  `last_stack_edit.textChanged` and invoked at the end of
+  `_apply_state_to_controls`) pre-fills the output folder from the last-stack
+  parent dir for *all* change paths (browse, manual edit, persisted-load) with
+  the exact Tk "only when output empty" guard; the browse path now delegates to
+  the same handler and M8 persistence round-trips green.  (b) run-end
+  "Processing Summary" dialog: a new engine/Tk-free
+  `seestar/gui_qt/summary_payload.py` (`SummaryPayload` + lazy
+  `read_final_fits_header`/`build_summary_payload`, astropy imported lazily via
+  `importlib`, never at module level); the backend adapter
+  (`SeestarQueuedStackerBackend.run`) and the boring runner
+  (`QProcessBoringRunner._on_finished`) each build the payload and emit it
+  through a new `summary(object)` signal
+  (`RunWorker`→`RunController.summary_updated`→`MainWindow`, and
+  `BoringRunnerBase.summary`→`MainWindow`); the Qt dialog only formats the
+  payload (Status / Total Processing Time / Files Attempted / final.fits
+  NIMAGES/TOTEXP / Open Output) and shows after both regular and boring runs.
+  (c) engine auto-resume verified: the Qt run path forwards `output_folder` as
+  `start_processing(output_dir=...)`, so `_can_resume` sees the memmap/
+  batches_count artifact set — no new resume UI (documented + tested).  No
+  Tk/engine changes; `_preview_source` never mutated; no FITS/PNG writes.
+  Covered by `tests/test_qt_last_stack_resume_m23.py` (new, 15 tests) + the
+  existing import-hygiene tests; `git diff --check` clean.  Remaining gaps:
+  Qt entry point (11.2), the boring single-batch `--max-mem` 8.0 GB delta, and
+  the M22 live-preview-frame display reconciliation.

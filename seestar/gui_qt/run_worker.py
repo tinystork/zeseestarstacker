@@ -26,6 +26,7 @@ the thread-safe
 from __future__ import annotations
 
 import enum
+import inspect
 from typing import Optional
 
 from PySide6.QtCore import QMutex, QObject, QThread, Signal, Slot
@@ -60,7 +61,10 @@ class RunWorker(QObject):
     * ``cancelled()`` — cancellation was requested and honoured,
     * ``preview(object)`` — a
       :class:`~seestar.gui_qt.backend_runner.BackendPreviewPayload` carrying a
-      preview metadata update from the backend.
+      preview metadata update from the backend,
+    * ``summary(object)`` — a
+      :class:`~seestar.gui_qt.summary_payload.SummaryPayload` carrying the
+      terminal run summary from the backend.
 
     Parameters
     ----------
@@ -78,6 +82,7 @@ class RunWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
     preview = Signal(object)
+    summary = Signal(object)
 
     def __init__(
         self,
@@ -149,6 +154,23 @@ class RunWorker(QObject):
     def _emit_preview(self, payload) -> None:
         self.preview.emit(payload)
 
+    def _emit_summary(self, payload) -> None:
+        self.summary.emit(payload)
+
+    def _accepts_summary_callback(self) -> bool:
+        """True when the injected backend's ``run`` accepts ``summary_callback``.
+
+        Existing test fakes subclass :class:`BaseRunBackend` with a narrower
+        ``run(..., preview_callback=None)`` signature; passing an unexpected
+        keyword would raise.  We introspect the bound method so the summary
+        channel is additive and old backends keep working unchanged.
+        """
+        try:
+            sig = inspect.signature(self._backend.run)
+        except (TypeError, ValueError):
+            return False
+        return "summary_callback" in sig.parameters
+
     @Slot()
     def run(self) -> None:
         """Execute the run via the backend.  Runs in the worker thread."""
@@ -159,13 +181,15 @@ class RunWorker(QObject):
                 self.failed.emit("RunWorker.run() called without a RunRequest")
                 return
 
-            result = self._backend.run(
-                request,
-                progress_callback=self._emit_progress,
-                log_callback=self._emit_log,
-                is_cancel_requested=self._is_cancel_requested,
-                preview_callback=self._emit_preview,
-            )
+            run_kwargs = {
+                "progress_callback": self._emit_progress,
+                "log_callback": self._emit_log,
+                "is_cancel_requested": self._is_cancel_requested,
+                "preview_callback": self._emit_preview,
+            }
+            if self._accepts_summary_callback():
+                run_kwargs["summary_callback"] = self._emit_summary
+            result = self._backend.run(request, **run_kwargs)
 
             if result is BackendRunResult.CANCELLED:
                 self.cancelled.emit()
