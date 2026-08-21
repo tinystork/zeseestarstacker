@@ -381,12 +381,13 @@ def test_backend_factory_not_blocked_by_preflight_with_empty_folders(qapp):
 # --------------------------------------------------------------------------
 # M12: real-backend preflight hardening (batch size 1 + reproject solver gate)
 # --------------------------------------------------------------------------
-def test_seestar_mode_batch_size_one_reaches_controller(qapp):
-    """batch_size == 1 (boring/single-batch path) must NOT be refused at preflight.
+def test_seestar_mode_batch_size_one_routes_to_boring_not_controller(qapp):
+    """batch_size == 1 now routes to the boring CSV path, not RunController.start.
 
-    The spy suppresses the real start (batch_size == 1 would drive the engine's
-    CSV single-batch path); reaching ``controller.start`` proves the preflight
-    accepted it and passed the historical value through unchanged.
+    With no ``stack_plan.csv`` present (and a non-existent input folder), the
+    boring preflight blocks the start — ``controller.start`` is never reached —
+    proving the Qt shell no longer silently launches the normal queue-manager
+    backend for ``batch_size == 1``.
     """
     win = MainWindow(backend_mode="seestar")
     seen = []
@@ -403,12 +404,9 @@ def test_seestar_mode_batch_size_one_reaches_controller(qapp):
         win.batch_spin.setValue(1)
         win.start_button.click()
 
-        assert len(seen) == 1
-        request, kwargs = seen[0]
-        assert isinstance(request, CanonicalRunRequest)
-        assert request.backend_kwargs["batch_size"] == 1
-        assert isinstance(kwargs.get("backend"), SeestarQueuedStackerBackend)
-        assert "Cannot start real backend" not in win.log_view.toPlainText()
+        assert seen == []  # RunController.start must NOT be called
+        assert win.is_running is False
+        assert "Cannot start boring stack" in win.log_view.toPlainText()
     finally:
         win.shutdown()
 

@@ -71,11 +71,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import boring_route
 from .backend_runner import (
     BackendPreviewPayload,
     BaseRunBackend,
     SeestarQueuedStackerBackend,
 )
+from .boring_runner import BoringRunnerBase, QProcessBoringRunner
 from .final_combine import (
     FINAL_COMBINE_LABELS,
     FINAL_COMBINE_LABEL_TO_KEY,
@@ -328,6 +330,7 @@ class MainWindow(QMainWindow):
         backend_factory: Optional[Callable[[], BaseRunBackend]] = None,
         backend_mode: str = DEFAULT_BACKEND_MODE,
         solver_probe: Optional[Callable[[], bool]] = None,
+        boring_runner_factory: Optional[Callable[[], BoringRunnerBase]] = None,
         shutdown_wait_ms: int = 5000,
     ):
         super().__init__(parent)
@@ -339,16 +342,24 @@ class MainWindow(QMainWindow):
             raise TypeError("backend_factory must be callable or None")
         if solver_probe is not None and not callable(solver_probe):
             raise TypeError("solver_probe must be callable or None")
+        if boring_runner_factory is not None and not callable(boring_runner_factory):
+            raise TypeError("boring_runner_factory must be callable or None")
         if not isinstance(shutdown_wait_ms, int) or shutdown_wait_ms < 0:
             raise ValueError("shutdown_wait_ms must be a non-negative int")
         self.backend_factory = backend_factory
         self.backend_mode = backend_mode
+        self.boring_runner_factory = boring_runner_factory
         self.solver_probe = (
             solver_probe if solver_probe is not None else probe_zesolver_operational
         )
         self._shutdown_wait_ms = shutdown_wait_ms
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         self._running: bool = False
+        # True while the boring (single-batch CSV) subprocess route is active.
+        self._boring_active: bool = False
+        # Lazily-created boring subprocess runner (default real runner only
+        # used outside tests; tests inject a factory).
+        self._boring_runner: Optional[BoringRunnerBase] = None
         self._shutdown_called: bool = False
         # Additional folders staged by the user before a run (Tk
         # ``additional_folders_to_process`` parity).  Passed as a copied list
@@ -438,6 +449,11 @@ class MainWindow(QMainWindow):
         self.batch_spin.setValue(0)
         self.batch_spin.setToolTip("Batch size (-1 = auto).")
 
+        # Boring (single-batch CSV) mode toggle — Tk ``boring_thread_check``
+        # parity.  Checked <=> batch_size == 1.
+        self.boring_check = QCheckBox("Threaded Boring Stack")
+        self.boring_check.setChecked(False)
+
         self.stacking_mode_combo = QComboBox()
         self.stacking_mode_combo.addItems(STACKING_MODES)
         self.stacking_mode_combo.setCurrentText("kappa-sigma")
@@ -490,6 +506,7 @@ class MainWindow(QMainWindow):
             self._path_row(self.last_stack_edit, self.browse_last_stack_button),
         )
         form.addRow("Batch size", self.batch_spin)
+        form.addRow("", self.boring_check)
         form.addRow("Stacking mode", self.stacking_mode_combo)
         form.addRow("Final combine", self.final_combine_combo)
         form.addRow("", self.drizzle_check)
@@ -838,6 +855,8 @@ class MainWindow(QMainWindow):
         self.browse_reference_button.clicked.connect(self._browse_reference)
         self.browse_last_stack_button.clicked.connect(self._browse_last_stack)
         self.batch_spin.valueChanged.connect(self._sync_state_from_controls)
+        self.batch_spin.valueChanged.connect(self._on_batch_size_changed)
+        self.boring_check.stateChanged.connect(self._on_boring_check_changed)
         self.stacking_mode_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
@@ -877,6 +896,13 @@ class MainWindow(QMainWindow):
         if errors:
             self._on_preflight_failed(errors)
             return
+        # Boring single-batch route (batch_size == 1): run boring_stack.py via
+        # the injectable subprocess runner instead of the normal backend, so the
+        # Qt shell never pretends to support batch_size == 1 while launching the
+        # wrong (queue-manager) path.
+        if state.batch_size == 1:
+            self._start_boring_route(state)
+            return
         request = self.build_run_request(
             initial_additional_folders=list(self._additional_folders)
         )
@@ -895,18 +921,168 @@ class MainWindow(QMainWindow):
         errors through the status bar and the log tab.  No ``RunController``
         call happens, so no ``failed`` signal is emitted.
         """
-        message = "Cannot start real backend: " + "; ".join(errors)
+        self._report_preflight_failure("Cannot start real backend", errors)
+
+    def _report_preflight_failure(self, prefix: str, errors: List[str]) -> None:
+        """Surface a preflight failure (prefix + errors) and stay idle."""
+        message = prefix + ": " + "; ".join(errors)
         self.log(message)
         self.statusBar().showMessage(message)
         self._running = False
         self._update_run_state()
 
+    # ------------------------------------------------------- boring route
+    def _boring_preflight_errors(self, state: QtSettingsState) -> List[str]:
+        """Return preflight errors for the boring (batch_size == 1) route."""
+        errors: List[str] = []
+        input_folder = str(state.input_folder or "").strip()
+        if not input_folder:
+            errors.append("Input folder is empty.")
+        elif not os.path.isdir(input_folder):
+            errors.append(f"Input folder does not exist: {input_folder}")
+        if not str(state.output_folder or "").strip():
+            errors.append("Output folder is empty.")
+        return errors
+
+    def _start_boring_route(self, state: QtSettingsState) -> None:
+        """Preflight and launch the boring (single-batch CSV) subprocess route.
+
+        Requires ``<input_folder>/stack_plan.csv`` to exist and parse to a
+        non-empty list of existing FITS files.  On any failure it reports a
+        clear preflight error and leaves the UI idle — it never calls
+        :meth:`RunController.start` and never launches a runner.
+        """
+        errors = self._boring_preflight_errors(state)
+        if errors:
+            self._report_preflight_failure("Cannot start boring stack", errors)
+            return
+
+        csv_path = boring_route.csv_path_for(str(state.input_folder).strip())
+        try:
+            parsed = boring_route.parse_stack_plan_csv(csv_path)
+        except boring_route.BoringCsvError as exc:
+            self._report_preflight_failure("Cannot start boring stack", [exc.message])
+            return
+
+        request = boring_route.build_boring_request(
+            csv_path=csv_path,
+            output_dir=str(state.output_folder).strip(),
+            batch_size=1,
+            chunk_size=boring_route.get_auto_chunk_size(),
+            normalize_method=str(state.stack_norm_method or "none"),
+            save_final_as_float32=bool(state.save_final_as_float32),
+            final_combine=str(state.stack_final_combine or "mean"),
+        )
+        self.log(
+            "Launching boring stack "
+            f"({len(parsed.ordered_files)} files, "
+            f"final_combine={request.final_combine}, batch_size=1)"
+        )
+        self._boring_active = True
+        runner = self._resolve_boring_runner()
+        runner.start(request)
+
+    def _resolve_boring_runner(self) -> BoringRunnerBase:
+        """Return the (lazily created, signal-wired) boring subprocess runner."""
+        if self._boring_runner is None:
+            if self.boring_runner_factory is not None:
+                self._boring_runner = self.boring_runner_factory()
+            else:
+                self._boring_runner = QProcessBoringRunner(self)
+            self._boring_runner.started.connect(self._on_boring_started)
+            self._boring_runner.finished.connect(self._on_boring_finished)
+            self._boring_runner.failed.connect(self._on_boring_failed)
+            self._boring_runner.cancelled.connect(self._on_boring_cancelled)
+            self._boring_runner.log_message.connect(self.log)
+        return self._boring_runner
+
+    # ------------------------------------------------ boring lifecycle slots
+    def _on_boring_started(self) -> None:
+        self._running = True
+        self._update_run_state()
+        self.statusBar().showMessage("Boring stack running…")
+
+    def _on_boring_finished(self, exit_code: int) -> None:
+        self._boring_active = False
+        self._running = False
+        self._update_run_state()
+        self.progress.setValue(100)
+        self.statusBar().showMessage("Boring stack finished.")
+        self.log("Boring stack finished.")
+
+    def _on_boring_failed(self, message: str) -> None:
+        self._boring_active = False
+        self._running = False
+        self._update_run_state()
+        self.statusBar().showMessage(f"Boring stack failed: {message}")
+        self.log(f"Boring stack failed: {message}")
+
+    def _on_boring_cancelled(self) -> None:
+        self._boring_active = False
+        self._running = False
+        self._update_run_state()
+        self.statusBar().showMessage("Boring stack cancelled.")
+        self.log("Boring stack cancelled.")
+
     def _on_stop(self) -> None:
         if not self._running:
+            return
+        if self._boring_active:
+            runner = self._boring_runner
+            if runner is not None:
+                runner.cancel()
+            self.statusBar().showMessage("Cancelling boring stack…")
+            self.log("Stop requested (boring stack).")
             return
         self.controller.cancel()
         self.statusBar().showMessage("Cancelling…")
         self.log("Stop requested.")
+
+    # ------------------------------------------------ boring mode sync / gating
+    def _on_boring_check_changed(self, checked: int) -> None:
+        """Synchronise the batch spinbox with the boring-thread checkbox.
+
+        Tk ``_toggle_boring_thread`` parity: checking the box forces
+        ``batch_size == 1`` and locks the spinbox; unchecking unlocks it and, if
+        it was pinned at 1, resets it to 0 (Auto).
+        """
+        if bool(checked):
+            if self.batch_spin.value() != 1:
+                self.batch_spin.setValue(1)
+            self.batch_spin.setEnabled(False)
+        else:
+            self.batch_spin.setEnabled(True)
+            if self.batch_spin.value() == 1:
+                self.batch_spin.setValue(0)
+        self._update_boring_gating()
+
+    def _on_batch_size_changed(self, value: int) -> None:
+        """Synchronise the boring checkbox with the batch size (Tk parity).
+
+        ``batch_size == 1`` checks the box; anything else unchecks it.  The
+        guard prevents a ping-pong with :meth:`_on_boring_check_changed`.
+        """
+        if value == 1 and not self.boring_check.isChecked():
+            self.boring_check.setChecked(True)
+        elif value != 1 and self.boring_check.isChecked():
+            self.boring_check.setChecked(False)
+        self._update_boring_gating()
+
+    def _update_boring_gating(self) -> None:
+        """Gate controls incompatible with boring mode (honest interdependency).
+
+        Boring mode forces ``use_drizzle=False`` (the boring CLI hardcodes it),
+        so the drizzle controls are disabled and unchecked while boring mode is
+        active.  Stacking mode / final-combine remain available: the boring CLI
+        forces winsorized-sigma stacking but genuinely supports the
+        ``--final-combine`` override, matching the Tk subprocess path.
+        """
+        boring = self.boring_check.isChecked()
+        self.drizzle_check.setEnabled(not boring)
+        self.drizzle_mode_combo.setEnabled(not boring)
+        self.drizzle_group_spin.setEnabled(not boring)
+        if boring and self.drizzle_check.isChecked():
+            self.drizzle_check.setChecked(False)
 
     def _on_solver(self) -> None:
         """Open the solver configuration dialog and apply accepted values.
@@ -1346,6 +1522,15 @@ class MainWindow(QMainWindow):
         """
         if wait_ms is None:
             wait_ms = self._shutdown_wait_ms
+        # Cancel any active boring subprocess before tearing down the window.
+        # The QProcess/runner is parented to the window, so a graceful SIGTERM
+        # here (and Qt's own child cleanup on destroy) is the best-effort path;
+        # the real runner is only ever active outside tests.
+        if self._boring_active and self._boring_runner is not None:
+            try:
+                self._boring_runner.cancel()
+            except Exception:
+                pass
         shutdown_complete = self.controller.shutdown(wait_ms=wait_ms)
         if shutdown_complete:
             self._shutdown_called = True

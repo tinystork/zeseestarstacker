@@ -25,7 +25,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 1.3 | `0` + "Reproject and coadd" keeps `0` (batch-zero) | `[x]` | `reproject_coadd_final` → `allow_mode_zero` |
 | 1.4 | `1` → boring/single-batch path, not refused in preflight | `[x]` | preflight no longer rejects `batch_size == 1` |
 | 1.5 | `>= 2` → explicit batch | `[x]` | passes through unchanged |
-| 1.6 | `1` → boring_stack subprocess / `stack_plan.csv` routing | `[ ]` | Qt routing of the CSV path is a later milestone |
+| 1.6 | `1` → boring_stack subprocess / `stack_plan.csv` routing | `[x]` | `boring_route` (CSV parse + command) + `boring_runner` (QProcess); `batch_size == 1` routes to boring, never `RunController.start` |
 
 ## 2. Final combination + interdependencies
 
@@ -33,7 +33,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 |---|---|---|---|
 | 2.1 | Final-combine choices (mean / median / winsorized_sigma_clip / reproject / reproject_coadd) | `[x]` | `final_combine_combo` (Stacking tab) with the five historical Tk keys |
 | 2.2 | `reproject_between_batches` ⇄ `reproject_coadd_final` mutual exclusion | `[x]` | single source of truth: `stack_final_combine` drives both flags via `final_combine_flags` |
-| 2.3 | Drizzle / reproject / boring-thread interdependencies (button gating) | `[ ]` | |
+| 2.3 | Drizzle / reproject / boring-thread interdependencies (button gating) | `[x]` | boring checkbox ↔ batch-size sync + spinbox lock; drizzle controls disabled/unchecked while boring mode active |
 
 ## 3. Solver dialog / readiness
 
@@ -157,3 +157,19 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   validation with `initial_additional_folders` passed through `_on_start`).
   Last-stack persistence (4.5), full resume semantics (10.1), Analyze external
   launch (5.4) and full settings persistence (9.3) remain `[ ]`.
+- **2026-08-21 — lot ZSSS-QT-FP-M4**: delivered items 1.6 and 2.3 (boring /
+  single-batch CSV route + gating).  `batch_size == 1` now routes to the boring
+  stack subprocess (`seestar/gui/boring_stack.py`, launched by filesystem path —
+  never imported) instead of `RunController.start`, with a conservative CSV
+  parser (`boring_route.parse_stack_plan_csv` replicating the Tk `read_rows`
+  rules) and a QProcess-based runner (`boring_runner.QProcessBoringRunner`).
+  Missing/empty/invalid `stack_plan.csv` or a listed missing FITS blocks start
+  with a clear preflight error and leaves the UI idle.  A visible
+  "Threaded Boring Stack" checkbox synchronises with the batch-size spinbox
+  (check ⇄ `batch_size == 1`, spinbox locked while checked) and gates the
+  incompatible drizzle controls.  Remaining deltas: `--max-mem` is fixed at the
+  8.0 GB default (no `max_hq_mem_gb` field in `QtSettingsState` yet); the real
+  QProcess lifecycle is implemented but **not** exercised by automated tests
+  (tests inject a fake runner and never spawn the subprocess); the CSV weight
+  column is parsed but the command builder does not consume it (the subprocess
+  re-reads the CSV itself).
