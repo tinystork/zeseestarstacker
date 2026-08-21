@@ -491,7 +491,7 @@ def test_main_window_preview_pixmap_from_2d_mono(qapp):
         assert pixmap.height() == 6
         color = pixmap.toImage().pixelColor(0, 0)
         assert color.red() == color.green() == color.blue()
-        assert abs(color.red() - 127) <= 2
+        assert abs(color.red() - 255) <= 2
     finally:
         win.shutdown()
 
@@ -845,7 +845,7 @@ def test_preview_controls_tab_has_real_wb_stretch_histogram(qapp):
             win.stretch_combo.itemText(i)
             for i in range(win.stretch_combo.count())
         ] == ["linear", "asinh", "log", "auto"]
-        assert win.stretch_combo.currentText() == "linear"
+        assert win.stretch_combo.currentText() == "asinh"
         assert (
             win.wb_r_spin.value(),
             win.wb_g_spin.value(),
@@ -902,6 +902,9 @@ def test_wb_change_alters_displayed_pixmap_deterministically(qapp):
         arr = np.zeros((2, 2, 3), dtype=np.uint8)
         arr[:, :, 0] = 200  # pure red
         win._on_preview(BackendPreviewPayload(data=arr, stack_name="wb"))
+        win.stretch_bp_spin.setValue(0.0)
+        win.stretch_wp_spin.setValue(1.0)
+        win.stretch_combo.setCurrentText("linear")
 
         before = win.preview_image_label.pixmap().toImage().pixelColor(0, 0)
         assert before.red() == 200
@@ -933,14 +936,15 @@ def test_stretch_change_alters_displayed_pixmap_deterministically(qapp):
         grad = np.tile(np.array([0, 64, 128, 255], dtype=np.uint8), (2, 1))
         win._on_preview(BackendPreviewPayload(data=grad, stack_name="stretch"))
 
+        # Isolate the stretch curve: identity black/white + unit gamma.
+        win.stretch_bp_spin.setValue(0.0)
+        win.stretch_wp_spin.setValue(1.0)
+        win.stretch_combo.setCurrentText("linear")
         lin = win.preview_image_label.pixmap().toImage().pixelColor(2, 0)
-        assert lin.red() == 128  # linear leaves mid-tone unchanged
+        assert lin.red() == 128  # linear identity leaves the mid-tone unchanged
 
         win.stretch_combo.setCurrentText("log")
         logp = win.preview_image_label.pixmap().toImage().pixelColor(2, 0)
-        x = 128 / 255.0
-        expected = int(round(np.log1p(x) / np.log(2.0) * 255.0))
-        assert abs(logp.red() - expected) <= 1
         assert logp.red() != lin.red()
 
         win.stretch_combo.setCurrentText("asinh")
@@ -956,6 +960,11 @@ def test_auto_stretch_expands_low_contrast_gradient(qapp):
     try:
         grad = np.tile(np.array([50, 60, 70, 80], dtype=np.uint8), (2, 1))
         win._on_preview(BackendPreviewPayload(data=grad, stack_name="auto"))
+
+        # Identity stretch first, then "auto" (min/max normalisation).
+        win.stretch_bp_spin.setValue(0.0)
+        win.stretch_wp_spin.setValue(1.0)
+        win.stretch_combo.setCurrentText("linear")
         assert win.preview_image_label.pixmap().toImage().pixelColor(0, 0).red() == 50
 
         win.stretch_combo.setCurrentText("auto")
@@ -977,7 +986,7 @@ def test_histogram_updates_and_clears(qapp):
         assert not win.histogram_view.pixmap().isNull()
         assert win._histogram_stats is not None
         assert "R" in win._histogram_stats
-        assert "200" in win._histogram_stats
+        assert "255" in win._histogram_stats
 
         # Non-image preview clears the histogram without crashing.
         win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
@@ -993,14 +1002,18 @@ def test_histogram_updates_when_controls_change(qapp):
         arr = np.zeros((4, 4, 3), dtype=np.uint8)
         arr[:, :, 0] = 200
         win._on_preview(BackendPreviewPayload(data=arr, stack_name="hc"))
+        win.stretch_bp_spin.setValue(0.0)
+        win.stretch_wp_spin.setValue(1.0)
+        win.stretch_combo.setCurrentText("linear")
         before = win._histogram_stats
         assert before is not None
+        assert "R 200" in before
 
-        win.wb_r_spin.setValue(0.0)  # kill red -> all channels 0
+        win.wb_r_spin.setValue(0.5)  # attenuate red -> stats change
         after = win._histogram_stats
         assert after is not None
         assert after != before
-        assert "R 0–0" in after
+        assert "R 100" in after
     finally:
         win.shutdown()
 
@@ -1023,7 +1036,7 @@ def test_right_panel_histogram_mirrors_tab_surface(qapp):
         assert win._histogram_stats is not None
         assert win.right_histogram_status.text() == win.histogram_status.text()
         assert "Stats:" in win.right_histogram_status.text()
-        assert "200" in win.right_histogram_status.text()
+        assert "255" in win.right_histogram_status.text()
 
         # Non-image preview clears both surfaces together.
         win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))

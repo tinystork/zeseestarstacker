@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QStatusBar,
@@ -99,10 +100,38 @@ from .final_combine import (
 )
 from .preview_render import render_preview_image
 from .preview_adjust import (
+    BLACK_POINT_MAX,
+    BLACK_POINT_MIN,
+    BLACK_POINT_STEP,
+    BRIGHTNESS_MAX,
+    BRIGHTNESS_MIN,
+    BRIGHTNESS_STEP,
+    CONTRAST_MAX,
+    CONTRAST_MIN,
+    CONTRAST_STEP,
+    DEFAULT_BLACK_POINT,
+    DEFAULT_BRIGHTNESS,
+    DEFAULT_CONTRAST,
+    DEFAULT_GAMMA,
+    DEFAULT_SATURATION,
     DEFAULT_STRETCH,
     DEFAULT_WB,
+    DEFAULT_WHITE_POINT,
+    GAMMA_MAX,
+    GAMMA_MIN,
+    GAMMA_STEP,
+    SATURATION_MAX,
+    SATURATION_MIN,
+    SATURATION_STEP,
     STRETCH_MODES,
-    apply_wb_stretch,
+    WB_MAX,
+    WB_MIN,
+    WB_STEP,
+    WHITE_POINT_MAX,
+    WHITE_POINT_MIN,
+    WHITE_POINT_STEP,
+    apply_preview_adjustments,
+    compute_auto_wb,
     compute_histogram_stats,
     render_histogram_pixmap,
 )
@@ -511,12 +540,20 @@ class MainWindow(QMainWindow):
         # (M12).  Avoids redundant reloads on repeated settings restore; it is
         # cleared when the folder changes or the load fails.
         self._last_preview_folder: Optional[str] = None
-        # Preview display-adjustment state (M10): white-balance R/G/B gains and
-        # the display-stretch mode.  These act only on the derived display
-        # image, never on ``_preview_source`` or any scientific output.  Raw
-        # histogram stats string (or ``None``) drives the localized status label.
+        # Preview display-adjustment state (M10/M13): white-balance R/G/B
+        # gains, the display-stretch mode, black/white points, gamma and
+        # brightness/contrast/saturation.  These act only on the derived
+        # display image, never on ``_preview_source`` or any scientific output.
+        # Defaults match the Tk GUI.  Raw histogram stats string (or ``None``)
+        # drives the localized status label.
         self._wb: tuple = DEFAULT_WB
         self._stretch: str = DEFAULT_STRETCH
+        self._black_point: float = DEFAULT_BLACK_POINT
+        self._white_point: float = DEFAULT_WHITE_POINT
+        self._gamma: float = DEFAULT_GAMMA
+        self._brightness: float = DEFAULT_BRIGHTNESS
+        self._contrast: float = DEFAULT_CONTRAST
+        self._saturation: float = DEFAULT_SATURATION
         self._histogram_stats: Optional[str] = None
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
@@ -722,8 +759,73 @@ class MainWindow(QMainWindow):
         h.addWidget(button)
         return row
 
+    def _make_slider_spin_pair(
+        self,
+        min_val: float,
+        max_val: float,
+        step: float,
+        decimals: int,
+        default: float,
+        on_change,
+    ):
+        """Build a Tk-parity slider + spinbox pair.
+
+        Returns ``(row_widget, slider, spin)`` where the slider drives a coarse
+        sweep and the spinbox shows the exact numeric value next to it (Tk's
+        ``_create_slider_spinbox_group`` shows the value in a spinbox beside
+        the slider).  A guard flag keeps the two widgets in sync without
+        ping-ponging; ``on_change`` fires once per user edit.
+        """
+        slider = QSlider(Qt.Orientation.Horizontal)
+        n = max(1, int(round((max_val - min_val) / step)))
+        slider.setRange(0, n)
+
+        spin = QDoubleSpinBox()
+        spin.setRange(float(min_val), float(max_val))
+        spin.setSingleStep(float(step))
+        spin.setDecimals(int(decimals))
+
+        guard = {"busy": False}
+
+        def _slider_changed(value: int) -> None:
+            if guard["busy"]:
+                return
+            guard["busy"] = True
+            try:
+                spin.setValue(min_val + value * step)
+            finally:
+                guard["busy"] = False
+            on_change()
+
+        def _spin_changed(value: float) -> None:
+            if guard["busy"]:
+                return
+            guard["busy"] = True
+            try:
+                slider.setValue(int(round((value - min_val) / step)))
+            finally:
+                guard["busy"] = False
+            on_change()
+
+        # Set the initial values *before* wiring the signals so the setup
+        # never fires ``on_change`` while the caller is still assigning the
+        # resulting attributes.
+        slider.setValue(int(round((default - min_val) / step)))
+        spin.setValue(float(default))
+
+        slider.valueChanged.connect(_slider_changed)
+        spin.valueChanged.connect(_spin_changed)
+
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(slider, 1)
+        h.addWidget(spin)
+        return row, slider, spin
+
     def _build_preview_controls_tab(self) -> QWidget:
-        """Left-panel "Preview controls" tab (M10): display-only WB / stretch /
+        """Left-panel "Preview controls" tab (M10/M13): display-only WB /
+        stretch / black-white-gamma / brightness-contrast-saturation /
         histogram.  These controls act only on the *displayed* preview pixmap
         (a derived image), never on the stored source image or any scientific
         output.  All controls are inert until a renderable preview arrives.
@@ -731,34 +833,37 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
-        # White balance: per-channel R/G/B gains (neutral = 1.0).
+        # White balance: Auto WB + Reset buttons, then per-channel R/G/B gains
+        # (neutral = 1.0) shown as slider + numeric spinbox pairs.
         self.wb_group = QGroupBox(self._tr("wb_group"))
         self._bind_text(self.wb_group, "wb_group")
         wb_form = QFormLayout(self.wb_group)
-        self.wb_r_spin = QDoubleSpinBox()
-        self.wb_r_spin.setRange(0.0, 4.0)
-        self.wb_r_spin.setSingleStep(0.05)
-        self.wb_r_spin.setDecimals(2)
-        self.wb_r_spin.setValue(1.0)
-        self.wb_g_spin = QDoubleSpinBox()
-        self.wb_g_spin.setRange(0.0, 4.0)
-        self.wb_g_spin.setSingleStep(0.05)
-        self.wb_g_spin.setDecimals(2)
-        self.wb_g_spin.setValue(1.0)
-        self.wb_b_spin = QDoubleSpinBox()
-        self.wb_b_spin.setRange(0.0, 4.0)
-        self.wb_b_spin.setSingleStep(0.05)
-        self.wb_b_spin.setDecimals(2)
-        self.wb_b_spin.setValue(1.0)
-        self._add_form_row(wb_form, "wb_red", self.wb_r_spin)
-        self._add_form_row(wb_form, "wb_green", self.wb_g_spin)
-        self._add_form_row(wb_form, "wb_blue", self.wb_b_spin)
+        wb_buttons = QWidget()
+        wb_btn_row = QHBoxLayout(wb_buttons)
+        wb_btn_row.setContentsMargins(0, 0, 0, 0)
+        self.auto_wb_button = QPushButton(self._tr("auto_wb"))
+        self._bind_text(self.auto_wb_button, "auto_wb")
         self.wb_reset_button = QPushButton(self._tr("wb_reset"))
         self._bind_text(self.wb_reset_button, "wb_reset")
-        wb_form.addRow("", self.wb_reset_button)
+        wb_btn_row.addWidget(self.auto_wb_button)
+        wb_btn_row.addWidget(self.wb_reset_button)
+        wb_btn_row.addStretch(1)
+        wb_form.addRow("", wb_buttons)
+        self.wb_r_row, self.wb_r_slider, self.wb_r_spin = self._make_slider_spin_pair(
+            WB_MIN, WB_MAX, WB_STEP, 2, DEFAULT_WB[0], self._on_wb_changed
+        )
+        self.wb_g_row, self.wb_g_slider, self.wb_g_spin = self._make_slider_spin_pair(
+            WB_MIN, WB_MAX, WB_STEP, 2, DEFAULT_WB[1], self._on_wb_changed
+        )
+        self.wb_b_row, self.wb_b_slider, self.wb_b_spin = self._make_slider_spin_pair(
+            WB_MIN, WB_MAX, WB_STEP, 2, DEFAULT_WB[2], self._on_wb_changed
+        )
+        self._add_form_row(wb_form, "wb_red", self.wb_r_row)
+        self._add_form_row(wb_form, "wb_green", self.wb_g_row)
+        self._add_form_row(wb_form, "wb_blue", self.wb_b_row)
         layout.addWidget(self.wb_group)
 
-        # Display stretch (linear default).
+        # Display stretch (Asinh default, Tk parity) + black/white/gamma.
         self.stretch_group = QGroupBox(self._tr("stretch_group"))
         self._bind_text(self.stretch_group, "stretch_group")
         stretch_form = QFormLayout(self.stretch_group)
@@ -766,7 +871,97 @@ class MainWindow(QMainWindow):
         self.stretch_combo.addItems(list(STRETCH_MODES))
         self.stretch_combo.setCurrentText(DEFAULT_STRETCH)
         self._add_form_row(stretch_form, "stretch_label", self.stretch_combo)
+        (
+            self.stretch_bp_row,
+            self.stretch_bp_slider,
+            self.stretch_bp_spin,
+        ) = self._make_slider_spin_pair(
+            BLACK_POINT_MIN,
+            BLACK_POINT_MAX,
+            BLACK_POINT_STEP,
+            3,
+            DEFAULT_BLACK_POINT,
+            self._on_stretch_params_changed,
+        )
+        (
+            self.stretch_wp_row,
+            self.stretch_wp_slider,
+            self.stretch_wp_spin,
+        ) = self._make_slider_spin_pair(
+            WHITE_POINT_MIN,
+            WHITE_POINT_MAX,
+            WHITE_POINT_STEP,
+            3,
+            DEFAULT_WHITE_POINT,
+            self._on_stretch_params_changed,
+        )
+        (
+            self.stretch_gamma_row,
+            self.stretch_gamma_slider,
+            self.stretch_gamma_spin,
+        ) = self._make_slider_spin_pair(
+            GAMMA_MIN,
+            GAMMA_MAX,
+            GAMMA_STEP,
+            2,
+            DEFAULT_GAMMA,
+            self._on_stretch_params_changed,
+        )
+        self._add_form_row(stretch_form, "stretch_black", self.stretch_bp_row)
+        self._add_form_row(stretch_form, "stretch_white", self.stretch_wp_row)
+        self._add_form_row(stretch_form, "stretch_gamma", self.stretch_gamma_row)
+        self.stretch_reset_button = QPushButton(self._tr("stretch_reset"))
+        self._bind_text(self.stretch_reset_button, "stretch_reset")
+        stretch_form.addRow("", self.stretch_reset_button)
         layout.addWidget(self.stretch_group)
+
+        # Image adjustments: brightness / contrast / saturation (Tk parity).
+        self.bcs_group = QGroupBox(self._tr("bcs_group"))
+        self._bind_text(self.bcs_group, "bcs_group")
+        bcs_form = QFormLayout(self.bcs_group)
+        (
+            self.brightness_row,
+            self.brightness_slider,
+            self.brightness_spin,
+        ) = self._make_slider_spin_pair(
+            BRIGHTNESS_MIN,
+            BRIGHTNESS_MAX,
+            BRIGHTNESS_STEP,
+            2,
+            DEFAULT_BRIGHTNESS,
+            self._on_bcs_changed,
+        )
+        (
+            self.contrast_row,
+            self.contrast_slider,
+            self.contrast_spin,
+        ) = self._make_slider_spin_pair(
+            CONTRAST_MIN,
+            CONTRAST_MAX,
+            CONTRAST_STEP,
+            2,
+            DEFAULT_CONTRAST,
+            self._on_bcs_changed,
+        )
+        (
+            self.saturation_row,
+            self.saturation_slider,
+            self.saturation_spin,
+        ) = self._make_slider_spin_pair(
+            SATURATION_MIN,
+            SATURATION_MAX,
+            SATURATION_STEP,
+            2,
+            DEFAULT_SATURATION,
+            self._on_bcs_changed,
+        )
+        self._add_form_row(bcs_form, "brightness", self.brightness_row)
+        self._add_form_row(bcs_form, "contrast", self.contrast_row)
+        self._add_form_row(bcs_form, "saturation", self.saturation_row)
+        self.bcs_reset_button = QPushButton(self._tr("bcs_reset"))
+        self._bind_text(self.bcs_reset_button, "bcs_reset")
+        bcs_form.addRow("", self.bcs_reset_button)
+        layout.addWidget(self.bcs_group)
 
         # Display histogram surface (real signal, not a placeholder).
         self.histogram_group = QGroupBox(self._tr("histogram_group"))
@@ -1113,11 +1308,15 @@ class MainWindow(QMainWindow):
         self.zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
         self.rotate_left_button.clicked.connect(self._on_rotate_left)
         self.rotate_right_button.clicked.connect(self._on_rotate_right)
-        self.wb_r_spin.valueChanged.connect(self._on_wb_changed)
-        self.wb_g_spin.valueChanged.connect(self._on_wb_changed)
-        self.wb_b_spin.valueChanged.connect(self._on_wb_changed)
+        # WB gains / stretch black-white-gamma / B-C-S are wired through
+        # ``_make_slider_spin_pair`` (slider <-> spinbox sync + a single
+        # ``on_change`` callback), so only the discrete buttons are connected
+        # here.
+        self.auto_wb_button.clicked.connect(self._on_auto_wb)
         self.wb_reset_button.clicked.connect(self._on_wb_reset)
         self.stretch_combo.currentIndexChanged.connect(self._on_stretch_changed)
+        self.stretch_reset_button.clicked.connect(self._on_stretch_reset)
+        self.bcs_reset_button.clicked.connect(self._on_bcs_reset)
         # Initial-preview auto-load delivery: the daemon worker thread emits
         # this signal; the explicit queued connection guarantees the slot runs
         # on the GUI thread even though the emitter is not a QThread.
@@ -1796,7 +1995,20 @@ class MainWindow(QMainWindow):
         self._initial_preview_result.emit(result)
 
     def _on_initial_preview_result(self, result) -> None:
-        """GUI-thread slot: render a loaded initial preview (or clear on error)."""
+        """GUI-thread slot: render a loaded initial preview (or clear on error).
+
+        A fast input-folder switch while a load is in flight can deliver the
+        *old* folder's image after the new folder's image.  To keep the preview
+        honest we drop any result whose ``folder`` (absolute path) no longer
+        matches the currently selected input folder.
+        """
+        current_folder = self.input_edit.text().strip()
+        current_folder = os.path.abspath(current_folder) if current_folder else ""
+        if result.folder:
+            result_folder = os.path.abspath(result.folder)
+            if result_folder != current_folder:
+                # Stale result for a folder that is no longer selected.
+                return
         if result.error is not None:
             self._last_preview_folder = None
             self._clear_preview(self._tr("preview_error"))
@@ -1860,16 +2072,59 @@ class MainWindow(QMainWindow):
         self._stretch = self.stretch_combo.currentText()
         self._refresh_preview_view()
 
+    def _on_auto_wb(self) -> None:
+        """Compute auto white-balance gains from the display image (Tk parity).
+
+        The gains are derived from the stored display image (``_preview_source``,
+        the same image the other adjustments act on) via the pure-numpy
+        ``compute_auto_wb`` helper; they are written back to the WB controls,
+        whose change callbacks re-render the preview.
+        """
+        if self._preview_source is None or self._preview_source.isNull():
+            return
+        r_gain, g_gain, b_gain = compute_auto_wb(self._preview_source)
+        self.wb_r_spin.setValue(round(float(r_gain), 3))
+        self.wb_g_spin.setValue(round(float(g_gain), 3))
+        self.wb_b_spin.setValue(round(float(b_gain), 3))
+
+    def _on_stretch_params_changed(self, *_ignored) -> None:
+        """Update black/white/gamma and re-render the preview (display-only)."""
+        self._black_point = self.stretch_bp_spin.value()
+        self._white_point = self.stretch_wp_spin.value()
+        self._gamma = self.stretch_gamma_spin.value()
+        self._refresh_preview_view()
+
+    def _on_stretch_reset(self) -> None:
+        """Reset the stretch controls to the Tk defaults (Asinh, 0.01/0.99/1.0)."""
+        self.stretch_combo.setCurrentText(DEFAULT_STRETCH)
+        self.stretch_bp_spin.setValue(DEFAULT_BLACK_POINT)
+        self.stretch_wp_spin.setValue(DEFAULT_WHITE_POINT)
+        self.stretch_gamma_spin.setValue(DEFAULT_GAMMA)
+
+    def _on_bcs_changed(self, *_ignored) -> None:
+        """Update brightness/contrast/saturation and re-render (display-only)."""
+        self._brightness = self.brightness_spin.value()
+        self._contrast = self.contrast_spin.value()
+        self._saturation = self.saturation_spin.value()
+        self._refresh_preview_view()
+
+    def _on_bcs_reset(self) -> None:
+        """Reset the brightness/contrast/saturation controls to neutral 1.0."""
+        self.brightness_spin.setValue(DEFAULT_BRIGHTNESS)
+        self.contrast_spin.setValue(DEFAULT_CONTRAST)
+        self.saturation_spin.setValue(DEFAULT_SATURATION)
+
     def _refresh_preview_view(self) -> None:
         """Repaint the preview image + resolution label + histogram from the
         stored source.
 
-        The source :class:`QImage` is never mutated: a WB/stretch adjusted
-        *derived* image is produced from it, then ``render_view`` applies the
+        The source :class:`QImage` is never mutated: a fully adjusted *derived*
+        image (WB + stretch + black/white/gamma + brightness/contrast/
+        saturation) is produced from it, then ``render_view`` applies the
         current rotation and zoom to that derived image, so zoom reapplies
         cleanly after rotation and the original display image stays pristine.
         The display histogram is computed from the same derived (displayed)
-        image, so it tracks WB/stretch changes too.
+        image, so it tracks every adjustment too.
         """
         source = self._preview_source
         if source is None or source.isNull():
@@ -1879,7 +2134,17 @@ class MainWindow(QMainWindow):
             self.resolution_label.setText("—")
             self._refresh_histogram(None)
             return
-        adjusted = apply_wb_stretch(source, self._wb, self._stretch)
+        adjusted = apply_preview_adjustments(
+            source,
+            wb=self._wb,
+            stretch=self._stretch,
+            black_point=self._black_point,
+            white_point=self._white_point,
+            gamma=self._gamma,
+            brightness=self._brightness,
+            contrast=self._contrast,
+            saturation=self._saturation,
+        )
         if adjusted is None or adjusted.isNull():
             adjusted = source
         pixmap = render_view(
@@ -1921,11 +2186,35 @@ class MainWindow(QMainWindow):
 
     def _set_preview_controls_enabled(self, enabled: bool) -> None:
         """Enable/disable the WB + stretch preview controls together."""
-        self.wb_r_spin.setEnabled(enabled)
-        self.wb_g_spin.setEnabled(enabled)
-        self.wb_b_spin.setEnabled(enabled)
+        for spin in (self.wb_r_spin, self.wb_g_spin, self.wb_b_spin):
+            spin.setEnabled(enabled)
+        for slider in (self.wb_r_slider, self.wb_g_slider, self.wb_b_slider):
+            slider.setEnabled(enabled)
+        self.auto_wb_button.setEnabled(enabled)
         self.wb_reset_button.setEnabled(enabled)
         self.stretch_combo.setEnabled(enabled)
+        for spin in (
+            self.stretch_bp_spin,
+            self.stretch_wp_spin,
+            self.stretch_gamma_spin,
+        ):
+            spin.setEnabled(enabled)
+        for slider in (
+            self.stretch_bp_slider,
+            self.stretch_wp_slider,
+            self.stretch_gamma_slider,
+        ):
+            slider.setEnabled(enabled)
+        self.stretch_reset_button.setEnabled(enabled)
+        for spin in (self.brightness_spin, self.contrast_spin, self.saturation_spin):
+            spin.setEnabled(enabled)
+        for slider in (
+            self.brightness_slider,
+            self.contrast_slider,
+            self.saturation_slider,
+        ):
+            slider.setEnabled(enabled)
+        self.bcs_reset_button.setEnabled(enabled)
 
     def _refresh_histogram(self, image: Optional[QImage]) -> None:
         """Update both display histogram surfaces from the (adjusted) preview.

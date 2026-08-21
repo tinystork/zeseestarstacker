@@ -70,13 +70,14 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 6.1 | Preview image rendering (array → `QImage`) | `[x]` | `preview_render` (display-only) |
-| 6.2 | White-balance controls | `[x]` | `preview_adjust` per-channel R/G/B gains (neutral 1.0) + `Reset`; display-only, re-renders the derived preview immediately |
-| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (linear default) + `preview_adjust._apply_stretch` tone curves; display-only, re-renders the derived preview |
+| 6.2 | White-balance controls | `[x]` | `preview_adjust` per-channel R/G/B gains (neutral 1.0) shown as slider + numeric spinbox pairs, `Auto WB` (mode-based gains from the display image, Tk parity) + `Reset`; Tk range 0.1–5.0 step 0.01; display-only, re-renders the derived preview immediately (M10/M13) |
+| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (Asinh default, Tk parity) + black/white/gamma slider + numeric spinbox controls (Tk defaults 0.01/0.99/1.0, ranges/steps 0–1/0.001 and 0.1–5/0.01) + `Reset Stretch`; `preview_adjust` tone curves reproduce the Tk `StretchPresets` math; display-only, re-renders the derived preview (M10/M13) |
 | 6.4 | Histogram | `[x]` | `preview_adjust` computes per-channel histograms + stats from the displayed image; `histogram_view` (QPixmap bars) + `histogram_status` (localized empty/stats) update on preview/control changes and clear on non-image input |
 | 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
 | 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
 | 6.7 | Pan | `[ ]` | |
 | 6.8 | Auto-load first FITS of the input folder (initial preview) | `[x]` | `MainWindow._try_show_first_input_image` + `seestar/gui_qt/initial_preview.py` (M12): folder restored from settings or chosen via Browse Input non-blockingly loads the first sorted `.fit`/`.fits` on a daemon thread (lazy `importlib` engine import), debayers 2D Bayer data (header `BAYERPAT` else `settings.bayer_pattern`), and delivers the image back via a queued Qt signal; missing/empty folder clears the preview with a localized message; redundant-reload guard skips an unchanged folder |
+| 6.9 | Brightness / contrast / saturation + reset (display-only) | `[x]` | slider + numeric spinbox pairs with Tk defaults 1.0/1.0/1.0 and ranges/steps 0.1–3.0/0.01, 0.1–3.0/0.01, 0.0–3.0/0.01 + `Reset Adjust.`; pure-numpy reproduction of the Tk image-enhancement behaviour; display-only (M13) |
 
 ## 7. Progress / log / copy
 
@@ -297,6 +298,28 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   `tests/test_qt_backend_runner.py` (queue-drain + malformed-item resilience);
   see the witness report under `~/.openclaw/workspace/review/`
   `zsss-pyside6-m11-real-backend-e2e/`.
+- **2026-08-21 — lot ZSSS-QT-FP-M13**: completed the Tk preview-controls
+  parity (display-only).  White balance (6.2) now includes an `Auto WB` action
+  (mode-based R/G/B gains computed from the display image, mirroring
+  `apply_auto_white_balance`) plus slider + numeric-spinbox pairs for R/G/B
+  (Tk range 0.1–5.0, step 0.01); stretch (6.3) gains black/white/gamma
+  slider + spinbox controls (Tk defaults 0.01/0.99/1.0, ranges/steps 0–1/
+  0.001 and 0.1–5/0.01) plus a `Reset Stretch`, and the default stretch is
+  now `Asinh` (Tk parity); a new image-adjustments surface (6.9) adds
+  brightness/contrast/saturation sliders + reset (Tk defaults 1.0, ranges/steps
+  0.1–3.0/0.01, 0.1–3.0/0.01, 0.0–3.0/0.01).  All adjustment math
+  (WB, stretch, gamma, B/C/S and auto-WB) is reimplemented in pure numpy inside
+  `preview_adjust` (lazy numpy, no Tk/engine/PIL import) and reproduces the Tk
+  `PreviewManager.process_image` pipeline exactly; the stored `_preview_source`
+  `QImage` is never mutated.  M12 hardening: `_on_initial_preview_result` now
+  drops a stale `InitialPreviewResult` whose absolute `folder` no longer matches
+  the selected input folder, so a fast folder switch cannot let the old folder's
+  image overwrite the new folder's preview.  Known gap left for later: the Tk
+  preview resolution-cycle button (`Res 1/1..1/4`) drives the backend's
+  `preview_downsample_factor` (not display-only) and is intentionally out of
+  scope; pan (6.7) remains `[ ]`.  Covered by
+  `tests/test_qt_preview_controls.py` (+ updated `tests/test_qt_preview.py`
+  defaults) and the existing import-hygiene tests.
 - **2026-08-21 — lot ZSSS-QT-FP-M12**: delivered item 6.8 (initial-preview
   parity: auto-load first FITS).  The Qt shell now reproduces the Tk GUI's
   initial-preview behaviour: when the input folder is set (restored from

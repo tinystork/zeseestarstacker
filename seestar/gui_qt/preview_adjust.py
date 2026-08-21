@@ -1,18 +1,20 @@
-"""Qt preview display-adjustment helpers (M10) — strictly display-only.
+"""Qt preview display-adjustment helpers (M10/M13) — strictly display-only.
 
-White-balance (per-channel R/G/B gain), display stretch (linear / asinh / log /
-auto) and a simple display histogram for the Preview surface.  Like the rest of
-the Qt shell this module imports only PySide6 Qt classes at module import time
-and imports numpy *lazily*, inside the conversion path only, so a fresh
+White-balance (per-channel R/G/B gain), the display stretch (linear / asinh /
+log / auto), black/white points, gamma, brightness/contrast/saturation and a
+simple display histogram for the Preview surface.  Like the rest of the Qt
+shell this module imports only PySide6 Qt classes at module import time and
+imports numpy *lazily*, inside the conversion path only, so a fresh
 ``import seestar.gui_qt`` never pulls numpy (or Tk / the engine) into
 ``sys.modules``.
 
 Every helper operates on a *copy* of the input :class:`QImage` and never
 mutates it, so the stored original display image (``MainWindow._preview_source``)
-stays pristine for later recomputation.  Neutral settings (WB == ``(1.0, 1.0,
-1.0)`` and stretch == ``"linear"``) return a plain copy of the source that is
-byte-identical to the unadjusted render, preserving the M5/M8 display behaviour
-exactly.
+stays pristine for later recomputation.  The adjustment math (WB, stretch,
+gamma, brightness/contrast/saturation and auto-WB) reproduces the Tk GUI's
+``PreviewManager.process_image`` pipeline (``seestar/gui/preview.py``) and its
+``seestar.tools.stretch`` tone curves / auto-WB, reimplemented here in pure
+numpy so the Qt shell never imports the engine or the Tk tooling.
 """
 
 from __future__ import annotations
@@ -21,13 +23,37 @@ from typing import Any, Dict, Optional
 
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 
-# Display-stretch modes (UI vocabulary, backend-agnostic).
+# Display-stretch modes (UI vocabulary, backend-agnostic).  ``auto`` is a
+# Qt-only convenience mode (Tk has an "Auto Stretch" *button* that computes
+# black/white points, not a stretch mode); the three Tk modes are linear /
+# asinh / log.
 STRETCH_MODES = ("linear", "asinh", "log", "auto")
-DEFAULT_STRETCH = "linear"
+
+# Defaults aligned with the Tk GUI (``seestar/gui/main_window.py``):
+# stretch "Asinh", black point 0.01, white point 0.99, gamma 1.0, WB 1/1/1,
+# brightness/contrast/saturation 1.0.
+DEFAULT_STRETCH = "asinh"
+DEFAULT_BLACK_POINT = 0.01
+DEFAULT_WHITE_POINT = 0.99
+DEFAULT_GAMMA = 1.0
 
 # Neutral white-balance gains (R, G, B).  1.0 = no change.
 NEUTRAL_WB = (1.0, 1.0, 1.0)
 DEFAULT_WB = NEUTRAL_WB
+
+DEFAULT_BRIGHTNESS = 1.0
+DEFAULT_CONTRAST = 1.0
+DEFAULT_SATURATION = 1.0
+
+# Slider ranges / steps, taken from the Tk ``_create_slider_spinbox_group``
+# calls in ``seestar/gui/main_window.py`` (they must match Tk exactly).
+WB_MIN, WB_MAX, WB_STEP = 0.1, 5.0, 0.01
+BLACK_POINT_MIN, BLACK_POINT_MAX, BLACK_POINT_STEP = 0.0, 1.0, 0.001
+WHITE_POINT_MIN, WHITE_POINT_MAX, WHITE_POINT_STEP = 0.0, 1.0, 0.001
+GAMMA_MIN, GAMMA_MAX, GAMMA_STEP = 0.1, 5.0, 0.01
+BRIGHTNESS_MIN, BRIGHTNESS_MAX, BRIGHTNESS_STEP = 0.1, 3.0, 0.01
+CONTRAST_MIN, CONTRAST_MAX, CONTRAST_STEP = 0.1, 3.0, 0.01
+SATURATION_MIN, SATURATION_MAX, SATURATION_STEP = 0.0, 3.0, 0.01
 
 # Channel-name -> histogram bar colour for the display histogram pixmap.
 _HISTOGRAM_COLORS = {
@@ -115,8 +141,13 @@ def _array_to_qimage(np: Any, arr) -> Optional[QImage]:
     return image.copy()
 
 
+# --------------------------------------------------------------------------
+# Tk-parity tone-curve / colour math (pure numpy, float [0, 1] in/out).
+# These reproduce ``seestar/tools/stretch.py`` exactly for the paths the Tk
+# preview uses, so the Qt display matches the Tk display.
+# --------------------------------------------------------------------------
 def _apply_wb(np: Any, f, wb):
-    """Multiply RGB channels by ``(r, g, b)`` gains; grayscale/alpha untouched."""
+    """Multiply RGB channels by ``(r, g, b)`` gains (``ColorCorrection.white_balance``)."""
     if f.ndim != 3 or f.shape[2] < 3:
         return f
     r, g, b = (float(wb[0]), float(wb[1]), float(wb[2]))
@@ -127,16 +158,52 @@ def _apply_wb(np: Any, f, wb):
     return out
 
 
-def _apply_stretch(np: Any, f, mode: str):
-    """Apply a monotonic display-stretch tone curve to float ``[0, 1]`` data."""
+def _stretch_linear(np: Any, f, black_point, white_point):
+    white_point = max(float(white_point), float(black_point) + 1e-6)
+    black_point = float(black_point)
+    return np.clip((f - black_point) / (white_point - black_point), 0.0, 1.0)
+
+
+def _stretch_log(np: Any, f, scale, black_point):
+    data = np.nan_to_num(f)
+    shifted = data - float(black_point)
+    clipped = np.maximum(shifted, 1e-10)
+    max_val = float(np.nanmax(clipped))
+    if max_val <= 0:
+        return np.zeros_like(data)
+    denom = np.log1p(float(scale) * max_val)
+    if denom < 1e-10:
+        return np.zeros_like(data)
+    return np.clip(np.log1p(float(scale) * clipped) / denom, 0.0, 1.0)
+
+
+def _stretch_asinh(np: Any, f, scale, black_point):
+    data = np.nan_to_num(f)
+    shifted = data - float(black_point)
+    clipped = np.maximum(shifted, 0.0)
+    max_val = float(np.nanmax(clipped))
+    if max_val <= 0:
+        return np.zeros_like(data)
+    denom = np.arcsinh(float(scale) * max_val)
+    if denom < 1e-10:
+        return np.zeros_like(data)
+    return np.clip(np.arcsinh(float(scale) * clipped) / denom, 0.0, 1.0)
+
+
+def _apply_stretch(np: Any, f, mode: str, black_point: float, white_point: float):
+    """Apply the Tk display-stretch tone curve to float ``[0, 1]`` data."""
     f = np.clip(f, 0.0, 1.0)
     if mode == "linear":
-        return f
+        return _stretch_linear(np, f, black_point, white_point)
     if mode == "log":
-        return np.log1p(f) / np.log(2.0)
+        return _stretch_log(np, f, 10.0, black_point)
     if mode == "asinh":
-        k = 10.0
-        return np.arcsinh(f * k) / np.arcsinh(k)
+        scale = (
+            10.0 / max(0.01, white_point - black_point)
+            if white_point > black_point
+            else 10.0
+        )
+        return _stretch_asinh(np, f, scale, black_point)
     if mode == "auto":
         mn = float(np.min(f))
         mx = float(np.max(f))
@@ -147,35 +214,145 @@ def _apply_stretch(np: Any, f, mode: str):
     return f
 
 
-def apply_wb_stretch(
+def _apply_gamma(np: Any, f, gamma):
+    gamma = float(gamma)
+    if abs(gamma - 1.0) < 1e-6:
+        return f
+    corrected = np.power(np.maximum(f, 1e-10), gamma)
+    return np.clip(corrected, 0.0, 1.0)
+
+
+def _apply_brightness_contrast_saturation(
+    np: Any, f, brightness, contrast, saturation
+):
+    """Apply the Tk image-adjustment enhancements (brightness/contrast/saturation).
+
+    Reproduces the Tk ``process_image`` use of the image-enhancement library:
+    brightness multiplies, contrast blends toward the mean of the first band
+    (as a scalar applied to every channel), and saturation blends each channel
+    toward the luma.  Grayscale data skips the saturation step (the Tk path
+    only applies saturation to RGB images).
+    """
+    if abs(float(brightness) - 1.0) > 1e-3:
+        f = f * float(brightness)
+    if abs(float(contrast) - 1.0) > 1e-3:
+        if f.ndim == 3 and f.shape[2] >= 3:
+            mean = float(np.mean(f[..., 0]))
+        else:
+            mean = float(np.mean(f))
+        f = mean * (1.0 - float(contrast)) + f * float(contrast)
+    if f.ndim == 3 and f.shape[2] >= 3 and abs(float(saturation) - 1.0) > 1e-3:
+        luma = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
+        f = luma[..., None] * (1.0 - float(saturation)) + f * float(saturation)
+    return f
+
+
+def apply_preview_adjustments(
     source: Optional[QImage],
+    *,
     wb=NEUTRAL_WB,
     stretch: str = DEFAULT_STRETCH,
+    black_point: float = DEFAULT_BLACK_POINT,
+    white_point: float = DEFAULT_WHITE_POINT,
+    gamma: float = DEFAULT_GAMMA,
+    brightness: float = DEFAULT_BRIGHTNESS,
+    contrast: float = DEFAULT_CONTRAST,
+    saturation: float = DEFAULT_SATURATION,
 ) -> Optional[QImage]:
-    """Return a WB + stretch transformed copy of ``source`` (or ``None``).
+    """Return a fully adjusted copy of ``source`` (or ``None``), display-only.
 
-    Neutral settings return a plain copy (byte-identical to the source) so the
-    default preview behaviour matches the pre-M10 render exactly.  The source
-    image is never mutated.
+    The pipeline order matches the Tk ``PreviewManager.process_image``:
+    white balance -> stretch -> gamma -> brightness/contrast/saturation.  The
+    input ``QImage`` is never mutated.  A full identity setting (neutral WB,
+    linear stretch with 0/1 black/white, unit gamma and unit B/C/S) returns a
+    plain byte-identical copy so the pre-M10 default display behaviour is
+    preserved when the user selects exactly that state.
     """
     if source is None or source.isNull():
         return None
     wb = tuple(float(x) for x in wb)
-    if stretch == DEFAULT_STRETCH and wb == NEUTRAL_WB:
+    black_point = float(black_point)
+    white_point = float(white_point)
+    gamma = float(gamma)
+    brightness = float(brightness)
+    contrast = float(contrast)
+    saturation = float(saturation)
+
+    identity = (
+        wb == NEUTRAL_WB
+        and stretch == "linear"
+        and abs(black_point) < 1e-9
+        and abs(white_point - 1.0) < 1e-9
+        and abs(gamma - 1.0) < 1e-6
+        and abs(brightness - 1.0) < 1e-3
+        and abs(contrast - 1.0) < 1e-3
+        and abs(saturation - 1.0) < 1e-3
+    )
+    if identity:
         return source.copy()
+
     np = _load_numpy()
     if np is None:
         return source.copy()
     arr = _image_to_array(np, source)
     if arr is None:
         return source.copy()
+
     f = arr.astype(np.float64) / 255.0
     f = _apply_wb(np, f, wb)
-    f = _apply_stretch(np, f, stretch)
+    f = _apply_stretch(np, f, stretch, black_point, white_point)
+    f = np.clip(f, 0.0, 1.0)
+    f = _apply_gamma(np, f, gamma)
+    f = np.clip(f, 0.0, 1.0)
+    f = _apply_brightness_contrast_saturation(np, f, brightness, contrast, saturation)
     out = np.clip(np.rint(f * 255.0), 0, 255).astype(np.uint8)
     return _array_to_qimage(np, out)
 
 
+def compute_auto_wb(image: Optional[QImage]) -> tuple:
+    """Compute auto white-balance gains from a display image (Tk parity).
+
+    Mirrors ``seestar.tools.stretch.apply_auto_white_balance``: for a
+    3-channel image each channel's mode (from a 256-bin histogram over the
+    [0.5, 99.5] percentile range) is equalised toward the green channel's mode,
+    with the R/B gains clipped to [0.2, 5.0].  Non-colour, missing, or invalid
+    data returns neutral ``(1.0, 1.0, 1.0)`` and never raises.
+    """
+    np = _load_numpy()
+    if np is None:
+        return NEUTRAL_WB
+    arr = _image_to_array(np, image)
+    if arr is None or arr.ndim != 3 or arr.shape[2] < 3:
+        return NEUTRAL_WB
+
+    f = arr.astype(np.float64) / 255.0
+    modes = []
+    for i in range(3):
+        channel = f[..., i].ravel()
+        finite = channel[np.isfinite(channel)]
+        if finite.size == 0:
+            return NEUTRAL_WB
+        lo, hi = np.percentile(finite, [0.5, 99.5])
+        if hi <= lo:
+            hi = lo + 1e-5
+        hist, edges = np.histogram(finite, bins=256, range=(lo, hi))
+        idx = int(np.argmax(hist))
+        mode = (edges[idx] + edges[idx + 1]) / 2.0
+        mode = max(mode, 1e-5)
+        modes.append(mode)
+
+    mode_r, mode_g, mode_b = modes
+    gain_r = mode_g / mode_r if mode_r > 1e-9 else 1.0
+    gain_g = 1.0
+    gain_b = mode_g / mode_b if mode_b > 1e-9 else 1.0
+    gain_r = float(np.clip(gain_r, 0.2, 5.0))
+    gain_b = float(np.clip(gain_b, 0.2, 5.0))
+    return (gain_r, gain_g, gain_b)
+
+
+# --------------------------------------------------------------------------
+# Display histogram (unchanged M10 surface).
+# --------------------------------------------------------------------------
 def compute_histogram(image: Optional[QImage], bins: int = 256) -> Optional[Dict[str, Any]]:
     """Return ``{channel: int64 histogram}`` for the display image, or ``None``.
 
