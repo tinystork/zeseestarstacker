@@ -83,7 +83,7 @@ def test_construct_loads_injected_settings_into_controls(tmp_path):
         assert win.batch_spin.value() == 4
         assert win.stacking_mode_combo.currentText() == "median"
         assert win.drizzle_check.isChecked() is True
-        assert win.drizzle_mode_combo.currentText() == "Incremental"
+        assert win.drizzle_mode_combo.currentText() == "Large dataset"
         assert win.drizzle_group_spin.value() == 77
         assert win.solver_combo.currentText() == "astap"
         assert win._settings_widgets["kappa"].value() == pytest.approx(3.5)

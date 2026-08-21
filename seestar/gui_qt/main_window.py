@@ -294,7 +294,15 @@ STACKING_MODES = [
     "winsorized-sigma-clip",
     "linear-fit-clip",
 ]
+# Drizzle processing mode backend values (persistence + engine keys, unchanged).
 DRIZZLE_MODES = ["Final", "Incremental"]
+# User-facing drizzle mode combo labels, one per ``DRIZZLE_MODES`` entry (order
+# matched).  The combo displays these localized labels while ``itemData`` keeps
+# the backend value (``Final`` / ``Incremental``) for state/persistence/engine,
+# so "Final"/"Incremental" are never shown to the user (R3b contract).  The Tk
+# oracle labels the second entry "Large dataset / incremental"; the contract
+# target keeps the shorter "Large dataset" spelling used across the Qt shell.
+DRIZZLE_MODE_LABEL_KEYS = ["drizzle_mode_standard", "drizzle_mode_large_dataset"]
 SOLVER_PREFERENCES = ["none", "astap", "zesolver"]
 
 # Preview resolution-cycle factors (Tk ``preview_res_button`` parity, M17).
@@ -405,7 +413,10 @@ SETTINGS_SECTIONS = [
     (
         "Drizzle Advanced",
         [
-            _field("drizzle_scale", "Drizzle scale", "int", 1, 10, 1),
+            # R3b: drizzle scale is restricted to x2 / x3 / x4 (Tk radios
+            # 2/3/4, default 2).  ``QtSettingsState.drizzle_scale`` default
+            # stays 2; the spinbox range no longer admits x1 or >x4.
+            _field("drizzle_scale", "Drizzle scale", "int", 2, 4, 1),
             _field("drizzle_wht_threshold", "WHT threshold", "float", 0.0, 1.0, 0.01, 3),
             _field("drizzle_kernel", "Kernel", "combo", DRIZZLE_KERNELS),
             _field("drizzle_pixfrac", "Pixfrac", "float", 0.01, 2.0, 0.05, 2),
@@ -1037,8 +1048,12 @@ class MainWindow(QMainWindow):
         self.drizzle_check.setChecked(False)
 
         self.drizzle_mode_combo = QComboBox()
-        self.drizzle_mode_combo.addItems(DRIZZLE_MODES)
-        self.drizzle_mode_combo.setCurrentText("Final")
+        # Label displayed / backend value stored (R3b): the combo shows the
+        # localized "Standard" / "Large dataset" labels while ``itemData``
+        # carries "Final" / "Incremental" for state, persistence and engine.
+        for mode, label_key in zip(DRIZZLE_MODES, DRIZZLE_MODE_LABEL_KEYS):
+            self.drizzle_mode_combo.addItem(self._tr(label_key), mode)
+        self.drizzle_mode_combo.setCurrentIndex(DRIZZLE_MODES.index("Final"))
 
         self.drizzle_group_spin = QSpinBox()
         self.drizzle_group_spin.setRange(1, 100_000)
@@ -2100,7 +2115,7 @@ class MainWindow(QMainWindow):
 
         # M3-D: group size is only relevant in the Large-dataset (Incremental)
         # policy; Standard keeps the same science with no grouped preview.
-        group = drizzle and self.drizzle_mode_combo.currentText() == "Incremental"
+        group = drizzle and self.drizzle_mode_combo.currentData() == "Incremental"
         self.drizzle_group_spin.setEnabled(group)
 
         self.use_gpu_check.setEnabled(drizzle)
@@ -3296,7 +3311,7 @@ class MainWindow(QMainWindow):
         state.batch_size = self.batch_spin.value()
         state.stacking_mode = self.stacking_mode_combo.currentText()
         state.use_drizzle = self.drizzle_check.isChecked()
-        state.drizzle_mode = self.drizzle_mode_combo.currentText()
+        state.drizzle_mode = self.drizzle_mode_combo.currentData()
         state.drizzle_group_size = self.drizzle_group_spin.value()
         state.use_gpu = self.use_gpu_check.isChecked()
         state.max_hq_mem_gb = float(self.max_hq_mem_spin.value())
@@ -3432,7 +3447,9 @@ class MainWindow(QMainWindow):
             self.max_hq_mem_spin.setValue(int(state.max_hq_mem_gb))
             self.drizzle_check.setChecked(bool(state.use_drizzle))
             if state.drizzle_mode in DRIZZLE_MODES:
-                self.drizzle_mode_combo.setCurrentText(state.drizzle_mode)
+                self.drizzle_mode_combo.setCurrentIndex(
+                    DRIZZLE_MODES.index(state.drizzle_mode)
+                )
             self.drizzle_group_spin.setValue(int(state.drizzle_group_size))
             self.use_gpu_check.setChecked(bool(state.use_gpu))
             if state.local_solver_preference in SOLVER_PREFERENCES:
@@ -3731,6 +3748,17 @@ class MainWindow(QMainWindow):
         for i, mode in enumerate(THEME_MODES):
             self.theme_combo.setItemText(i, self._tr(THEME_CHOICE_KEYS[mode]))
 
+    def _refresh_drizzle_mode_combo(self) -> None:
+        """Re-localize the drizzle mode combo items without touching item data.
+
+        The combo order is fixed to :data:`DRIZZLE_MODES`, so each item label is
+        re-set in place; ``setItemText`` never changes the item's data (the
+        backend value ``Final`` / ``Incremental``) nor the current index, so it
+        can never fire ``_sync_state_from_controls`` or ``_update_drizzle_gating``.
+        """
+        for i, label_key in enumerate(DRIZZLE_MODE_LABEL_KEYS):
+            self.drizzle_mode_combo.setItemText(i, self._tr(label_key))
+
     def _refresh_language(self) -> None:
         """Re-apply the active language to every localized visible string.
 
@@ -3754,6 +3782,7 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.tabs.setTabText(idx, self._tr(key))
         self._refresh_theme_combo()
+        self._refresh_drizzle_mode_combo()
         self._render_elapsed_label()
         self._render_remaining_label()
         self._render_preview_label()

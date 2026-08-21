@@ -326,7 +326,7 @@ def test_boring_mode_gates_drizzle_controls(qapp):
         win.drizzle_check.setChecked(True)
         assert win.drizzle_mode_combo.isEnabled()
         assert not win.drizzle_group_spin.isEnabled()
-        win.drizzle_mode_combo.setCurrentText("Incremental")
+        win.drizzle_mode_combo.setCurrentText("Large dataset")
         assert win.drizzle_group_spin.isEnabled()
     finally:
         win.shutdown()

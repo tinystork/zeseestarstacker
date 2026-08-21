@@ -485,7 +485,7 @@ def test_controls_update_settings_state():
         win.batch_spin.setValue(4)
         win.stacking_mode_combo.setCurrentText("median")
         win.drizzle_check.setChecked(True)
-        win.drizzle_mode_combo.setCurrentText("Incremental")
+        win.drizzle_mode_combo.setCurrentText("Large dataset")
         win.drizzle_group_spin.setValue(88)
         win.solver_combo.setCurrentText("astap")
 
@@ -510,7 +510,7 @@ def test_build_run_request_reflects_controls():
         win.batch_spin.setValue(4)
         win.solver_combo.setCurrentText("zesolver")
         win.drizzle_check.setChecked(True)
-        win.drizzle_mode_combo.setCurrentText("Incremental")
+        win.drizzle_mode_combo.setCurrentText("Large dataset")
         win.drizzle_group_spin.setValue(66)
 
         req = win.build_run_request()

@@ -63,6 +63,17 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "final_combine": {"en": "Final combine", "fr": "Combinaison finale"},
     "drizzle_mode": {"en": "Drizzle mode", "fr": "Mode drizzle"},
     "drizzle_group_size": {"en": "Drizzle group size", "fr": "Taille du groupe drizzle"},
+    # Drizzle processing mode combo labels (Tk ``drizzle_processing_*`` parity,
+    # R3b): the user-facing labels are "Standard" / "Large dataset" while the
+    # combo's item data keeps the backend values "Final" / "Incremental".
+    # The Tk oracle labels the second "Large dataset / incremental" (fr
+    # "Grand jeu de données / incrémental"); the contract target keeps the
+    # shorter "Large dataset" spelling used throughout the Qt shell.
+    "drizzle_mode_standard": {"en": "Standard", "fr": "Standard"},
+    "drizzle_mode_large_dataset": {
+        "en": "Large dataset",
+        "fr": "Grand jeu de données",
+    },
     "local_solver": {"en": "Local solver", "fr": "Solveur local"},
     "browse": {"en": "Browse...", "fr": "Parcourir..."},
     "boring_check": {"en": "Threaded Boring Stack", "fr": "Empilement Boring en thread"},

@@ -86,7 +86,7 @@ def test_stacking_controls_exist_with_tk_ranges_and_defaults(window):
     assert window.stacking_mode_combo.currentText() == "kappa-sigma"
     assert window.final_combine_combo.currentText() == "Mean"
     assert window.drizzle_check.isChecked() is False
-    assert window.drizzle_mode_combo.currentText() == "Final"
+    assert window.drizzle_mode_combo.currentText() == "Standard"
     assert window.drizzle_group_spin.value() == 50
     assert window.drizzle_group_spin.minimum() == 1
     assert window.drizzle_group_spin.maximum() == 100_000
@@ -102,7 +102,7 @@ def test_expert_drizzle_and_scnr_controls_have_tk_defaults(window):
     scale = widgets["drizzle_scale"]
     assert isinstance(scale, QSpinBox)
     assert scale.value() == defaults["drizzle_scale"]  # 2
-    assert scale.minimum() == 1 and scale.maximum() == 10
+    assert scale.minimum() == 2 and scale.maximum() == 4
 
     wht = widgets["drizzle_wht_threshold"]
     assert isinstance(wht, QDoubleSpinBox)
@@ -121,6 +121,52 @@ def test_expert_drizzle_and_scnr_controls_have_tk_defaults(window):
     assert widgets["final_scnr_target_channel"].currentText() == "green"
     assert widgets["final_scnr_amount"].value() == pytest.approx(defaults["final_scnr_amount"])
     assert widgets["final_scnr_preserve_luminosity"].isChecked() is defaults["final_scnr_preserve_luminosity"]
+
+
+# --------------------------------------------------------------------------
+# R3b: drizzle mode labels (Standard / Large dataset) + scale x2/x3/x4
+# --------------------------------------------------------------------------
+def test_drizzle_mode_combo_shows_labels_not_backend_values(window):
+    """The combo displays user-facing labels; itemData keeps the backend value."""
+    combo = window.drizzle_mode_combo
+    labels = [combo.itemText(i) for i in range(combo.count())]
+    assert labels == ["Standard", "Large dataset"]
+    assert "Final" not in labels and "Incremental" not in labels
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Final", "Incremental"]
+    assert combo.currentText() == "Standard"
+    assert combo.currentData() == "Final"
+
+
+def test_drizzle_mode_label_switches_value_to_state(window):
+    """Selecting the user-facing "Large dataset" label yields "Incremental" state."""
+    window.drizzle_check.setChecked(True)
+    window.drizzle_mode_combo.setCurrentText("Large dataset")
+    state = window.collect_settings_state()
+    assert state.drizzle_mode == "Incremental"
+    # Back to Standard yields the "Final" backend value.
+    window.drizzle_mode_combo.setCurrentText("Standard")
+    state = window.collect_settings_state()
+    assert state.drizzle_mode == "Final"
+
+
+def test_drizzle_scale_restricted_to_x2_x3_x4(window):
+    """drizzle_scale cannot be x1 (widget range 2-4) and defaults to 2."""
+    widgets = window._settings_widgets
+    scale = widgets["drizzle_scale"]
+    assert isinstance(scale, QSpinBox)
+    assert scale.minimum() == 2 and scale.maximum() == 4
+    assert scale.value() == 2
+    # x1 is not representable: setting 1 clamps to the minimum (2).
+    scale.setValue(1)
+    assert scale.value() == 2
+    state = window.collect_settings_state()
+    assert state.drizzle_scale == 2
+    # x3 round-trips through the model and the backend kwargs as a float.
+    scale.setValue(3)
+    state = window.collect_settings_state()
+    assert state.drizzle_scale == 3
+    kw = window.build_run_request().backend_kwargs
+    assert kw["drizzle_scale"] == 3.0
 
 
 # --------------------------------------------------------------------------
@@ -178,11 +224,11 @@ def test_drizzle_enabler_gates_suboptions(window):
     assert not window.drizzle_group_spin.isEnabled()
 
     # Large-dataset (Incremental) mode re-enables the group-size spin.
-    window.drizzle_mode_combo.setCurrentText("Incremental")
+    window.drizzle_mode_combo.setCurrentText("Large dataset")
     assert window.drizzle_group_spin.isEnabled()
 
     # Back to Standard disables the group-size spin again.
-    window.drizzle_mode_combo.setCurrentText("Final")
+    window.drizzle_mode_combo.setCurrentText("Standard")
     assert not window.drizzle_group_spin.isEnabled()
 
     # Disable drizzle -> everything gated off again.
@@ -197,9 +243,9 @@ def test_drizzle_enabler_gates_suboptions(window):
 def test_group_size_mode_interaction_only_large_dataset(window):
     """Group size is enabled only for drizzle + Large-dataset (Incremental)."""
     window.drizzle_check.setChecked(True)
-    window.drizzle_mode_combo.setCurrentText("Final")
+    window.drizzle_mode_combo.setCurrentText("Standard")
     assert not window.drizzle_group_spin.isEnabled()
-    window.drizzle_mode_combo.setCurrentText("Incremental")
+    window.drizzle_mode_combo.setCurrentText("Large dataset")
     assert window.drizzle_group_spin.isEnabled()
     # Group size value still propagates regardless of enablement (backend key).
     window.drizzle_group_spin.setValue(77)
@@ -273,7 +319,7 @@ def test_engine_coupled_fields_do_not_mutate_preview_source(window):
     window.use_gpu_check.setChecked(True)
     window.max_hq_mem_spin.setValue(16)
     window.drizzle_check.setChecked(True)
-    window.drizzle_mode_combo.setCurrentText("Incremental")
+    window.drizzle_mode_combo.setCurrentText("Large dataset")
     window.drizzle_group_spin.setValue(99)
     window.collect_settings_state()
     assert window._preview_source is before
