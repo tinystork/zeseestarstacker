@@ -70,9 +70,9 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 6.1 | Preview image rendering (array → `QImage`) | `[x]` | `preview_render` (display-only) |
-| 6.2 | White-balance controls | `[ ]` | |
-| 6.3 | Stretch controls (linear / asinh / log / auto) | `[ ]` | |
-| 6.4 | Histogram | `[ ]` | |
+| 6.2 | White-balance controls | `[x]` | `preview_adjust` per-channel R/G/B gains (neutral 1.0) + `Reset`; display-only, re-renders the derived preview immediately |
+| 6.3 | Stretch controls (linear / asinh / log / auto) | `[x]` | `stretch_combo` (linear default) + `preview_adjust._apply_stretch` tone curves; display-only, re-renders the derived preview |
+| 6.4 | Histogram | `[x]` | `preview_adjust` computes per-channel histograms + stats from the displayed image; `histogram_view` (QPixmap bars) + `histogram_status` (localized empty/stats) update on preview/control changes and clear on non-image input |
 | 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
 | 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
 | 6.7 | Pan | `[ ]` | |
@@ -130,7 +130,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 13.1 | Left/right `QSplitter` (control panel + persistent preview/action panel) | `[x]` | `_build_central` + `_build_left_panel` / `_build_right_panel` |
 | 13.2 | Scrollable left panel (language + tabs + progress/log) | `[x]` | `QScrollArea` wrapping language combo, `QTabWidget`, progress, log |
 | 13.3 | Left tabs `Stacking` / `Expert` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs |
-| 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches |
+| 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches; the right-panel histogram surface (`right_histogram_group` / `right_histogram_status` / `right_histogram_view`) is live and fed by the same display-only pixmap/stats as the Preview controls tab histogram (M10/C1) |
 | 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
 | 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[x]` | zoom (Fit/100/200/50), resolution label (orig → displayed + zoom + rotation), rotate left/right; display-only, offscreen-tested |
 | 13.7 | Language switch (FR/EN) | `[x]` | placeholder combo is now enabled and participates in the FR/EN switch (M9) |
@@ -251,3 +251,26 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   notice and transient log/status/dialog strings stay English, and the
   full Tk `Localization` dictionaries are intentionally not imported (kept
   Qt/Tk/engine-free).  Covered by `tests/test_qt_localization.py`.
+- **2026-08-21 — lot ZSSS-QT-FP-M10**: delivered items 6.2, 6.3 and 6.4
+  (display-only preview WB / stretch / histogram).  The left "Preview controls"
+  tab is no longer a placeholder: it now holds a White-balance group (per-channel
+  R/G/B `QDoubleSpinBox` gains, neutral 1.0, plus a `Reset` button), a Stretch
+  group (`linear` / `asinh` / `log` / `auto`, linear default) and a Histogram
+  group (a `QPixmap` bar-chart surface + a localized empty/stats status label).
+  All three act strictly on a *derived* display image produced by the new
+  Qt-local helper `seestar/gui_qt/preview_adjust.py` (lazy numpy, no Tk/engine);
+  the stored `_preview_source` `QImage` is never mutated, the raw preview payload
+  contract and the scientific backend are untouched, and zoom/rotation still
+  apply cleanly on top of the WB/stretch result (and vice versa).  Neutral
+  settings (WB `(1.0, 1.0, 1.0)` + `linear`) return a byte-identical copy, so the
+  default preview behaviour matches M5/M8 exactly.  The right-panel "Histogram"
+  surface is preserved, not removed: the persistent right panel keeps a live
+  histogram group (`right_histogram_group` / `right_histogram_status` /
+  `right_histogram_view`) fed by the same pixmap/stats as the Preview controls
+  tab histogram, so both surfaces update and clear together (checklist item
+  13.4 stays true).  Preview-control values are intentionally **not** persisted
+  (kept out of `QtSettingsState` to avoid touching M8) and reset to neutral on
+  each window construction.  New FR/EN keys (`wb_*`, `stretch_*`,
+  `histogram_empty`, `histogram_stats`) were added with full parity.  Pan (6.7)
+  remains `[ ]`.
+  Covered by `tests/test_qt_preview.py` and `tests/test_qt_localization.py`.

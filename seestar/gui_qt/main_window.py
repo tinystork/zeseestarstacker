@@ -19,12 +19,12 @@ Topology mirrors the historical Tk window (``0d9af8b``): a horizontal
 ``QSplitter`` with a scrollable left control panel (language placeholder +
 ``QTabWidget`` with ``Stacking`` / ``Expert`` / ``Preview controls`` tabs +
 progress/status/log area) and a persistent right preview/action panel
-(preview image + metadata, zoom/resolution/rotation controls, histogram
-placeholder and the action buttons Start / Stop / Analyse / Solver /
+(preview image + metadata, zoom/resolution/rotation controls, a persistent
+display histogram and the action buttons Start / Stop / Analyse / Solver /
 View Inputs / Add Folder / Open Output).  Start/Stop are functional, as are the
-display-only preview zoom / rotation / resolution controls (M5); the histogram
-controls and the left "Preview controls" tab remain topology placeholders for
-later milestones.  The Analyse button launches the standalone ZeAnalyser
+display-only preview zoom / rotation / resolution controls (M5) and the
+display-only preview WB / stretch / histogram controls (M10).  The Analyse
+button launches the standalone ZeAnalyser
 product on the current input folder (M7) via a stdlib-only launch seam; it
 never touches the stacking backend.
 
@@ -91,6 +91,14 @@ from .final_combine import (
     final_combine_flags,
 )
 from .preview_render import render_preview_image
+from .preview_adjust import (
+    DEFAULT_STRETCH,
+    DEFAULT_WB,
+    STRETCH_MODES,
+    apply_wb_stretch,
+    compute_histogram_stats,
+    render_histogram_pixmap,
+)
 from .preview_view import ZOOM_LABELS, render_view
 from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
 from .run_bridge import RunRequest, build_run_request as _build_run_request
@@ -487,6 +495,13 @@ class MainWindow(QMainWindow):
         # accumulated clockwise rotation in degrees (0/90/180/270).
         self._preview_source: Optional[QImage] = None
         self._preview_rotation: int = 0
+        # Preview display-adjustment state (M10): white-balance R/G/B gains and
+        # the display-stretch mode.  These act only on the derived display
+        # image, never on ``_preview_source`` or any scientific output.  Raw
+        # histogram stats string (or ``None``) drives the localized status label.
+        self._wb: tuple = DEFAULT_WB
+        self._stretch: str = DEFAULT_STRETCH
+        self._histogram_stats: Optional[str] = None
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
 
@@ -692,22 +707,77 @@ class MainWindow(QMainWindow):
         return row
 
     def _build_preview_controls_tab(self) -> QWidget:
-        """Left-panel "Preview controls" tab (topology placeholder).
-
-        Full WB / stretch / histogram interactivity is a later milestone; the
-        tab exists only to hold its place in the Tk-like left panel.
+        """Left-panel "Preview controls" tab (M10): display-only WB / stretch /
+        histogram.  These controls act only on the *displayed* preview pixmap
+        (a derived image), never on the stored source image or any scientific
+        output.  All controls are inert until a renderable preview arrives.
         """
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        label = QLabel("Preview controls placeholder — no interactivity yet.")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(label)
+
+        # White balance: per-channel R/G/B gains (neutral = 1.0).
+        self.wb_group = QGroupBox(self._tr("wb_group"))
+        self._bind_text(self.wb_group, "wb_group")
+        wb_form = QFormLayout(self.wb_group)
+        self.wb_r_spin = QDoubleSpinBox()
+        self.wb_r_spin.setRange(0.0, 4.0)
+        self.wb_r_spin.setSingleStep(0.05)
+        self.wb_r_spin.setDecimals(2)
+        self.wb_r_spin.setValue(1.0)
+        self.wb_g_spin = QDoubleSpinBox()
+        self.wb_g_spin.setRange(0.0, 4.0)
+        self.wb_g_spin.setSingleStep(0.05)
+        self.wb_g_spin.setDecimals(2)
+        self.wb_g_spin.setValue(1.0)
+        self.wb_b_spin = QDoubleSpinBox()
+        self.wb_b_spin.setRange(0.0, 4.0)
+        self.wb_b_spin.setSingleStep(0.05)
+        self.wb_b_spin.setDecimals(2)
+        self.wb_b_spin.setValue(1.0)
+        self._add_form_row(wb_form, "wb_red", self.wb_r_spin)
+        self._add_form_row(wb_form, "wb_green", self.wb_g_spin)
+        self._add_form_row(wb_form, "wb_blue", self.wb_b_spin)
+        self.wb_reset_button = QPushButton(self._tr("wb_reset"))
+        self._bind_text(self.wb_reset_button, "wb_reset")
+        wb_form.addRow("", self.wb_reset_button)
+        layout.addWidget(self.wb_group)
+
+        # Display stretch (linear default).
+        self.stretch_group = QGroupBox(self._tr("stretch_group"))
+        self._bind_text(self.stretch_group, "stretch_group")
+        stretch_form = QFormLayout(self.stretch_group)
+        self.stretch_combo = QComboBox()
+        self.stretch_combo.addItems(list(STRETCH_MODES))
+        self.stretch_combo.setCurrentText(DEFAULT_STRETCH)
+        self._add_form_row(stretch_form, "stretch_label", self.stretch_combo)
+        layout.addWidget(self.stretch_group)
+
+        # Display histogram surface (real signal, not a placeholder).
+        self.histogram_group = QGroupBox(self._tr("histogram_group"))
+        self._bind_text(self.histogram_group, "histogram_group")
+        histo_layout = QVBoxLayout(self.histogram_group)
+        self.histogram_status = QLabel(self._tr("histogram_empty"))
+        self.histogram_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        histo_layout.addWidget(self.histogram_status)
+        self.histogram_view = QLabel()
+        self.histogram_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.histogram_view.setMinimumSize(256, 64)
+        histo_layout.addWidget(self.histogram_view)
+        layout.addWidget(self.histogram_group)
+
+        self._set_preview_controls_enabled(False)
         layout.addStretch(1)
         return panel
 
     def _build_right_panel(self) -> QWidget:
         """Build the persistent right preview/action panel (Tk ``preview_frame``
-        + histogram + action buttons)."""
+        + view + histogram + action buttons).
+
+        The histogram group here is the persistent right-panel surface required
+        by checklist item 13.4.  It mirrors the Preview controls tab histogram:
+        both are fed by the same display-only pixmap/stats in
+        :meth:`_refresh_histogram`, so they update and clear together.
+        """
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
@@ -752,15 +822,22 @@ class MainWindow(QMainWindow):
         view_layout.addWidget(self.rotate_right_button, 1, 1)
         layout.addWidget(view_group)
 
-        # Histogram placeholder.
-        histo_group = QGroupBox(self._tr("histogram_group"))
-        self._bind_text(histo_group, "histogram_group")
-        histo_layout = QVBoxLayout(histo_group)
-        self.histogram_placeholder = QLabel(self._tr("histogram_placeholder"))
-        self._bind_text(self.histogram_placeholder, "histogram_placeholder")
-        self.histogram_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        histo_layout.addWidget(self.histogram_placeholder)
-        layout.addWidget(histo_group)
+        # Persistent display histogram (Tk parity, checklist item 13.4).  This
+        # is the *right-panel* surface; the Preview controls tab keeps its own
+        # ``histogram_group`` / ``histogram_status`` / ``histogram_view``.  The
+        # two surfaces share the same derived preview data via
+        # ``_refresh_histogram`` / ``_render_histogram_status``.
+        self.right_histogram_group = QGroupBox(self._tr("histogram_group"))
+        self._bind_text(self.right_histogram_group, "histogram_group")
+        right_histo_layout = QVBoxLayout(self.right_histogram_group)
+        self.right_histogram_status = QLabel(self._tr("histogram_empty"))
+        self.right_histogram_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right_histo_layout.addWidget(self.right_histogram_status)
+        self.right_histogram_view = QLabel()
+        self.right_histogram_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.right_histogram_view.setMinimumSize(256, 64)
+        right_histo_layout.addWidget(self.right_histogram_view)
+        layout.addWidget(self.right_histogram_group)
 
         # Action buttons (Start/Stop/Analyse/Solver/path actions functional).
         actions_group = QGroupBox(self._tr("actions_group"))
@@ -1020,6 +1097,11 @@ class MainWindow(QMainWindow):
         self.zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
         self.rotate_left_button.clicked.connect(self._on_rotate_left)
         self.rotate_right_button.clicked.connect(self._on_rotate_right)
+        self.wb_r_spin.valueChanged.connect(self._on_wb_changed)
+        self.wb_g_spin.valueChanged.connect(self._on_wb_changed)
+        self.wb_b_spin.valueChanged.connect(self._on_wb_changed)
+        self.wb_reset_button.clicked.connect(self._on_wb_reset)
+        self.stretch_combo.currentIndexChanged.connect(self._on_stretch_changed)
         self._update_run_state()
 
     def _wire_controller(self) -> None:
@@ -1645,21 +1727,50 @@ class MainWindow(QMainWindow):
         self._preview_rotation = (self._preview_rotation + 90) % 360
         self._refresh_preview_view()
 
-    def _refresh_preview_view(self) -> None:
-        """Repaint the preview image + resolution label from the stored source.
+    def _on_wb_changed(self, *_ignored) -> None:
+        """Update the white-balance gains and re-render the preview (display-only)."""
+        self._wb = (
+            self.wb_r_spin.value(),
+            self.wb_g_spin.value(),
+            self.wb_b_spin.value(),
+        )
+        self._refresh_preview_view()
 
-        The source :class:`QImage` is never mutated: ``render_view`` applies the
-        current rotation and zoom to a copy, so zoom reapplies cleanly after
-        rotation and the original display image stays pristine.
+    def _on_wb_reset(self) -> None:
+        """Reset the three white-balance gains to their neutral values."""
+        self.wb_r_spin.setValue(1.0)
+        self.wb_g_spin.setValue(1.0)
+        self.wb_b_spin.setValue(1.0)
+
+    def _on_stretch_changed(self, _index: int) -> None:
+        """Update the display-stretch mode and re-render the preview (display-only)."""
+        self._stretch = self.stretch_combo.currentText()
+        self._refresh_preview_view()
+
+    def _refresh_preview_view(self) -> None:
+        """Repaint the preview image + resolution label + histogram from the
+        stored source.
+
+        The source :class:`QImage` is never mutated: a WB/stretch adjusted
+        *derived* image is produced from it, then ``render_view`` applies the
+        current rotation and zoom to that derived image, so zoom reapplies
+        cleanly after rotation and the original display image stays pristine.
+        The display histogram is computed from the same derived (displayed)
+        image, so it tracks WB/stretch changes too.
         """
         source = self._preview_source
         if source is None or source.isNull():
             self.preview_image_label.clear()
             self._set_view_controls_enabled(False)
+            self._set_preview_controls_enabled(False)
             self.resolution_label.setText("—")
+            self._refresh_histogram(None)
             return
+        adjusted = apply_wb_stretch(source, self._wb, self._stretch)
+        if adjusted is None or adjusted.isNull():
+            adjusted = source
         pixmap = render_view(
-            source,
+            adjusted,
             self._preview_rotation,
             self.zoom_combo.currentText(),
             self.preview_image_label.size(),
@@ -1667,11 +1778,15 @@ class MainWindow(QMainWindow):
         if pixmap is None or pixmap.isNull():
             self.preview_image_label.clear()
             self._set_view_controls_enabled(False)
+            self._set_preview_controls_enabled(False)
             self.resolution_label.setText("—")
+            self._refresh_histogram(None)
             return
         self.preview_image_label.setPixmap(pixmap)
         self._set_view_controls_enabled(True)
+        self._set_preview_controls_enabled(True)
         self.resolution_label.setText(self._resolution_text(source, pixmap))
+        self._refresh_histogram(adjusted)
 
     def _resolution_text(self, source: QImage, pixmap: QPixmap) -> str:
         """Build the resolution label: original → displayed size + zoom + rotation."""
@@ -1690,6 +1805,47 @@ class MainWindow(QMainWindow):
         self.zoom_combo.setEnabled(enabled)
         self.rotate_left_button.setEnabled(enabled)
         self.rotate_right_button.setEnabled(enabled)
+
+    def _set_preview_controls_enabled(self, enabled: bool) -> None:
+        """Enable/disable the WB + stretch preview controls together."""
+        self.wb_r_spin.setEnabled(enabled)
+        self.wb_g_spin.setEnabled(enabled)
+        self.wb_b_spin.setEnabled(enabled)
+        self.wb_reset_button.setEnabled(enabled)
+        self.stretch_combo.setEnabled(enabled)
+
+    def _refresh_histogram(self, image: Optional[QImage]) -> None:
+        """Update both display histogram surfaces from the (adjusted) preview.
+
+        The Preview controls tab surface (``histogram_view``) and the persistent
+        right-panel surface (``right_histogram_view``) are fed the same pixmap;
+        the status labels are re-rendered together by
+        :meth:`_render_histogram_status`.
+        """
+        if image is None or image.isNull():
+            self.histogram_view.clear()
+            self.right_histogram_view.clear()
+            self._histogram_stats = None
+            self._render_histogram_status()
+            return
+        pixmap = render_histogram_pixmap(image)
+        if pixmap is not None and not pixmap.isNull():
+            self.histogram_view.setPixmap(pixmap)
+            self.right_histogram_view.setPixmap(pixmap)
+        else:
+            self.histogram_view.clear()
+            self.right_histogram_view.clear()
+        self._histogram_stats = compute_histogram_stats(image)
+        self._render_histogram_status()
+
+    def _render_histogram_status(self) -> None:
+        """Render both histogram status labels from stored raw stats + language."""
+        if self._histogram_stats is None:
+            text = self._tr("histogram_empty")
+        else:
+            text = f"{self._tr('histogram_stats')} {self._histogram_stats}"
+        self.histogram_status.setText(text)
+        self.right_histogram_status.setText(text)
 
     def _on_run_finished(self) -> None:
         self._running = False
@@ -2128,6 +2284,7 @@ class MainWindow(QMainWindow):
         self._render_elapsed_label()
         self._render_remaining_label()
         self._render_preview_label()
+        self._render_histogram_status()
 
     def _render_preview_label(self) -> None:
         """Render the preview metadata label from its stored detail + language."""

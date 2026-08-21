@@ -240,7 +240,7 @@ def test_left_panel_is_scrollable_and_holds_tabs():
         win.shutdown()
 
 
-def test_right_panel_has_preview_view_histogram_and_actions():
+def test_right_panel_has_preview_view_and_actions():
     win = MainWindow()
     try:
         for attr in (
@@ -250,7 +250,6 @@ def test_right_panel_has_preview_view_histogram_and_actions():
             "resolution_label",
             "rotate_left_button",
             "rotate_right_button",
-            "histogram_placeholder",
             "start_button",
             "stop_button",
             "analyse_button",
@@ -281,6 +280,30 @@ def test_right_panel_is_not_a_tab_and_persists_across_switches():
         for i in range(win.tabs.count()):
             win.tabs.setCurrentIndex(i)
             assert win.right_panel is identity
+    finally:
+        win.shutdown()
+
+
+def test_right_panel_has_persistent_histogram_surface():
+    """Checklist item 13.4: a real histogram surface lives in the right panel."""
+    win = MainWindow()
+    try:
+        for attr in (
+            "right_histogram_group",
+            "right_histogram_status",
+            "right_histogram_view",
+        ):
+            assert hasattr(win, attr), f"missing right-panel histogram {attr}"
+        assert win.right_histogram_group.title() == "Histogram"
+        assert win.right_histogram_status.text() == "No preview"
+        assert win.right_histogram_view.pixmap().isNull()
+        # The group is owned by the persistent right panel, not a left tab.
+        assert win.right_histogram_group.parent() is win.right_panel
+        # It persists across left-tab switches (same widget identity).
+        identity = win.right_histogram_group
+        for i in range(win.tabs.count()):
+            win.tabs.setCurrentIndex(i)
+            assert win.right_histogram_group is identity
     finally:
         win.shutdown()
 

@@ -66,10 +66,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "zoom_label": {"en": "Zoom:", "fr": "Zoom :"},
     "resolution_label": {"en": "Resolution:", "fr": "Résolution :"},
     "histogram_group": {"en": "Histogram", "fr": "Histogramme"},
-    "histogram_placeholder": {
-        "en": "[ ] Histogram placeholder",
-        "fr": "[ ] Emplacement histogramme",
-    },
     "actions_group": {"en": "Actions", "fr": "Actions"},
     "preview_prefix": {"en": "Preview:", "fr": "Aperçu :"},
     # Action buttons.
@@ -80,6 +76,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "view_inputs": {"en": "View Inputs", "fr": "Voir les entrées"},
     "add_folder": {"en": "Add Folder", "fr": "Ajouter un dossier"},
     "open_output": {"en": "Open Output", "fr": "Ouvrir la sortie"},
+    # Preview controls tab (M10): display-only WB / stretch / histogram.
+    "wb_group": {"en": "White balance", "fr": "Balance des blancs"},
+    "wb_red": {"en": "Red", "fr": "Rouge"},
+    "wb_green": {"en": "Green", "fr": "Vert"},
+    "wb_blue": {"en": "Blue", "fr": "Bleu"},
+    "wb_reset": {"en": "Reset", "fr": "Réinitialiser"},
+    "stretch_group": {"en": "Stretch", "fr": "Étirement"},
+    "stretch_label": {"en": "Stretch:", "fr": "Étirement :"},
+    "histogram_empty": {"en": "No preview", "fr": "Aucun aperçu"},
+    "histogram_stats": {"en": "Stats:", "fr": "Stats :"},
     # Expert/Settings section titles.
     "section_stacking_paths": {"en": "Stacking / Paths", "fr": "Empilement / Chemins"},
     "section_calibration": {

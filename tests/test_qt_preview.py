@@ -820,3 +820,266 @@ def test_view_controls_do_not_alter_metadata_label(qapp):
         assert win.preview_label.text() == before
     finally:
         win.shutdown()
+
+
+# --------------------------------------------------------------------------
+# M10: preview controls (WB / stretch / histogram) — display-only
+# --------------------------------------------------------------------------
+def test_preview_controls_tab_has_real_wb_stretch_histogram(qapp):
+    win = MainWindow()
+    try:
+        for attr in (
+            "wb_group",
+            "wb_r_spin",
+            "wb_g_spin",
+            "wb_b_spin",
+            "wb_reset_button",
+            "stretch_group",
+            "stretch_combo",
+            "histogram_group",
+            "histogram_status",
+            "histogram_view",
+        ):
+            assert hasattr(win, attr), f"missing preview-control {attr}"
+        assert [
+            win.stretch_combo.itemText(i)
+            for i in range(win.stretch_combo.count())
+        ] == ["linear", "asinh", "log", "auto"]
+        assert win.stretch_combo.currentText() == "linear"
+        assert (
+            win.wb_r_spin.value(),
+            win.wb_g_spin.value(),
+            win.wb_b_spin.value(),
+        ) == (1.0, 1.0, 1.0)
+        # Inert before a renderable preview exists.
+        assert not win.wb_r_spin.isEnabled()
+        assert not win.wb_reset_button.isEnabled()
+        assert not win.stretch_combo.isEnabled()
+        assert win.histogram_view.pixmap().isNull()
+    finally:
+        win.shutdown()
+
+
+def test_preview_controls_enable_with_renderable_preview(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="pc"))
+        assert win.wb_r_spin.isEnabled()
+        assert win.wb_reset_button.isEnabled()
+        assert win.stretch_combo.isEnabled()
+        assert not win.histogram_view.pixmap().isNull()
+        # Clearing disables them again.
+        win._on_preview(BackendPreviewPayload(data=None, stack_name="none"))
+        assert not win.wb_r_spin.isEnabled()
+        assert not win.stretch_combo.isEnabled()
+        assert win.histogram_view.pixmap().isNull()
+    finally:
+        win.shutdown()
+
+
+def test_neutral_wb_stretch_keeps_dimensions_zoom_rotation(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="n"))
+        # Neutral defaults: byte-identical to the pre-M10 render (M5 behaviour).
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 10
+        win.zoom_combo.setCurrentText("200%")
+        assert win.preview_image_label.pixmap().width() == 40
+        assert win.preview_image_label.pixmap().height() == 20
+        win.rotate_right_button.click()
+        assert win.preview_rotation == 90
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 40
+        assert win.resolution_label.text() == "20x10 → 20x40 · 200% · 90°"
+    finally:
+        win.shutdown()
+
+
+def test_wb_change_alters_displayed_pixmap_deterministically(qapp):
+    win = MainWindow()
+    try:
+        arr = np.zeros((2, 2, 3), dtype=np.uint8)
+        arr[:, :, 0] = 200  # pure red
+        win._on_preview(BackendPreviewPayload(data=arr, stack_name="wb"))
+
+        before = win.preview_image_label.pixmap().toImage().pixelColor(0, 0)
+        assert before.red() == 200
+        assert before.green() == 0
+        assert before.blue() == 0
+        source_before = win._preview_source
+        assert source_before is not None
+
+        win.wb_r_spin.setValue(0.5)  # halve the red gain
+        after = win.preview_image_label.pixmap().toImage().pixelColor(0, 0)
+        assert abs(after.red() - 100) <= 1
+        assert after.green() == 0
+        assert after.blue() == 0
+
+        # The stored source image is untouched by the WB control.
+        assert win._preview_source is source_before
+        assert win._preview_source.pixelColor(0, 0).red() == 200
+
+        win.wb_reset_button.click()
+        reset = win.preview_image_label.pixmap().toImage().pixelColor(0, 0)
+        assert reset.red() == 200
+    finally:
+        win.shutdown()
+
+
+def test_stretch_change_alters_displayed_pixmap_deterministically(qapp):
+    win = MainWindow()
+    try:
+        grad = np.tile(np.array([0, 64, 128, 255], dtype=np.uint8), (2, 1))
+        win._on_preview(BackendPreviewPayload(data=grad, stack_name="stretch"))
+
+        lin = win.preview_image_label.pixmap().toImage().pixelColor(2, 0)
+        assert lin.red() == 128  # linear leaves mid-tone unchanged
+
+        win.stretch_combo.setCurrentText("log")
+        logp = win.preview_image_label.pixmap().toImage().pixelColor(2, 0)
+        x = 128 / 255.0
+        expected = int(round(np.log1p(x) / np.log(2.0) * 255.0))
+        assert abs(logp.red() - expected) <= 1
+        assert logp.red() != lin.red()
+
+        win.stretch_combo.setCurrentText("asinh")
+        asinhp = win.preview_image_label.pixmap().toImage().pixelColor(2, 0)
+        assert asinhp.red() != lin.red()
+        assert asinhp.red() != logp.red()
+    finally:
+        win.shutdown()
+
+
+def test_auto_stretch_expands_low_contrast_gradient(qapp):
+    win = MainWindow()
+    try:
+        grad = np.tile(np.array([50, 60, 70, 80], dtype=np.uint8), (2, 1))
+        win._on_preview(BackendPreviewPayload(data=grad, stack_name="auto"))
+        assert win.preview_image_label.pixmap().toImage().pixelColor(0, 0).red() == 50
+
+        win.stretch_combo.setCurrentText("auto")
+        assert win.preview_image_label.pixmap().toImage().pixelColor(0, 0).red() == 0
+        assert win.preview_image_label.pixmap().toImage().pixelColor(3, 0).red() == 255
+    finally:
+        win.shutdown()
+
+
+def test_histogram_updates_and_clears(qapp):
+    win = MainWindow()
+    try:
+        assert win.histogram_view.pixmap().isNull()
+        assert win._histogram_stats is None
+
+        arr = np.zeros((4, 4, 3), dtype=np.uint8)
+        arr[:, :, 0] = 200
+        win._on_preview(BackendPreviewPayload(data=arr, stack_name="h"))
+        assert not win.histogram_view.pixmap().isNull()
+        assert win._histogram_stats is not None
+        assert "R" in win._histogram_stats
+        assert "200" in win._histogram_stats
+
+        # Non-image preview clears the histogram without crashing.
+        win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
+        assert win.histogram_view.pixmap().isNull()
+        assert win._histogram_stats is None
+    finally:
+        win.shutdown()
+
+
+def test_histogram_updates_when_controls_change(qapp):
+    win = MainWindow()
+    try:
+        arr = np.zeros((4, 4, 3), dtype=np.uint8)
+        arr[:, :, 0] = 200
+        win._on_preview(BackendPreviewPayload(data=arr, stack_name="hc"))
+        before = win._histogram_stats
+        assert before is not None
+
+        win.wb_r_spin.setValue(0.0)  # kill red -> all channels 0
+        after = win._histogram_stats
+        assert after is not None
+        assert after != before
+        assert "R 0–0" in after
+    finally:
+        win.shutdown()
+
+
+def test_right_panel_histogram_mirrors_tab_surface(qapp):
+    """Both histogram surfaces (tab + persistent right panel) update/clear together."""
+    win = MainWindow()
+    try:
+        assert win.histogram_view.pixmap().isNull()
+        assert win.right_histogram_view.pixmap().isNull()
+        assert win.right_histogram_status.text() == "No preview"
+
+        arr = np.zeros((4, 4, 3), dtype=np.uint8)
+        arr[:, :, 0] = 200
+        win._on_preview(BackendPreviewPayload(data=arr, stack_name="rh"))
+
+        assert not win.histogram_view.pixmap().isNull()
+        assert not win.right_histogram_view.pixmap().isNull()
+        # Both status labels are driven by the same stored stats.
+        assert win._histogram_stats is not None
+        assert win.right_histogram_status.text() == win.histogram_status.text()
+        assert "Stats:" in win.right_histogram_status.text()
+        assert "200" in win.right_histogram_status.text()
+
+        # Non-image preview clears both surfaces together.
+        win._on_preview(BackendPreviewPayload(data="garbage", stack_name="bad"))
+        assert win.histogram_view.pixmap().isNull()
+        assert win.right_histogram_view.pixmap().isNull()
+        assert win._histogram_stats is None
+        assert win.right_histogram_status.text() == "No preview"
+    finally:
+        win.shutdown()
+
+
+def test_zoom_rotation_still_apply_after_wb_stretch(qapp):
+    win = MainWindow()
+    try:
+        win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="mix"))
+        win.wb_r_spin.setValue(0.5)
+        win.stretch_combo.setCurrentText("asinh")
+        win.zoom_combo.setCurrentText("200%")
+        win.rotate_right_button.click()
+
+        assert win.preview_image_label.pixmap().width() == 20
+        assert win.preview_image_label.pixmap().height() == 40
+        assert "200%" in win.resolution_label.text()
+        assert "90°" in win.resolution_label.text()
+    finally:
+        win.shutdown()
+
+
+def test_preview_adjust_module_is_display_only():
+    """The new helper keeps the same source-token / import-hygiene invariants."""
+    from pathlib import Path
+
+    import seestar.gui_qt as gui_qt
+
+    pkg_dir = Path(gui_qt.__file__).resolve().parent
+    text = (pkg_dir / "preview_adjust.py").read_text(encoding="utf-8")
+    forbidden = (
+        "seestar.core",
+        "seestar.alignment",
+        "seestar.enhancement",
+        "seestar.queuep",
+        "tkinter",
+        "seestar.gui.settings",
+        "seestar.gui.main_window",
+        "seestar.gui.boring_stack",
+        "zesolver_adapter",
+        "zesolver.api",
+        "zealfie",
+        "PIL",
+        "matplotlib",
+    )
+    for token in forbidden:
+        assert token not in text, f"preview_adjust.py references {token}"
+    # numpy stays a *lazy* import: no top-level ``import numpy`` statement.
+    for line in text.splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith(("import numpy", "from numpy")), (
+            f"preview_adjust.py imports numpy at top level: {line!r}"
+        )

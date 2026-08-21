@@ -247,3 +247,42 @@ def test_settings_state_invalid_language_falls_back():
     assert QtSettingsState.from_dict({"language": 123}).language == "en"
     assert QtSettingsState.from_dict({"language": None}).language == "en"
     assert QtSettingsState.from_dict({}).language == "en"
+
+
+# --------------------------------------------------------------------------
+# M10: preview-controls tab labels localize (WB / stretch / histogram)
+# --------------------------------------------------------------------------
+def test_preview_controls_labels_localize(window):
+    assert window.wb_group.title() == "White balance"
+    assert window.stretch_group.title() == "Stretch"
+    assert window.histogram_group.title() == "Histogram"
+    assert window.histogram_status.text() == "No preview"
+    assert window.wb_reset_button.text() == "Reset"
+
+    window.language_combo.setCurrentText("Français")
+
+    assert window.wb_group.title() == "Balance des blancs"
+    assert window.stretch_group.title() == "Étirement"
+    assert window.histogram_group.title() == "Histogramme"
+    assert window.histogram_status.text() == "Aucun aperçu"
+    assert window.wb_reset_button.text() == "Réinitialiser"
+
+    # Round-trip back to English.
+    window.language_combo.setCurrentText("English")
+    assert window.wb_group.title() == "White balance"
+    assert window.histogram_status.text() == "No preview"
+
+
+def test_right_panel_histogram_labels_localize(window):
+    assert window.right_histogram_group.title() == "Histogram"
+    assert window.right_histogram_status.text() == "No preview"
+
+    window.language_combo.setCurrentText("Français")
+
+    assert window.right_histogram_group.title() == "Histogramme"
+    assert window.right_histogram_status.text() == "Aucun aperçu"
+
+    # Round-trip back to English.
+    window.language_combo.setCurrentText("English")
+    assert window.right_histogram_group.title() == "Histogram"
+    assert window.right_histogram_status.text() == "No preview"
