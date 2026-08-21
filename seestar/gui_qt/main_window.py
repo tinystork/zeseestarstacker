@@ -44,11 +44,12 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
 import time
 from dataclasses import replace
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import QByteArray, Qt, QUrl
+from PySide6.QtCore import QByteArray, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -77,7 +78,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import analyzer_launch, boring_route, localization, settings_persistence
+from . import (
+    analyzer_launch,
+    boring_route,
+    initial_preview,
+    localization,
+    settings_persistence,
+)
 from .backend_runner import (
     BackendPreviewPayload,
     BaseRunBackend,
@@ -397,6 +404,11 @@ class MainWindow(QMainWindow):
     connected to the controller's queued signals.
     """
 
+    # Worker-thread -> GUI-thread delivery for the initial-preview auto-load
+    # (M12).  Emitted from a daemon ``threading.Thread``; the connection is
+    # explicitly queued so no widget is ever touched off the GUI thread.
+    _initial_preview_result = Signal(object)
+
     def __init__(
         self,
         title: Optional[str] = None,
@@ -495,6 +507,10 @@ class MainWindow(QMainWindow):
         # accumulated clockwise rotation in degrees (0/90/180/270).
         self._preview_source: Optional[QImage] = None
         self._preview_rotation: int = 0
+        # Input folder whose first FITS was last successfully auto-loaded
+        # (M12).  Avoids redundant reloads on repeated settings restore; it is
+        # cleared when the folder changes or the load fails.
+        self._last_preview_folder: Optional[str] = None
         # Preview display-adjustment state (M10): white-balance R/G/B gains and
         # the display-stretch mode.  These act only on the derived display
         # image, never on ``_preview_source`` or any scientific output.  Raw
@@ -1102,6 +1118,12 @@ class MainWindow(QMainWindow):
         self.wb_b_spin.valueChanged.connect(self._on_wb_changed)
         self.wb_reset_button.clicked.connect(self._on_wb_reset)
         self.stretch_combo.currentIndexChanged.connect(self._on_stretch_changed)
+        # Initial-preview auto-load delivery: the daemon worker thread emits
+        # this signal; the explicit queued connection guarantees the slot runs
+        # on the GUI thread even though the emitter is not a QThread.
+        self._initial_preview_result.connect(
+            self._on_initial_preview_result, Qt.ConnectionType.QueuedConnection
+        )
         self._update_run_state()
 
     def _wire_controller(self) -> None:
@@ -1491,6 +1513,9 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.input_edit.setText(os.path.abspath(folder))
+            # Tk parity: picking an input folder auto-loads its first FITS for
+            # an immediate preview.
+            self._try_show_first_input_image()
 
     def _browse_output(self) -> None:
         """Select the output folder via a directory dialog (Tk parity)."""
@@ -1706,6 +1731,94 @@ class MainWindow(QMainWindow):
         else:
             self._preview_source = None
             self._preview_rotation = 0
+        self._refresh_preview_view()
+
+    # ------------------------------------------------ initial preview (M12)
+    def _try_show_first_input_image(self) -> None:
+        """Auto-load the first FITS of the input folder (Tk parity).
+
+        The folder is validated and scanned synchronously (both are cheap); only
+        the actual FITS load + debayer runs on a daemon worker thread, which
+        delivers the result back through the queued
+        :attr:`_initial_preview_result` signal.  A folder unchanged from the
+        last successful load is skipped so repeated settings restores never
+        reload the same image.
+        """
+        input_folder = self.input_edit.text().strip()
+        if input_folder:
+            input_folder = os.path.abspath(input_folder)
+
+        # Guard against redundant reloads: same folder already loaded.
+        if input_folder and input_folder == self._last_preview_folder:
+            return
+
+        if not input_folder or not os.path.isdir(input_folder):
+            self._last_preview_folder = None
+            self._clear_preview(self._tr("preview_no_input_folder"))
+            return
+
+        first = initial_preview.find_first_fits_file(input_folder)
+        if first is None:
+            self._last_preview_folder = None
+            self._clear_preview(self._tr("preview_no_fits"))
+            return
+
+        # Loading state: label only; the previous image (if any) stays until
+        # the new one arrives (Tk parity).
+        self._preview_detail = f"{self._tr('preview_loading')} {first}"
+        self._render_preview_label()
+
+        bayer_pattern = self.settings_state.bayer_pattern or "GRBG"
+        threading.Thread(
+            target=self._initial_preview_worker,
+            args=(input_folder, first, bayer_pattern),
+            daemon=True,
+            name="InitialPreviewLoader",
+        ).start()
+
+    def _initial_preview_worker(self, folder: str, filename: str, bayer_pattern) -> None:
+        """Load + debayer the first FITS on a daemon thread; emit the result.
+
+        Never touches a widget: it only imports the engine lazily, reads the
+        file into an in-memory ndarray and emits the queued result signal.
+        """
+        try:
+            data, header = initial_preview.load_initial_preview(
+                folder, filename, bayer_pattern
+            )
+            result = initial_preview.InitialPreviewResult(
+                folder=folder, filename=filename, data=data, header=header
+            )
+        except Exception:
+            result = initial_preview.InitialPreviewResult(
+                folder=folder, filename=filename, error="load_failed"
+            )
+        self._initial_preview_result.emit(result)
+
+    def _on_initial_preview_result(self, result) -> None:
+        """GUI-thread slot: render a loaded initial preview (or clear on error)."""
+        if result.error is not None:
+            self._last_preview_folder = None
+            self._clear_preview(self._tr("preview_error"))
+            return
+        image = render_preview_image(result.data)
+        if image is None or image.isNull():
+            self._last_preview_folder = None
+            self._clear_preview(self._tr("preview_error"))
+            return
+        self._preview_source = image
+        self._preview_rotation = 0
+        self._last_preview_folder = result.folder
+        self._preview_detail = f"{self._tr('preview_loaded')} {result.filename}"
+        self._render_preview_label()
+        self._refresh_preview_view()
+
+    def _clear_preview(self, message: str) -> None:
+        """Clear the preview surface and show a localized message."""
+        self._preview_detail = message
+        self._render_preview_label()
+        self._preview_source = None
+        self._preview_rotation = 0
         self._refresh_preview_view()
 
     # ------------------------------------------------- preview view controls
@@ -2083,6 +2196,9 @@ class MainWindow(QMainWindow):
         data = settings_persistence.load_settings_json(self._settings_path)
         state = QtSettingsState.from_dict(data)
         self._apply_state_to_controls(state)
+        # Tk parity: a folder restored from settings auto-loads its first FITS
+        # for an immediate preview (guarded against redundant reloads).
+        self._try_show_first_input_image()
         geometry = data.get("window_geometry")
         if isinstance(geometry, str) and geometry:
             self._restore_geometry_from_key(geometry)

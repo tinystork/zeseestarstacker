@@ -86,6 +86,27 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "stretch_label": {"en": "Stretch:", "fr": "Étirement :"},
     "histogram_empty": {"en": "No preview", "fr": "Aucun aperçu"},
     "histogram_stats": {"en": "Stats:", "fr": "Stats :"},
+    # Initial preview auto-load states (M12): auto-load first FITS.
+    "preview_no_input_folder": {
+        "en": "Input folder not found or not set",
+        "fr": "Dossier d'entrée introuvable ou non défini",
+    },
+    "preview_no_fits": {
+        "en": "No FITS files in input folder",
+        "fr": "Aucun fichier FITS dans le dossier d'entrée",
+    },
+    "preview_loading": {
+        "en": "Loading preview...",
+        "fr": "Chargement de l'aperçu...",
+    },
+    "preview_loaded": {
+        "en": "Preview loaded",
+        "fr": "Aperçu chargé",
+    },
+    "preview_error": {
+        "en": "Error loading preview...",
+        "fr": "Erreur lors du chargement de l'aperçu...",
+    },
     # Expert/Settings section titles.
     "section_stacking_paths": {"en": "Stacking / Paths", "fr": "Empilement / Chemins"},
     "section_calibration": {

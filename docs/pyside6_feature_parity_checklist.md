@@ -76,6 +76,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 6.5 | Zoom (Fit / 100% / 200% / 50%) | `[x]` | display-only `preview_view` + `MainWindow` view controls; percent zoom scales from the rotated native size, Fit preserves aspect ratio |
 | 6.6 | Rotation (left / right 90°) | `[x]` | cumulative ±90° modulo 360; preserves source image; zoom reapplies after rotation |
 | 6.7 | Pan | `[ ]` | |
+| 6.8 | Auto-load first FITS of the input folder (initial preview) | `[x]` | `MainWindow._try_show_first_input_image` + `seestar/gui_qt/initial_preview.py` (M12): folder restored from settings or chosen via Browse Input non-blockingly loads the first sorted `.fit`/`.fits` on a daemon thread (lazy `importlib` engine import), debayers 2D Bayer data (header `BAYERPAT` else `settings.bayer_pattern`), and delivers the image back via a queued Qt signal; missing/empty folder clears the preview with a localized message; redundant-reload guard skips an unchanged folder |
 
 ## 7. Progress / log / copy
 
@@ -296,3 +297,24 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   `tests/test_qt_backend_runner.py` (queue-drain + malformed-item resilience);
   see the witness report under `~/.openclaw/workspace/review/`
   `zsss-pyside6-m11-real-backend-e2e/`.
+- **2026-08-21 — lot ZSSS-QT-FP-M12**: delivered item 6.8 (initial-preview
+  parity: auto-load first FITS).  The Qt shell now reproduces the Tk GUI's
+  initial-preview behaviour: when the input folder is set (restored from
+  settings at startup, or chosen via Browse Input) it non-blockingly loads the
+  first sorted `.fit`/`.fits` file and displays it in the right preview panel
+  with the histogram and view/preview controls enabled.  The folder is
+  validated and scanned synchronously (cheap); only the FITS load + debayer
+  runs on a daemon `threading.Thread`, which lazily imports the engine
+  (`load_and_validate_fits` / `debayer_image` via `importlib`, mirroring
+  `backend_runner.py`'s split-string discipline) and delivers the in-memory
+  image back through a *queued* Qt signal — no widget is ever touched off the
+  GUI thread, and a slow/absent folder never freezes the shell.  2D Bayer data
+  is debayered only when a valid pattern exists (header `BAYERPAT` else
+  `settings.bayer_pattern`, default `GRBG`), matching Tk.  Missing/empty folder
+  states clear the preview with localized messages (`preview_no_input_folder`,
+  `preview_no_fits`, `preview_loading`, `preview_loaded`, `preview_error`), and
+  a redundant-reload guard skips an unchanged folder so repeated settings
+  restores never reload the same image.  Qt-only: no Tk/engine/settings changes
+  and no FITS/PNG writes.  Covered by `tests/test_qt_initial_preview.py` (real
+  FITS load, missing/empty folder, 2D Bayer debayer → 3 channels, GUI-thread
+  responsiveness smoke, redundant-reload guard).
