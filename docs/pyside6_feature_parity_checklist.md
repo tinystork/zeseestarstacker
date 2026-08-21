@@ -140,6 +140,82 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 ---
 
+## 14. Expert tab content parity (M15)
+
+Per-control Tk `tab_expert` → Qt parity (the Tk controls live in
+`seestar/gui/main_window.py` ~l.1520-1942; the Qt surface is the `Expert` tab
+built by `MainWindow._settings_tab`).  `[x]` = delivered this lot (present +
+correct label/default/range/enabler/reset); `[ ]` = gap with a note.
+
+| # | Tk control (label → var) | Range / default | Qt equivalent | Status |
+|---|---|---|---|---|
+| 14.1 | `warning_label` ("Expert Settings!", red italic) | — | `expert_warning_label` (`expert_warning_text`) | `[x]` |
+| 14.2 | "Feather inter-batch (radial blend)" → `apply_batch_feathering_var` | bool, `True` | `apply_batch_feathering` checkbox | `[x]` |
+| 14.3 | "Enable Feathering" → `apply_feathering_var` | bool, `True` | `apply_feathering` checkbox (enabler) | `[x]` |
+| 14.4 | "Blur (px)" → `feather_blur_px_var` | 32–512 step 16, `256` | `feather_blur_px` spinbox | `[x]` |
+| 14.5 | "Apply Low WHT Mask" → `apply_low_wht_mask_var` | bool, `False` | `apply_low_wht_mask` checkbox (enabler) | `[x]` |
+| 14.6 | "Percentile" → `low_wht_pct_var` | 1–100 step 1, `5` | `low_wht_percentile` spinbox | `[x]` |
+| 14.7 | "Soften (px)" → `low_wht_soften_px_var` | 32–512 step 16, `128` | `low_wht_soften_px` spinbox | `[x]` |
+| 14.8 | "Enable BN" → `apply_bn_var` | bool, `True` | `apply_bn` checkbox (enabler) | `[x]` |
+| 14.9 | "Grid Size" → `bn_grid_size_str_var` | combo 8x8…64x64, `24x24` | `bn_grid_size_str` combo | `[x]` |
+| 14.10 | "BG Perc. Low" → `bn_perc_low_var` | 0–40 step 1, `5` | `bn_perc_low` spinbox | `[x]` |
+| 14.11 | "BG Perc. High" → `bn_perc_high_var` | 10–95 step 1, `40` | `bn_perc_high` spinbox | `[x]` |
+| 14.12 | "BG Std Factor" → `bn_std_factor_var` | 0.5–5.0 step 0.1, `1.5` | `bn_std_factor` spinbox | `[x]` |
+| 14.13 | "Min Gain" → `bn_min_gain_var` | 0.1–2.0 step 0.1, `0.2` | `bn_min_gain` spinbox | `[x]` |
+| 14.14 | "Max Gain" → `bn_max_gain_var` | 1.0–10.0 step 0.1, `7.0` | `bn_max_gain` spinbox | `[x]` |
+| 14.15 | "Enable Edge/Chroma Correction" → `apply_cb_var` | bool, `True` | `apply_cb` checkbox (enabler) | `[x]` |
+| 14.16 | "Border Size (px)" → `cb_border_size_var` | 5–150 step 5, `25` | `cb_border_size` spinbox | `[x]` |
+| 14.17 | "Blur Radius (px)" → `cb_blur_radius_var` | 0–50 step 1, `8` | `cb_blur_radius` spinbox | `[x]` |
+| 14.18 | "Min Blue Factor" → `cb_min_b_factor_var` | 0.1–1.0 step 0.05, `0.4` | `cb_min_b_factor` spinbox | `[x]` |
+| 14.19 | "Max Blue Factor" → `cb_max_b_factor_var` | 1.0–3.0 step 0.05, `1.5` | `cb_max_b_factor` spinbox | `[x]` |
+| 14.20 | "Enable Final Cropping" → `apply_final_crop_var` | bool, `True` | `apply_final_crop` checkbox (enabler) | `[x]` |
+| 14.21 | "Edge Crop (%)" → `final_edge_crop_percent_var` | 0.0–25.0 step 0.5, `2.0` | `final_edge_crop_percent` spinbox | `[x]` |
+| 14.22 | "Crop master tiles" → `apply_master_tile_crop_var` (Stacking tab in Tk) | bool, `False` | `apply_master_tile_crop` checkbox (enabler) | `[x]` |
+| 14.23 | "Crop % per side" → `master_tile_crop_percent_var` | 0.0–25.0 step 0.5, `18.0` | `master_tile_crop_percent` spinbox | `[x]` |
+| 14.24 | "Enable Photutils 2D Bkg Subtraction" → `apply_photutils_bn_var` | bool, `False` | `apply_photutils_bn` checkbox (enabler) | `[x]` |
+| 14.25 | "Box Size (px)" → `photutils_bn_box_size_var` | 16–1024 step 16, `128` | `photutils_bn_box_size` spinbox | `[x]` |
+| 14.26 | "Filter Size (px, odd)" → `photutils_bn_filter_size_var` | 1–15 step 2, `11` | `photutils_bn_filter_size` spinbox | `[x]` |
+| 14.27 | "Sigma Clip Value" → `photutils_bn_sigma_clip_var` | 1.0–5.0 step 0.1, `3.0` | `photutils_bn_sigma_clip` spinbox | `[x]` |
+| 14.28 | "Exclude Brightest (%)" → `photutils_bn_exclude_percentile_var` | 0.0–100.0 step 1.0, `95.0` | `photutils_bn_exclude_percentile` spinbox | `[x]` |
+| 14.29 | "Save final FITS as float32" → `save_as_float32_var` | bool, `False` | `save_final_as_float32` checkbox | `[x]` |
+| 14.30 | "Preserve linear output" → `preserve_linear_output_var` | bool, `False` | `preserve_linear_output` checkbox | `[x]` |
+| 14.31 | `reset_expert_button` ("Reset Expert Settings") | — | `reset_expert_button` (`reset_expert_button`) | `[x]` |
+
+Notes / gaps:
+
+- **Enablers gate sub-options exactly like Tk** (14.3/14.5/14.8/14.15/14.20/
+  14.22/14.24): unchecked disables the gated widgets via
+  `_update_expert_enabler_states` (the Qt equivalent of Tk
+  `_update_*_options_state` / `_update_master_tile_crop_state`).  `[x]`
+- **Reset-to-defaults** (14.31) restores the BN / CB / master-tile-crop /
+  final-crop / feathering / batch-feathering / low-weight-mask / Photutils-BN
+  widgets to their `QtSettingsState` defaults (`_reset_expert_settings`, GUI
+  state only).  Output-format fields (`save_final_as_float32` /
+  `preserve_linear_output`) are deliberately **not** reset, matching the Tk
+  button.  *Deviation:* the Tk button also omits the Low WHT Mask group; the
+  Qt button resets it too so "Reset Expert Settings" actually restores the
+  whole Expert surface (justified, documented).  `[x]`
+- **Engine-coupled status.**  The numeric BN / CB / crop / Photutils /
+  feathering parameters already reach the backend through the existing M10
+  `settings_state` → `build_backend_kwargs` path, so they are wired, not
+  display-only; whether the engine *applies* them during a run is the
+  pre-existing backend E2E scope and is unchanged by this lot.  The three
+  enabler flags `apply_bn` / `apply_cb` / `apply_final_crop` are **display-only
+  now** (gating + persistence): `build_backend_kwargs` does not consume them
+  today (verified), so wiring them to the engine is deferred to a later
+  backend E2E milestone if needed.  `[ ]` backend E2E for enabler flags.
+- **Default-value divergence (Tk init vars vs `SettingsManager`).**  The Tk
+  `init_variables` seeds a few Expert vars with values that differ from
+  `SettingsManager.get_default_values` (e.g. `bn_grid_size_str` `"16x16"` vs
+  `"24x24"`, `bn_perc_high` `30` vs `40`, `bn_std_factor` `1.0` vs `1.5`,
+  `photutils_bn_filter_size` `5` vs `11`, `photutils_bn_exclude_percentile`
+  `98.0` vs `95.0`).  The Qt shell seeds every widget from `QtSettingsState`
+  (aligned with `SettingsManager`), which is also what the Tk reset/apply path
+  uses; the transient Tk init-var values are not reproduced.  `[x]` (documented
+  divergence, canonical default = `SettingsManager`).
+
+---
+
 ## Last updated
 
 - **2026-08-21 — lot ZSSS-QT-FP-M1**: delivered items 2.1, 2.2 and section 13
@@ -366,3 +442,22 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   Covered by `tests/test_qt_histogram_m14.py` (+ re-pointed
   `tests/test_qt_preview.py`, `tests/test_qt_localization.py` and
   `tests/test_qt_shell.py`), and the existing import-hygiene tests.
+- **2026-08-21 — lot ZSSS-QT-FP-M15**: Expert tab content parity + closure +
+  M14 leftovers.  Delivered the full Tk `tab_expert` → Qt per-control parity
+  (new section 14): every Expert control now exists with the Tk label (fully
+  FR/EN localised via `localization`), the Tk range/step and the canonical
+  `SettingsManager` default; the BN / CB / final-crop / master-tile-crop /
+  Photutils / feathering / low-weight enabler checkboxes gate their sub-option
+  widgets exactly like the Tk `_update_*_options_state` methods; a new
+  "Reset Expert Settings" button restores the whole Expert surface to model
+  defaults (GUI-only).  `bn_grid_size_str` is now a combo (was a free-text
+  field).  `QtSettingsState` gains the three gating flags `apply_bn` /
+  `apply_cb` / `apply_final_crop` (persisted like Tk, but not consumed by
+  `build_backend_kwargs` → "display-only now, backend E2E later").  M14
+  leftovers: the persistent histogram now freezes a manual X zoom across
+  `set_data` refreshes (Tk `freeze_x_range` semantics) and resets it on
+  reset-view / reset-zoom / auto-zoom; the dead `render_histogram_pixmap`
+  helper (and its unused colour palette) was removed from `preview_adjust`.
+  No Tk/engine/backend/settings-file changes; `_preview_source` never mutated.
+  Covered by `tests/test_qt_expert_m15.py` (10 tests) + the existing import
+  hygiene tests; `git diff --check` clean.

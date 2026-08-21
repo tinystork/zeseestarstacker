@@ -27,8 +27,8 @@ from PySide6.QtWidgets import QWidget
 
 from .preview_adjust import compute_histogram, compute_histogram_percentile
 
-# Channel-name -> bar colour (matches the previous ``render_histogram_pixmap``
-# palette so the new surface stays visually consistent with M10).
+# Channel-name -> bar colour (matches the earlier M10 display-histogram
+# palette so the surface stays visually consistent).
 _CHANNEL_COLORS: Dict[str, QColor] = {
     "L": QColor(225, 225, 225),
     "R": QColor(225, 70, 70),
@@ -67,6 +67,11 @@ class HistogramView(QWidget):
         self._white_point: float = _DEFAULT_WHITE_POINT
         self._view_min: float = 0.0
         self._view_max: float = 1.0
+        # Manual-zoom window ``(view_min, view_max)`` preserved across data
+        # refreshes (Tk ``freeze_x_range`` / ``_stored_xlim`` semantics), or
+        # ``None`` while the view tracks the full data range.  Cleared by
+        # ``reset_histogram_view`` / ``reset_zoom`` and when data is cleared.
+        self._frozen_range: Optional[tuple] = None
         self.auto_zoom_enabled: bool = False
         self._drag_line: Optional[str] = None
         self.setMinimumSize(256, 64)
@@ -78,14 +83,19 @@ class HistogramView(QWidget):
         if image is None or image.isNull():
             self._histogram = None
             self._percentile_99_5 = 1.0
+            self._frozen_range = None
         else:
             self._histogram = compute_histogram(image, bins=256)
             p99_5 = compute_histogram_percentile(image, 99.5)
             self._percentile_99_5 = 1.0 if p99_5 is None else p99_5
         if self.auto_zoom_enabled and self._histogram:
             self.zoom_histogram()
+        elif self._frozen_range is not None:
+            # Preserve a manual zoom across the refresh (Tk freeze_x_range).
+            self._view_min, self._view_max = self._frozen_range
         else:
-            self.reset_zoom()
+            self._view_min = 0.0
+            self._view_max = 1.0
         self.update()
 
     def clear(self) -> None:
@@ -135,18 +145,24 @@ class HistogramView(QWidget):
         """Zoom the X axis to ``[0, max(0.02, p99.5)]`` (Tk ``zoom_histogram``)."""
         self._view_min = 0.0
         self._view_max = max(0.02, self._percentile_99_5)
+        # A manual zoom is frozen across refreshes unless auto-zoom is active
+        # (Tk stores ``_stored_xlim`` only while ``freeze_x_range`` is set).
+        if not self.auto_zoom_enabled:
+            self._frozen_range = (self._view_min, self._view_max)
         self.update()
 
     def reset_histogram_view(self) -> None:
         """Reset the X axis to the full ``[0, 1]`` range (Tk ``reset_histogram_view``)."""
         self._view_min = 0.0
         self._view_max = 1.0
+        self._frozen_range = None
         self.update()
 
     def reset_zoom(self) -> None:
         """Reset the X axis to the full data range (Tk ``reset_zoom``)."""
         self._view_min = 0.0
         self._view_max = 1.0
+        self._frozen_range = None
         self.update()
 
     # -------------------------------------------------------- drag plumbing

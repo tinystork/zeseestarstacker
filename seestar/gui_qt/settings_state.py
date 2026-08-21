@@ -193,12 +193,19 @@ class QtSettingsState:
     final_scnr_target_channel: str = "green"
     final_scnr_amount: float = 0.6
     final_scnr_preserve_luminosity: bool = True
+    # Expert-tab enable flags (BN / CB / final crop).  These are GUI gating
+    # controls only: they enable/disable their sub-option widgets and are
+    # persisted/restored like the Tk ``apply_bn_var`` / ``apply_cb_var`` /
+    # ``apply_final_crop_var``, but they are NOT consumed by
+    # ``build_backend_kwargs`` (the engine does not read them today).
+    apply_bn: bool = True
     bn_grid_size_str: str = "24x24"
     bn_perc_low: int = 5
     bn_perc_high: int = 40
     bn_std_factor: float = 1.5
     bn_min_gain: float = 0.2
     bn_max_gain: float = 7.0
+    apply_cb: bool = True
     cb_border_size: int = 25
     cb_blur_radius: int = 8
     cb_min_b_factor: float = 0.4
@@ -207,6 +214,7 @@ class QtSettingsState:
     # --- Cropping ---
     apply_master_tile_crop: bool = False
     master_tile_crop_percent: float = 18.0
+    apply_final_crop: bool = True
     final_edge_crop_percent: float = 2.0
 
     # --- Photutils background normalisation ---

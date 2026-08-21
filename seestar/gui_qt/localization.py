@@ -219,6 +219,106 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Match background for final",
         "fr": "Correspondance fond final",
     },
+    # Expert tab chrome (M15): warning banner + reset-to-defaults button.
+    "expert_warning_text": {
+        "en": "Expert Settings!",
+        "fr": "Réglages Expert !",
+    },
+    "reset_expert_button": {
+        "en": "Reset Expert Settings",
+        "fr": "Réinitialiser les réglages Expert",
+    },
+    # Expert tab field labels (M15) — the full BN / CB / cropping / Photutils /
+    # feathering / low-weight surface, so every Expert-tab control localizes.
+    "field_apply_bn": {"en": "Enable BN", "fr": "Activer BN"},
+    "field_bn_grid_size": {"en": "BN grid size", "fr": "Taille de grille BN"},
+    "field_bn_perc_low": {
+        "en": "BN percentile low",
+        "fr": "Percentile bas BN",
+    },
+    "field_bn_perc_high": {
+        "en": "BN percentile high",
+        "fr": "Percentile haut BN",
+    },
+    "field_bn_std_factor": {
+        "en": "BN std factor",
+        "fr": "Facteur écart-type BN",
+    },
+    "field_bn_min_gain": {"en": "BN min gain", "fr": "Gain min BN"},
+    "field_bn_max_gain": {"en": "BN max gain", "fr": "Gain max BN"},
+    "field_apply_cb": {
+        "en": "Enable Edge/Chroma Correction",
+        "fr": "Activer la correction bord/chroma",
+    },
+    "field_cb_border_size": {
+        "en": "CB border size",
+        "fr": "Taille de bordure CB",
+    },
+    "field_cb_blur_radius": {
+        "en": "CB blur radius",
+        "fr": "Rayon de flou CB",
+    },
+    "field_cb_min_b_factor": {
+        "en": "CB min B factor",
+        "fr": "Facteur B min CB",
+    },
+    "field_cb_max_b_factor": {
+        "en": "CB max B factor",
+        "fr": "Facteur B max CB",
+    },
+    "field_apply_final_crop": {
+        "en": "Enable Final Cropping",
+        "fr": "Activer le rognage final",
+    },
+    "field_final_edge_crop_percent": {
+        "en": "Final edge crop %",
+        "fr": "Rognage des bords final %",
+    },
+    "field_master_tile_crop_percent": {
+        "en": "Master tile crop %",
+        "fr": "Rognage tuiles maîtresses %",
+    },
+    "field_apply_photutils_bn": {
+        "en": "Photutils background normalization",
+        "fr": "Normalisation du fond Photutils",
+    },
+    "field_photutils_bn_box_size": {
+        "en": "Box size",
+        "fr": "Taille de boîte",
+    },
+    "field_photutils_bn_filter_size": {
+        "en": "Filter size",
+        "fr": "Taille du filtre",
+    },
+    "field_photutils_bn_sigma_clip": {
+        "en": "Sigma clip",
+        "fr": "Sigma clip",
+    },
+    "field_photutils_bn_exclude_percentile": {
+        "en": "Exclude percentile",
+        "fr": "Percentile exclu",
+    },
+    "field_apply_feathering": {"en": "Feathering", "fr": "Feathering"},
+    "field_feather_blur_px": {
+        "en": "Feather blur (px)",
+        "fr": "Flou feathering (px)",
+    },
+    "field_apply_batch_feathering": {
+        "en": "Batch feathering",
+        "fr": "Feathering inter-lots",
+    },
+    "field_apply_low_wht_mask": {
+        "en": "Low-weight mask",
+        "fr": "Masque bas poids",
+    },
+    "field_low_wht_percentile": {
+        "en": "Low-weight percentile",
+        "fr": "Percentile bas poids",
+    },
+    "field_low_wht_soften_px": {
+        "en": "Low-weight soften (px)",
+        "fr": "Adoucissement bas poids (px)",
+    },
 }
 
 

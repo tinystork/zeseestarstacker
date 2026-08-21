@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QImage
 
 # Display-stretch modes (UI vocabulary, backend-agnostic).  ``auto`` is a
 # Qt-only convenience mode (Tk has an "Auto Stretch" *button* that computes
@@ -54,14 +54,6 @@ GAMMA_MIN, GAMMA_MAX, GAMMA_STEP = 0.1, 5.0, 0.01
 BRIGHTNESS_MIN, BRIGHTNESS_MAX, BRIGHTNESS_STEP = 0.1, 3.0, 0.01
 CONTRAST_MIN, CONTRAST_MAX, CONTRAST_STEP = 0.1, 3.0, 0.01
 SATURATION_MIN, SATURATION_MAX, SATURATION_STEP = 0.0, 3.0, 0.01
-
-# Channel-name -> histogram bar colour for the display histogram pixmap.
-_HISTOGRAM_COLORS = {
-    "L": QColor(225, 225, 225),
-    "R": QColor(225, 70, 70),
-    "G": QColor(70, 200, 70),
-    "B": QColor(70, 120, 225),
-}
 
 
 def _load_numpy():
@@ -505,36 +497,3 @@ def compute_histogram_stats(image: Optional[QImage]) -> Optional[str]:
             f"B {int(b.min())}–{int(b.max())}"
         )
     return None
-
-
-def render_histogram_pixmap(
-    image: Optional[QImage],
-    width: int = 256,
-    height: int = 64,
-) -> Optional[QPixmap]:
-    """Draw a small per-channel histogram bar chart, or ``None`` if not renderable."""
-    width = max(1, int(width))
-    height = max(1, int(height))
-    hist = compute_histogram(image, bins=width)
-    if not hist:
-        return None
-    pixmap = QPixmap(width, height)
-    pixmap.fill(QColor(22, 22, 24))
-    painter = QPainter(pixmap)
-    try:
-        max_count = max(int(h.max()) for h in hist.values())
-        if max_count <= 0:
-            max_count = 1
-        for name, h in hist.items():
-            color = _HISTOGRAM_COLORS.get(name, QColor(225, 225, 225))
-            painter.setPen(color)
-            n = len(h)
-            for i in range(n):
-                bar = int(round(float(h[i]) / max_count * (height - 1)))
-                if bar <= 0:
-                    continue
-                x = i * width // n
-                painter.drawLine(x, height - 1, x, height - 1 - bar)
-    finally:
-        painter.end()
-    return pixmap

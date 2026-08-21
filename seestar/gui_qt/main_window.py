@@ -196,6 +196,8 @@ DRIZZLE_KERNELS = [
 BAYER_PATTERNS = ["GRBG", "RGGB", "GBRG", "BGGR"]
 SCNR_TARGET_CHANNELS = ["green", "red", "blue"]
 MOSAIC_ALIGNMENT_MODES = ["local_fast_fallback", "local_fast_only", "astrometry_per_panel"]
+# BN grid-size choices (Tk ``bn_grid_size_combo`` values, ``24x24`` default).
+BN_GRID_SIZES = ["8x8", "16x16", "24x24", "32x32", "64x64"]
 
 # Tri-state for ``match_background_for_final``.  ``default`` (and the older
 # ``none`` spelling) both mean "unset" -> ``None`` at the backend, which is the
@@ -281,45 +283,48 @@ SETTINGS_SECTIONS = [
             _field("final_scnr_target_channel", "SCNR target channel", "combo", SCNR_TARGET_CHANNELS),
             _field("final_scnr_amount", "SCNR amount", "float", 0.0, 1.0, 0.05, 2),
             _field("final_scnr_preserve_luminosity", "SCNR preserve luminosity", "bool"),
-            _field("bn_grid_size_str", "BN grid size", "str"),
-            _field("bn_perc_low", "BN percentile low", "int", 0, 100, 1),
-            _field("bn_perc_high", "BN percentile high", "int", 0, 100, 1),
-            _field("bn_std_factor", "BN std factor", "float", 0.0, 10.0, 0.1, 2),
-            _field("bn_min_gain", "BN min gain", "float", 0.0, 10.0, 0.1, 2),
-            _field("bn_max_gain", "BN max gain", "float", 0.0, 100.0, 0.1, 2),
-            _field("cb_border_size", "CB border size", "int", 0, 1000, 1),
-            _field("cb_blur_radius", "CB blur radius", "int", 0, 100, 1),
-            _field("cb_min_b_factor", "CB min B factor", "float", 0.0, 10.0, 0.1, 2),
-            _field("cb_max_b_factor", "CB max B factor", "float", 0.0, 100.0, 0.1, 2),
+            _field("apply_bn", "Enable BN", "bool"),
+            _field("bn_grid_size_str", "BN grid size", "combo", BN_GRID_SIZES),
+            _field("bn_perc_low", "BN percentile low", "int", 0, 40, 1),
+            _field("bn_perc_high", "BN percentile high", "int", 10, 95, 1),
+            _field("bn_std_factor", "BN std factor", "float", 0.5, 5.0, 0.1, 1),
+            _field("bn_min_gain", "BN min gain", "float", 0.1, 2.0, 0.1, 1),
+            _field("bn_max_gain", "BN max gain", "float", 1.0, 10.0, 0.1, 1),
+            _field("apply_cb", "Enable Edge/Chroma Correction", "bool"),
+            _field("cb_border_size", "CB border size", "int", 5, 150, 5),
+            _field("cb_blur_radius", "CB blur radius", "int", 0, 50, 1),
+            _field("cb_min_b_factor", "CB min B factor", "float", 0.1, 1.0, 0.05, 2),
+            _field("cb_max_b_factor", "CB max B factor", "float", 1.0, 3.0, 0.05, 2),
         ],
     ),
     (
         "Cropping",
         [
             _field("apply_master_tile_crop", "Master tile crop", "bool"),
-            _field("master_tile_crop_percent", "Master tile crop %", "float", 0.0, 100.0, 0.5, 2),
-            _field("final_edge_crop_percent", "Final edge crop %", "float", 0.0, 100.0, 0.5, 2),
+            _field("master_tile_crop_percent", "Master tile crop %", "float", 0.0, 25.0, 0.5, 1),
+            _field("apply_final_crop", "Enable Final Cropping", "bool"),
+            _field("final_edge_crop_percent", "Final edge crop %", "float", 0.0, 25.0, 0.5, 1),
         ],
     ),
     (
         "Photutils BN",
         [
             _field("apply_photutils_bn", "Photutils background normalization", "bool"),
-            _field("photutils_bn_box_size", "Box size", "int", 1, 4096, 1),
-            _field("photutils_bn_filter_size", "Filter size", "int", 1, 100, 1),
-            _field("photutils_bn_sigma_clip", "Sigma clip", "float", 0.0, 10.0, 0.1, 2),
-            _field("photutils_bn_exclude_percentile", "Exclude percentile", "float", 0.0, 100.0, 0.5, 2),
+            _field("photutils_bn_box_size", "Box size", "int", 16, 1024, 16),
+            _field("photutils_bn_filter_size", "Filter size", "int", 1, 15, 2),
+            _field("photutils_bn_sigma_clip", "Sigma clip", "float", 1.0, 5.0, 0.1, 1),
+            _field("photutils_bn_exclude_percentile", "Exclude percentile", "float", 0.0, 100.0, 1.0, 1),
         ],
     ),
     (
         "Feathering / Low-weight Mask",
         [
             _field("apply_feathering", "Feathering", "bool"),
-            _field("feather_blur_px", "Feather blur (px)", "int", 0, 4096, 1),
+            _field("feather_blur_px", "Feather blur (px)", "int", 32, 512, 16),
             _field("apply_batch_feathering", "Batch feathering", "bool"),
             _field("apply_low_wht_mask", "Low-weight mask", "bool"),
-            _field("low_wht_percentile", "Low-weight percentile", "int", 0, 100, 1),
-            _field("low_wht_soften_px", "Low-weight soften (px)", "int", 0, 4096, 1),
+            _field("low_wht_percentile", "Low-weight percentile", "int", 1, 100, 1),
+            _field("low_wht_soften_px", "Low-weight soften (px)", "int", 32, 512, 16),
         ],
     ),
     ("Mosaic", None),
@@ -385,9 +390,9 @@ SECTION_TITLE_KEYS = {
     "Final Background Matching": "section_final_bg_matching",
 }
 
-# attr -> translation key for the *representative* Settings field labels we
-# localise (M9).  Remaining field labels stay English until a fuller mapping
-# lands; the key-parity test only guards the keys actually registered here.
+# attr -> translation key for Settings field labels (M9).  The Expert-tab
+# (BN / CB / cropping / Photutils / feathering / low-weight) labels were added
+# in M15 so every Expert-tab control localizes to FR/EN.
 LOCALIZED_SETTINGS_FIELD_KEYS = {
     "kappa": "field_kappa",
     "stack_norm_method": "field_normalize_method",
@@ -398,7 +403,33 @@ LOCALIZED_SETTINGS_FIELD_KEYS = {
     "weight_by_snr": "field_weight_by_snr",
     "weight_by_stars": "field_weight_by_stars",
     "drizzle_kernel": "field_drizzle_kernel",
+    "apply_bn": "field_apply_bn",
+    "bn_grid_size_str": "field_bn_grid_size",
+    "bn_perc_low": "field_bn_perc_low",
+    "bn_perc_high": "field_bn_perc_high",
+    "bn_std_factor": "field_bn_std_factor",
+    "bn_min_gain": "field_bn_min_gain",
+    "bn_max_gain": "field_bn_max_gain",
+    "apply_cb": "field_apply_cb",
+    "cb_border_size": "field_cb_border_size",
+    "cb_blur_radius": "field_cb_blur_radius",
+    "cb_min_b_factor": "field_cb_min_b_factor",
+    "cb_max_b_factor": "field_cb_max_b_factor",
     "apply_master_tile_crop": "field_master_tile_crop",
+    "master_tile_crop_percent": "field_master_tile_crop_percent",
+    "apply_final_crop": "field_apply_final_crop",
+    "final_edge_crop_percent": "field_final_edge_crop_percent",
+    "apply_photutils_bn": "field_apply_photutils_bn",
+    "photutils_bn_box_size": "field_photutils_bn_box_size",
+    "photutils_bn_filter_size": "field_photutils_bn_filter_size",
+    "photutils_bn_sigma_clip": "field_photutils_bn_sigma_clip",
+    "photutils_bn_exclude_percentile": "field_photutils_bn_exclude_percentile",
+    "apply_feathering": "field_apply_feathering",
+    "feather_blur_px": "field_feather_blur_px",
+    "apply_batch_feathering": "field_apply_batch_feathering",
+    "apply_low_wht_mask": "field_apply_low_wht_mask",
+    "low_wht_percentile": "field_low_wht_percentile",
+    "low_wht_soften_px": "field_low_wht_soften_px",
     "save_final_as_float32": "field_save_as_float32",
     "preserve_linear_output": "field_preserve_linear_output",
     "match_background_for_final": "field_match_bg",
@@ -422,6 +453,76 @@ MOSAIC_FIELD_KEYS = {
     "fastalign_dao_max_stars": "mosaic_fastalign_dao_max_stars",
     "mosaic_scale_factor": "mosaic_scale_factor",
 }
+
+# Expert-tab enable flags -> the sub-option widget attrs each flag gates
+# (mirrors the Tk ``_update_*_options_state`` / ``_update_master_tile_crop_state``
+# enabler logic: unchecked disables the gated widgets, checked re-enables them).
+EXPERT_ENABLER_GATES = {
+    "apply_bn": [
+        "bn_grid_size_str",
+        "bn_perc_low",
+        "bn_perc_high",
+        "bn_std_factor",
+        "bn_min_gain",
+        "bn_max_gain",
+    ],
+    "apply_cb": [
+        "cb_border_size",
+        "cb_blur_radius",
+        "cb_min_b_factor",
+        "cb_max_b_factor",
+    ],
+    "apply_final_crop": ["final_edge_crop_percent"],
+    "apply_master_tile_crop": ["master_tile_crop_percent"],
+    "apply_photutils_bn": [
+        "photutils_bn_box_size",
+        "photutils_bn_filter_size",
+        "photutils_bn_sigma_clip",
+        "photutils_bn_exclude_percentile",
+    ],
+    "apply_feathering": ["feather_blur_px"],
+    "apply_low_wht_mask": ["low_wht_percentile", "low_wht_soften_px"],
+}
+
+# The set of Expert-tab attributes the "Reset Expert Settings" button restores
+# to ``QtSettingsState`` defaults.  This mirrors the Tk ``_reset_expert_settings``
+# reset set (BN / CB / master-tile crop / final crop / feathering / batch
+# feathering / Photutils BN) and additionally resets the Low WHT Mask group
+# (``apply_low_wht_mask`` / ``low_wht_percentile`` / ``low_wht_soften_px``),
+# which the Tk button omits (a Tk oversight) — see the M15 checklist note.
+# ``apply_batch_feathering`` has no gated widgets but is still a reset target
+# (Tk parity).  Output-format fields (``save_final_as_float32`` /
+# ``preserve_linear_output``) are deliberately NOT reset, matching the Tk
+# button which leaves them untouched.
+EXPERT_RESET_ATTRS = [
+    "apply_bn",
+    "bn_grid_size_str",
+    "bn_perc_low",
+    "bn_perc_high",
+    "bn_std_factor",
+    "bn_min_gain",
+    "bn_max_gain",
+    "apply_cb",
+    "cb_border_size",
+    "cb_blur_radius",
+    "cb_min_b_factor",
+    "cb_max_b_factor",
+    "apply_master_tile_crop",
+    "master_tile_crop_percent",
+    "apply_final_crop",
+    "final_edge_crop_percent",
+    "apply_feathering",
+    "feather_blur_px",
+    "apply_batch_feathering",
+    "apply_low_wht_mask",
+    "low_wht_percentile",
+    "low_wht_soften_px",
+    "apply_photutils_bn",
+    "photutils_bn_box_size",
+    "photutils_bn_filter_size",
+    "photutils_bn_sigma_clip",
+    "photutils_bn_exclude_percentile",
+]
 
 
 class MainWindow(QMainWindow):
@@ -1128,12 +1229,25 @@ class MainWindow(QMainWindow):
         container = QWidget()
         outer = QVBoxLayout(container)
 
+        # Expert-tab warning banner (Tk ``warning_label`` parity): a red,
+        # italicised "Expert Settings!" label above the grouped sections.
+        self.expert_warning_label = QLabel(self._tr("expert_warning_text"))
+        self._bind_text(self.expert_warning_label, "expert_warning_text")
+        self.expert_warning_label.setStyleSheet("color: red; font-style: italic;")
+        outer.addWidget(self.expert_warning_label)
+
         for section_title, fields in SETTINGS_SECTIONS:
             if fields is None:
                 group = self._build_mosaic_section()
             else:
                 group = self._build_generic_section(SECTION_TITLE_KEYS[section_title], fields)
             outer.addWidget(group)
+
+        # Reset Expert Settings button (Tk ``reset_expert_button`` parity).
+        self.reset_expert_button = QPushButton(self._tr("reset_expert_button"))
+        self._bind_text(self.reset_expert_button, "reset_expert_button")
+        self.reset_expert_button.clicked.connect(self._reset_expert_settings)
+        outer.addWidget(self.reset_expert_button)
 
         outer.addStretch(1)
         scroll.setWidget(container)
@@ -1305,6 +1419,46 @@ class MainWindow(QMainWindow):
         for key, (kind, widget) in self._mosaic_widgets.items():
             ms[key] = self._widget_value(kind, widget)
 
+    def _update_expert_enabler_states(self, *_ignored) -> None:
+        """Enable/disable Expert-tab sub-options from their enabler flags (Tk parity).
+
+        Mirrors the Tk ``_update_*_options_state`` / ``_update_master_tile_crop_state``
+        methods: an unchecked enabler checkbox disables (greys out) its gated
+        sub-option widgets, and checking it re-enables them.  The enabler
+        widgets themselves are never disabled by this routine.
+        """
+        for enabler, gated in EXPERT_ENABLER_GATES.items():
+            enabler_widget = self._settings_widgets.get(enabler)
+            if enabler_widget is None:
+                continue
+            checked = bool(enabler_widget.isChecked())
+            for attr in gated:
+                widget = self._settings_widgets.get(attr)
+                if widget is not None:
+                    widget.setEnabled(checked)
+
+    def _reset_expert_settings(self) -> None:
+        """Reset every Expert-tab setting to its ``QtSettingsState`` default.
+
+        Mirrors the Tk ``reset_expert_settings`` button: it restores the BN /
+        CB / master-tile-crop / final-crop / feathering / batch-feathering /
+        low-weight-mask / Photutils-BN widgets to their model defaults and
+        re-applies the enabler gating.  This is display/settings-only: it
+        mutates GUI state (widgets + the shared model), never writes FITS/PNG,
+        never touches the engine or the settings file, and never touches
+        ``_preview_source``.
+        """
+        defaults = QtSettingsState.defaults()
+        for attr in EXPERT_RESET_ATTRS:
+            widget = self._settings_widgets.get(attr)
+            if widget is None:
+                continue
+            self._set_settings_widget_value(
+                self._settings_kinds[attr], widget, defaults[attr]
+            )
+        self._update_expert_enabler_states()
+        self._sync_state_from_controls()
+
     def _backend_notice_text(self) -> str:
         """Return the honest backend-mode notice for the current mode."""
         if self.backend_mode == "seestar":
@@ -1409,6 +1563,14 @@ class MainWindow(QMainWindow):
             self._connect_settings_widget(widget)
         for _kind, widget in self._mosaic_widgets.values():
             self._connect_settings_widget(widget)
+        # Expert-tab enabler flags gate their sub-option widgets (Tk parity).
+        for enabler in EXPERT_ENABLER_GATES:
+            enabler_widget = self._settings_widgets.get(enabler)
+            if enabler_widget is not None:
+                enabler_widget.stateChanged.connect(
+                    self._update_expert_enabler_states
+                )
+        self._update_expert_enabler_states()
 
     # ------------------------------------------------------------ controls
     def _on_start(self) -> None:
@@ -2551,6 +2713,7 @@ class MainWindow(QMainWindow):
         # normalised by ``QtSettingsState.from_dict``; ``_set_language`` is
         # idempotent for the default English path.
         self._set_language(getattr(state, "language", "en"))
+        self._update_expert_enabler_states()
         self._sync_state_from_controls()
         self._update_path_action_state()
 
