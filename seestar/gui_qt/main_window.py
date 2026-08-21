@@ -51,7 +51,7 @@ from dataclasses import replace
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImage
+from PySide6.QtGui import QColor, QDesktopServices, QImage, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -172,10 +172,72 @@ DEFAULT_BACKEND_MODE = "simulated"
 ANALYZER_WATCH_INTERVAL_MS = 1000
 
 # Left-panel tab labels (Tk ``control_notebook`` parity: Stacking / Expert /
-# Preview controls).
+# Preview controls, plus the Qt-only System tab — M25.5-C).
 TAB_STACKING = "Stacking"
 TAB_EXPERT = "Expert"
+TAB_SYSTEM = "System"
 TAB_PREVIEW_CONTROLS = "Preview controls"
+
+# Presentation theme modes (M25.5-C).  ``system`` follows the platform/style
+# palette (no custom palette is imposed), ``dark`` / ``light`` apply a small
+# Qt ``QPalette``.  Purely presentation — never read by the engine or Tk.
+THEME_MODES = ("system", "dark", "light")
+DEFAULT_THEME = "system"
+THEME_CHOICE_KEYS = {
+    "system": "theme_system",
+    "dark": "theme_dark",
+    "light": "theme_light",
+}
+
+
+def _dark_palette() -> QPalette:
+    """Return a compact dark ``QPalette`` (no stylesheet, presentation-only)."""
+    p = QPalette()
+    window = QColor(53, 53, 53)
+    base = QColor(35, 35, 35)
+    text = QColor(255, 255, 255)
+    disabled_text = QColor(127, 127, 127)
+    p.setColor(QPalette.ColorRole.Window, window)
+    p.setColor(QPalette.ColorRole.WindowText, text)
+    p.setColor(QPalette.ColorRole.Base, base)
+    p.setColor(QPalette.ColorRole.AlternateBase, window)
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(25, 25, 25))
+    p.setColor(QPalette.ColorRole.ToolTipText, text)
+    p.setColor(QPalette.ColorRole.Text, text)
+    p.setColor(QPalette.ColorRole.PlaceholderText, disabled_text)
+    p.setColor(QPalette.ColorRole.Button, window)
+    p.setColor(QPalette.ColorRole.ButtonText, text)
+    p.setColor(QPalette.ColorRole.BrightText, QColor(255, 80, 80))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+    return p
+
+
+def _light_palette() -> QPalette:
+    """Return a compact light ``QPalette`` (no stylesheet, presentation-only)."""
+    p = QPalette()
+    window = QColor(240, 240, 240)
+    base = QColor(255, 255, 255)
+    text = QColor(0, 0, 0)
+    disabled_text = QColor(127, 127, 127)
+    p.setColor(QPalette.ColorRole.Window, window)
+    p.setColor(QPalette.ColorRole.WindowText, text)
+    p.setColor(QPalette.ColorRole.Base, base)
+    p.setColor(QPalette.ColorRole.AlternateBase, QColor(233, 231, 227))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
+    p.setColor(QPalette.ColorRole.ToolTipText, text)
+    p.setColor(QPalette.ColorRole.Text, text)
+    p.setColor(QPalette.ColorRole.PlaceholderText, disabled_text)
+    p.setColor(QPalette.ColorRole.Button, window)
+    p.setColor(QPalette.ColorRole.ButtonText, text)
+    p.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+    return p
 
 # Minimal visible subset of stacking modes, drizzle modes and local-solver
 # preferences.  Values are the *backend* keys, not display labels.
@@ -675,6 +737,10 @@ class MainWindow(QMainWindow):
         # built.  ``_last_*`` / ``_preview_detail`` keep the raw value behind
         # the dynamic labels so a language switch can re-render them.
         self._language: str = localization.normalize_language("en")
+        # Presentation theme mode (M25.5-C).  ``system`` (default) follows the
+        # platform/style palette; a persisted ``theme`` field overrides it after
+        # controls are built (mirrors the language flow).
+        self._theme: str = DEFAULT_THEME
         self._text_bindings: List[tuple] = []
         self._last_elapsed_seconds: Optional[float] = 0.0
         self._last_remaining_text: str = UNKNOWN
@@ -739,6 +805,10 @@ class MainWindow(QMainWindow):
         self._wire_settings_controls()
         self._wire_controller()
         self._sync_state_from_controls()
+        # Apply the default presentation theme palette at construction so a
+        # bare window always starts from the platform/style palette (M25.5-C).
+        # A persisted ``theme`` is re-applied by ``_load_persisted_settings``.
+        self._apply_theme_palette(self._theme)
         if self._settings_path:
             self._load_persisted_settings()
 
@@ -760,26 +830,14 @@ class MainWindow(QMainWindow):
         container = QWidget()
         outer = QVBoxLayout(container)
 
-        # Language control (M9): user-triggered FR/EN switch.
-        lang_row = QHBoxLayout()
-        self.language_label = QLabel(self._tr("language_label"))
-        self._bind_text(self.language_label, "language_label")
-        lang_row.addWidget(self.language_label)
-        self.language_combo = QComboBox()
-        self.language_combo.addItems(
-            [localization.LANGUAGE_LABELS[code] for code in localization.SUPPORTED_LANGUAGES]
-        )
-        self.language_combo.setEnabled(True)
-        lang_row.addWidget(self.language_combo)
-        lang_row.addStretch(1)
-        outer.addLayout(lang_row)
-
         self.tabs = QTabWidget()
         self._stacking_tab = self._build_stacking_tab()
         self._settings_tab = self._build_settings_tab()
+        self._system_tab = self._build_system_tab()
         self._preview_controls_tab = self._build_preview_controls_tab()
         self.tabs.addTab(self._stacking_tab, self._tr("tab_stacking"))
         self.tabs.addTab(self._settings_tab, self._tr("tab_expert"))
+        self.tabs.addTab(self._system_tab, self._tr("tab_system"))
         self.tabs.addTab(self._preview_controls_tab, self._tr("tab_preview_controls"))
         outer.addWidget(self.tabs)
 
@@ -821,6 +879,52 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(container)
         return scroll
+
+    def _build_system_tab(self) -> QWidget:
+        """Build the "System" tab (M25.5-C): application/runtime settings.
+
+        Groups the Language switch (moved from the left-panel top), the
+        "Use GPU" toggle (moved from the Stacking tab — same ``use_gpu`` state
+        key and same M20 RunRequest/seam plumbing, only the widget location
+        changed) and the presentation-only Appearance theme selector
+        (System/Dark/Light).
+        """
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        form = QFormLayout()
+
+        # Language control (M9): user-triggered FR/EN switch.  Same widget and
+        # same ``_on_language_changed`` live re-translation wiring as before.
+        self.language_label = QLabel(self._tr("language_label"))
+        self._bind_text(self.language_label, "language_label")
+        self.language_combo = QComboBox()
+        self.language_combo.addItems(
+            [localization.LANGUAGE_LABELS[code] for code in localization.SUPPORTED_LANGUAGES]
+        )
+        self.language_combo.setEnabled(True)
+        form.addRow(self.language_label, self.language_combo)
+
+        # Use GPU toggle (moved from the Stacking tab).  Same QCheckBox, same
+        # ``drizzle_use_gpu`` label key, same ``use_gpu`` state key, same
+        # drizzle-gating and M20 seam.  No GPU status label: Zsss has no public
+        # GPU probe (and importing engine/ZeAlfie or adding a dependency is
+        # forbidden), so we show nothing instead of inventing one.
+        self.use_gpu_check = QCheckBox(self._tr("drizzle_use_gpu"))
+        self._bind_text(self.use_gpu_check, "drizzle_use_gpu")
+        self.use_gpu_check.setChecked(bool(self.settings_state.use_gpu))
+        form.addRow("", self.use_gpu_check)
+
+        # Appearance / theme (presentation-only).  Default System.
+        self.appearance_label = QLabel(self._tr("appearance_label"))
+        self._bind_text(self.appearance_label, "appearance_label")
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([self._tr(THEME_CHOICE_KEYS[m]) for m in THEME_MODES])
+        self.theme_combo.setCurrentIndex(THEME_MODES.index(DEFAULT_THEME))
+        form.addRow(self.appearance_label, self.theme_combo)
+
+        layout.addLayout(form)
+        layout.addStretch(1)
+        return panel
 
     def _build_stacking_tab(self) -> QWidget:
         panel = QWidget()
@@ -890,13 +994,6 @@ class MainWindow(QMainWindow):
         self.drizzle_group_spin.setSingleStep(10)
         self.drizzle_group_spin.setValue(50)
 
-        # Drizzle GPU toggle (Tk ``use_gpu_var``) — display/settings-only
-        # parity; gated by the Enable-drizzle flag (Tk parity) and not wired
-        # to ``build_backend_kwargs`` (backend E2E later).
-        self.use_gpu_check = QCheckBox(self._tr("drizzle_use_gpu"))
-        self._bind_text(self.use_gpu_check, "drizzle_use_gpu")
-        self.use_gpu_check.setChecked(bool(self.settings_state.use_gpu))
-
         # Drizzle policy hint (Tk ``drizzle_policy_hint``) — a grey, wrapped,
         # display-only note about the Standard / Large-dataset accumulator.
         self.drizzle_policy_hint = QLabel(self._tr("drizzle_policy_hint"))
@@ -943,7 +1040,6 @@ class MainWindow(QMainWindow):
         form.addRow("", self.drizzle_check)
         self._add_form_row(form, "drizzle_mode", self.drizzle_mode_combo)
         self._add_form_row(form, "drizzle_group_size", self.drizzle_group_spin)
-        form.addRow("", self.use_gpu_check)
         form.addRow("", self.drizzle_policy_hint)
         self._add_form_row(form, "local_solver", self.solver_combo)
         layout.addLayout(form)
@@ -1579,6 +1675,7 @@ class MainWindow(QMainWindow):
 
     def _wire_controls(self) -> None:
         self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         self.start_button.clicked.connect(self._on_start)
         self.stop_button.clicked.connect(self._on_stop)
         self.analyse_button.clicked.connect(self._on_analyse)
@@ -3099,6 +3196,7 @@ class MainWindow(QMainWindow):
         """
         state = self.settings_state
         state.language = self._language
+        state.theme = self._theme
         state.input_folder = self.input_edit.text()
         state.output_folder = self.output_edit.text()
         state.temp_folder = self.temp_edit.text()
@@ -3272,6 +3370,10 @@ class MainWindow(QMainWindow):
         # normalised by ``QtSettingsState.from_dict``; ``_set_language`` is
         # idempotent for the default English path.
         self._set_language(getattr(state, "language", "en"))
+        # Apply the persisted UI theme (M25.5-C).  ``state.theme`` is already
+        # normalised by ``QtSettingsState.from_dict``; ``_set_theme`` applies
+        # the palette immediately (and is idempotent for the default System).
+        self._set_theme(getattr(state, "theme", DEFAULT_THEME))
         self._update_expert_enabler_states()
         self._toggle_kappa_visibility()
         self._sync_state_from_controls()
@@ -3479,6 +3581,66 @@ class MainWindow(QMainWindow):
                 self.language_combo.blockSignals(False)
         self._refresh_language()
 
+    def _on_theme_changed(self, index: Optional[int] = None) -> None:
+        """Handle a user theme-combo change (M25.5-C)."""
+        if index is None or index < 0 or index >= len(THEME_MODES):
+            return
+        mode = THEME_MODES[index]
+        if mode != self._theme:
+            self._set_theme(mode)
+
+    def _set_theme(self, mode: Optional[str]) -> None:
+        """Activate ``mode`` (normalized), sync the combo/model and apply palette.
+
+        Presentation-only: never touches widget behaviour, layout logic, the
+        engine or the Tk GUI.  ``system`` restores the platform/style default
+        palette; ``dark`` / ``light`` apply a compact Qt ``QPalette``.
+        """
+        if mode not in THEME_MODES:
+            mode = DEFAULT_THEME
+        self._theme = mode
+        self.settings_state.theme = mode
+        idx = THEME_MODES.index(mode)
+        if self.theme_combo.currentIndex() != idx:
+            self.theme_combo.blockSignals(True)
+            try:
+                self.theme_combo.setCurrentIndex(idx)
+            finally:
+                self.theme_combo.blockSignals(False)
+        self._apply_theme_palette(mode)
+
+    def _apply_theme_palette(self, mode: str) -> None:
+        """Apply the palette for ``mode`` to the running application.
+
+        ``system`` re-reads the style's standard palette (i.e. follows the
+        platform), so toggling back from dark/light restores the original
+        platform look.  Never raises; a missing ``QApplication`` is a no-op.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+        if mode == "system":
+            app.setPalette(app.style().standardPalette())
+        elif mode == "dark":
+            app.setPalette(_dark_palette())
+        elif mode == "light":
+            app.setPalette(_light_palette())
+
+    @property
+    def theme_mode(self) -> str:
+        """The active presentation theme mode (``system``/``dark``/``light``)."""
+        return self._theme
+
+    def _refresh_theme_combo(self) -> None:
+        """Re-localize the theme combo items without changing the selection.
+
+        The combo order is fixed to :data:`THEME_MODES`, so each item is
+        re-labelled in place; ``setItemText`` never changes the current index
+        (and therefore never fires ``_on_theme_changed``).
+        """
+        for i, mode in enumerate(THEME_MODES):
+            self.theme_combo.setItemText(i, self._tr(THEME_CHOICE_KEYS[mode]))
+
     def _refresh_language(self) -> None:
         """Re-apply the active language to every localized visible string.
 
@@ -3495,11 +3657,13 @@ class MainWindow(QMainWindow):
         for tab_widget, key in (
             (self._stacking_tab, "tab_stacking"),
             (self._settings_tab, "tab_expert"),
+            (self._system_tab, "tab_system"),
             (self._preview_controls_tab, "tab_preview_controls"),
         ):
             idx = self.tabs.indexOf(tab_widget)
             if idx >= 0:
                 self.tabs.setTabText(idx, self._tr(key))
+        self._refresh_theme_combo()
         self._render_elapsed_label()
         self._render_remaining_label()
         self._render_preview_label()

@@ -78,6 +78,12 @@ def test_defaults_aligned_with_settings_manager():
     qt_defaults = QtSettingsState.defaults()
     assert qt_defaults, "QtSettingsState must expose defaults"
     for key, value in qt_defaults.items():
+        # ``theme`` is a Qt-shell presentation-only field (M25.5-C) with no Tk
+        # equivalent — the Tk ``SettingsManager`` has no theme, so there is no
+        # default to align against.  Exclude it from the backend-default
+        # alignment invariant (it is never read by the engine or Tk).
+        if key == "theme":
+            continue
         assert key in sm_defaults, f"QtSettingsState.{key} missing from SettingsManager"
         assert value == sm_defaults[key], (
             f"default mismatch for {key}: {value!r} != {sm_defaults[key]!r}"

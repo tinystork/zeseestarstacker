@@ -33,6 +33,13 @@ from typing import Any, Dict, List
 # so this module stays a pure, dependency-free stdlib model.
 _SUPPORTED_LANGUAGES = ("en", "fr")
 
+# Closed vocabulary for the presentation theme (M25.5-C).  Presentation-only:
+# the engine and the Tk GUI never read it.  An unknown persisted value degrades
+# to ``"system"`` so a corrupt settings file can never leave the shell in an
+# unrecognised theme.  Kept inline (not imported from ``gui_qt.main_window``)
+# so this module stays a pure, dependency-free stdlib model.
+_SUPPORTED_THEMES = ("system", "dark", "light")
+
 
 def _default_mosaic_settings() -> Dict[str, Any]:
     """Return a fresh copy of the default mosaic settings dict."""
@@ -278,6 +285,11 @@ class QtSettingsState:
     # --- UI language (M9; persisted via the M8 settings JSON round-trip) ---
     language: str = "en"
 
+    # --- UI theme (M25.5-C; presentation-only, persisted via the M8 round-trip)
+    # ``system`` follows the platform/style palette, ``dark`` / ``light`` apply
+    # a Qt palette.  Never read by the engine or the Tk GUI.
+    theme: str = "system"
+
     @classmethod
     def defaults(cls) -> Dict[str, Any]:
         """Return a fresh dict of field name -> default value.
@@ -317,6 +329,10 @@ class QtSettingsState:
         # else (unknown, corrupt, or non-string) falls back to English.
         if state.language not in _SUPPORTED_LANGUAGES:
             state.language = "en"
+        # Normalise the UI theme field: a supported mode is kept, anything else
+        # (unknown, corrupt, or non-string) falls back to the platform default.
+        if state.theme not in _SUPPORTED_THEMES:
+            state.theme = "system"
         return state
 
     def to_dict(self) -> Dict[str, Any]:

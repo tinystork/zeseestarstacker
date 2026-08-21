@@ -24,6 +24,7 @@ from seestar.gui_qt.main_window import (
     TAB_EXPERT,
     TAB_PREVIEW_CONTROLS,
     TAB_STACKING,
+    TAB_SYSTEM,
 )
 from seestar.gui_qt.run_bridge import RunRequest
 from seestar.gui_qt.settings_state import QtSettingsState
@@ -200,6 +201,7 @@ def test_tab_labels():
         labels = [win.tabs.tabText(i) for i in range(win.tabs.count())]
         assert TAB_STACKING in labels
         assert TAB_EXPERT in labels
+        assert TAB_SYSTEM in labels
         assert TAB_PREVIEW_CONTROLS in labels
     finally:
         win.shutdown()

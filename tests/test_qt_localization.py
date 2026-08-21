@@ -134,7 +134,8 @@ def test_language_combo_enabled_and_defaults_to_english(window):
 def test_switch_language_updates_code_and_representative_labels(window):
     assert window.tabs.tabText(0) == "Stacking"
     assert window.tabs.tabText(1) == "Expert"
-    assert window.tabs.tabText(2) == "Preview controls"
+    assert window.tabs.tabText(2) == "System"
+    assert window.tabs.tabText(3) == "Preview controls"
     assert window.start_button.text() == "Start"
     assert window.analyse_button.text() == "Analyse"
 
@@ -144,7 +145,8 @@ def test_switch_language_updates_code_and_representative_labels(window):
     assert window.settings_state.language == "fr"
     assert window.tabs.tabText(0) == "Empilement"
     assert window.tabs.tabText(1) == "Expert"
-    assert window.tabs.tabText(2) == "Contrôles d'aperçu"
+    assert window.tabs.tabText(2) == "Système"
+    assert window.tabs.tabText(3) == "Contrôles d'aperçu"
     assert window.start_button.text() == "Démarrer"
     assert window.stop_button.text() == "Arrêter"
     assert window.analyse_button.text() == "Analyser"

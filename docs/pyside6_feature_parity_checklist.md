@@ -92,7 +92,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 8.1 | FR / EN language switch | `[x]` | `language_combo` enabled + user-triggered; switching updates `_current_language_code()` (feeds ZeAnalyser `--lang`) and re-labels visible Qt strings in place (tabs, path/action buttons, progress/log labels, preview/View/Histogram/Actions group titles, section titles + representative Settings/Mosaic field labels) without rebuilding the window; English default, French ↔ English round-trip (M9) |
+| 8.1 | FR / EN language switch | `[x]` | `language_combo` enabled + user-triggered; switching updates `_current_language_code()` (feeds ZeAnalyser `--lang`) and re-labels visible Qt strings in place (tabs, path/action buttons, progress/log labels, preview/View/Histogram/Actions group titles, section titles + representative Settings/Mosaic field labels) without rebuilding the window; English default, French ↔ English round-trip (M9); moved into the new **System** tab in M25.5-C (same live re-translation + persistence) |
 | 8.2 | `Localization` key parity | `[x]` | Qt-local `seestar/gui_qt/localization.py` (pure stdlib) holds a compact FR/EN mapping for the Qt shell surface; a parity guard asserts every registered key has both `en` and `fr`, and missing-key/unknown-language fallback never raises. Delta: the full Tk `Localization` dictionaries are intentionally NOT imported (kept Qt/Tk/engine-free); the remaining ~unmapped Settings field labels stay English |
 
 ## 9. Settings / geometry persistence
@@ -102,6 +102,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 9.1 | Settings surface (full `QtSettingsState` mirror) | `[x]` | grouped, scrollable Settings tab |
 | 9.2 | Window geometry save/restore | `[x]` | `saveGeometry()` → base64 `window_geometry` JSON key; `restoreGeometry()` on load; offscreen round-trip tested (M8) |
 | 9.3 | Settings persistence (`seestar_settings.json` / XDG) | `[x]` | `settings_persistence` (pure stdlib) + `QtSettingsState.from_dict` coercion; platform-aware user-config default (Windows `%APPDATA%`, macOS `~/Library/Application Support`, Linux `$XDG_CONFIG_HOME`/`~/.config`, all under `ZeSeestarStacker/`) with non-destructive migration of a legacy CWD `seestar_settings.json` (M25.5-B), injectable path for tests (M8) |
+| 9.4 | Appearance theme (System / Dark / Light) | `[x]` | `QtSettingsState.theme` (default `system`, presentation-only) round-trips through the same M8 `to_dict`/`from_dict` surface; applied immediately via a compact Qt `QPalette` (no stylesheet); `system` re-reads the style's standard palette (M25.5-C) |
 
 ## 10. Last stack / resume
 
@@ -131,12 +132,12 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 13.1 | Left/right `QSplitter` (control panel + persistent preview/action panel) | `[x]` | `_build_central` + `_build_left_panel` / `_build_right_panel` |
-| 13.2 | Scrollable left panel (language + tabs + progress/log) | `[x]` | `QScrollArea` wrapping language combo, `QTabWidget`, progress, log |
-| 13.3 | Left tabs `Stacking` / `Expert` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs |
+| 13.2 | Scrollable left panel (tabs + progress/log) | `[x]` | `QScrollArea` wrapping `QTabWidget` (incl. the System tab, which now hosts the language combo), progress, log |
+| 13.3 | Left tabs `Stacking` / `Expert` / `System` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs; `System` is Qt-only (M25.5-C) and groups language + GPU + theme |
 | 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches; the right-panel histogram surface (`right_histogram_group` / `right_histogram_status` / `right_histogram_view`) is the *single* live histogram surface (the duplicated Preview-controls-tab histogram was removed in M14) |
 | 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
 | 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[x]` | zoom (Fit/100/200/50), resolution label (orig → displayed + zoom + rotation), rotate left/right; display-only, offscreen-tested |
-| 13.7 | Language switch (FR/EN) | `[x]` | placeholder combo is now enabled and participates in the FR/EN switch (M9) |
+| 13.7 | Language switch (FR/EN) | `[x]` | placeholder combo is now enabled and participates in the FR/EN switch (M9); moved into the System tab in M25.5-C |
 
 ---
 
@@ -257,7 +258,7 @@ label/default/range/enabler); `[ ]` = gap with a note.
 | 15.27 | "WHT Threshold %:" → `drizzle_wht_display_var`→`drizzle_wht_threshold_var` | 10–100 step 5 (%), `0.7` | `drizzle_wht_threshold` (Expert tab, float 0–1) | `[x]` (% vs float) |
 | 15.28 | "Kernel:" → `drizzle_kernel_var` | combo 7 kernels, `square` | `drizzle_kernel` combo (Expert tab) | `[x]` |
 | 15.29 | "Pixfrac:" → `drizzle_pixfrac_var` | 0.01–2.00 step 0.05, `1.0` | `drizzle_pixfrac` (Expert tab) | `[x]` |
-| 15.30 | "Use GPU" → `use_gpu_var` | bool, `False` | `use_gpu_check` (Stacking tab) | `[x]` display-only, `[x]` backend (M20) |
+| 15.30 | "Use GPU" → `use_gpu_var` | bool, `False` | `use_gpu_check` (System tab, M25.5-C — moved from Stacking; same `use_gpu` state key + M20 seam) | `[x]` display-only, `[x]` backend (M20) |
 | 15.31 | "Correct hot pixels" → `correct_hot_pixels` | bool, `True` | `correct_hot_pixels` checkbox (Expert tab) | `[x]` |
 | 15.32 | "Threshold:" → `hot_pixel_threshold` | 1–10 step 0.1, `3.0` | `hot_pixel_threshold` (Expert tab, 0.5–10) | `[x]` (range diff) |
 | 15.33 | "Neighborhood:" → `neighborhood_size` | 3–15 step 2, `5` | `neighborhood_size` (Expert tab, 1–20 step 1) | `[x]` (range/step diff) |
@@ -520,7 +521,7 @@ and the Qt backend adapter applies them to the stacker *instance*.
 
 | Setting | Qt control | Collected field | Consumed where | Test |
 |---|---|---|---|---|
-| Use GPU (drizzle) | `use_gpu_check` (Stacking tab) | `QtSettingsState.use_gpu` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.use_gpu` | `test_qt_run_settings_handoff_m20.py` |
+| Use GPU (drizzle) | `use_gpu_check` (System tab, M25.5-C — moved from Stacking) | `QtSettingsState.use_gpu` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.use_gpu` | `test_qt_run_settings_handoff_m20.py` / `test_qt_system_tab_m255c.py` |
 | HQ RAM limit (GB) | `max_hq_mem_spin` (Stacking tab) | `QtSettingsState.max_hq_mem_gb` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["max_hq_mem_gb"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.max_hq_mem` (bytes) | `test_qt_run_settings_handoff_m20.py` |
 
 Mechanics:
@@ -1121,3 +1122,34 @@ lot.)
   persistence/state/surface/validation/window/localization suites + the
   import-hygiene tests; `git diff --check` clean.  Remaining gap: Qt entry
   point (11.2).
+- **2026-08-21 — lot ZSSS-PYSIDE6-M25.5-C**: new **System** tab grouping the
+  application/runtime settings instead of scattering them in the scientific
+  workflow (checklist 8.1/13.3/13.7/15.30 moved-marked, 9.4 added).  The left
+  tab order is now `Stacking | Expert | System | Preview controls`; the
+  **Language** switch (FR/EN) moved from the left-panel top into System with
+  the same live re-translation (`_on_language_changed` → `_set_language` →
+  `_refresh_language`) and the same close-time persistence (no duplicate), and
+  the **Use GPU** toggle moved from the Stacking tab into System with the exact
+  same `use_gpu` state key and M20 RunRequest/seam plumbing (`QtSettingsState.
+  use_gpu` → `attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` →
+  `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.use_gpu`); the
+  drizzle-gating is preserved verbatim and no GPU science changed.  Added an
+  **Appearance** theme selector (System/Dark/Light, default System,
+  presentation-only): a compact `QPalette` (no giant stylesheet) is applied
+  immediately on change, `system` re-reads the style's standard palette
+  (`app.style().standardPalette()`, i.e. follows the platform), and the choice
+  persists via the new `QtSettingsState.theme` field (closed vocabulary
+  `system|dark|light`, unknown → `system`) through the standard M8
+  `to_dict`/`from_dict` round-trip.  **GPU status label decision**: Zsss has no
+  public/internal GPU probe (the Tk GUI shows none either), and importing the
+  engine/ZeAlfie or adding a runtime dependency is forbidden, so the label is
+  deliberately **omitted** rather than inventing a probe; a missing GPU can
+  never prevent Zsss from starting.  Tk and the engine are untouched; no
+  `zealfie` token anywhere in `gui_qt` (source scan + fresh-process hygiene).
+  Covered by `tests/test_qt_system_tab_m255c.py` (new, 13 tests) + the adjusted
+  `test_qt_localization.py` / `test_qt_shell.py` / `test_qt_stacking_m16.py` /
+  `test_qt_settings_state.py` (tab order + checkbox-count + `theme` alignment
+  exclusions) + the existing settings/state/surface/persistence/handoff/expert/
+  worker-lifecycle suites + the import-hygiene tests; `git diff --check` clean.
+  Remaining gaps: Qt entry point (11.2), resources/actions ergonomics, audit F,
+  M26.

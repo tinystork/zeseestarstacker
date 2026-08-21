@@ -294,5 +294,6 @@ def test_stacking_tab_has_no_reset_button(window):
     stacking_buttons = window._stacking_tab.findChildren(QPushButton)
     reset_texts = [b.text().lower() for b in stacking_buttons]
     assert not any("reset" in t for t in reset_texts)
-    # Sanity: the three Stacking-tab checkboxes are all present.
-    assert len(stacking_children) >= 3  # boring_check + drizzle_check + use_gpu_check
+    # Sanity: the two Stacking-tab checkboxes are present.  ``use_gpu_check``
+    # moved to the System tab in M25.5-C (same state key + seam).
+    assert len(stacking_children) >= 2  # boring_check + drizzle_check
