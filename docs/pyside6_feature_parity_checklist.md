@@ -101,7 +101,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 |---|---|---|---|
 | 9.1 | Settings surface (full `QtSettingsState` mirror) | `[x]` | grouped, scrollable Settings tab |
 | 9.2 | Window geometry save/restore | `[x]` | `saveGeometry()` → base64 `window_geometry` JSON key; `restoreGeometry()` on load; offscreen round-trip tested (M8) |
-| 9.3 | Settings persistence (`seestar_settings.json` / XDG) | `[x]` | `settings_persistence` (pure stdlib) + `QtSettingsState.from_dict` coercion; CWD `seestar_settings.json` default (Tk convention), injectable path for tests (M8) |
+| 9.3 | Settings persistence (`seestar_settings.json` / XDG) | `[x]` | `settings_persistence` (pure stdlib) + `QtSettingsState.from_dict` coercion; platform-aware user-config default (Windows `%APPDATA%`, macOS `~/Library/Application Support`, Linux `$XDG_CONFIG_HOME`/`~/.config`, all under `ZeSeestarStacker/`) with non-destructive migration of a legacy CWD `seestar_settings.json` (M25.5-B), injectable path for tests (M8) |
 
 ## 10. Last stack / resume
 
@@ -1095,3 +1095,29 @@ lot.)
   `test_qt_analyzer_launch.py` suite + shell/file-actions/localization/worker-
   lifecycle suites + the import-hygiene tests; `git diff --check` clean.
   Remaining gap: Qt entry point (11.2).
+- **2026-08-21 — lot ZSSS-QT-FP-M25.5-B**: settings independent of the CWD
+  (closes the 9.3 "CWD `seestar_settings.json`" convention for the official Qt
+  shell).  `settings_persistence.default_settings_path()` now resolves a
+  platform-aware per-user location — Windows `%APPDATA%/ZeSeestarStacker`,
+  macOS `~/Library/Application Support/ZeSeestarStacker`, Linux
+  `$XDG_CONFIG_HOME/ZeSeestarStacker` (default `~/.config`) — replicated with
+  pure `os`/`platform` (no engine import), so `cd /tmp && python -m
+  seestar.qt_main` finds the *same* settings as any other launch directory.
+  New `resolve_settings_path()` implements the documented priority: (1) the
+  platform file already exists → new wins (legacy untouched); (2) else a legacy
+  CWD `seestar_settings.json` exists → migrated non-destructively into the
+  platform location (directories created, legacy file **preserved**, whole JSON
+  document copied verbatim so recognised *and* unknown keys survive; filtering
+  stays a `QtSettingsState.from_dict` model concern); (3) else → the platform
+  path with the directory created eagerly (defaults until first save).  Failure
+  mode: an unwritable user-config location returns `None` (never raises), so
+  `run_qt_app` disables persistence and the GUI opens with code defaults.
+  `save_settings_json` now creates its parent directory and keeps returning
+  `False` (never raising) on any write failure.  Tk and the engine are
+  untouched; the Tk `SettingsManager` remains CWD-based, so this is a
+  deliberate improvement over Tk parity, not a parity change.  Covered by
+  `tests/test_qt_settings_cwd_m255b.py` (new, 14 tests) + the re-pointed
+  `test_qt_settings_persistence.py` default-path test + the existing
+  persistence/state/surface/validation/window/localization suites + the
+  import-hygiene tests; `git diff --check` clean.  Remaining gap: Qt entry
+  point (11.2).

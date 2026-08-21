@@ -8,7 +8,8 @@ engine:
 * missing file -> empty dict (code defaults), no crash,
 * corrupt JSON / non-mapping JSON -> empty dict, no crash,
 * deterministic output (sort_keys) so the file is stable for tests,
-* the default path matches the Tk ``seestar_settings.json`` CWD convention.
+* the default path is the platform-aware user-config location (M25.5-B), not
+  the CWD.
 
 ``QtSettingsState.from_dict`` coercion / unknown-key filtering is covered in
 ``test_qt_settings_state.py``; only the file layer is exercised here.
@@ -25,12 +26,16 @@ def _write(path, text):
     path.write_text(text, encoding="utf-8")
 
 
-def test_default_settings_path_matches_tk_convention(monkeypatch, tmp_path):
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    monkeypatch.chdir(workdir)
+def test_default_settings_path_is_platform_aware(monkeypatch, tmp_path):
+    # On Linux the platform branch honours $XDG_CONFIG_HOME (fallback ~/.config).
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert persistence.default_settings_path() == os.path.join(
-        str(workdir), persistence.DEFAULT_SETTINGS_FILENAME
+        str(xdg),
+        "ZeSeestarStacker",
+        persistence.DEFAULT_SETTINGS_FILENAME,
     )
     assert persistence.DEFAULT_SETTINGS_FILENAME == "seestar_settings.json"
 

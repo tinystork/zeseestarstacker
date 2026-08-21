@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from .backend_runner import BaseRunBackend
 from .main_window import DEFAULT_BACKEND_MODE, MainWindow
-from .settings_persistence import default_settings_path
+from .settings_persistence import resolve_settings_path
 
 
 def create_application(argv: Optional[Sequence[str]] = None) -> QApplication:
@@ -39,13 +39,15 @@ def run_qt_app(
     backend; the default is the safe simulated runner.  Returns the
     :meth:`QApplication.exec` exit code.  Closing the window ends the loop
     (Qt's ``quitOnLastWindowClosed`` default).  ``settings_path`` selects the
-    settings/geometry JSON file; ``None`` (the default) uses the CWD
-    ``seestar_settings.json`` (matching the Tk convention) so the non-default Qt
-    shell persists settings across launches.  Pass an explicit path to override.
+    settings/geometry JSON file; ``None`` (the default) resolves the
+    platform-aware user-config path (migrating a legacy CWD
+    ``seestar_settings.json`` non-destructively) so the non-default Qt shell
+    persists settings across launches regardless of the working directory.
+    Pass an explicit path to override.
     """
     app = create_application(argv)
     if settings_path is None:
-        settings_path = default_settings_path()
+        settings_path = resolve_settings_path()
     window = MainWindow(
         title=title,
         backend_factory=backend_factory,

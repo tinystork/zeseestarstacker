@@ -666,7 +666,8 @@ class MainWindow(QMainWindow):
         self._shutdown_wait_ms = shutdown_wait_ms
         # Settings/geometry persistence (M8).  ``None`` disables persistence so
         # bare ``MainWindow()`` constructions (tests) never touch a real file;
-        # the Qt entry point passes the CWD ``seestar_settings.json`` default.
+        # the Qt entry point passes the platform-aware user-config default
+        # (``settings_persistence.resolve_settings_path``, M25.5-B).
         self._settings_path = os.path.abspath(settings_path) if settings_path else None
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         # Qt-local localization state (M9).  English by default; a persisted
