@@ -90,14 +90,14 @@ def test_settings_tab_is_not_placeholder(window):
 
 def test_settings_surface_has_real_controls(window):
     assert isinstance(window._settings_widgets, dict)
-    assert len(window._settings_widgets) >= 60
+    assert len(window._settings_widgets) >= 59
     assert len(window._mosaic_widgets) == 14
 
 
 def test_representative_control_per_section(window):
     """At least one backend-relevant control exists for every section group."""
     expected = {
-        "reference_image_path": QLineEdit,       # Stacking / Paths
+        "kappa": QDoubleSpinBox,                  # Stacking / Paths
         "correct_hot_pixels": QCheckBox,          # Calibration / Hot Pixels
         "weight_by_snr": QCheckBox,               # Quality Weighting
         "drizzle_kernel": QComboBox,              # Drizzle Advanced

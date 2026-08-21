@@ -50,19 +50,19 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 4.1 | Browse input folder | `[ ]` | `input_edit` is a plain `QLineEdit`, no dialog |
-| 4.2 | Browse output folder | `[ ]` | |
-| 4.3 | Reference image path | `[x]` | Settings surface field only (no dialog) |
-| 4.4 | Temp folder | `[x]` | Stack tab field |
-| 4.5 | Last-stack / last output path persistence | `[ ]` | |
+| 4.1 | Browse input folder | `[x]` | `QFileDialog.getExistingDirectory` → `input_edit` |
+| 4.2 | Browse output folder | `[x]` | `QFileDialog.getExistingDirectory` → `output_edit` |
+| 4.3 | Reference image path | `[x]` | Stacking-tab field + FITS `QFileDialog.getOpenFileName` browse |
+| 4.4 | Temp folder | `[x]` | Stack tab field + browse |
+| 4.5 | Last-stack / last output path persistence | `[ ]` | browse + `last_stack_path` state field added; persistence later |
 
 ## 5. Inputs / folders / output / analyzer
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 5.1 | View inputs | `[ ]` | |
-| 5.2 | Add folder | `[ ]` | |
-| 5.3 | Open output | `[ ]` | |
+| 5.1 | View inputs | `[x]` | non-backend Qt dialog (main + staged folders) |
+| 5.2 | Add folder | `[x]` | stage + validate (input/output/subfolder-of-output) |
+| 5.3 | Open output | `[x]` | `QDesktopServices.openUrl` (user-triggered) |
 | 5.4 | Analyze (ZeAnalyser launch) | `[ ]` | |
 
 ## 6. Preview
@@ -129,7 +129,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 13.2 | Scrollable left panel (language + tabs + progress/log) | `[x]` | `QScrollArea` wrapping language combo, `QTabWidget`, progress, log |
 | 13.3 | Left tabs `Stacking` / `Expert` / `Preview controls` | `[x]` | replaces former `Stack`/`Settings`/`Preview`/`Log` top-level tabs |
 | 13.4 | Persistent right panel (preview + metadata + view + histogram + actions) | `[x]` | stays visible across left-tab switches |
-| 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop functional; the rest are disabled topology stubs |
+| 13.5 | Action buttons Start / Stop / Analyse / Solver / View Inputs / Add Folder / Open Output | `[x]` | Start/Stop/Solver/View Inputs/Add Folder/Open Output functional; Analyse disabled |
 | 13.6 | Zoom / resolution / rotation controls (real interactivity) | `[ ]` | basic disabled placeholders only |
 | 13.7 | Language switch (FR/EN) | `[ ]` | placeholder combo (disabled) |
 
@@ -150,3 +150,10 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   public `zesolver_ui_state(check_zesolver_readiness())` contract, in-dialog
   ASTAP-path validation, OK→`MainWindow` state round-trip, lazy engine-free
   import). Solver *persistence* via `solver_config` (item 3.6) remains `[ ]`.
+- **2026-08-21 — lot ZSSS-QT-FP-M3**: delivered items 4.1–4.4, 5.1–5.3
+  (browse input/output/temp/reference/last-stack via `QFileDialog`, reference +
+  last-stack controls surfaced on the Stacking tab, View Inputs non-backend
+  dialog, Open Output via `QDesktopServices.openUrl`, Add Folder staging +
+  validation with `initial_additional_folders` passed through `_on_start`).
+  Last-stack persistence (4.5), full resume semantics (10.1), Analyze external
+  launch (5.4) and full settings persistence (9.3) remain `[ ]`.

@@ -39,16 +39,19 @@ explicit opt-in only.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QGridLayout,
@@ -112,6 +115,9 @@ STACKING_MODES = [
 DRIZZLE_MODES = ["Final", "Incremental"]
 SOLVER_PREFERENCES = ["none", "astap", "zesolver"]
 
+# File-dialog filter for reference / last-stack images (Tk parity).
+FITS_FILE_FILTER = "FITS files (*.fit *.fits)"
+
 # Choice vocabularies shared with the Tk GUI / backend (backend keys, not
 # display labels).  These are the "known choices" for combo-box fields in the
 # Settings surface; everything else is a plain scalar/string widget.
@@ -168,7 +174,6 @@ SETTINGS_SECTIONS = [
     (
         "Stacking / Paths",
         [
-            _field("reference_image_path", "Reference image path", "str"),
             _field("kappa", "Kappa", "float", 1.0, 5.0, 0.1, 2),
             _field("stack_kappa_low", "Kappa low", "float", 0.0, 10.0, 0.1, 2),
             _field("stack_kappa_high", "Kappa high", "float", 0.0, 10.0, 0.1, 2),
@@ -345,6 +350,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         self._running: bool = False
         self._shutdown_called: bool = False
+        # Additional folders staged by the user before a run (Tk
+        # ``additional_folders_to_process`` parity).  Passed as a copied list
+        # into the RunRequest on Start.
+        self._additional_folders: List[str] = []
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
 
@@ -415,6 +424,14 @@ class MainWindow(QMainWindow):
         self.output_edit = QLineEdit()
         self.temp_edit = QLineEdit()
         self.output_filename_edit = QLineEdit()
+        self.reference_edit = QLineEdit()
+        self.last_stack_edit = QLineEdit()
+
+        self.browse_input_button = QPushButton("Browse...")
+        self.browse_output_button = QPushButton("Browse...")
+        self.browse_temp_button = QPushButton("Browse...")
+        self.browse_reference_button = QPushButton("Browse...")
+        self.browse_last_stack_button = QPushButton("…")
 
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(-1, 1_000_000)
@@ -451,10 +468,27 @@ class MainWindow(QMainWindow):
         self.solver_combo.setCurrentText("none")
 
         form = QFormLayout()
-        form.addRow("Input folder", self.input_edit)
-        form.addRow("Output folder", self.output_edit)
-        form.addRow("Temp folder", self.temp_edit)
+        form.addRow(
+            "Input folder",
+            self._path_row(self.input_edit, self.browse_input_button),
+        )
+        form.addRow(
+            "Output folder",
+            self._path_row(self.output_edit, self.browse_output_button),
+        )
+        form.addRow(
+            "Temp folder",
+            self._path_row(self.temp_edit, self.browse_temp_button),
+        )
         form.addRow("Output filename", self.output_filename_edit)
+        form.addRow(
+            "Reference image",
+            self._path_row(self.reference_edit, self.browse_reference_button),
+        )
+        form.addRow(
+            "Last stack",
+            self._path_row(self.last_stack_edit, self.browse_last_stack_button),
+        )
         form.addRow("Batch size", self.batch_spin)
         form.addRow("Stacking mode", self.stacking_mode_combo)
         form.addRow("Final combine", self.final_combine_combo)
@@ -466,6 +500,15 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
 
         return panel
+
+    def _path_row(self, edit: QLineEdit, button: QPushButton) -> QWidget:
+        """Build a horizontal row with a line edit and a Browse button."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(edit, 1)
+        h.addWidget(button)
+        return row
 
     def _build_preview_controls_tab(self) -> QWidget:
         """Left-panel "Preview controls" tab (topology placeholder).
@@ -536,15 +579,11 @@ class MainWindow(QMainWindow):
         self.view_inputs_button = QPushButton("View Inputs")
         self.add_folder_button = QPushButton("Add Folder")
         self.open_output_button = QPushButton("Open Output")
-        # Stub action buttons: present for topology, no external action yet.
-        # (Solver is functional now; it is wired in _wire_controls.)
-        for stub in (
-            self.analyse_button,
-            self.view_inputs_button,
-            self.add_folder_button,
-            self.open_output_button,
-        ):
-            stub.setEnabled(False)
+        # Analyse is the only remaining topology stub (ZeAnalyser launch is a
+        # later milestone); View Inputs / Add Folder / Open Output are wired to
+        # path actions and their enablement is driven by
+        # ``_update_path_action_state``.
+        self.analyse_button.setEnabled(False)
         actions_layout.addWidget(self.start_button, 0, 0)
         actions_layout.addWidget(self.stop_button, 0, 1)
         actions_layout.addWidget(self.analyse_button, 1, 0)
@@ -765,6 +804,9 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self._on_start)
         self.stop_button.clicked.connect(self._on_stop)
         self.solver_button.clicked.connect(self._on_solver)
+        self.view_inputs_button.clicked.connect(self._show_input_folder_list)
+        self.add_folder_button.clicked.connect(self._add_folder)
+        self.open_output_button.clicked.connect(self._open_output_folder)
         self._update_run_state()
 
     def _wire_controller(self) -> None:
@@ -788,6 +830,13 @@ class MainWindow(QMainWindow):
         self.output_edit.textChanged.connect(self._sync_state_from_controls)
         self.temp_edit.textChanged.connect(self._sync_state_from_controls)
         self.output_filename_edit.textChanged.connect(self._sync_state_from_controls)
+        self.reference_edit.textChanged.connect(self._sync_state_from_controls)
+        self.last_stack_edit.textChanged.connect(self._sync_state_from_controls)
+        self.browse_input_button.clicked.connect(self._browse_input)
+        self.browse_output_button.clicked.connect(self._browse_output)
+        self.browse_temp_button.clicked.connect(self._browse_temp)
+        self.browse_reference_button.clicked.connect(self._browse_reference)
+        self.browse_last_stack_button.clicked.connect(self._browse_last_stack)
         self.batch_spin.valueChanged.connect(self._sync_state_from_controls)
         self.stacking_mode_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
@@ -828,7 +877,9 @@ class MainWindow(QMainWindow):
         if errors:
             self._on_preflight_failed(errors)
             return
-        request = self.build_run_request()
+        request = self.build_run_request(
+            initial_additional_folders=list(self._additional_folders)
+        )
         backend = self.resolve_backend()
         if backend is None:
             self.controller.start(request)
@@ -898,6 +949,182 @@ class MainWindow(QMainWindow):
             else:
                 widget.setValue(int(value))
 
+    # ------------------------------------------------------ path / file actions
+    def _browse_input(self) -> None:
+        """Select the input folder via a directory dialog (Tk parity)."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Input Folder", self.input_edit.text().strip()
+        )
+        if folder:
+            self.input_edit.setText(os.path.abspath(folder))
+
+    def _browse_output(self) -> None:
+        """Select the output folder via a directory dialog (Tk parity)."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder", self.output_edit.text().strip()
+        )
+        if folder:
+            self.output_edit.setText(os.path.abspath(folder))
+
+    def _browse_temp(self) -> None:
+        """Select the temporary folder via a directory dialog (Tk parity)."""
+        start_dir = self.temp_edit.text().strip() or self.output_edit.text().strip()
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Temporary Folder", start_dir
+        )
+        if folder:
+            self.temp_edit.setText(os.path.abspath(folder))
+
+    def _reference_start_dir(self) -> str:
+        """Return a sensible start directory for the reference file dialog."""
+        current = self.reference_edit.text().strip()
+        if current and os.path.isfile(current):
+            return os.path.dirname(current)
+        input_folder = self.input_edit.text().strip()
+        if input_folder and os.path.isdir(input_folder):
+            return input_folder
+        return "."
+
+    def _browse_reference(self) -> None:
+        """Select the reference image via a FITS file dialog (Tk parity)."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Reference Image (Optional)",
+            self._reference_start_dir(),
+            FITS_FILE_FILTER,
+        )
+        if filepath:
+            self.reference_edit.setText(os.path.abspath(filepath))
+
+    def _browse_last_stack(self) -> None:
+        """Select the previous stack via a FITS file dialog (Tk parity).
+
+        When the output folder is empty, it is pre-filled from the selected
+        file's parent directory — mirroring Tk ``_on_last_stack_changed``.
+        """
+        start_dir = (
+            self.output_edit.text().strip()
+            or self.last_stack_edit.text().strip()
+            or "."
+        )
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select previous stack", start_dir, FITS_FILE_FILTER
+        )
+        if filepath:
+            abs_path = os.path.abspath(filepath)
+            self.last_stack_edit.setText(abs_path)
+            if not self.output_edit.text().strip():
+                self.output_edit.setText(os.path.dirname(abs_path))
+
+    def _input_folder_summary_text(self) -> str:
+        """Return the human-readable input-folder summary (main + staged)."""
+        main_folder = self.input_edit.text().strip()
+        if not main_folder or not os.path.isdir(main_folder):
+            return ""
+        lines = [os.path.abspath(main_folder)]
+        for folder in self._additional_folders:
+            abs_path = os.path.abspath(folder)
+            if abs_path not in lines:
+                lines.append(abs_path)
+        return "\n".join(lines)
+
+    def _build_input_folder_dialog(self) -> QDialog:
+        """Build the non-backend View Inputs dialog (read-only folder list)."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Input Folders")
+        layout = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setText(self._input_folder_summary_text())
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return dialog
+
+    def _show_input_folder_list(self) -> None:
+        """Show a non-backend dialog listing main + staged input folders."""
+        if not self._input_folder_summary_text():
+            message = "No valid input folder set."
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+        self._build_input_folder_dialog().exec()
+
+    def _open_output_folder(self) -> None:
+        """Open the output folder via the desktop service (safe, user-triggered).
+
+        Never raises and never crashes on a missing/invalid path: it logs a
+        clear message and leaves the UI idle.
+        """
+        output_folder = self.output_edit.text().strip()
+        if not output_folder:
+            message = "Open Output: no output folder set."
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+        if not os.path.isdir(output_folder):
+            message = f"Open Output: output folder does not exist: {output_folder}"
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(output_folder))
+        self.log(f"Opening output folder: {output_folder}")
+
+    def _validate_additional_folder(self, abs_folder: str) -> Optional[str]:
+        """Return an error message, or ``None`` when the folder is acceptable.
+
+        Rejects the main input folder, the output folder, and any subfolder of
+        the output folder (Tk parity).  Missing paths are rejected upstream.
+        """
+        if not os.path.isdir(abs_folder):
+            return "Folder not found."
+        input_text = self.input_edit.text().strip()
+        output_text = self.output_edit.text().strip()
+        abs_input = os.path.abspath(input_text) if input_text else None
+        abs_output = os.path.abspath(output_text) if output_text else None
+        if abs_input and os.path.normcase(abs_folder) == os.path.normcase(abs_input):
+            return "Input folder cannot be added."
+        if abs_output:
+            if os.path.normcase(abs_folder) == os.path.normcase(abs_output):
+                return "Output folder cannot be added."
+            if os.path.normcase(abs_folder).startswith(
+                os.path.normcase(abs_output) + os.sep
+            ):
+                return "Cannot add subfolder of output folder."
+        return None
+
+    def _add_folder(self) -> None:
+        """Stage an additional folder for the next run (Tk ``add_folder`` parity).
+
+        Live-add during an active run is not exposed by ``RunController``, so
+        the action is disabled while running; this guard is defensive.
+        """
+        if self._running:
+            message = "Add Folder: live add is not implemented; stop the run first."
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Additional Images Folder", self.input_edit.text().strip()
+        )
+        if not folder:
+            return
+        abs_folder = os.path.abspath(folder)
+        error = self._validate_additional_folder(abs_folder)
+        if error:
+            self.log(f"Add Folder rejected: {error}")
+            self.statusBar().showMessage(error)
+            return
+        if abs_folder not in self._additional_folders:
+            self._additional_folders.append(abs_folder)
+            self.log(f"Folder added for next run: {os.path.basename(abs_folder)}")
+            self.statusBar().showMessage(f"Added folder: {abs_folder}")
+        else:
+            message = "Folder already added to the list."
+            self.log(message)
+            self.statusBar().showMessage(message)
+
     # ------------------------------------------------- lifecycle callbacks
     def _on_run_started(self) -> None:
         self._running = True
@@ -956,6 +1183,23 @@ class MainWindow(QMainWindow):
     def _update_run_state(self) -> None:
         self.start_button.setEnabled(not self._running)
         self.stop_button.setEnabled(self._running)
+        self._update_path_action_state()
+
+    def _update_path_action_state(self) -> None:
+        """Enable/disable path actions based on current paths and run state.
+
+        * View Inputs  — enabled when the input folder is an existing directory,
+        * Open Output  — enabled when the output folder is an existing directory,
+        * Add Folder   — enabled pre-run when the input folder is valid; disabled
+          while a run is active (live-add is not exposed by ``RunController``).
+        """
+        input_text = self.input_edit.text().strip()
+        output_text = self.output_edit.text().strip()
+        input_valid = bool(input_text) and os.path.isdir(input_text)
+        output_valid = bool(output_text) and os.path.isdir(output_text)
+        self.view_inputs_button.setEnabled(input_valid)
+        self.open_output_button.setEnabled(output_valid)
+        self.add_folder_button.setEnabled(input_valid and not self._running)
 
     # ------------------------------------------------- settings collection
     def _sync_state_from_controls(self, *_ignored) -> None:
@@ -970,6 +1214,8 @@ class MainWindow(QMainWindow):
         state.output_folder = self.output_edit.text()
         state.temp_folder = self.temp_edit.text()
         state.output_filename = self.output_filename_edit.text()
+        state.reference_image_path = self.reference_edit.text()
+        state.last_stack_path = self.last_stack_edit.text()
         state.batch_size = self.batch_spin.value()
         state.stacking_mode = self.stacking_mode_combo.currentText()
         state.use_drizzle = self.drizzle_check.isChecked()
@@ -993,6 +1239,9 @@ class MainWindow(QMainWindow):
 
         # Mosaic nested dict.
         self._sync_mosaic_settings(state)
+
+        # Path action buttons react to path edits immediately (Tk parity).
+        self._update_path_action_state()
 
     def _final_combine_key(self) -> str:
         """Return the current final-combine backend key from the combo label."""

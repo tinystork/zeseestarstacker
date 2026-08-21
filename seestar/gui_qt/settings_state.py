@@ -64,6 +64,9 @@ class QtSettingsState:
     temp_folder: str = ""
     output_filename: str = ""
     reference_image_path: str = ""
+    # Last completed stack path (GUI parity only; the backend does not read it
+    # yet — full resume semantics are a later milestone).
+    last_stack_path: str = ""
 
     # --- Stacking method ---
     stacking_mode: str = "kappa-sigma"
