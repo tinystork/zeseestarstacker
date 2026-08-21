@@ -175,3 +175,125 @@ def test_compute_align_on_disk_semantics():
     assert compute_align_on_disk(1) is True
     assert compute_align_on_disk(2) is True
     assert compute_align_on_disk("garbage") is False
+
+
+# --------------------------------------------------------------------------
+# M8: to_dict / from_dict persistence round-trip (pure, no Qt)
+# --------------------------------------------------------------------------
+def test_to_dict_contains_persistence_paths():
+    state = _make_state()
+    state.last_stack_path = "/outputs/last.fit"
+    state.input_folder = "/inputs"
+    state.output_folder = "/outputs"
+    state.temp_folder = "/tmp"
+    state.reference_image_path = "/inputs/ref.fit"
+    d = state.to_dict()
+    assert d["last_stack_path"] == "/outputs/last.fit"
+    assert d["input_folder"] == "/inputs"
+    assert d["output_folder"] == "/outputs"
+    assert d["temp_folder"] == "/tmp"
+    assert d["reference_image_path"] == "/inputs/ref.fit"
+
+
+def test_from_dict_round_trip_representative_fields():
+    state = _make_state()
+    state.last_stack_path = "/outputs/last.fit"
+    state.input_folder = "/inputs"
+    state.output_folder = "/outputs"
+    state.temp_folder = "/tmp/stack"
+    state.reference_image_path = "/inputs/ref.fit"
+    state.output_filename = "stack.fits"
+    state.batch_size = 4
+    state.stacking_mode = "median"
+    state.stack_final_combine = "reproject"
+    state.reproject_between_batches = True
+    state.reproject_coadd_final = False
+    state.use_drizzle = True
+    state.drizzle_mode = "Incremental"
+    state.drizzle_group_size = 77
+    state.local_solver_preference = "zesolver"
+    state.astap_search_radius = 12.5
+    state.order_file_list = ["a.fit", "b.fit"]
+    mosaic = dict(QtSettingsState.defaults()["mosaic_settings"])
+    mosaic["kernel"] = "gaussian"
+    mosaic["mosaic_scale_factor"] = 3
+    state.mosaic_settings = mosaic
+    state.match_background_for_final = True
+
+    restored = QtSettingsState.from_dict(state.to_dict())
+    assert restored.to_dict() == state.to_dict()
+
+
+def test_from_dict_ignores_unknown_keys():
+    state = QtSettingsState.from_dict(
+        {
+            "batch_size": 3,
+            "totally_unknown_key": "ignored",
+            "another_unknown": 42,
+        }
+    )
+    assert state.batch_size == 3
+    # Unknown keys never become attributes.
+    assert not hasattr(state, "totally_unknown_key")
+    assert not hasattr(state, "another_unknown")
+    # Missing known keys fall back to defaults.
+    assert state.kappa == 2.5
+    assert state.input_folder == ""
+
+
+def test_from_dict_fills_missing_keys_from_defaults():
+    state = QtSettingsState.from_dict({"batch_size": 7})
+    defaults = QtSettingsState.defaults()
+    assert state.batch_size == 7
+    for key, value in defaults.items():
+        if key != "batch_size":
+            assert getattr(state, key) == value, key
+
+
+def test_from_dict_coerces_or_falls_back():
+    # Wrong type for an int field -> falls back to default.
+    s1 = QtSettingsState.from_dict({"batch_size": "not-a-number"})
+    assert s1.batch_size == 0
+
+    # Numeric string coerced for int / float.
+    s2 = QtSettingsState.from_dict({"batch_size": "3", "kappa": "4.25"})
+    assert s2.batch_size == 3
+    assert s2.kappa == 4.25
+
+    # bool stays bool; 0/1 ints coerce to bool.
+    s3 = QtSettingsState.from_dict({"correct_hot_pixels": False})
+    assert s3.correct_hot_pixels is False
+    s4 = QtSettingsState.from_dict({"correct_hot_pixels": 0})
+    assert s4.correct_hot_pixels is False
+
+    # match_background_for_final None-default accepts canonical strings.
+    s5 = QtSettingsState.from_dict({"match_background_for_final": "true"})
+    assert s5.match_background_for_final is True
+    s6 = QtSettingsState.from_dict({"match_background_for_final": None})
+    assert s6.match_background_for_final is None
+
+    # A non-list for a list field falls back to a fresh default list.
+    s7 = QtSettingsState.from_dict({"order_file_list": "not-a-list"})
+    assert s7.order_file_list == []
+
+    # A dict field merges onto the default so missing sub-keys are filled, and
+    # known nested values are coerced/fallbacked too.
+    s8 = QtSettingsState.from_dict(
+        {"mosaic_settings": {"kernel": "gaussian", "mosaic_scale_factor": "bad"}}
+    )
+    assert s8.mosaic_settings["kernel"] == "gaussian"
+    assert s8.mosaic_settings["alignment_mode"] == "local_fast_fallback"
+    assert s8.mosaic_settings["mosaic_scale_factor"] == 1
+
+
+def test_from_dict_non_dict_returns_defaults():
+    for bad in (None, [], "hello", 42):
+        state = QtSettingsState.from_dict(bad)
+        assert state.to_dict() == QtSettingsState.defaults()
+
+
+def test_from_dict_mutable_defaults_are_independent():
+    a = QtSettingsState.from_dict({"order_file_list": ["x"]})
+    b = QtSettingsState.from_dict({})
+    a.order_file_list.append("y")
+    assert b.order_file_list == []

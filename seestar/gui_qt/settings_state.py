@@ -47,6 +47,79 @@ def _default_mosaic_settings() -> Dict[str, Any]:
     }
 
 
+def _coerce_value(raw: Any, default: Any) -> Any:
+    """Coerce ``raw`` toward the type/shape of ``default``; fall back to it.
+
+    This is the defensive, pure-stdlib coercion used by
+    :meth:`QtSettingsState.from_dict` so a partially-corrupt persisted value
+    for a known field degrades to the code default instead of raising.  The
+    rules are deliberately conservative:
+
+    * ``None`` default (``match_background_for_final``): accept ``None``, a
+      real ``bool``, or the canonical ``"true"``/``"false"`` string spellings.
+    * ``bool`` default: accept a real ``bool`` or the ints ``0``/``1``.
+    * ``int``/``float`` defaults: accept a number (or numeric string) that is
+      not a ``bool``; ``int`` goes through ``float`` so ``"3.0"`` works.
+    * ``str`` default: accept a ``str`` only (``None`` -> default).
+    * ``list``/``dict`` defaults: accept the matching container; ``dict`` is
+      merged onto a default copy so missing sub-keys are filled.
+    """
+    if default is None:
+        if raw is None:
+            return None
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            spelling = raw.strip().lower()
+            if spelling in ("true", "1"):
+                return True
+            if spelling in ("false", "0"):
+                return False
+        return None
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)) and raw in (0, 1):
+            return bool(raw)
+        return default
+    if isinstance(default, int):
+        if isinstance(raw, bool):
+            return default
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
+        if isinstance(raw, bool):
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, str):
+        if isinstance(raw, str):
+            return raw
+        return default
+    if isinstance(default, list):
+        if isinstance(raw, list):
+            return list(raw)
+        return list(default)
+    if isinstance(default, dict):
+        if isinstance(raw, dict):
+            merged = dict(default)
+            for key, value in raw.items():
+                if key in default:
+                    merged[key] = _coerce_value(value, default[key])
+                else:
+                    # Preserve unknown nested keys for forward compatibility,
+                    # but never let a bad value for a known nested key crash
+                    # widget application later.
+                    merged[key] = value
+            return merged
+        return dict(default)
+    return default
+
+
 @dataclass
 class QtSettingsState:
     """Plain, mutable settings model for the PySide6 shell.
@@ -181,6 +254,26 @@ class QtSettingsState:
             else:
                 result[f.name] = None
         return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "QtSettingsState":
+        """Build a state from a persisted dict, ignoring unknown keys.
+
+        Every known field present in ``data`` is coerced toward its default
+        type via :func:`_coerce_value`; fields absent from ``data`` (or with an
+        uncoercible value) fall back to the dataclass default.  Unknown keys
+        are ignored so a future/legacy settings file never raises.  A non-dict
+        ``data`` yields a pure default instance.
+        """
+        state = cls()
+        if not isinstance(data, dict):
+            return state
+        defaults = cls.defaults()
+        for f in dataclasses.fields(cls):
+            name = f.name
+            if name in data:
+                setattr(state, name, _coerce_value(data[name], defaults[name]))
+        return state
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a shallow snapshot of the current state as a dict."""

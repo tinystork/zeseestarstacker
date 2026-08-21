@@ -42,12 +42,13 @@ explicit opt-in only.
 
 from __future__ import annotations
 
+import base64
 import os
 import time
 from dataclasses import replace
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QByteArray, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -76,7 +77,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import analyzer_launch, boring_route
+from . import analyzer_launch, boring_route, settings_persistence
 from .backend_runner import (
     BackendPreviewPayload,
     BaseRunBackend,
@@ -347,6 +348,7 @@ class MainWindow(QMainWindow):
         analyzer_launcher: Optional[Callable[[str, str, str], bool]] = None,
         analyzer_command_file_maker: Optional[Callable[[], str]] = None,
         shutdown_wait_ms: int = 5000,
+        settings_path: Optional[str] = None,
     ):
         super().__init__(parent)
         if backend_mode not in BACKEND_MODES:
@@ -401,6 +403,10 @@ class MainWindow(QMainWindow):
         # ``_check_analyzer_command_file``.
         self._analyzer_command_file_path: Optional[str] = None
         self._shutdown_wait_ms = shutdown_wait_ms
+        # Settings/geometry persistence (M8).  ``None`` disables persistence so
+        # bare ``MainWindow()`` constructions (tests) never touch a real file;
+        # the Qt entry point passes the CWD ``seestar_settings.json`` default.
+        self._settings_path = os.path.abspath(settings_path) if settings_path else None
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         self._running: bool = False
         # True while the boring (single-batch CSV) subprocess route is active.
@@ -427,6 +433,8 @@ class MainWindow(QMainWindow):
         self._wire_settings_controls()
         self._wire_controller()
         self._sync_state_from_controls()
+        if self._settings_path:
+            self._load_persisted_settings()
 
     # ------------------------------------------------------------------ UI
     def _build_central(self) -> None:
@@ -1693,6 +1701,146 @@ class MainWindow(QMainWindow):
         self._sync_state_from_controls()
         return self.settings_state
 
+    # -------------------------------------------------- settings persistence
+    def _set_settings_widget_value(self, kind: str, widget, value) -> None:
+        """Write a plain Python value into a settings widget by kind.
+
+        The inverse of :meth:`_widget_value`; used to apply a persisted settings
+        model to the Settings-tab / Mosaic widgets.
+        """
+        if kind == "bool":
+            widget.setChecked(bool(value))
+        elif kind == "int":
+            widget.setValue(int(float(value)))
+        elif kind == "float":
+            widget.setValue(float(value))
+        elif kind == "str":
+            widget.setText("" if value is None else str(value))
+        elif kind == "combo":
+            text = str(value)
+            if text in [widget.itemText(i) for i in range(widget.count())]:
+                widget.setCurrentText(text)
+        elif kind == "list":
+            widget.setText(", ".join(str(x) for x in value) if value else "")
+        elif kind == "match_bg":
+            widget.setCurrentText(MATCH_BG_TO_TEXT.get(value, "default"))
+        else:
+            raise ValueError(f"unknown settings field kind {kind!r}")
+
+    def _apply_state_to_controls(self, state: QtSettingsState) -> None:
+        """Apply a settings model to the visible Qt controls (M8).
+
+        Widgets that cannot represent a persisted value (e.g. a combo choice no
+        longer in the vocabulary, or a numeric value clamped by a spinbox) keep
+        their representable value, and the trailing sync folds the constrained
+        widget values back into the model — so a legacy/corrupt value can never
+        leave the UI/model inconsistent.  ``stack_final_combine`` remains the
+        single source of truth: setting the final-combine combo re-derives the
+        two reproject flags exactly like a user edit.
+        """
+        widgets = [
+            self.input_edit,
+            self.output_edit,
+            self.temp_edit,
+            self.output_filename_edit,
+            self.reference_edit,
+            self.last_stack_edit,
+            self.batch_spin,
+            self.stacking_mode_combo,
+            self.final_combine_combo,
+            self.drizzle_check,
+            self.drizzle_mode_combo,
+            self.drizzle_group_spin,
+            self.solver_combo,
+            self.mosaic_active_check,
+        ]
+        widgets.extend(self._settings_widgets.values())
+        widgets.extend(w for _kind, w in self._mosaic_widgets.values())
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.input_edit.setText(state.input_folder or "")
+            self.output_edit.setText(state.output_folder or "")
+            self.temp_edit.setText(state.temp_folder or "")
+            self.output_filename_edit.setText(state.output_filename or "")
+            self.reference_edit.setText(state.reference_image_path or "")
+            self.last_stack_edit.setText(state.last_stack_path or "")
+            self.batch_spin.setValue(int(state.batch_size))
+            if state.stacking_mode in STACKING_MODES:
+                self.stacking_mode_combo.setCurrentText(state.stacking_mode)
+            label = FINAL_COMBINE_LABELS.get(state.stack_final_combine)
+            if label is not None:
+                self.final_combine_combo.setCurrentText(label)
+            self.drizzle_check.setChecked(bool(state.use_drizzle))
+            if state.drizzle_mode in DRIZZLE_MODES:
+                self.drizzle_mode_combo.setCurrentText(state.drizzle_mode)
+            self.drizzle_group_spin.setValue(int(state.drizzle_group_size))
+            if state.local_solver_preference in SOLVER_PREFERENCES:
+                self.solver_combo.setCurrentText(state.local_solver_preference)
+
+            for attr, widget in self._settings_widgets.items():
+                self._set_settings_widget_value(
+                    self._settings_kinds[attr], widget, getattr(state, attr)
+                )
+            self.mosaic_active_check.setChecked(bool(state.mosaic_mode_active))
+            ms = state.mosaic_settings if isinstance(state.mosaic_settings, dict) else {}
+            for key, (kind, widget) in self._mosaic_widgets.items():
+                self._set_settings_widget_value(kind, widget, ms.get(key))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+        # Reconcile the boring-thread toggle + gating with the loaded batch
+        # size, then fold the (possibly constrained) widget values back into the
+        # model and refresh path-action enablement.
+        self.boring_check.setChecked(self.batch_spin.value() == 1)
+        self._update_boring_gating()
+        self.settings_state = state
+        self._sync_state_from_controls()
+        self._update_path_action_state()
+
+    def _load_persisted_settings(self) -> None:
+        """Load persisted settings + geometry into the window (best-effort).
+
+        A missing or corrupt file yields the code defaults; an unknown value for
+        a known field is coerced by ``QtSettingsState.from_dict`` and an unknown
+        combo choice degrades to the widget's current value.  Never raises.
+        """
+        data = settings_persistence.load_settings_json(self._settings_path)
+        state = QtSettingsState.from_dict(data)
+        self._apply_state_to_controls(state)
+        geometry = data.get("window_geometry")
+        if isinstance(geometry, str) and geometry:
+            self._restore_geometry_from_key(geometry)
+
+    def _save_persisted_settings(self) -> None:
+        """Save the current settings + geometry to the injected JSON path.
+
+        Best-effort: a write failure is swallowed by the helper and surfaced via
+        the log.  Geometry is stored as base64 of ``saveGeometry()`` so it is
+        both Qt-safe and JSON-safe.
+        """
+        if not self._settings_path:
+            return
+        self._sync_state_from_controls()
+        data = self.settings_state.to_dict()
+        data["window_geometry"] = self._geometry_to_key()
+        if not settings_persistence.save_settings_json(self._settings_path, data):
+            self.log(f"Could not save settings to {self._settings_path}")
+
+    def _geometry_to_key(self) -> str:
+        """Return the current window geometry as a base64 JSON-safe string."""
+        return base64.b64encode(bytes(self.saveGeometry())).decode("ascii")
+
+    def _restore_geometry_from_key(self, value: str) -> bool:
+        """Restore window geometry from a base64 string; never raises."""
+        try:
+            return bool(
+                self.restoreGeometry(QByteArray.fromBase64(value.encode("ascii")))
+            )
+        except (ValueError, TypeError):
+            return False
+
     def _effective_settings_state(self) -> QtSettingsState:
         """Return a settings snapshot with batch-size normalization applied.
 
@@ -1845,6 +1993,9 @@ class MainWindow(QMainWindow):
             self._shutdown_called = True
             self._running = False
             self._update_run_state()
+            # Persist settings + geometry on a completed teardown (M8).  A no-op
+            # when persistence is disabled (settings_path is None).
+            self._save_persisted_settings()
             return True
         # Still stopping: keep the controller/thread references alive and do
         # NOT record completion, so Start stays disabled and a later

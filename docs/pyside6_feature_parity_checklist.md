@@ -54,7 +54,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 4.2 | Browse output folder | `[x]` | `QFileDialog.getExistingDirectory` → `output_edit` |
 | 4.3 | Reference image path | `[x]` | Stacking-tab field + FITS `QFileDialog.getOpenFileName` browse |
 | 4.4 | Temp folder | `[x]` | Stack tab field + browse |
-| 4.5 | Last-stack / last output path persistence | `[ ]` | browse + `last_stack_path` state field added; persistence later |
+| 4.5 | Last-stack / last output path persistence | `[x]` | `last_stack_path` + input/output/temp/reference/filename persisted to the settings JSON on close/shutdown and re-applied on launch (M8) |
 
 ## 5. Inputs / folders / output / analyzer
 
@@ -98,8 +98,8 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 9.1 | Settings surface (full `QtSettingsState` mirror) | `[x]` | grouped, scrollable Settings tab |
-| 9.2 | Window geometry save/restore | `[ ]` | |
-| 9.3 | Settings persistence (`seestar_settings.json` / XDG) | `[ ]` | |
+| 9.2 | Window geometry save/restore | `[x]` | `saveGeometry()` → base64 `window_geometry` JSON key; `restoreGeometry()` on load; offscreen round-trip tested (M8) |
+| 9.3 | Settings persistence (`seestar_settings.json` / XDG) | `[x]` | `settings_persistence` (pure stdlib) + `QtSettingsState.from_dict` coercion; CWD `seestar_settings.json` default (Tk convention), injectable path for tests (M8) |
 
 ## 10. Last stack / resume
 
@@ -217,3 +217,19 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   re-arming reference-return *watcher* is intentionally deferred (no QTimer
   polling yet); the launch seam and one-shot consumption are covered by
   `tests/test_qt_analyzer_launch.py`.
+- **2026-08-21 — lot ZSSS-QT-FP-M8**: delivered items 4.5, 9.2 and 9.3
+  (bounded Qt settings/geometry persistence).  New pure-stdlib helper
+  `seestar/gui_qt/settings_persistence.py` loads/saves a UTF-8 JSON dict
+  (missing/corrupt file → defaults, never raises, deterministic `sort_keys`);
+  `QtSettingsState.from_dict` + `_coerce_value` coerce known fields, ignore
+  unknown keys and fill missing keys from defaults.  `MainWindow` accepts an
+  injectable `settings_path` (default `None` = persistence disabled for bare
+  tests; the `run_qt_app` entry point defaults to CWD `seestar_settings.json`,
+  matching Tk), applies persisted settings to all visible controls on
+  construction (paths, filename, batch/stacking/final-combine/drizzle/solver +
+  the full Settings/Mosaic surface), refreshes path-action enablement, and
+  saves `collect_settings_state()` + base64 `saveGeometry()` on completed
+  shutdown.  `stack_final_combine` stays the single source of truth (the
+  derived `reproject_*` flags are re-derived from the combo on apply), no
+  seam-only key is passed to the backend, and no Tk/engine/scientific code was
+  touched.  Solver config persistence (item 3.6) remains `[ ]`.
