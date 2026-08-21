@@ -311,6 +311,78 @@ Notes / gaps:
 
 ---
 
+## 16. Right panel / preview toolbar parity (M17)
+
+Per-control Tk right-panel / preview-toolbar → Qt parity (the Tk controls live
+in `seestar/gui/main_window.py` ~l.2113-2320 plus the `PreviewManager` canvas
+interactions in `seestar/gui/preview.py`; the Qt surface is
+`MainWindow._build_right_panel` plus `preview_view` / `preview_adjust` /
+`histogram_view`).  `[x]` = delivered this lot (present + correct label /
+behaviour); `[ ]` = gap with a note.  "engine-coupled" marks controls whose Tk
+behaviour reaches the stacking engine (`queued_stacker` / run backend), which
+the Qt shell reproduces either as a functional action or as a display-only
+equivalent with the backend part deferred.
+
+| # | Tk control (label → target) | Behaviour / coupling | Qt equivalent | Status |
+|---|---|---|---|---|
+| 16.1 | `start_button` "Start" → `start_processing` | starts a run (engine-coupled) | `start_button` | `[x]` |
+| 16.2 | `stop_button` "Stop" → `stop_processing` | cancels a run (engine-coupled) | `stop_button` | `[x]` |
+| 16.3 | `analyze_folder_button` "Analyze Input Folder" → `_launch_folder_analyzer` | external ZeAnalyser launch | `analyse_button` (M7; label "Analyse") | `[x]` (label diff) |
+| 16.4 | `local_solver_button` "Local Solvers..." → `_open_local_solver_settings_window` | solver dialog | `solver_button` (M2; label "Solver") | `[x]` (label diff) |
+| 16.5 | `open_output_button` "Open Output" → `_open_output_folder` | open output dir | `open_output_button` | `[x]` |
+| 16.6 | `add_files_button` "Add Folder" → `file_handler.add_folder` | stage a folder | `add_folder_button` | `[x]` |
+| 16.7 | `show_folders_button` "View Inputs" → `_show_input_folder_list` | list staged folders | `view_inputs_button` | `[x]` |
+| 16.8 | `histogram_widget` (HistogramWidget) | live histogram + BP/WP drag | `right_histogram_view` (single surface, M14) | `[x]` |
+| 16.9 | `auto_zoom_histo_check` "Auto zoom histogram" | auto-zoom toggle | `auto_zoom_histo_check` | `[x]` |
+| 16.10 | `hist_reset_view_btn` "Reset Histogram" | reset view | `hist_reset_view_button` | `[x]` |
+| 16.11 | `hist_zoom_btn` "Zoom Histogram" | zoom into histogram | `hist_zoom_button` | `[x]` |
+| 16.12 | `hist_reset_btn` "R" | reset zoom | `hist_reset_button` | `[x]` |
+| 16.13 | `preview_canvas` (Canvas) | preview image surface | `preview_image_label` (QLabel) | `[x]` |
+| 16.14 | `zoom_100_button` "Zoom 100%" / `zoom_fit_button` "Zoom Fit" | discrete zoom (engine-free) | `zoom_combo` (`Fit`/`100%`/`200%`/`50%`) | `[x]` (shape diff) |
+| 16.15 | `preview_res_button` "Res 1/1..1/4" → `_cycle_preview_resolution` | cycles preview resolution (engine-coupled: `set_preview_downsample_factor` + `refresh_preview`) | `preview_res_button` (display-only) | `[x]` display-only, `[ ]` backend E2E |
+| 16.16 | `rotate_left_button` / `rotate_right_button` | rotate preview ±90° (engine-free) | `rotate_left_button` / `rotate_right_button` | `[x]` |
+| 16.17 | Pan (left-drag / scroll) via `PreviewManager` | canvas pan + scroll-zoom (engine-free) | — | `[ ]` (checklist 6.7) |
+| 16.18 | Save / export | no dedicated right-panel button; the run saves FITS/PNG via the engine | run backend + `open_output_button` | `[x]` (N/A) |
+
+Notes / gaps:
+
+- **Res-cycle button (16.15).**  The Qt right panel now has a `preview_res_button`
+  that cycles factors 1→2→3→4→1 with the Tk `Res 1/N` label (localized
+  `Res`/`Rés`), persisted in GUI state (`_preview_res_factor`), and — via a new
+  display-only `downsampled_image` / `render_view(..., downsample_factor=...)`
+  seam — re-renders the local preview at the new factor.  It never mutates
+  `_preview_source` and never imports/uses the engine.  **Engine coupling gap:**
+  the Tk button also calls `queued_stacker.set_preview_downsample_factor` +
+  `refresh_preview` (a real backend re-render); the Qt button is display-only
+  ("backend E2E later").  **Default deviation:** the Qt default factor is `1`
+  (native) because the Qt shell's display-only preview is never
+  engine-downsampled and the existing preview tests lock native rendering; the
+  Tk initial factor is `2` (engine `preview_downsample_factor` default).  `[x]`
+- **Kappa/winsor visibility (M16 gap closed).**  `_toggle_kappa_visibility` now
+  mirrors the Tk `_toggle_kappa_visibility` rule exactly: `stack_kappa_low` /
+  `stack_kappa_high` show for stacking method `kappa-sigma` /
+  `winsorized-sigma-clip` or final-combine `winsorized_sigma_clip`;
+  `stack_winsor_limits` shows for stacking method `winsorized-sigma-clip` or
+  final-combine `winsorized_sigma_clip`.  Purely cosmetic: the values stay in
+  the shared model and `build_backend_kwargs` always passes
+  `stack_kappa_low` / `stack_kappa_high` / `winsor_limits` regardless of
+  visibility.  The standalone `kappa` field is **not** part of the Tk kappa
+  frame and stays always visible.  `[x]`
+- **Pan (16.17, checklist 6.7) feasibility.**  Tk pan/scroll-zoom is a pure
+  display interaction inside `PreviewManager` (mouse-wheel zoom, left-drag pan
+  on the Canvas) with **no** engine coupling — only the `_preview_source`
+  pixmap/view transform is involved.  The Qt shell would need mouse-event
+  handling on the preview surface (e.g. `preview_view` gain drag/scroll state,
+  or wrap the label in a scroll area); it is display-only and feasible without
+  touching the engine, so it is deferred (not implemented this lot).  `[ ]`
+- **Solver-config persistence (3.6) feasibility.**  Still `[ ]`.  The Qt solver
+  dialog already round-trips its accepted values into the live Qt controls /
+  `QtSettingsState` (M2), so persistence is a matter of adding the ASTAP /
+  ZeSolver fields to the M8 settings JSON surface (or a `solver_config`-backed
+  load/save seam); no engine coupling blocks it.  Deferred.  `[ ]`
+
+---
+
 ## Last updated
 
 - **2026-08-21 — lot ZSSS-QT-FP-M1**: delivered items 2.1, 2.2 and section 13
@@ -579,3 +651,20 @@ Notes / gaps:
   gating (sub-options re-enable only after re-checking drizzle, not merely on
   un-checking boring).  Covered by `tests/test_qt_stacking_m16.py` (11 tests)
   + the existing import-hygiene tests; `git diff --check` clean.
+- **2026-08-21 — lot ZSSS-QT-FP-M17**: right-panel preview ergonomics parity
+  closure (new section 16).  Delivered the Res 1/1..1/4 preview-resolution
+  cycle button (`preview_res_button`) on the right panel: it cycles factors
+  1→2→3→4→1 with the Tk `Res 1/N` label (localized `Res`/`Rés`), persists the
+  factor in GUI state (`_preview_res_factor`), and re-renders the local preview
+  at the new factor via a display-only `downsampled_image` /
+  `render_view(..., downsample_factor=...)` seam — never mutating
+  `_preview_source` and never importing/using the engine.  The Tk button's
+  engine coupling (`set_preview_downsample_factor` + `refresh_preview`) is a
+  documented backend-E2E gap.  Closed the M16 kappa/winsor gap:
+  `_toggle_kappa_visibility` mirrors the Tk show/hide rule exactly (cosmetic
+  only — `build_backend_kwargs` still always carries `stack_kappa_low` /
+  `stack_kappa_high` / `winsor_limits`).  Default deviation (documented): the
+  Qt Res factor defaults to `1` (native) vs the Tk engine default `2`.  Pan
+  (6.7) and solver-config persistence (3.6) remain `[ ]` with feasibility
+  notes.  Covered by `tests/test_qt_preview_ergonomics_m17.py` (12 tests) +
+  the existing import-hygiene tests; `git diff --check` clean.

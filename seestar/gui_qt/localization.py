@@ -79,6 +79,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "view_group": {"en": "View", "fr": "Vue"},
     "zoom_label": {"en": "Zoom:", "fr": "Zoom :"},
     "resolution_label": {"en": "Resolution:", "fr": "Résolution :"},
+    # Preview resolution-cycle button (M17).  ``preview_res_prefix`` is the
+    # "Res" prefix composed with the current ``1/N`` factor; Tk hardcodes the
+    # label, the Qt shell localizes it (FR "Rés").
+    "preview_res_prefix": {"en": "Res", "fr": "Rés"},
     "histogram_group": {"en": "Histogram", "fr": "Histogramme"},
     "actions_group": {"en": "Actions", "fr": "Actions"},
     "preview_prefix": {"en": "Preview:", "fr": "Aperçu :"},

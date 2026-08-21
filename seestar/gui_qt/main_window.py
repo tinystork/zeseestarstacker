@@ -172,6 +172,17 @@ STACKING_MODES = [
 DRIZZLE_MODES = ["Final", "Incremental"]
 SOLVER_PREFERENCES = ["none", "astap", "zesolver"]
 
+# Preview resolution-cycle factors (Tk ``preview_res_button`` parity, M17).
+# Display-only: the Tk button also drives the engine
+# ``preview_downsample_factor`` + ``refresh_preview``; the Qt shell cycles the
+# same 1/1..1/4 label plus a local display downsample and never touches the
+# engine (backend E2E later).  The Qt default is 1 (native) — the shell's
+# display-only preview is never engine-downsampled, so "1/1" is its native
+# state; the Tk initial factor is 2 (engine ``preview_downsample_factor``
+# default), a documented deviation.
+PREVIEW_RES_FACTORS = (1, 2, 3, 4)
+DEFAULT_PREVIEW_RES_FACTOR = 1
+
 # Language combo label -> ZeAnalyser ``--lang`` code (Tk settings default is
 # ``"en"``).  Sourced from the Qt-local ``localization`` module (M9).
 LANGUAGE_CODE_BY_TEXT = localization.LANGUAGE_CODE_BY_TEXT
@@ -649,6 +660,10 @@ class MainWindow(QMainWindow):
         # accumulated clockwise rotation in degrees (0/90/180/270).
         self._preview_source: Optional[QImage] = None
         self._preview_rotation: int = 0
+        # Preview-resolution cycle factor (Tk ``preview_res_button`` parity,
+        # M17).  Display-only GUI state; never touches the engine or
+        # ``_preview_source``.  Default 1 (native) — see the module comment.
+        self._preview_res_factor: int = DEFAULT_PREVIEW_RES_FACTOR
         # Input folder whose first FITS was last successfully auto-loaded
         # (M12).  Avoids redundant reloads on repeated settings restore; it is
         # cleared when the folder changes or the load fails.
@@ -1165,6 +1180,13 @@ class MainWindow(QMainWindow):
         self.rotate_right_button.setEnabled(False)
         view_layout.addWidget(self.rotate_left_button, 1, 0)
         view_layout.addWidget(self.rotate_right_button, 1, 1)
+        # Preview resolution-cycle button (Tk ``preview_res_button`` parity,
+        # M17).  Cycles 1/1..1/4; display-only (never the engine).  Always
+        # enabled like the Tk button (the cycle only changes GUI state + the
+        # local display, and no-ops while there is no preview).
+        self.preview_res_button = QPushButton(self._preview_res_text())
+        self.preview_res_button.setToolTip("Cycle preview resolution (1/1..1/4).")
+        view_layout.addWidget(self.preview_res_button, 1, 2)
         layout.addWidget(view_group)
 
         # Persistent display histogram (Tk parity, checklist item 13.4).  This
@@ -1258,6 +1280,10 @@ class MainWindow(QMainWindow):
         self._settings_widgets = {}
         self._settings_kinds = {}
         self._mosaic_widgets = {}
+        # attr -> the QFormLayout hosting its row, so the kappa/winsor
+        # visibility toggle (M17) can hide/show the whole label+widget row via
+        # ``QFormLayout.setRowVisible``.
+        self._settings_forms = {}
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1304,6 +1330,7 @@ class MainWindow(QMainWindow):
                 form.addRow(label, widget)
             self._settings_widgets[attr] = widget
             self._settings_kinds[attr] = kind
+            self._settings_forms[attr] = form
         return group
 
     def _build_mosaic_section(self) -> QGroupBox:
@@ -1518,6 +1545,7 @@ class MainWindow(QMainWindow):
         self.zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
         self.rotate_left_button.clicked.connect(self._on_rotate_left)
         self.rotate_right_button.clicked.connect(self._on_rotate_right)
+        self.preview_res_button.clicked.connect(self._on_preview_res_cycle)
         # WB gains / stretch black-white-gamma / B-C-S are wired through
         # ``_make_slider_spin_pair`` (slider <-> spinbox sync + a single
         # ``on_change`` callback), so only the discrete buttons are connected
@@ -1585,8 +1613,14 @@ class MainWindow(QMainWindow):
         self.stacking_mode_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
+        self.stacking_mode_combo.currentIndexChanged.connect(
+            self._toggle_kappa_visibility
+        )
         self.final_combine_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
+        )
+        self.final_combine_combo.currentIndexChanged.connect(
+            self._toggle_kappa_visibility
         )
         self.drizzle_check.stateChanged.connect(self._sync_state_from_controls)
         self.drizzle_check.stateChanged.connect(self._update_drizzle_gating)
@@ -1611,6 +1645,7 @@ class MainWindow(QMainWindow):
                 )
         self._update_expert_enabler_states()
         self._update_drizzle_gating()
+        self._toggle_kappa_visibility()
 
     # ------------------------------------------------------------ controls
     def _on_start(self) -> None:
@@ -1863,6 +1898,39 @@ class MainWindow(QMainWindow):
             widget = self._settings_widgets.get(attr)
             if widget is not None:
                 widget.setEnabled(drizzle)
+
+    def _toggle_kappa_visibility(self, *_ignored) -> None:
+        """Show/hide the Kappa Low/High + Winsor-Limits widgets (Tk parity, M17).
+
+        Mirrors the Tk ``_toggle_kappa_visibility``: the Kappa Low/High controls
+        are shown when the stacking method is ``kappa-sigma`` /
+        ``winsorized-sigma-clip`` or the final-combine is
+        ``winsorized_sigma_clip``; the Winsor-Limits control is shown when the
+        stacking method or the final-combine is winsorized-sigma.  Purely
+        cosmetic: the widgets' values stay in the shared settings model and
+        ``build_backend_kwargs`` always passes them (they are never removed).
+        The standalone "Kappa" field (backend ``kappa``) is *not* part of the
+        Tk kappa frame and stays always visible.
+        """
+        method = self.stacking_mode_combo.currentText()
+        final_key = self._final_combine_key()
+        show_kappa = (
+            method in ("kappa-sigma", "winsorized-sigma-clip")
+            or final_key == "winsorized_sigma_clip"
+        )
+        show_winsor = (
+            method == "winsorized-sigma-clip"
+            or final_key == "winsorized_sigma_clip"
+        )
+        for attr, visible in (
+            ("stack_kappa_low", show_kappa),
+            ("stack_kappa_high", show_kappa),
+            ("stack_winsor_limits", show_winsor),
+        ):
+            widget = self._settings_widgets.get(attr)
+            form = self._settings_forms.get(attr)
+            if widget is not None and form is not None:
+                form.setRowVisible(widget, visible)
 
     def _on_solver(self) -> None:
         """Open the solver configuration dialog and apply accepted values.
@@ -2326,6 +2394,35 @@ class MainWindow(QMainWindow):
         self._preview_rotation = (self._preview_rotation + 90) % 360
         self._refresh_preview_view()
 
+    def _preview_res_text(self) -> str:
+        """Return the localized label for the current preview-resolution factor."""
+        factor = self._preview_res_factor
+        prefix = self._tr("preview_res_prefix")
+        return f"{prefix} 1/{factor}" if factor > 1 else f"{prefix} 1/1"
+
+    def _render_preview_res_button(self) -> None:
+        """Re-render the Res-cycle button label from the factor + language."""
+        self.preview_res_button.setText(self._preview_res_text())
+
+    def _on_preview_res_cycle(self) -> None:
+        """Cycle the preview-resolution factor 1→2→3→4→1 (display-only).
+
+        Advances the factor among 1/2/3/4 (default 1), updates the button label
+        and re-renders the local preview at the new factor.  The Tk button
+        additionally calls the engine ``set_preview_downsample_factor`` +
+        ``refresh_preview`` (engine-coupled); the Qt shell only changes GUI
+        state and applies a local display downsample — backend E2E later.
+        """
+        factors = PREVIEW_RES_FACTORS
+        if self._preview_res_factor in factors:
+            idx = factors.index(self._preview_res_factor)
+        else:
+            idx = factors.index(DEFAULT_PREVIEW_RES_FACTOR)
+        idx = (idx + 1) % len(factors)
+        self._preview_res_factor = factors[idx]
+        self._render_preview_res_button()
+        self._refresh_preview_view()
+
     def _on_wb_changed(self, *_ignored) -> None:
         """Update the white-balance gains and re-render the preview (display-only)."""
         self._wb = (
@@ -2463,6 +2560,7 @@ class MainWindow(QMainWindow):
             self._preview_rotation,
             self.zoom_combo.currentText(),
             self.preview_image_label.size(),
+            downsample_factor=self._preview_res_factor,
         )
         if pixmap is None or pixmap.isNull():
             self.preview_image_label.clear()
@@ -2796,6 +2894,7 @@ class MainWindow(QMainWindow):
         # idempotent for the default English path.
         self._set_language(getattr(state, "language", "en"))
         self._update_expert_enabler_states()
+        self._toggle_kappa_visibility()
         self._sync_state_from_controls()
         self._update_path_action_state()
 
@@ -3014,6 +3113,7 @@ class MainWindow(QMainWindow):
         self._render_remaining_label()
         self._render_preview_label()
         self._render_histogram_status()
+        self._render_preview_res_button()
 
     def _render_preview_label(self) -> None:
         """Render the preview metadata label from its stored detail + language."""

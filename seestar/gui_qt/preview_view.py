@@ -73,6 +73,29 @@ def percent_scaled_image(source: QImage, zoom: str) -> QImage:
     )
 
 
+def downsampled_image(source: QImage, factor: int) -> QImage:
+    """Return ``source`` scaled down by ``factor`` (display-only, never mutates).
+
+    This is the local, display-only seam for the Tk preview-resolution cycle
+    button (``Res 1/1``..``Res 1/4``).  The Tk button drives the engine's
+    ``preview_downsample_factor`` (a backend re-render); the Qt shell cannot
+    touch the engine, so it approximates the effect by down-scaling the already
+    adjusted display image.  ``factor <= 1`` (or a non-positive factor) returns
+    the image unchanged; the source is never mutated (a fresh image is produced).
+    """
+    factor = int(factor)
+    if factor <= 1 or source.isNull():
+        return source
+    width = max(1, int(round(source.width() / factor)))
+    height = max(1, int(round(source.height() / factor)))
+    return source.scaled(
+        width,
+        height,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
 def fit_pixmap(source: QImage, target_size: QSize) -> QPixmap:
     """Scale ``source`` to fit ``target_size``, preserving aspect ratio.
 
@@ -96,16 +119,20 @@ def render_view(
     rotation: int,
     zoom: str,
     target_size: QSize,
+    downsample_factor: int = 1,
 ) -> Optional[QPixmap]:
     """Render the preview pixmap for ``source`` under ``rotation`` and ``zoom``.
 
     Returns ``None`` when there is no renderable source (so the caller can
-    clear the label); otherwise returns the pixmap to display.  The source
-    image is never mutated.
+    clear the label); otherwise returns the pixmap to display.  ``downsample_factor``
+    (``Res 1/N``) scales the rotated image down by that factor before the zoom
+    is applied — a display-only approximation of the Tk engine-coupled preview
+    downsample.  The source image is never mutated.
     """
     if source is None or source.isNull():
         return None
     rotated = rotated_image(source, rotation)
+    rotated = downsampled_image(rotated, downsample_factor)
     if zoom == "Fit":
         return fit_pixmap(rotated, target_size)
     return QPixmap.fromImage(percent_scaled_image(rotated, zoom))
