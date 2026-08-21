@@ -63,7 +63,7 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 | 5.1 | View inputs | `[x]` | non-backend Qt dialog (main + staged folders) |
 | 5.2 | Add folder | `[x]` | stage + validate (input/output/subfolder-of-output) |
 | 5.3 | Open output | `[x]` | `QDesktopServices.openUrl` (user-triggered) |
-| 5.4 | Analyze (ZeAnalyser launch) | `[ ]` | |
+| 5.4 | Analyze (ZeAnalyser launch) | `[x]` | stdlib-only `seestar/gui_qt/analyzer_launch.py` seam + `MainWindow._on_analyse`; button enabled only for an existing input dir; non-blocking launch with `ZEANALYSER_COMMAND_FILE`; reference-return *consumption* seam present, periodic re-arming watcher deferred |
 
 ## 6. Preview
 
@@ -200,3 +200,20 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
   `cancelled` at the end).  New Qt-only helper
   `seestar/gui_qt/progress_time.py` keeps the math out of `main_window.py` and
   is deterministic (no real sleeping in tests).
+- **2026-08-21 — lot ZSSS-QT-FP-M7**: delivered item 5.4 (Analyze /
+  ZeAnalyser launch seam).  New stdlib-only seam
+  `seestar/gui_qt/analyzer_launch.py` mirrors the public-process-contract
+  behaviour of the Tk helper without importing Tk or the engine; every
+  side-effecting dependency (executable detection, popen, temp-dir, pid) is
+  injectable so tests never spawn a real ZeAnalyser.  `MainWindow._on_analyse`
+  validates the input folder, detects ZeAnalyser (`zeanalyser` entry point,
+  `python -m zeanalyser` fallback), creates the command-file path, and launches
+  a non-blocking subprocess with `ZEANALYSER_COMMAND_FILE` set — never marking
+  a run active.  The Analyse button is enabled only when the input folder is a
+  non-empty existing directory (updated on path changes).  A single-shot,
+  Qt-safe command-file *consumption* seam (`_check_analyzer_command_file`)
+  parses `REFERENCE=<path>`, updates the reference field only for a non-empty
+  reference, and deletes the file best-effort.  Remaining delta: the periodic
+  re-arming reference-return *watcher* is intentionally deferred (no QTimer
+  polling yet); the launch seam and one-shot consumption are covered by
+  `tests/test_qt_analyzer_launch.py`.

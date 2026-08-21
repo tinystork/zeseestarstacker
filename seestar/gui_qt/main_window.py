@@ -23,8 +23,10 @@ progress/status/log area) and a persistent right preview/action panel
 placeholder and the action buttons Start / Stop / Analyse / Solver /
 View Inputs / Add Folder / Open Output).  Start/Stop are functional, as are the
 display-only preview zoom / rotation / resolution controls (M5); the histogram
-controls, the left "Preview controls" tab and the Analyse button remain
-topology placeholders for later milestones.
+controls and the left "Preview controls" tab remain topology placeholders for
+later milestones.  The Analyse button launches the standalone ZeAnalyser
+product on the current input folder (M7) via a stdlib-only launch seam; it
+never touches the stacking backend.
 
 The Stacking tab exposes input/output/temp/filename, batch size, stacking mode,
 the final-combination business selector, drizzle and local-solver controls; the
@@ -74,7 +76,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import boring_route
+from . import analyzer_launch, boring_route
 from .backend_runner import (
     BackendPreviewPayload,
     BaseRunBackend,
@@ -121,6 +123,11 @@ STACKING_MODES = [
 ]
 DRIZZLE_MODES = ["Final", "Incremental"]
 SOLVER_PREFERENCES = ["none", "astap", "zesolver"]
+
+# Language combo label -> ZeAnalyser ``--lang`` code (Tk settings default is
+# ``"en"``).  The combo is currently disabled, but this keeps the launch
+# command's language argument honest and testable.
+LANGUAGE_CODE_BY_TEXT = {"English": "en", "Français": "fr"}
 
 # File-dialog filter for reference / last-stack images (Tk parity).
 FITS_FILE_FILTER = "FITS files (*.fit *.fits)"
@@ -337,6 +344,8 @@ class MainWindow(QMainWindow):
         solver_probe: Optional[Callable[[], bool]] = None,
         boring_runner_factory: Optional[Callable[[], BoringRunnerBase]] = None,
         clock: Optional[Callable[[], float]] = None,
+        analyzer_launcher: Optional[Callable[[str, str, str], bool]] = None,
+        analyzer_command_file_maker: Optional[Callable[[], str]] = None,
         shutdown_wait_ms: int = 5000,
     ):
         super().__init__(parent)
@@ -352,6 +361,12 @@ class MainWindow(QMainWindow):
             raise TypeError("boring_runner_factory must be callable or None")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable or None")
+        if analyzer_launcher is not None and not callable(analyzer_launcher):
+            raise TypeError("analyzer_launcher must be callable or None")
+        if analyzer_command_file_maker is not None and not callable(
+            analyzer_command_file_maker
+        ):
+            raise TypeError("analyzer_command_file_maker must be callable or None")
         if not isinstance(shutdown_wait_ms, int) or shutdown_wait_ms < 0:
             raise ValueError("shutdown_wait_ms must be a non-negative int")
         self.backend_factory = backend_factory
@@ -366,6 +381,25 @@ class MainWindow(QMainWindow):
         self.solver_probe = (
             solver_probe if solver_probe is not None else probe_zesolver_operational
         )
+        # ZeAnalyser launch seam (M7).  Injectable so tests never spawn a real
+        # ZeAnalyser process.  The launcher has signature
+        # ``(input_folder, lang, command_file_path) -> bool`` (True = spawned);
+        # the maker returns the command-file path to pass via
+        # ``ZEANALYSER_COMMAND_FILE``.
+        self._analyzer_launcher = (
+            analyzer_launcher
+            if analyzer_launcher is not None
+            else analyzer_launch.launch_analyzer
+        )
+        self._analyzer_command_file_maker = (
+            analyzer_command_file_maker
+            if analyzer_command_file_maker is not None
+            else analyzer_launch.make_command_file_path
+        )
+        # Command-file path used by the ZeAnalyser reference-return protocol;
+        # set on launch and consumed (single-shot) by
+        # ``_check_analyzer_command_file``.
+        self._analyzer_command_file_path: Optional[str] = None
         self._shutdown_wait_ms = shutdown_wait_ms
         self.setWindowTitle(title if title is not None else DEFAULT_TITLE)
         self._running: bool = False
@@ -624,7 +658,7 @@ class MainWindow(QMainWindow):
         histo_layout.addWidget(self.histogram_placeholder)
         layout.addWidget(histo_group)
 
-        # Action buttons (Start/Stop functional; the rest are topology stubs).
+        # Action buttons (Start/Stop/Analyse/Solver/path actions functional).
         actions_group = QGroupBox("Actions")
         actions_layout = QGridLayout(actions_group)
         self.start_button = QPushButton("Start")
@@ -634,10 +668,9 @@ class MainWindow(QMainWindow):
         self.view_inputs_button = QPushButton("View Inputs")
         self.add_folder_button = QPushButton("Add Folder")
         self.open_output_button = QPushButton("Open Output")
-        # Analyse is the only remaining topology stub (ZeAnalyser launch is a
-        # later milestone); View Inputs / Add Folder / Open Output are wired to
-        # path actions and their enablement is driven by
-        # ``_update_path_action_state``.
+        # Analyse (ZeAnalyser launch, M7), View Inputs / Add Folder / Open
+        # Output are all wired to user-triggered actions; their enablement is
+        # driven by ``_update_path_action_state``.
         self.analyse_button.setEnabled(False)
         actions_layout.addWidget(self.start_button, 0, 0)
         actions_layout.addWidget(self.stop_button, 0, 1)
@@ -858,6 +891,7 @@ class MainWindow(QMainWindow):
     def _wire_controls(self) -> None:
         self.start_button.clicked.connect(self._on_start)
         self.stop_button.clicked.connect(self._on_stop)
+        self.analyse_button.clicked.connect(self._on_analyse)
         self.solver_button.clicked.connect(self._on_solver)
         self.view_inputs_button.clicked.connect(self._show_input_folder_list)
         self.add_folder_button.clicked.connect(self._add_folder)
@@ -1173,6 +1207,79 @@ class MainWindow(QMainWindow):
                 widget.setValue(float(value))
             else:
                 widget.setValue(int(value))
+
+    # ------------------------------------------------ ZeAnalyser launch seam
+    def _current_language_code(self) -> str:
+        """Return the ZeAnalyser ``--lang`` code for the current combo label."""
+        return LANGUAGE_CODE_BY_TEXT.get(self.language_combo.currentText(), "en")
+
+    def _on_analyse(self) -> None:
+        """Launch standalone ZeAnalyser on the current input folder (M7).
+
+        This is a user-triggered, non-blocking launch of an external product.
+        It never marks a run active and never touches the stacking backend.  It
+        validates the input folder, detects ZeAnalyser, creates the command-file
+        path, and spawns the process with ``ZEANALYSER_COMMAND_FILE`` set.  Any
+        failure is reported through the log + status bar without raising.
+        """
+        input_folder = self.input_edit.text().strip()
+        if not input_folder or not os.path.isdir(input_folder):
+            message = "Analyze: select a valid input folder first."
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+
+        lang = self._current_language_code()
+        try:
+            command_file_path = self._analyzer_command_file_maker()
+        except Exception as exc:  # noqa: BLE001 - surface any path-creation failure
+            message = f"Analyze: cannot create command file: {exc}"
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+
+        self._analyzer_command_file_path = command_file_path
+        try:
+            launched = self._analyzer_launcher(input_folder, lang, command_file_path)
+        except Exception as exc:  # noqa: BLE001 - surface any launch failure
+            message = f"Analyze: launch failed: {exc}"
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+
+        if not launched:
+            message = (
+                "Analyze: ZeAnalyser not found (install the 'zeanalyser' command "
+                "or the 'zeanalyser' Python module)."
+            )
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+
+        self.log(f"Analyzer launched on {input_folder}.")
+        self.statusBar().showMessage("Analyzer launched.")
+
+    def _check_analyzer_command_file(self) -> Optional[str]:
+        """Consume the ZeAnalyser command file once, if present (Qt-safe).
+
+        Reads ``REFERENCE=<path>``, updates the reference field only for a
+        non-empty reference, deletes the file best-effort, and returns the
+        reference (or ``None``).  The periodic re-arming watcher is a deferred
+        delta; this single-shot consumption seam is safe to call from the GUI
+        thread or from tests.
+        """
+        path = self._analyzer_command_file_path
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            ref = analyzer_launch.consume_command_file(path)
+        except OSError:
+            return None
+        if ref:
+            self.reference_edit.setText(ref)
+            self.log(f"Analyzer reference received: {ref}")
+            self.statusBar().showMessage(f"Analyzer reference: {ref}")
+        return ref
 
     # ------------------------------------------------------ path / file actions
     def _browse_input(self) -> None:
@@ -1497,6 +1604,8 @@ class MainWindow(QMainWindow):
         * Open Output  — enabled when the output folder is an existing directory,
         * Add Folder   — enabled pre-run when the input folder is valid; disabled
           while a run is active (live-add is not exposed by ``RunController``).
+        * Analyse      — enabled when the input folder is an existing directory
+          (user-triggered ZeAnalyser launch; independent of run state).
         """
         input_text = self.input_edit.text().strip()
         output_text = self.output_edit.text().strip()
@@ -1505,6 +1614,7 @@ class MainWindow(QMainWindow):
         self.view_inputs_button.setEnabled(input_valid)
         self.open_output_button.setEnabled(output_valid)
         self.add_folder_button.setEnabled(input_valid and not self._running)
+        self.analyse_button.setEnabled(input_valid)
 
     # ------------------------------------------------- settings collection
     def _sync_state_from_controls(self, *_ignored) -> None:
