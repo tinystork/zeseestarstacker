@@ -552,12 +552,23 @@ def test_seestar_mode_zesolver_operational_without_astap_reaches_controller(qapp
 # --------------------------------------------------------------------------
 # CLI parsing (seestar.qt_main)
 # --------------------------------------------------------------------------
-def test_cli_parser_default_simulated():
+def test_cli_parser_default_seestar():
     import seestar.qt_main as qt_main
 
-    assert qt_main.parse_qt_args([]) == ("simulated", [])
+    assert qt_main.parse_qt_args([]) == ("seestar", [])
+    assert qt_main.parse_qt_args(["--backend", "seestar"]) == ("seestar", [])
+    assert qt_main.parse_qt_args(["--backend=seestar"]) == ("seestar", [])
+
+
+def test_cli_parser_explicit_simulated_accepted():
+    import seestar.qt_main as qt_main
+
     assert qt_main.parse_qt_args(["--backend", "simulated"]) == ("simulated", [])
     assert qt_main.parse_qt_args(["--backend=simulated"]) == ("simulated", [])
+    assert qt_main.parse_qt_args(["--backend", "simulated", "--verbose"]) == (
+        "simulated",
+        ["--verbose"],
+    )
 
 
 def test_cli_parser_explicit_seestar_and_remaining_args():
@@ -582,3 +593,27 @@ def test_cli_parser_rejects_invalid():
         qt_main.parse_qt_args(["--backend", "bogus"])
     with pytest.raises(SystemExit):
         qt_main.parse_qt_args(["--backend"])
+
+
+def test_startup_witness_resolves_real_backend_offscreen():
+    """``ZSSS_QT_STARTUP_WITNESS=1`` smoke test (no event loop, returns 0)."""
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["ZSSS_QT_STARTUP_WITNESS"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-m", "seestar.qt_main"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=env,
+    )
+    assert proc.returncode == 0, (
+        f"startup witness failed: stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = proc.stdout
+    assert "ZSSS_QT_STARTUP_WITNESS_TITLE=" in out
+    assert "ZSSS_QT_STARTUP_WITNESS_VERSION='8.0.0 Phoenix consedit'" in out
+    assert "ZSSS_QT_STARTUP_WITNESS_BACKEND_MODE='seestar'" in out
+    assert "ZSSS_QT_STARTUP_WITNESS_BACKEND_CLASS=SeestarQueuedStackerBackend" in out
+    assert "ZSSS_QT_STARTUP_WITNESS_ICON=present" in out
+    assert "ZSSS_QT_STARTUP_WITNESS_PREVIEW=present" in out

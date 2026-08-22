@@ -1,4 +1,4 @@
-"""QApplication lifecycle helpers for the non-default PySide6 shell."""
+"""QApplication lifecycle helpers for the PySide6 (Qt) shell."""
 
 from __future__ import annotations
 
@@ -36,14 +36,15 @@ def run_qt_app(
 
     ``backend_mode`` (``"simulated"`` or ``"seestar"``) and/or
     ``backend_factory`` select how the window's Start button resolves a run
-    backend; the default is the safe simulated runner.  Returns the
-    :meth:`QApplication.exec` exit code.  Closing the window ends the loop
-    (Qt's ``quitOnLastWindowClosed`` default).  ``settings_path`` selects the
-    settings/geometry JSON file; ``None`` (the default) resolves the
-    platform-aware user-config path (migrating a legacy CWD
-    ``seestar_settings.json`` non-destructively) so the non-default Qt shell
-    persists settings across launches regardless of the working directory.
-    Pass an explicit path to override.
+    backend; the function default is the safe simulated runner, while the
+    console entry point (``seestar.qt_main``) passes ``"seestar"`` explicitly.
+    Returns the :meth:`QApplication.exec` exit code.  Closing the window ends
+    the loop (Qt's ``quitOnLastWindowClosed`` default).  ``settings_path``
+    selects the settings/geometry JSON file; ``None`` (the default) resolves
+    the platform-aware user-config path (migrating a legacy CWD
+    ``seestar_settings.json`` non-destructively) so the Qt shell persists
+    settings across launches regardless of the working directory.  Pass an
+    explicit path to override.
     """
     app = create_application(argv)
     if settings_path is None:

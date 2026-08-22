@@ -42,4 +42,20 @@ def test_pyproject_declares_version_and_entry_point():
     )
 
     gui_scripts = project["gui-scripts"]
-    assert gui_scripts["zeseestarstacker"] == "seestar.main:main"
+    assert gui_scripts["zeseestarstacker"] == "seestar.qt_main:main"
+
+
+def test_pyproject_declares_pyside6_as_standard_dependency():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = data["project"]["dependencies"]
+    assert "PySide6" in dependencies
+
+
+def test_pyproject_has_no_zealfie_dependency():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = data["project"].get("dependencies", [])
+    extras = data["project"].get("optional-dependencies", {})
+    all_deps = list(dependencies)
+    for group in extras.values():
+        all_deps.extend(group)
+    assert all("zealfie" not in dep.lower() for dep in all_deps)

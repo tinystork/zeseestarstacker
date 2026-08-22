@@ -106,12 +106,11 @@ threadpoolctl     # Optional: control of BLAS threadpools
 PyQt5                    # GUI framework for the standalone visu.py viewer
 
 # ---------------------------------------------------------------------------
-# Dependencies ONLY for the non-default PySide6 GUI shell (seestar/gui_qt)
+# Dependencies for the official PySide6 / Qt GUI shell (seestar/gui_qt)
 # ---------------------------------------------------------------------------
-# The default application entry point (seestar.main:main) is still Tkinter.
-# This is the experimental side-by-side Qt shell for the parity migration,
-# launched explicitly with:  python -m seestar.qt_main
-PySide6                   # Qt6 bindings for the experimental PySide6 GUI shell
+# The default application entry point (zeseestarstacker) launches
+# seestar.qt_main, with the real seestar backend selected by default.
+PySide6                   # Qt6 bindings for the official PySide6 GUI shell
 
 # ===========================================================================
 # FIN DES NOTES (Version Française)

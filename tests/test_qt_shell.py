@@ -1,4 +1,4 @@
-"""Offscreen smoke tests for the non-default PySide6 GUI shell.
+"""Offscreen smoke tests for the PySide6 GUI shell.
 
 These tests construct the minimal :class:`seestar.gui_qt.MainWindow` under the
 ``offscreen`` Qt platform plugin so they run headlessly (no X11/Wayland).  They

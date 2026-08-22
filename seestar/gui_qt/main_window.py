@@ -1,8 +1,10 @@
 """PySide6 main-window shell for ZeSeestarStacker (Tk-like topology).
 
-This is a *non-default* GUI shell.  The default entry point remains the Tk
-``seestar.main:main`` application; this module is an architectural foothold for
-the later parity migration and deliberately does NOT:
+This module builds the Qt window used by the official Qt entry point
+``seestar.qt_main:main`` (console script ``zeseestarstacker``).  A bare
+``MainWindow()`` still defaults to the simulated backend; the console entry
+point opts into the real ``seestar`` backend by default.  This module
+deliberately does NOT:
 
 * launch any real stacking,
 * import the Tk GUI,
@@ -36,9 +38,10 @@ Expert tab (M10) exposes the rest of the backend-relevant
 grouped form.  Both feed the same model, which
 :meth:`MainWindow.build_run_request` turns into a validated, immutable
 :class:`~seestar.gui_qt.run_bridge.RunRequest`, which the Start button hands to
-the lifecycle controller.  The default backend remains simulated (and is
-labelled as such next to Start); real ``SeestarQueuedStacker`` activation is
-explicit opt-in only.
+the lifecycle controller.  A bare ``MainWindow()`` defaults to the simulated
+backend (labelled as such next to Start); the console entry point
+``seestar.qt_main`` opts into the real ``SeestarQueuedStacker`` by default, and
+real activation stays explicit via ``backend_mode``/``backend_factory``.
 """
 
 from __future__ import annotations

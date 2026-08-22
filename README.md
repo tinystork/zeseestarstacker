@@ -87,7 +87,7 @@ fait sans normalisation par percentiles et les données sont écrites linéairem
 *   **Version:** ZeSeestarStacker 8.0.0 beta, codename **Phoenix consedit**.
 *   **Operating systems:** Windows, Linux, or macOS.
 *   **Python:** 3.10 or higher.
-*   **Recommended GUI:** the PySide6 / Qt interface. Install it with the `[qt]` extra shown below.
+*   **Recommended GUI:** the PySide6 / Qt interface (included in a plain install).
 *   **PyQt5:** not required for the main Qt application.
 *   **GPU:** not required. ZeSeestarStacker runs normally on CPU. NVIDIA GPU acceleration is optional and can be configured separately later.
 
@@ -96,7 +96,7 @@ fait sans normalisation par percentiles et les données sont écrites linéairem
 *   **Version :** ZeSeestarStacker 8.0.0 beta, nom de code **Phoenix consedit**.
 *   **Systèmes :** Windows, Linux ou macOS.
 *   **Python :** 3.10 ou supérieur.
-*   **Interface recommandée :** l'interface PySide6 / Qt. Installez-la avec l'extra `[qt]` indiqué ci-dessous.
+*   **Interface recommandée :** l'interface PySide6 / Qt (incluse dans l'installation standard).
 *   **PyQt5 :** non requis pour l'application Qt principale.
 *   **GPU :** non obligatoire. ZeSeestarStacker fonctionne normalement sur CPU. L'accélération NVIDIA GPU est optionnelle et peut être configurée séparément plus tard.
 
@@ -115,16 +115,16 @@ py -m venv zsss-env
 .\zsss-env\Scripts\Activate.ps1
 
 python -m pip install --upgrade pip
-python -m pip install "ZeSeestarStacker[qt] @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
+python -m pip install "ZeSeestarStacker @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
 
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
 Later, to launch ZeSeestarStacker again from the same folder:
 
 ```powershell
 .\zsss-env\Scripts\Activate.ps1
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
 ### Linux / macOS
@@ -134,19 +134,19 @@ python3 -m venv zsss-env
 source zsss-env/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install "ZeSeestarStacker[qt] @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
+python -m pip install "ZeSeestarStacker @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
 
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
 Later, to launch ZeSeestarStacker again from the same folder:
 
 ```bash
 source zsss-env/bin/activate
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
-**Qt / Tk transition note:** Qt / PySide6 is the recommended interface for this beta. The `zeseestarstacker` command still temporarily launches the older Tk interface during the 8.0 transition. Use `python -m seestar.qt_main --backend seestar` for the recommended Qt GUI until Qt becomes the official entry point.
+**Qt entry point:** Qt / PySide6 is now the official interface for this beta. The `zeseestarstacker` command launches the Qt GUI with the real engine by default. For a safe simulated/dev run without the engine, use `python -m seestar.qt_main --backend simulated`.
 
 **(Français)**
 
@@ -159,16 +159,16 @@ py -m venv zsss-env
 .\zsss-env\Scripts\Activate.ps1
 
 python -m pip install --upgrade pip
-python -m pip install "ZeSeestarStacker[qt] @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
+python -m pip install "ZeSeestarStacker @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
 
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
 Plus tard, pour relancer ZeSeestarStacker depuis le même dossier :
 
 ```powershell
 .\zsss-env\Scripts\Activate.ps1
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
 ### Linux / macOS
@@ -178,19 +178,19 @@ python3 -m venv zsss-env
 source zsss-env/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install "ZeSeestarStacker[qt] @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
+python -m pip install "ZeSeestarStacker @ https://github.com/tinystork/zeseestarstacker/archive/refs/heads/beta.zip"
 
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
 Plus tard, pour relancer ZeSeestarStacker depuis le même dossier :
 
 ```bash
 source zsss-env/bin/activate
-python -m seestar.qt_main --backend seestar
+zeseestarstacker
 ```
 
-**Note de transition Qt / Tk :** Qt / PySide6 est l'interface recommandée pour cette beta. La commande `zeseestarstacker` lance encore temporairement l'ancienne interface Tk pendant la transition 8.0. Utilisez `python -m seestar.qt_main --backend seestar` pour l'interface Qt recommandée, jusqu'à ce que Qt devienne l'entry point officiel.
+**Entry point Qt :** Qt / PySide6 est désormais l'interface officielle de cette beta. La commande `zeseestarstacker` lance l'interface Qt avec le moteur réel par défaut. Pour une exécution simulée de développement sans moteur, utilisez `python -m seestar.qt_main --backend simulated`.
 
 
 ## Development Setup
@@ -322,8 +322,7 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
 
 **(English)**
 
-1.  **Run the Application:** activate your environment, then start the recommended Qt GUI with `python -m seestar.qt_main --backend seestar`.
-    The `zeseestarstacker` command still temporarily launches the older Tk interface during the 8.0 transition.
+1.  **Run the Application:** activate your environment, then start the Qt GUI with `zeseestarstacker`.
     Set the environment variable `SEESTAR_VERBOSE=1` (or pass `-v` when running
     `run_zemosaic.py`) to enable verbose debug output.
 2.  **Select Folders:** Choose Input, Output, and optional Reference folders/files.
@@ -336,8 +335,7 @@ Lorsque vous lancez l'application, elle effectue des vérifications pour voir si
 
 **(Français)**
 
-1.  **Lancer l'Application :** activez votre environnement, puis lancez l'interface Qt recommandée avec `python -m seestar.qt_main --backend seestar`.
-    La commande `zeseestarstacker` lance encore temporairement l'ancienne interface Tk pendant la transition 8.0.
+1.  **Lancer l'Application :** activez votre environnement, puis lancez l'interface Qt avec `zeseestarstacker`.
     Définissez la variable d'environnement `SEESTAR_VERBOSE=1` (ou utilisez
     l'option `-v` avec `run_zemosaic.py`) pour activer les messages de débogage détaillés.
 2.  **Sélectionner les Dossiers :** Choisissez les dossiers d'Entrée, de Sortie et optionnellement le fichier de Référence.
@@ -495,7 +493,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 
 **(English)**
 
-*   **Error: Dependencies Missing:** Re-run the installation command for your system, including the `[qt]` extra.
+*   **Error: Dependencies Missing:** Re-run the installation command for your system (a plain install already includes the Qt/PySide6 interface).
 *   **GUI Doesn't Appear / Display Error:** Ensure you are running in a graphical environment.
 *   **Images Fail to Align:** Check logs. Causes: poor seeing, clouds, trailing, few stars, bad reference. Try auto-reference first. Inspect "unaligned" files (if cleanup disabled).
 *   **Warning: Low Variance:** Normal for very dark/cloudy frames.
@@ -505,7 +503,7 @@ La pondération par qualité vise à améliorer le stack final en donnant plus d
 
 **(Français)**
 
-*   **Erreur : dépendances manquantes :** relancez la commande d’installation correspondant à votre système, avec l’extra `[qt]`.
+*   **Erreur : dépendances manquantes :** relancez la commande d’installation correspondant à votre système (l'installation standard inclut déjà l'interface Qt/PySide6).
 *   **L'Interface n'apparaît pas / Erreur d'Affichage :** Assurez-vous d'exécuter dans un environnement graphique.
 *   **Échec d'Alignement des Images :** Vérifiez les logs. Causes : mauvaise météo, nuages, filé d'étoiles, peu d'étoiles, mauvaise référence. Essayez d'abord la référence auto. Inspectez les fichiers "unaligned" (si nettoyage désactivé).
 *   **Avertissement : Faible Variance :** Normal pour images très sombres/nuageuses.

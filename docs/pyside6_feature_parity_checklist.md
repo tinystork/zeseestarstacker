@@ -114,8 +114,8 @@ backend contract lives in `seestar/gui/run_config.py`; this checklist tracks the
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 11.1 | Non-default Qt entry point (`seestar.qt_main`) | `[x]` | `--backend simulated|seestar` |
-| 11.2 | Official entry point switched to Qt | `[ ]` | default stays Tk `seestar.main:main` |
+| 11.1 | Qt entry point (`seestar.qt_main`) | `[x]` | `--backend simulated|seestar` (default `seestar`) |
+| 11.2 | Official entry point switched to Qt | `[x]` | console script `zeseestarstacker` → `seestar.qt_main:main` (Qt, real backend default; `--backend simulated` stays a dev/test option) |
 
 ## 12. Run lifecycle robustness
 
@@ -821,8 +821,9 @@ No GUI behaviour was changed; no backend semantic was added.
 
 ### (e) Checklist completeness verdict
 
-* Final counts: **187 checked matrix rows / 1 open matrix row** — the sole
-  open row is 11.2 (official Qt entry point; human gate, left open).
+* Final counts: **188 checked matrix rows / 0 open matrix rows** — 11.2
+  (official Qt entry point) is closed by the 2026-08-22 entry-point lot (see
+  the last "Last updated" entry).
 * Note corrections made this lot: §6.3 (the `auto` stretch mode is Qt-only),
   §14 (explicit NON-BLOCKER + Tk-parity evidence for the three enabler flags).
 * No over-claims found in the three audited tabs beyond those two wording
@@ -1421,12 +1422,30 @@ No GUI behaviour was changed; no backend semantic was added.
   them, and the Tk GUI likewise never forwards them (both sides share
   `build_backend_kwargs`, which omits the three flags), so Qt is Tk-identical
   rather than a gap; deliberately not implemented as new backend semantics.
-  Completeness verdict: 187 checked rows / 1 open row (11.2 remains the sole
-  open matrix row).  Note corrections: §6.3 (`auto` stretch combo entry is a Qt-only
+  Completeness verdict: 187 checked rows / 1 open row at that lot (11.2,
+  since closed by the 2026-08-22 entry-point lot).  Note corrections: §6.3 (`auto` stretch combo entry is a Qt-only
   convenience mode; Tk's combo is 3-mode + a separate Auto Stretch button) and
   §14 (explicit NON-BLOCKER + Tk-parity evidence for the three enabler flags).
   New documentation-truth test `tests/test_qt_audit_m255f.py` (3 tests: the
   three flags are absent from `build_backend_kwargs`, present as persisted GUI
   state, and present as gating enablers).  No GUI/behaviour change, no new
-  backend semantic, no new dependency.  Remaining gaps: Qt entry point (11.2),
-  M26.
+  backend semantic, no new dependency.  Remaining gaps: M26.
+- **2026-08-22 — lot ZSSS-QT-FP-11.2**: official Qt entry point.  Closes
+  checklist 11.2: the console script now points at `seestar.qt_main:main`
+  (`pyproject.toml` `[project.gui-scripts]` `zeseestarstacker`), and
+  `PySide6` moves from the `[qt]` extra into the standard `[project]
+  dependencies` so a plain install ships the Qt shell.  `seestar.qt_main`
+  defaults to the real `seestar` backend (`--backend simulated` stays an
+  explicit dev/test option); a bare `MainWindow()` keeps the simulated default
+  (unchanged for the test suite).  Added an env-only offscreen startup witness
+  (`ZSSS_QT_STARTUP_WITNESS=1`, `python -m seestar.qt_main`) that proves the
+  window title/version, the resolved `SeestarQueuedStackerBackend` and the
+  packaged icon/`back.png` resources, then returns `0` without entering the Qt
+  event loop; normal launches are unchanged.  No engine/Tk change, no new
+  runtime dependency beyond `PySide6` (already the shell's toolkit), no
+  `zealfie` dependency/import.  Covered by updated
+  `tests/test_packaging.py` (entry point + standard `PySide6` dependency + no
+  `zealfie` dep) and `tests/test_qt_backend_activation.py` (parser default
+  `seestar`, explicit `simulated` accepted, fresh-process startup witness) plus
+  the existing import-hygiene / resources / system-tab suites; `git diff
+  --check` clean.  Remaining gaps: M26.
