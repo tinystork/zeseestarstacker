@@ -17,6 +17,83 @@ logger = logging.getLogger(__name__)
 TILE_HEIGHT = 512
 
 
+def _product_display_version():
+    """Return the current product display version, derived from the single
+    source of truth (``seestar.__version__`` + ``seestar.__codename__``).
+
+    Prefers the live package attributes when importing ``seestar`` is safe
+    (import-light builds). When that import fails — for example because
+    optional dependencies such as OpenCV are missing — or when the attributes
+    are absent, this falls back to AST-parsing ``seestar/__init__.py`` from the
+    source tree without executing the heavy package body. Falls back to
+    ``__version__`` alone when ``__codename__`` is missing or blank.
+    """
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    version = ""
+    codename = ""
+
+    # 1) Fast path: live package attributes (cheap and safe on import-light
+    #    builds; skipped automatically when the package cannot be imported).
+    try:
+        import seestar as _seestar
+    except Exception:  # pragma: no cover - depends on optional dependencies
+        _seestar = None
+    if _seestar is not None:
+        version = str(getattr(_seestar, "__version__", "") or "").strip()
+        codename = str(getattr(_seestar, "__codename__", "") or "").strip()
+        if version and codename:
+            return f"{version} {codename}"
+
+    # 2) Source-tree fallback: parse seestar/__init__.py without importing it.
+    candidates = []
+    try:
+        spec = importlib.util.find_spec("seestar")
+    except Exception:  # pragma: no cover - defensive
+        spec = None
+    if spec is not None:
+        origin = getattr(spec, "origin", None)
+        if origin and origin.endswith("__init__.py"):
+            candidates.append(origin)
+        submodule_locations = getattr(spec, "submodule_search_locations", None)
+        if submodule_locations:
+            try:
+                candidates.append(
+                    str(Path(list(submodule_locations)[0]) / "__init__.py")
+                )
+            except Exception:  # pragma: no cover - defensive
+                pass
+    # Local source-tree location relative to this module
+    # (seestar/<subpackage>/<module>.py -> seestar/__init__.py).
+    candidates.append(str(Path(__file__).resolve().parents[1] / "__init__.py"))
+
+    for init_file in dict.fromkeys(candidates):
+        try:
+            tree = ast.parse(Path(init_file).read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover - defensive
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Name)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                ):
+                    if target.id == "__version__" and not version:
+                        version = node.value.value.strip()
+                    elif target.id == "__codename__" and not codename:
+                        codename = node.value.value.strip()
+        if version and codename:
+            break
+
+    if version and codename:
+        return f"{version} {codename}"
+    return version or codename
+
 class SettingsManager:
     """
     Classe pour gérer les paramètres de l'application, y compris
@@ -2374,7 +2451,7 @@ class SettingsManager:
         MODIFIED: Ajout de save_final_as_float32.
         """
         settings_data = {
-            "version": "6.3.0 Boring",  # Version mise à jour pour refléter l'ajout
+            "version": _product_display_version(),  # current product display version (seestar.__version__ + __codename__)
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             "input_folder": str(self.input_folder),
             "output_folder": str(self.output_folder),
