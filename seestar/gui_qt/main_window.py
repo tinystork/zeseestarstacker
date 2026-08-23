@@ -356,10 +356,10 @@ MATCH_BG_TO_TEXT = {None: "default", True: "true", False: "false"}
 # Honest backend-mode notice (M9 fix): makes the simulated default explicit so
 # a human witness is never misled into thinking a Start click ran real science.
 SIMULATED_BACKEND_NOTICE = (
-    "Backend: simulated — Start runs no real stacking. "
+    "Backend: simulated (dev/test) — Start runs no real stacking. "
     "Launch with '--backend seestar' to use the real engine."
 )
-SEESTAR_BACKEND_NOTICE = "Backend: seestar — real engine (explicit opt-in)."
+SEESTAR_BACKEND_NOTICE = "Backend: seestar — real engine."
 
 
 def _field(attr, label, kind, *params):
@@ -1761,8 +1761,8 @@ class MainWindow(QMainWindow):
     def _backend_notice_text(self) -> str:
         """Return the honest backend-mode notice for the current mode."""
         if self.backend_mode == "seestar":
-            return SEESTAR_BACKEND_NOTICE
-        return SIMULATED_BACKEND_NOTICE
+            return self._tr("backend_notice_seestar", SEESTAR_BACKEND_NOTICE)
+        return self._tr("backend_notice_simulated", SIMULATED_BACKEND_NOTICE)
 
     def _build_status_bar(self) -> None:
         status = QStatusBar()
@@ -3850,6 +3850,8 @@ class MainWindow(QMainWindow):
         self._render_preview_label()
         self._render_histogram_status()
         self._render_preview_res_button()
+        if hasattr(self, "backend_notice_label"):
+            self.backend_notice_label.setText(self._backend_notice_text())
 
     def _render_preview_label(self) -> None:
         """Render the preview metadata label from its stored detail + language."""

@@ -285,6 +285,7 @@ def test_simulated_backend_notice_default(window):
     text = window.backend_notice_label.text()
     assert text == SIMULATED_BACKEND_NOTICE
     assert "simulated" in text.lower()
+    assert "dev/test" in text
     assert "--backend seestar" in text
     assert not window.backend_notice_label.isHidden()
 
@@ -297,6 +298,8 @@ def test_seestar_backend_notice_differs(qapp):
         assert text != SIMULATED_BACKEND_NOTICE
         assert "seestar" in text.lower()
         assert "--backend seestar" not in text
+        win.language_combo.setCurrentText("Français")
+        assert win.backend_notice_label.text() == "Moteur : seestar — traitement réel."
     finally:
         win.shutdown()
 

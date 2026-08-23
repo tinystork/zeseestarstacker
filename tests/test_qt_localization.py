@@ -161,6 +161,7 @@ def test_switch_language_updates_code_and_representative_labels(window):
     assert window.remaining_label.text() == "Restant : —"
     assert window.preview_label.text() == "Aperçu : —"
     assert window.browse_input_button.text() == "Parcourir..."
+    assert "simulé (dev/test)" in window.backend_notice_label.text()
 
     titles = _settings_group_titles(window)
     assert "Empilement / Chemins" in titles

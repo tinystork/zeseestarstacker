@@ -1,6 +1,6 @@
 # Seestar Stacker
-**(English)** User-friendly Astronomical Image Stacker for Seestar S50
-**(Français)** Empileur d'Images Astronomiques Convivial pour Seestar S50
+**(English)** The little stacker for lots of lights.
+**(Français)** Le petit stacker pour plein de brutes.
 
 **(English)**
 Seestar Stacker is a graphical application designed to align and stack astronomical images captured with the Seestar S50 smart telescope (and potentially other FITS sources). Its primary goal is to improve the signal-to-noise ratio (SNR) of your astrophotography observations by combining multiple light frames.

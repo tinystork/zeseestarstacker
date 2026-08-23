@@ -95,6 +95,22 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "histogram_group": {"en": "Histogram", "fr": "Histogramme"},
     "actions_group": {"en": "Actions", "fr": "Actions"},
     "preview_prefix": {"en": "Preview:", "fr": "Aperçu :"},
+    # Backend-mode notice next to Start.
+    "backend_notice_simulated": {
+        "en": (
+            "Backend: simulated (dev/test) — Start runs no real stacking. "
+            "Launch with '--backend seestar' to use the real engine."
+        ),
+        "fr": (
+            "Moteur : simulé (dev/test) — Démarrer ne lance aucun "
+            "traitement réel. Lancez avec '--backend seestar' pour utiliser "
+            "le moteur réel."
+        ),
+    },
+    "backend_notice_seestar": {
+        "en": "Backend: seestar — real engine.",
+        "fr": "Moteur : seestar — traitement réel.",
+    },
     # Action buttons.
     "start": {"en": "Start", "fr": "Démarrer"},
     "stop": {"en": "Stop", "fr": "Arrêter"},

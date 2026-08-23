@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ZeSeestarStacker"
 dynamic = ["version"]
-description = "Alignement et empilement d'images astronomiques (Seestar S50) - ZeSeestarStacker"
+description = "The little stacker for lots of lights."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }
