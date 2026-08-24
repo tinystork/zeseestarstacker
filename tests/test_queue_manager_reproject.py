@@ -26,6 +26,38 @@ def make_wcs(shape=(10, 10)):
     return w
 
 
+def _wht_sidecar_header(ch, n_channels=3):
+    """Version-2 per-channel WHT sidecar metadata."""
+    hdr = fits.Header()
+    hdr["HSIVER"] = 2
+    hdr["WHTSEM"] = "EFF_DENOM"
+    hdr["WHTCH"] = ch
+    hdr["WHTNCH"] = n_channels
+    return hdr
+
+
+def _write_versioned_wht_sidecars(base_path, W, n_channels=3):
+    """Write ``n_channels`` versioned per-channel WHT sidecars.
+
+    Returns the list of paths ``[<base>_0.fits, <base>_1.fits, ...]``.  A 2-D
+    ``W`` is broadcast to every channel; a 3-D (HWC) ``W`` is split per
+    channel.
+    """
+    W = np.asarray(W, dtype=np.float32)
+    paths = []
+    for ch in range(n_channels):
+        plane = W if W.ndim == 2 else W[..., ch]
+        p = Path(str(base_path) + f"_{ch}.fits")
+        fits.writeto(
+            p,
+            np.ascontiguousarray(plane, dtype=np.float32),
+            _wht_sidecar_header(ch, n_channels),
+            overwrite=True,
+        )
+        paths.append(str(p))
+    return paths
+
+
 class DummyStacker:
     def __init__(self):
         self.memmap_shape = (10, 10, 3)
@@ -1302,10 +1334,12 @@ def test_reproject_classic_batches_uses_fixed(monkeypatch, tmp_path):
     sci2 = tmp_path / "b2.fits"
     fits.writeto(sci1, data, hdr, overwrite=True)
     fits.writeto(sci2, data, hdr, overwrite=True)
-    wht1 = tmp_path / "b1_wht.fits"
-    wht2 = tmp_path / "b2_wht.fits"
-    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
-    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    wht1 = _write_versioned_wht_sidecars(
+        tmp_path / "b1_wht", np.ones((3, 3), dtype=np.float32)
+    )
+    wht2 = _write_versioned_wht_sidecars(
+        tmp_path / "b2_wht", np.ones((3, 3), dtype=np.float32)
+    )
 
     calls = {"fixed": 0, "optimal": 0}
 
@@ -1334,8 +1368,8 @@ def test_reproject_classic_batches_uses_fixed(monkeypatch, tmp_path):
     monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
 
     obj._reproject_classic_batches([
-        (str(sci1), [str(wht1)]),
-        (str(sci2), [str(wht2)]),
+        (str(sci1), wht1),
+        (str(sci2), wht2),
     ])
 
     assert calls["fixed"] == 1
@@ -1384,14 +1418,16 @@ def _prepare_qm_env(monkeypatch, tmp_path, batch_size):
     sci2 = tmp_path / "b2.fits"
     fits.writeto(sci1, data, hdr, overwrite=True)
     fits.writeto(sci2, data, hdr, overwrite=True)
-    wht1 = tmp_path / "b1_wht.fits"
-    wht2 = tmp_path / "b2_wht.fits"
-    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
-    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    wht1 = _write_versioned_wht_sidecars(
+        tmp_path / "b1_wht", np.ones((3, 3), dtype=np.float32)
+    )
+    wht2 = _write_versioned_wht_sidecars(
+        tmp_path / "b2_wht", np.ones((3, 3), dtype=np.float32)
+    )
 
     return obj, [
-        (str(sci1), [str(wht1)]),
-        (str(sci2), [str(wht2)]),
+        (str(sci1), wht1),
+        (str(sci2), wht2),
     ]
 
 
@@ -1508,10 +1544,12 @@ def test_reproject_classic_batches_skips_unsolved(monkeypatch, tmp_path):
     sci2 = tmp_path / "b2.fits"
     fits.writeto(sci1, data, hdr, overwrite=True)
     fits.writeto(sci2, data, hdr, overwrite=True)
-    wht1 = tmp_path / "b1_wht.fits"
-    wht2 = tmp_path / "b2_wht.fits"
-    fits.writeto(wht1, np.ones((3, 3), dtype=np.float32), overwrite=True)
-    fits.writeto(wht2, np.ones((3, 3), dtype=np.float32), overwrite=True)
+    wht1 = _write_versioned_wht_sidecars(
+        tmp_path / "b1_wht", np.ones((3, 3), dtype=np.float32)
+    )
+    wht2 = _write_versioned_wht_sidecars(
+        tmp_path / "b2_wht", np.ones((3, 3), dtype=np.float32)
+    )
 
     obj.unsolved_classic_batch_files.add(str(sci2))
 
@@ -1532,8 +1570,8 @@ def test_reproject_classic_batches_skips_unsolved(monkeypatch, tmp_path):
     monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
 
     obj._reproject_classic_batches([
-        (str(sci1), [str(wht1)]),
-        (str(sci2), [str(wht2)]),
+        (str(sci1), wht1),
+        (str(sci2), wht2),
     ])
 
     assert counts == []
@@ -1587,10 +1625,12 @@ def test_reproject_classic_batches_forces_reference_wcs_bs0(monkeypatch, tmp_pat
     sci2 = tmp_path / "b2.fits"
     fits.writeto(sci1, data, hdr1, overwrite=True)
     fits.writeto(sci2, data, hdr2, overwrite=True)
-    wht1 = tmp_path / "b1_wht.fits"
-    wht2 = tmp_path / "b2_wht.fits"
-    fits.writeto(wht1, np.ones((4, 4), dtype=np.float32), overwrite=True)
-    fits.writeto(wht2, np.ones((4, 4), dtype=np.float32), overwrite=True)
+    wht1 = _write_versioned_wht_sidecars(
+        tmp_path / "b1_wht", np.ones((4, 4), dtype=np.float32)
+    )
+    wht2 = _write_versioned_wht_sidecars(
+        tmp_path / "b2_wht", np.ones((4, 4), dtype=np.float32)
+    )
 
     import seestar.enhancement.reproject_utils as ru
 
@@ -1609,8 +1649,8 @@ def test_reproject_classic_batches_forces_reference_wcs_bs0(monkeypatch, tmp_pat
     monkeypatch.setattr(obj, "_save_final_stack", lambda *a, **k: None)
 
     obj._reproject_classic_batches([
-        (str(sci1), [str(wht1)]),
-        (str(sci2), [str(wht2)]),
+        (str(sci1), wht1),
+        (str(sci2), wht2),
     ])
 
     # reproject_and_coadd is called once per channel; every wcs should be the reference
@@ -1732,7 +1772,15 @@ def test_reproject_classic_batches_bs0_rescales_near_white(monkeypatch, tmp_path
     hdr = make_wcs(shape=shape).to_header()
     for sci_path, wht_paths in batch_files:
         fits.writeto(sci_path, rgb, hdr, overwrite=True)
-        fits.writeto(wht_paths[0], np.ones(shape, dtype=np.float32), overwrite=True)
+        # Rewrite every per-channel sidecar at the new spatial shape, keeping
+        # the versioned metadata so the v2 contract still validates.
+        for ch, wp in enumerate(wht_paths):
+            fits.writeto(
+                wp,
+                np.ones(shape, dtype=np.float32),
+                _wht_sidecar_header(ch, 3),
+                overwrite=True,
+            )
 
     import seestar.enhancement.reproject_utils as ru
 
@@ -1769,4 +1817,3 @@ def test_reproject_classic_batches_bs0_rescales_near_white(monkeypatch, tmp_path
     assert float(np.nanmax(data) - np.nanmin(data)) > 1e-3
     assert np.all(np.isfinite(data))
     assert np.all(cov > 0)
-

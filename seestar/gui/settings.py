@@ -16,6 +16,31 @@ logger = logging.getLogger(__name__)
 # Default tile height used when stacking with disk-backed memmaps.
 TILE_HEIGHT = 512
 
+# Documented default min_weight floor, shared by the settings seam, the backend
+# transport clamp and both GUI shells.
+DEFAULT_MIN_WEIGHT = 0.01
+_MIN_WEIGHT_LOWER = 0.01
+_MIN_WEIGHT_UPPER = 1.0
+
+
+def normalize_min_weight(value):
+    """Normalize a ``min_weight`` value to a finite float in ``[0.01, 1.0]``.
+
+    NaN, +/-Inf, non-numeric and bool values are normalized to the documented
+    default ``0.01``; finite numeric values are clamped to ``[0.01, 1.0]``.
+    This mirrors :func:`seestar.queuep.queue_manager._normalize_min_weight`
+    exactly so the settings seam and the backend transport clamp cannot drift.
+    """
+    if isinstance(value, bool):
+        return DEFAULT_MIN_WEIGHT
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_WEIGHT
+    if not np.isfinite(f):
+        return DEFAULT_MIN_WEIGHT
+    return float(min(_MIN_WEIGHT_UPPER, max(_MIN_WEIGHT_LOWER, f)))
+
 
 def _product_display_version():
     """Return the current product display version, derived from the single
@@ -1733,19 +1758,12 @@ class SettingsManager:
                 messages.append(
                     f"Exposant Étoiles ('{original}') invalide, réinitialisé à {self.stars_exponent:.1f}"
                 )
-            try:
-                self.min_weight = float(self.min_weight)
-                if not (0 < self.min_weight <= 1.0):
-                    original = self.min_weight
-                    self.min_weight = np.clip(self.min_weight, 0.01, 1.0)
-                    messages.append(
-                        f"Poids Min ({original:.2f}) ajusté à {self.min_weight:.2f}"
-                    )
-            except (ValueError, TypeError):
-                original = self.min_weight
-                self.min_weight = defaults_fallback["min_weight"]
+            original_min_weight = self.min_weight
+            self.min_weight = normalize_min_weight(self.min_weight)
+            if self.min_weight != original_min_weight:
                 messages.append(
-                    f"Poids Min ('{original}') invalide, réinitialisé à {self.min_weight:.2f}"
+                    f"Poids Min ('{original_min_weight}') hors limites/invalide, "
+                    f"normalisé à {self.min_weight}"
                 )
 
             if self.use_quality_weighting and not (

@@ -22,10 +22,13 @@ stacking, no FITS/PNG side effects beyond a small test fixture, and no Tk:
 
 (c) engine auto-resume seam:
     * the Qt run path forwards ``output_folder`` as ``start_processing``
-      ``output_dir`` (the exact folder ``_can_resume`` checks), and the resume
-      condition (memmap_accumulators/cumulative_SUM.npy +
-      cumulative_WHT.npy + batches_count.txt) evaluates True against that
-      forwarded folder.
+      ``output_dir`` (the exact folder the engine resume decision inspects),
+      and that folder is where the engine's versioned resume artifacts live
+      (memmap_accumulators/cumulative_SUM.npy + cumulative_WHT.npy +
+      resume_manifest.json).  HSI-2B replaced the legacy three-file
+      ``_can_resume`` condition with a versioned, fail-closed manifest; this
+      seam test only asserts the forwarded folder is the one the engine will
+      evaluate (it uses a fake stacker, so no real resume decision runs here).
 
 No real stacking, no engine, no Tk. ``QT_QPA_PLATFORM=offscreen`` is set
 defensively before any ``QApplication``.
@@ -575,16 +578,37 @@ def test_backend_emit_summary_uses_final_stacked_path(tmp_path):
 
 
 def test_auto_resume_condition_matches_forwarded_output_dir(tmp_path):
-    # Build the exact engine ``_can_resume`` artifact set in the output folder.
+    # Build a versioned engine resume artifact set in the output folder. The
+    # fake stacker below never runs a real resume decision; this only proves the
+    # forwarded ``output_dir`` is the folder the engine will inspect (HSI-2B
+    # replaced the legacy three-file ``_can_resume`` condition with a versioned
+    # manifest + SUM/WHT contract).
     memdir = tmp_path / "memmap_accumulators"
     memdir.mkdir()
     np.lib.format.open_memmap(
         memdir / "cumulative_SUM.npy", mode="w+", dtype=np.float32, shape=(2, 2, 3)
     )[:]
     np.lib.format.open_memmap(
-        memdir / "cumulative_WHT.npy", mode="w+", dtype=np.float32, shape=(2, 2)
+        memdir / "cumulative_WHT.npy", mode="w+", dtype=np.float32, shape=(2, 2, 3)
     )[:]
     (tmp_path / "batches_count.txt").write_text("2", encoding="utf-8")
+    import json
+
+    (memdir / "resume_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "clean",
+                "mode": "classic_sumw",
+                "shape": [2, 2, 3],
+                "dtype_sum": "float32",
+                "dtype_wht": "float32",
+                "stacked_batches_count": 2,
+                "completed_sources": [],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     instances = []
     backend = _backend_for_stackers(instances)
@@ -598,11 +622,11 @@ def test_auto_resume_condition_matches_forwarded_output_dir(tmp_path):
     output_dir = instances[0].start_kwargs["output_dir"]
     assert output_dir == str(tmp_path)
 
-    # The exact files SeestarQueuedStacker._can_resume(Path(self.output_folder))
-    # requires all exist under the folder the Qt run path forwarded.
+    # The versioned resume artifact set lives under the forwarded folder.
     required = [
         "memmap_accumulators/cumulative_SUM.npy",
         "memmap_accumulators/cumulative_WHT.npy",
+        "memmap_accumulators/resume_manifest.json",
         "batches_count.txt",
     ]
     assert all((Path(output_dir) / r).exists() for r in required)

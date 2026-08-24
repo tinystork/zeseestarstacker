@@ -326,7 +326,7 @@ class SeestarStackerGUI:
         self.weight_stars_var = tk.BooleanVar(value=True)
         self.snr_exponent_var = tk.DoubleVar(value=1.0)
         self.stars_exponent_var = tk.DoubleVar(value=0.5)
-        self.min_weight_var = tk.DoubleVar(value=0.1)
+        self.min_weight_var = tk.DoubleVar(value=0.01)
 
         self._final_stretch_set_by_processing_finished = False  # <--- C'EST LA LIGNE DE LA MÉTHODE 2
 

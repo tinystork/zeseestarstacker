@@ -25,6 +25,8 @@ import asyncio
 import concurrent.futures
 import gc
 import glob
+import hashlib
+import json
 import math
 import multiprocessing
 import os
@@ -322,6 +324,268 @@ _FINALIZATION_MODES = frozenset(
 )
 
 
+# ----------------------------------------------------------------------
+# HSI-2B: versioned, fail-closed resume contract for the *plain classic*
+# SUM/W path only.  Drizzle, mosaic and (inter-batch / final) reproject are
+# deliberately NOT resumable: their sufficient scientific state (drizzle
+# accumulators, WCS / intermediate grids) is not covered by these two
+# memmaps, so presenting resume artifacts for those modes fails closed.
+# ----------------------------------------------------------------------
+
+_RESUME_MANIFEST_VERSION = 1
+_RESUME_MANIFEST_FILENAME = "resume_manifest.json"
+_RESUME_STATE_CLEAN = "clean"
+_RESUME_STATE_DIRTY = "dirty"
+_RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
+
+# ----------------------------------------------------------------------
+# Quality-weighting domain constants (HSI P5-FIX).
+#
+# ``DEFAULT_MIN_WEIGHT`` is the single documented default floor (0.01) shared
+# by the settings seam, the backend transport clamp and both GUI shells.
+# ``_QUALITY_METRIC_FLOOR`` is the positive safety floor for ``q(scores)``;
+# ``_QUALITY_FACTOR_CAP`` / ``_QUALITY_METRIC_CAP`` are the finite upper
+# saturation bounds used so a +Inf / overflowing factor saturates (never
+# collapses to the minimum and never emits NaN/Inf/negative).
+# ----------------------------------------------------------------------
+DEFAULT_MIN_WEIGHT = 0.01
+_MIN_WEIGHT_LOWER = 0.01
+_MIN_WEIGHT_UPPER = 1.0
+
+_QUALITY_METRIC_FLOOR = 1e-9
+_QUALITY_FACTOR_CAP = 1e12
+_QUALITY_METRIC_CAP = 1e24
+
+
+def _normalize_min_weight(value):
+    """Normalize a ``min_weight`` transport value to a finite float in
+    ``[0.01, 1.0]``.
+
+    NaN, +/-Inf, non-numeric and bool values are normalized to the documented
+    default ``0.01``; finite numeric values are clamped to ``[0.01, 1.0]``.
+    This is the *single* backend normalization shared by the settings seam and
+    the ``start_processing`` transport clamp, so the two cannot drift.
+    """
+    if isinstance(value, bool):
+        return DEFAULT_MIN_WEIGHT
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_WEIGHT
+    if not np.isfinite(f):
+        return DEFAULT_MIN_WEIGHT
+    return float(min(_MIN_WEIGHT_UPPER, max(_MIN_WEIGHT_LOWER, f)))
+
+
+class _ResumeCheckpointError(RuntimeError):
+    """Raised when a checkpoint persist/commit operation fails.
+
+    A checkpoint failure is *mandatory-abort*: once the accumulators are being
+    mutated on the strength of a durable ``dirty`` mark, any failure to persist
+    that mark (before mutation) or to persist a clean commit (after mutation)
+    must stop processing and refuse a later resume, never warn-and-continue.
+    """
+
+
+class _QualityReferenceError(RuntimeError):
+    """Raised when quality-weighted stacking lacks a valid pinned ``q_ref``.
+
+    The relative quality domain is defined only once the immutable session
+    reference scale ``q_ref`` has been pinned (fresh capture) or restored
+    verbatim (resume).  A quality-weighted reduction, checkpoint write or
+    resume that would otherwise fall back to the pre-P5 absolute domain fails
+    closed through the established processing-error path instead.
+    """
+
+# Scientific settings that, if changed, invalidate a classic SUM/W checkpoint.
+# Purely cosmetic final-output settings (SCNR, colour balance, background
+# neutralisation, photometric calibration) are intentionally excluded: they do
+# not change the accumulated numerator SUM or effective denominator WHT.
+_RESUME_FINGERPRINT_ATTRS = (
+    # stacking / rejection family and thresholds (including winsor settings)
+    "stacking_mode",
+    "kappa",
+    "stack_kappa_low",
+    "stack_kappa_high",
+    "winsor_limits",
+    # normalisation
+    "normalize_method",
+    # quality-weighting policy / exponents / floor
+    "weighting_method",
+    "use_quality_weighting",
+    "weight_by_snr",
+    "weight_by_stars",
+    "snr_exponent",
+    "stars_exponent",
+    "min_weight",
+    # hot-pixel / debayer choices that affect the input samples
+    "correct_hot_pixels",
+    "hot_pixel_threshold",
+    "neighborhood_size",
+    "bayer_pattern",
+    # batch decomposition controls
+    "batch_size",
+    "chunk_size",
+    # feathering / crop controls applied before accumulation
+    "apply_batch_feathering",
+    "apply_feathering",
+    "feather_blur_px",
+    "apply_master_tile_crop",
+    "master_tile_crop_percent_decimal",
+    "apply_low_wht_mask",
+    "low_wht_percentile",
+    "low_wht_soften_px",
+)
+
+
+def _json_safe(value):
+    """Coerce a scientific setting to a deterministic JSON-safe primitive."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _identities_equivalent(a, b):
+    """True when two source identities carry the same physical-observation
+    evidence (size + mtime_ns), regardless of the resolved path.
+
+    A source moved to ``stacked/`` keeps its size and mtime but changes its
+    path, so path is deliberately *not* part of the equivalence test for the
+    reference identity.  Size+mtime is the discriminator that rejects a
+    different observation masquerading under the same path.
+    """
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    try:
+        return int(a.get("size")) == int(b.get("size")) and int(
+            a.get("mtime_ns")
+        ) == int(b.get("mtime_ns"))
+    except (TypeError, ValueError):
+        return False
+
+
+def _identity_evidence_key(ident):
+    """Tuple of the physical-observation evidence of one source identity.
+
+    Used for identity uniqueness/prefix comparisons.  The ``path`` is
+    intentionally part of this key (unlike ``_identities_equivalent``), because
+    prefix/uniqueness checks compare two *persisted* identities which should
+    carry the exact same original path, not the reference equivalence of a
+    moved-to-stacked counterpart.
+    """
+    if not isinstance(ident, dict):
+        return None
+    return (ident.get("path"), ident.get("size"), ident.get("mtime_ns"))
+
+
+def _validate_source_identity(ident, what="source"):
+    """Validate one source-observation identity against the scientific schema.
+
+    Returns ``(True, None)`` or ``(False, reason)``.  The schema is: a dict
+    with a non-empty string ``path``, integer (non-bool) ``size`` and
+    ``mtime_ns``, and an optional string ``name``.  ``None`` / missing /
+    bool / float / string ``size`` or ``mtime_ns`` are all refused.
+    """
+    if not isinstance(ident, dict):
+        return (False, f"{what} identity is not an object")
+    path = ident.get("path")
+    if not isinstance(path, str) or not path:
+        return (False, f"{what} identity has an invalid/empty path")
+    size = ident.get("size")
+    if isinstance(size, bool) or not isinstance(size, int):
+        return (False, f"{what} identity size must be an integer")
+    mtime = ident.get("mtime_ns")
+    if isinstance(mtime, bool) or not isinstance(mtime, int):
+        return (False, f"{what} identity mtime_ns must be an integer")
+    name = ident.get("name")
+    if name is not None and not isinstance(name, str):
+        return (False, f"{what} identity name must be a string")
+    return (True, None)
+
+
+def _validate_decomposition(decomp, n_sources):
+    """Validate a persisted plan decomposition.
+
+    Returns ``(True, None)`` or ``(False, reason)``.  A non-empty plan must
+    carry a non-empty list of strictly positive non-bool integers summing to
+    ``n_sources``; an empty plan must carry an empty decomposition.
+    """
+    if not isinstance(decomp, list):
+        return (False, "plan decomposition must be a list")
+    if n_sources == 0:
+        if decomp:
+            return (False, "plan decomposition must be empty for an empty plan")
+        return (True, None)
+    if not decomp:
+        return (False, "plan decomposition must be non-empty for a non-empty plan")
+    total = 0
+    for b in decomp:
+        if isinstance(b, bool) or not isinstance(b, int):
+            return (False, "plan decomposition entries must be integers")
+        if b <= 0:
+            return (False, "plan decomposition entries must be strictly positive")
+        total += b
+    if total != n_sources:
+        return (False, "plan decomposition sum does not match the source count")
+    return (True, None)
+
+
+def _ledger_on_boundary(ledger_len, decomposition):
+    """True when ``ledger_len`` is a valid completed-batch boundary for the
+    given decomposition (0 is always the initial boundary)."""
+    if ledger_len == 0:
+        return True
+    cum = 0
+    for b in decomposition:
+        cum += b
+        if cum == ledger_len:
+            return True
+        if cum > ledger_len:
+            return False
+    return False
+
+
+def _validate_count_field(value, name):
+    """Validate a non-negative integer counter (reject bool/string/float)."""
+    if isinstance(value, bool):
+        return (False, f"{name} must be an integer, not a bool")
+    if not isinstance(value, int):
+        return (False, f"{name} must be an integer")
+    if value < 0:
+        return (False, f"{name} must be non-negative")
+    return (True, None)
+
+
+def _validate_exposure_field(value, name="total_exposure_seconds"):
+    """Validate a non-negative finite numeric exposure field (reject bool)."""
+    if isinstance(value, bool):
+        return (False, f"{name} must be numeric, not a bool")
+    if not isinstance(value, (int, float)):
+        return (False, f"{name} must be numeric")
+    try:
+        fv = float(value)
+    except (TypeError, ValueError):
+        return (False, f"{name} must be numeric")
+    if not np.isfinite(fv) or fv < 0:
+        return (False, f"{name} must be finite and non-negative")
+    return (True, None)
+
+
 def _decide_finalization_mode(stacker) -> str:
     """Map the stacker flag state to a single coherent finalization mode.
 
@@ -405,6 +669,50 @@ def _suggest_pool_size(fraction: float = 0.75) -> int:
 
     n_cpu = max(os.cpu_count() or 1, 1)
     return max(1, math.ceil(n_cpu * fraction))
+
+
+_WINSORIZED_MODE_ALIASES = frozenset(
+    {
+        "winsorized-sigma",
+        "winsorized-sigma-clip",
+        "winsorized_sigma",
+        "winsorized_sigma_clip",
+    }
+)
+
+
+def _is_winsorized_mode(mode) -> bool:
+    """Return True for any accepted spelling of the winsorized-sigma mode.
+
+    The scientific kernel's canonical key is ``"winsorized-sigma"``, but the
+    Qt shell sends ``stacking_mode="winsorized-sigma-clip"`` and the legacy
+    settings layer uses ``"winsorized_sigma_clip"``.  Normalize all aliases at
+    this boundary so RAM and tiled/HQ dispatch select winsorized rejection
+    instead of silently falling through to the arithmetic mean.
+    """
+    return str(mode or "").strip().lower() in _WINSORIZED_MODE_ALIASES
+
+
+_LINEAR_FIT_CLIP_MODE_ALIASES = frozenset(
+    {
+        "linear_fit_clip",
+        "linear-fit-clip",
+    }
+)
+
+
+def _is_linear_fit_clip_mode(mode) -> bool:
+    """Return True for any accepted spelling of the linear-fit clipping mode.
+
+    The scientific kernel's canonical key is ``"linear_fit_clip"``, but the
+    GUI/settings layer derives ``stacking_mode`` as
+    ``stack_method.replace("_", "-")`` (``seestar/gui/settings.py``) and the
+    Qt shell advertises ``"linear-fit-clip"`` as its backend key.  Normalize
+    both spellings at this boundary — mirroring :func:`_is_winsorized_mode` —
+    so RAM and tiled/HQ dispatch select the real linear-fit clipping kernel
+    instead of silently falling through to the arithmetic mean.
+    """
+    return str(mode or "").strip().lower() in _LINEAR_FIT_CLIP_MODE_ALIASES
 
 
 def _reproject_worker(
@@ -637,6 +945,7 @@ def _stack_worker(args):
         kappa_high,
         winsor_limits,
         apply_rewinsor,
+        return_weights,
     ) = args
 
     from seestar.core.stack_methods import (
@@ -647,13 +956,14 @@ def _stack_worker(args):
         _stack_winsorized_sigma,
     )
 
-    if mode == "winsorized-sigma":
+    if _is_winsorized_mode(mode):
         res = _stack_winsorized_sigma(
             images,
             weights,
             kappa=max(kappa_low, kappa_high),
             winsor_limits=winsor_limits,
             apply_rewinsor=apply_rewinsor,
+            return_weights=return_weights,
         )
         gc.collect()  # FIX MEMLEAK
         return res
@@ -663,14 +973,25 @@ def _stack_worker(args):
             weights,
             sigma_low=kappa_low,
             sigma_high=kappa_high,
+            return_weights=return_weights,
         )
-    elif mode == "linear_fit_clip":
-        return _stack_linear_fit_clip(images, weights)
+    elif _is_linear_fit_clip_mode(mode):
+        return _stack_linear_fit_clip(images, weights, return_weights=return_weights)
     elif mode == "median":
-        return _stack_median(images, weights)
+        return _stack_median(images, weights, return_weights=return_weights)
     else:
-        return _stack_mean(images, weights)
+        return _stack_mean(images, weights, return_weights=return_weights)
 
+
+def _nan_mask_image(img, mask):
+    """Return ``img`` with spatially invalid pixels set to NaN (missing).
+
+    ``mask`` is a 2-D boolean/fractional validity map (``True``/nonzero ==
+    valid).  Invalid samples become ``NaN`` so nonlinear reduction kernels
+    treat them as *missing* rather than as numeric zeros.
+    """
+    m = mask[..., None] if img.ndim == 3 else mask
+    return np.where(m, img, np.nan)
 
 def drizzle_batch_worker(args):
     """M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
@@ -1158,6 +1479,248 @@ logger.debug("Configuration warnings OK.")
 # --- FIN Imports ---
 
 
+# ---------------------------------------------------------------------------
+# Classic-batch intermediate persistence contract (ZSSS-HSI-2A)
+# ---------------------------------------------------------------------------
+#
+# A classic batch is persisted as a science cube ``classic_batch_XXX.fits``
+# (CHW) holding the *normalized* batch value V, plus one per-channel effective
+# denominator sidecar ``classic_batch_XXX_wht_C.fits`` (2-D float32) for each
+# colour channel C in ``0 .. n_channels-1``.
+#
+# ``V`` is the normalized reduction output and ``W`` the effective per-pixel /
+# per-channel denominator of that reduction, so the scientific numerator is
+# ``V_ch * W_ch`` and two batches compose exactly via
+# ``sum(V * W) / sum(W)`` independently per channel.
+#
+# FITS-safe metadata (version 2 contract):
+#   HSIVER = 2           : classic-batch persistence contract version
+#   WHTSEM = 'EFF_DENOM' : sidecar carries the *effective denominator*
+#   WHTCH  = C           : 0-based colour channel this sidecar belongs to
+#   WHTNCH = N           : number of colour channels in the science cube
+#
+# Version 1 (legacy, unversioned) collapsed a per-channel HWC denominator to a
+# single 2-D map and wrote that *same* array to every sidecar.  Because the
+# per-channel provenance is unrecoverable from such a file, unversioned legacy
+# sidecars are refused when presented as scientific/resumable intermediates
+# (fail closed) rather than silently broadcast across channels.  Compatibility
+# is retained only for the clearly non-scientific display/coverage path (see
+# ``_finalize_single_classic_batch``).
+
+HSI_CONTRACT_VERSION = 2
+HSI_WHT_SEMANTIC = "EFF_DENOM"
+HSI_VERSION_KEY = "HSIVER"
+HSI_WHT_SEMANTIC_KEY = "WHTSEM"
+HSI_WHT_CHANNEL_KEY = "WHTCH"
+HSI_WHT_NCHANNEL_KEY = "WHTNCH"
+
+
+def _hsi_wht_sidecar_path(out_dir, batch_idx, ch):
+    return os.path.join(out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch}.fits")
+
+
+def _hsi_wht_header(ch, n_channels):
+    """Build the versioned FITS header for a per-channel WHT sidecar."""
+    hdr = fits.Header()
+    hdr[HSI_VERSION_KEY] = (
+        HSI_CONTRACT_VERSION,
+        "Classic-batch WHT persistence version",
+    )
+    hdr[HSI_WHT_SEMANTIC_KEY] = (
+        HSI_WHT_SEMANTIC,
+        "Effective per-pixel denominator",
+    )
+    hdr[HSI_WHT_CHANNEL_KEY] = (ch, "0-based colour channel index")
+    hdr[HSI_WHT_NCHANNEL_KEY] = (n_channels, "Number of colour channels in cube")
+    return hdr
+
+
+def _hsi_validate_wht(final_wht, spatial_shape, n_channels):
+    """Validate a WHT map before any per-channel sidecar is written.
+
+    Only a 2-D (HW) map or a 3-D (HWC) map whose spatial shape equals
+    ``spatial_shape`` and whose channel count equals ``n_channels`` is
+    accepted.  Anything else raises ``ValueError`` (fail closed) so that no
+    per-channel provenance is ever manufactured from malformed input.
+
+    Raises
+    ------
+    ValueError
+        If ``final_wht`` has an unsupported rank, a spatial shape that does not
+        match the science cube, or a channel count that does not match the
+        science cube.
+    """
+    w = np.asarray(final_wht)
+    H, W = int(spatial_shape[0]), int(spatial_shape[1])
+    if w.ndim not in (2, 3):
+        raise ValueError(
+            f"WHT map must be 2-D (HW) or 3-D (HWC), got {w.ndim}-D with "
+            f"shape {w.shape}"
+        )
+    if w.shape[0] != H or w.shape[1] != W:
+        raise ValueError(
+            f"WHT map spatial shape {tuple(w.shape[:2])} does not match the "
+            f"science cube spatial shape ({H}, {W})"
+        )
+    if w.ndim == 3 and w.shape[2] != n_channels:
+        raise ValueError(
+            f"WHT map has {w.shape[2]} channels but the science cube has "
+            f"{n_channels}; refusing to broadcast or drop channels"
+        )
+    return w
+
+
+def _hsi_wht_channel(final_wht, ch, n_channels):
+    """Return the 2-D effective denominator plane for channel ``ch``.
+
+    A 2-D ``final_wht`` is inherently channel-invariant and is broadcast
+    (returned as-is) to every channel; a 3-D (HWC) ``final_wht`` yields its
+    ``ch``-th plane.  This function assumes the input has already passed
+    :func:`_hsi_validate_wht`; it never falls back to channel 0 or to ones.
+    """
+    w = np.asarray(final_wht, dtype=np.float32)
+    if w.ndim == 3:
+        return w[:, :, ch]
+    if w.ndim == 2:
+        return w
+    raise ValueError(
+        f"WHT map has unsupported rank {w.ndim}; expected 2-D (HW) or 3-D (HWC)"
+    )
+
+
+def _hsi_crop_wht(final_wht, dh, dw, end_h, end_w):
+    """Crop a 2-D or 3-D weight map with the same spatial window as the cube."""
+    w = np.asarray(final_wht)
+    if w.ndim == 3:
+        return w[dh:end_h, dw:end_w, :]
+    return w[dh:end_h, dw:end_w]
+
+
+def _hsi_finite_nonneg(data):
+    """Coerce a denominator plane to a finite, nonnegative float32 array.
+
+    Non-finite values (NaN / +/-inf) and negative values are treated as zero
+    contribution: an effective denominator is never undefined or negative, so a
+    non-finite or negative entry cannot legitimately weight a pixel.
+    """
+    x = np.asarray(data, dtype=np.float32)
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.maximum(x, 0.0)
+
+
+def _load_classic_batch_wht(wht_paths, n_channels, spatial_shape, display_only=False):
+    """Load per-channel effective denominators for one classic batch.
+
+    Returns a ``(n_channels, H, W)`` float32 array.  An empty ``wht_paths``
+    (headless ``boring_stack`` path that never produced per-batch weights)
+    yields a uniform channel-invariant denominator of ones.
+
+    Versioned (HSIVER == 2) sidecars are read per channel and the *complete*
+    contract is validated: ``HSIVER == 2``, ``WHTSEM == 'EFF_DENOM'``,
+    ``WHTNCH == n_channels``, the expected unique ``WHTCH``, and an exact
+    ``(H, W)`` shape.  Missing or mismatched semantic/count/channel/shape
+    metadata fails closed with ``ValueError``.  Denominator planes are then
+    coerced to finite, nonnegative values.  An unversioned legacy sidecar —
+    where the per-channel denominator was irreversibly collapsed to one 2-D
+    map — is refused (``ValueError``) when treated as scientific provenance,
+    because the channel information cannot be recovered.  ``display_only=True``
+    relaxes this for the clearly non-scientific display/coverage view only: a
+    legacy 2-D map is broadcast across channels, never as per-channel
+    scientific provenance.
+
+    Raises
+    ------
+    ValueError
+        If sidecar provenance is insufficient for scientific per-channel use.
+    """
+    H, W = int(spatial_shape[0]), int(spatial_shape[1])
+    if not wht_paths:
+        return np.ones((n_channels, H, W), dtype=np.float32)
+
+    def _read(path):
+        # Load into memory and copy the data (and header) before the FITS
+        # handle closes, so the returned arrays never alias the file.
+        with fits.open(path, memmap=False) as hdul:
+            hdr = hdul[0].header.copy()
+            data = hdul[0].data
+            if data is None:
+                return hdr, None
+            return hdr, np.array(data, dtype=np.float32, copy=True)
+
+    def _validate_sidecar(hdr, name, ch):
+        if hdr.get(HSI_VERSION_KEY, None) != HSI_CONTRACT_VERSION:
+            raise ValueError(
+                f"{name} is a legacy collapsed WHT sidecar (missing per-channel "
+                "provenance); refusing to reinterpret it as per-channel "
+                "scientific weights"
+            )
+        if hdr.get(HSI_WHT_SEMANTIC_KEY, None) != HSI_WHT_SEMANTIC:
+            raise ValueError(
+                f"{name} has WHTSEM={hdr.get(HSI_WHT_SEMANTIC_KEY, None)!r} but "
+                f"expected {HSI_WHT_SEMANTIC!r}"
+            )
+        nch = hdr.get(HSI_WHT_NCHANNEL_KEY, None)
+        if nch is None or int(nch) != n_channels:
+            raise ValueError(
+                f"{name} has WHTNCH={nch!r} but the science cube has "
+                f"{n_channels} channels"
+            )
+        wch = hdr.get(HSI_WHT_CHANNEL_KEY, None)
+        if wch is None or int(wch) != ch:
+            raise ValueError(
+                f"{name} has WHTCH={wch!r} but expected channel {ch}"
+            )
+
+    first = wht_paths[0]
+    try:
+        hdr0, _ = _read(first)
+    except FileNotFoundError:
+        raise ValueError(f"missing classic-batch WHT sidecar {first}")
+
+    if hdr0.get(HSI_VERSION_KEY, None) != HSI_CONTRACT_VERSION:
+        # Unversioned legacy collapsed 2-D map.
+        if not display_only:
+            raise ValueError(
+                f"{os.path.basename(first)} is a legacy collapsed WHT sidecar "
+                "(missing per-channel provenance); refusing to reinterpret it "
+                "as per-channel scientific weights"
+            )
+        try:
+            _, data = _read(first)
+            cov = _hsi_finite_nonneg(data)
+            if cov.ndim != 2 or cov.shape != (H, W):
+                raise ValueError(
+                    f"{os.path.basename(first)} legacy WHT has shape "
+                    f"{cov.shape} but expected ({H}, {W})"
+                )
+            return np.broadcast_to(cov, (n_channels, H, W)).copy()
+        except Exception:
+            return np.ones((n_channels, H, W), dtype=np.float32)
+
+    if len(wht_paths) < n_channels:
+        raise ValueError(
+            "classic-batch WHT sidecars are incomplete "
+            f"({len(wht_paths)} files for {n_channels} channels)"
+        )
+
+    out = np.empty((n_channels, H, W), dtype=np.float32)
+    for ch in range(n_channels):
+        path = wht_paths[ch]
+        try:
+            hdr, data = _read(path)
+        except FileNotFoundError:
+            raise ValueError(f"missing classic-batch WHT sidecar {path}")
+        _validate_sidecar(hdr, os.path.basename(path), ch)
+        if data is None or data.ndim != 2 or data.shape != (H, W):
+            got = None if data is None else data.shape
+            raise ValueError(
+                f"classic-batch WHT sidecar {os.path.basename(path)} has shape "
+                f"{got} but expected ({H}, {W})"
+            )
+        out[ch] = _hsi_finite_nonneg(data)
+    return out
+
+
 class SeestarQueuedStacker:
     """
     Classe pour l'empilement des images Seestar avec file d'attente et traitement par lots.
@@ -1464,7 +2027,10 @@ class SeestarQueuedStacker:
                 data = np.moveaxis(data, 0, -1)
             return data
 
-        def _ensure_hw(arr):
+        def _ensure_wht(arr):
+            """Normalize a weight map to (H, W) or (H, W, C) *without*
+            collapsing per-channel denominators.  CHW is moved to HWC; a 2-D
+            map stays 2-D (legacy channel-invariant coverage)."""
             if arr is None:
                 return None
             weights = np.asarray(arr, dtype=np.float32)
@@ -1474,6 +2040,13 @@ class SeestarQueuedStacker:
                 and weights.shape[-1] not in (1, 3, 4)
             ):
                 weights = np.moveaxis(weights, 0, -1)
+            return weights.astype(np.float32, copy=False)
+
+        def _coverage_hw(arr):
+            """Derive a 2-D coverage view for display/preview only."""
+            if arr is None:
+                return None
+            weights = np.asarray(arr, dtype=np.float32)
             if weights.ndim == 3:
                 weights = np.nanmean(weights, axis=2)
             return weights.astype(np.float32, copy=False)
@@ -1486,7 +2059,7 @@ class SeestarQueuedStacker:
 
             reproj_data, reproj_wht = worker(fits_path)
             reproj_data = _ensure_hwc(reproj_data)
-            reproj_wht = _ensure_hw(reproj_wht)
+            reproj_wht = _ensure_wht(reproj_wht)
 
             if getattr(self, "interbatch_norm_active", False):
                 reproj_data, reproj_wht = self._apply_interbatch_normalization(
@@ -1495,10 +2068,10 @@ class SeestarQueuedStacker:
                     context="reproject",
                 )
                 reproj_data = _ensure_hwc(reproj_data)
-                reproj_wht = _ensure_hw(reproj_wht)
+                reproj_wht = _ensure_wht(reproj_wht)
                 if reproj_wht is not None:
                     mask = (reproj_wht > 0).astype(np.float32, copy=False)
-                    if reproj_data.ndim == 3:
+                    if reproj_data.ndim == 3 and reproj_wht.ndim == 2:
                         reproj_data *= mask[..., None]
                     else:
                         reproj_data *= mask
@@ -1509,24 +2082,38 @@ class SeestarQueuedStacker:
             if reproj_wht is None:
                 reproj_wht = np.ones(reproj_data.shape[:2], dtype=np.float32)
 
+            # Normalize/broadcast the incoming weight map to the scientific
+            # accumulator target (normally ``cumulative_sum_memmap.shape`` ==
+            # ``(H, W, C)``).  A 2-D HW weight broadcasts across colour
+            # channels; an HWC weight stays channel-specific (CHW was already
+            # moved to HWC by ``_ensure_wht``).  We must never downgrade or
+            # recreate an HWC accumulator to HW merely because one input weight
+            # map is HW — that would silently discard already accumulated
+            # denominators.  If the shape truly cannot be reconciled, raise
+            # instead of zeroing scientific state.
+            target_shape = self.cumulative_sum_memmap.shape
+            if reproj_wht.shape != tuple(target_shape):
+                if reproj_wht.ndim == 2 and len(target_shape) == 3:
+                    # HW weight -> (H, W, 1) -> broadcast across channels.
+                    reproj_wht = reproj_wht[..., None]
+                try:
+                    reproj_wht = np.broadcast_to(reproj_wht, target_shape)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Cannot reconcile weight map shape "
+                        f"{reproj_wht.shape} with scientific accumulator "
+                        f"shape {target_shape}; refusing to recreate/zero "
+                        "accumulated scientific state."
+                    ) from exc
+
             # continuous accumulation
             self.cumulative_sum_memmap += reproj_data
-            if self.cumulative_wht_memmap.shape != reproj_wht.shape:
-                from numpy.lib.format import open_memmap
-
-                self.cumulative_wht_memmap = open_memmap(
-                    self.cumulative_wht_path,
-                    mode="w+",
-                    dtype=np.float32,
-                    shape=reproj_wht.shape,
-                )
-                self.cumulative_wht_memmap[:] = 0.0
             self.cumulative_wht_memmap += reproj_wht
             self.cumulative_sum_memmap.flush()
             self.cumulative_wht_memmap.flush()
 
             if self.enable_preview:
-                self._downsample_preview(reproj_data, reproj_wht)
+                self._downsample_preview(reproj_data, _coverage_hw(reproj_wht))
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
@@ -2194,6 +2781,13 @@ class SeestarQueuedStacker:
         self._ibn_skipped = 0
         self._ibn_last_scale = None
         self._ibn_min_overlap = 1024
+        # P1-FIX (HSI closure): immutable float32 session normalization
+        # reference (captured once in ``_worker``).  ``None`` until captured.
+        self._norm_reference = None
+        # P5-FIX (HSI closure): immutable session quality reference scale
+        # ``q_ref`` (captured once in ``start_processing`` from the actual
+        # session reference image).  ``None`` until captured/restored.
+        self._quality_reference_scale = None
 
         self.partial_save_interval = 1
         self.stacked_subdir_name = "stacked"
@@ -2201,6 +2795,22 @@ class SeestarQueuedStacker:
         self._current_batch_paths = []
         self.batch_count_path = None
         self._resume_requested = False
+        self._resume_active = False
+        self._resume_completed_sources = []
+        self._resume_pending_count = 0
+        self._checkpointing_enabled = False
+        # HSI-2B C1: scientific-session binding (input roots, classic-alignment
+        # reference identity, and the planned observation set/order/decomposition).
+        # ``None`` means "not yet bound"; a manifest written without a full
+        # binding fails closed on resume.
+        self._resume_input_roots = None
+        self._resume_reference_identity = None
+        self._resume_plan = None
+        # Restored scientific counters/header (persisted in the manifest and
+        # reapplied after the common ``initialize`` reset).
+        self._resume_images_in_cumulative_stack = 0
+        self._resume_total_exposure_seconds = 0.0
+        self._resume_cumulative_header = None
 
         # Flag indicating the queue was pre-populated externally
         self.queue_prepared = False
@@ -2905,20 +3515,35 @@ class SeestarQueuedStacker:
             os.makedirs(memmap_dir, exist_ok=True)
             H, W, C = reference_image_shape_hwc_input
 
-            self.cumulative_sum_memmap = np.lib.format.open_memmap(
-                self.sum_memmap_path, mode="w+", dtype=np.float32, shape=(H, W, C)
-            )
-            self.cumulative_sum_memmap[:] = 0.0
-
-            self.cumulative_wht_memmap = np.lib.format.open_memmap(
-                self.wht_memmap_path, mode="w+", dtype=np.float32, shape=(H, W)
-            )
-            self.cumulative_wht_memmap[:] = 0.0
-
-            # Do not force inter-batch reprojection here. Respect existing
-            # configuration loaded from settings or previous state.
-
-            self.memmap_shape = (H, W, C)
+            if self._is_plain_classic():
+                # HSI-2B: resume-or-fresh for the supported plain classic path.
+                if not self._initialize_classic_sumw_accumulators((H, W, C)):
+                    self.update_progress(
+                        "❌ Reprise de pile refusée (artefacts conservés intacts).",
+                        "ERROR",
+                    )
+                    return False
+            else:
+                # Non-resumable modes (mosaic, drizzle-final-standard,
+                # reproject). Fail closed if resume artifacts are present.
+                if self._resume_artifacts_present(self.output_folder):
+                    self.update_progress(
+                        "❌ Reprise impossible: le mode sélectionné "
+                        "(drizzle/mosaic/reproject) n'est pas couvert par le "
+                        "contrat de reprise HSI-2B. Utilisez un dossier de "
+                        "sortie vide pour ce mode.",
+                        "ERROR",
+                    )
+                    return False
+                self.cumulative_sum_memmap = np.lib.format.open_memmap(
+                    self.sum_memmap_path, mode="w+", dtype=np.float32, shape=(H, W, C)
+                )
+                self.cumulative_sum_memmap[:] = 0.0
+                self.cumulative_wht_memmap = np.lib.format.open_memmap(
+                    self.wht_memmap_path, mode="w+", dtype=np.float32, shape=(H, W, C)
+                )
+                self.cumulative_wht_memmap[:] = 0.0
+                self.memmap_shape = (H, W, C)
 
             if self.enable_preview:
                 self.preview_H = 256
@@ -2981,6 +3606,22 @@ class SeestarQueuedStacker:
 
         if hasattr(self, "aligner") and self.aligner:
             self.aligner.stop_processing = False
+        # HSI-2B: after the common reset, restore the resume-restored batch
+        # count (and keep the completed-source ledger) when a valid checkpoint
+        # was reopened above.
+        if getattr(self, "_resume_active", False):
+            self.stacked_batches_count = int(
+                getattr(self, "_resume_pending_count", 0) or 0
+            )
+            self.images_in_cumulative_stack = int(
+                getattr(self, "_resume_images_in_cumulative_stack", 0) or 0
+            )
+            self.total_exposure_seconds = float(
+                getattr(self, "_resume_total_exposure_seconds", 0.0) or 0.0
+            )
+            self.current_stack_header = self._header_from_serialized(
+                getattr(self, "_resume_cumulative_header", None)
+            )
         logger.debug(
             "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Initialisation terminée avec succès."
         )
@@ -3445,7 +4086,7 @@ class SeestarQueuedStacker:
             )  # Shape (H, W, C)
             current_wht_map = np.array(
                 self.cumulative_wht_memmap, dtype=np.float64
-            )  # Shape (H, W)
+            )  # Shape (H, W) or (H, W, C)
             logger.debug(
                 f"DEBUG QM [_update_preview_sum_w]: Données lues. SUM shape={current_sum.shape}, WHT shape={current_wht_map.shape}"
             )
@@ -3454,7 +4095,16 @@ class SeestarQueuedStacker:
             epsilon = 1e-9  # Pour éviter division par zéro
             wht_for_division = np.maximum(current_wht_map, epsilon)
             # Broadcaster wht_for_division (H,W) pour correspondre à current_sum (H,W,C)
-            wht_broadcasted = wht_for_division[:, :, np.newaxis]
+            wht_broadcasted = (
+                wht_for_division[:, :, np.newaxis]
+                if wht_for_division.ndim == 2
+                else wht_for_division
+            )
+            wht_2d = (
+                current_wht_map.astype(np.float32)
+                if current_wht_map.ndim == 2
+                else np.nanmean(current_wht_map, axis=2).astype(np.float32)
+            )
 
             avg_img_fullres = None
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -3477,7 +4127,7 @@ class SeestarQueuedStacker:
                     )
                     avg_img_fullres = feather_by_weight_map(
                         avg_img_fullres,
-                        current_wht_map.astype(np.float32),
+                        wht_2d,
                         blur_px=getattr(self, "feather_blur_px", 256),
                     )
                 else:
@@ -3492,7 +4142,7 @@ class SeestarQueuedStacker:
                     )
                     avg_img_fullres = apply_low_wht_mask(
                         avg_img_fullres,
-                        current_wht_map.astype(np.float32),
+                        wht_2d,
                         percentile=getattr(self, "low_wht_percentile", 5),
                         soften_px=getattr(self, "low_wht_soften_px", 128),
                         progress_callback=self.update_progress,
@@ -4577,6 +5227,10 @@ class SeestarQueuedStacker:
         self.processing_error = None
         # start_time_session = time.monotonic() # Décommenter si besoin
         self._eta_start_time = time.monotonic()
+        # P1-FIX (HSI closure): clear any stale normalization reference at
+        # session start; it is re-captured once the real global reference is
+        # obtained below.
+        self._norm_reference = None
 
         reference_image_data_for_global_alignment = None
         reference_header_for_global_alignment = None
@@ -4774,6 +5428,22 @@ class SeestarQueuedStacker:
             ):
                 raise RuntimeError(
                     "Échec critique obtention image/header de référence de base (globale/premier panneau)."
+                )
+
+            # P1-FIX (HSI closure): capture the immutable normalization reference
+            # now, immediately after the real global reference is obtained and
+            # before ``reference_image_data_for_global_alignment`` can later be
+            # replaced by intermediate stacks (reproject path).  Plain classic
+            # normalizes every aligned observation against THIS frame (or the
+            # pinned resume reference), never a batch output.
+            #
+            # Only plain-classic sessions that actually configure linear_fit or
+            # sky_mean carry the full-frame copy; non-plain paths never pay for
+            # it (their historical batch-local normalization needs no session
+            # reference).
+            if self._should_capture_norm_reference():
+                self._capture_normalization_reference(
+                    reference_image_data_for_global_alignment
                 )
 
             # Préparation du header qui sera utilisé pour le WCS de référence global
@@ -6272,6 +6942,11 @@ class SeestarQueuedStacker:
             if self.autotuner:
                 self.autotuner.stop()
             self.__class__.stop_processing(self)
+            # P1-FIX (HSI closure): release the immutable full-frame
+            # normalization reference on every worker exit (success or failure)
+            # before gc.collect(), so the copy is strictly session-scoped and
+            # never outlives the worker.
+            self._release_norm_reference()
             gc.collect()
             logger.debug(
                 f"DEBUG QM [_worker V_NoDerotation]: Fin du bloc FINALLY principal. Flag processing_active mis à False."
@@ -7279,30 +7954,192 @@ class SeestarQueuedStacker:
 
     ####################################################################################################################
 
+    @staticmethod
+    def _sanitize_quality_factor(value):
+        """Coerce one raw quality factor to a finite float in
+        ``[0, _QUALITY_FACTOR_CAP]``.
+
+        NaN, non-numeric and non-positive values map to ``0.0`` (a
+        deterministic safety-floor contribution: an invalid metric contributes
+        nothing and the whole product collapses to the positive floor).
+        ``+Inf`` and positive overflow map to ``_QUALITY_FACTOR_CAP`` (finite
+        upper saturation), never to the minimum.
+        """
+        if isinstance(value, bool):
+            return 0.0
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if np.isnan(v) or v <= 0.0:
+            return 0.0
+        if not np.isfinite(v) or v > _QUALITY_FACTOR_CAP:
+            return _QUALITY_FACTOR_CAP
+        return v
+
+    @staticmethod
+    def _sanitize_quality_exponent(value):
+        """Coerce one quality exponent to a finite float (non-finite -> 1.0)."""
+        if isinstance(value, bool):
+            return 1.0
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        if not np.isfinite(v):
+            return 1.0
+        return v
+
+    @staticmethod
+    def _quality_power(base, exponent):
+        """``base ** exponent`` computed with numpy float64.
+
+        Positive overflow yields ``+Inf`` (warning suppressed) instead of
+        raising, so the final metric sanitization can saturate it to the finite
+        metric cap.
+        """
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            return float(np.power(np.float64(base), np.float64(exponent)))
+
+    def _raw_quality_metric(self, scores):
+        """Compute the positive raw quality metric product ``q(scores)``.
+
+        ``q`` is the product of the enabled SNR/star factors raised to their
+        configured exponents.  This is the *scale-bearing* quantity: the exact
+        same formula is used for the immutable session reference (``q_ref``)
+        and for every source, so ``q(source) / q_ref`` is dimensionless and
+        reference-relative.
+
+        ``q(scores)`` is *always* a finite, strictly positive float:
+
+        * a NaN/invalid/negative factor contributes ``0.0`` (deterministic
+          safety-floor contribution, so the product collapses to the positive
+          floor — never NaN/Inf/negative);
+        * a ``+Inf``/overflowing factor saturates to a finite upper bound
+          (never the minimum), so high-quality saturation stays monotonic.
+        """
+        weight = 1.0
+        if self.weight_by_snr:
+            weight *= self._quality_power(
+                self._sanitize_quality_factor(scores.get("snr", 0.0)),
+                self._sanitize_quality_exponent(self.snr_exponent),
+            )
+        if self.weight_by_stars:
+            weight *= self._quality_power(
+                self._sanitize_quality_factor(scores.get("stars", 0.0)),
+                self._sanitize_quality_exponent(self.stars_exponent),
+            )
+        # Final deterministic sanitization: always finite and positive.
+        if np.isnan(weight) or weight <= 0.0:
+            return _QUALITY_METRIC_FLOOR
+        if not np.isfinite(weight):
+            return _QUALITY_METRIC_CAP
+        return float(min(max(weight, _QUALITY_METRIC_FLOOR), _QUALITY_METRIC_CAP))
+
+    def _pinned_quality_reference_scale(self):
+        """Return the pinned ``q_ref`` or ``None`` when it is not available.
+
+        Only a finite, strictly positive value is returned; anything else
+        (``None``, non-numeric, non-finite, non-positive) is treated as "not
+        pinned" so callers can apply a deterministic fallback rather than
+        divide by a non-finite or non-positive scale.
+        """
+        q_ref = getattr(self, "_quality_reference_scale", None)
+        if q_ref is None:
+            return None
+        try:
+            f = float(q_ref)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(f) or f <= 0.0:
+            return None
+        return f
+
+    def _capture_quality_reference(self, reference_data):
+        """Compute and pin ``q_ref`` from the immutable session reference image.
+
+        Called exactly once in ``start_processing`` after the actual session
+        reference has been prepared and before any source can be stacked.  The
+        reference is scored with the same quality-metrics path used for sources
+        and reduced with :meth:`_raw_quality_metric`.  A scoring failure or a
+        non-positive/non-finite metric falls back to ``q_ref = 1.0`` (the
+        absolute domain, i.e. pre-P5 behaviour) and is logged loudly, never
+        silently.
+        """
+        q_ref = 1.0
+        fallback = False
+        try:
+            scores = self._calculate_quality_metrics(reference_data)
+            candidate = float(self._raw_quality_metric(scores))
+            if np.isfinite(candidate) and candidate > 0.0:
+                q_ref = candidate
+            else:
+                fallback = True
+        except Exception as e:
+            fallback = True
+            logger.warning(
+                "P5-FIX: quality reference scale computation failed (%s); "
+                "falling back to q_ref=1.0 (absolute domain)",
+                e,
+            )
+        self._quality_reference_scale = float(q_ref)
+        if fallback:
+            logger.warning("P5-FIX: quality reference scale fallback q_ref=%.6g", q_ref)
+        else:
+            logger.info("P5-FIX: pinned quality reference scale q_ref=%.6g", q_ref)
+
     def _calculate_weights(self, batch_scores):
+        """Compute batch-independent scalar quality weights.
+
+        A frame's weight is ``max(q(source) / q_ref, min_weight)`` where
+        ``q_ref`` is the immutable session reference scale pinned once in
+        ``start_processing``.  ``min_weight`` is therefore a *relative* floor
+        expressed as a fraction of the reference quality scale, and the
+        reference itself always receives weight ``1.0`` (before the floor).
+        The weight is a deterministic function of each frame's own metrics and
+        the pinned reference, independent of batch companions, order, or
+        splitting, so SUM/WHT composition is exact regardless of batch
+        boundaries.  No batch-local renormalisation is performed.
+
+        A valid pinned ``q_ref`` is *mandatory* for quality-weighted stacking:
+        if the reference scale is absent or malformed, this raises
+        :class:`_QualityReferenceError` (fail closed) rather than silently
+        restoring the pre-P5 absolute domain.
+        """
         num_images = len(batch_scores)
         if num_images == 0:
             return np.array([])
-        raw_weights = np.ones(num_images, dtype=np.float32)
-        for i, scores in enumerate(batch_scores):
-            weight = 1.0
-            if self.weight_by_snr:
-                weight *= max(scores.get("snr", 0.0), 0.0) ** self.snr_exponent
-            if self.weight_by_stars:
-                weight *= max(scores.get("stars", 0.0), 0.0) ** self.stars_exponent
-            raw_weights[i] = max(weight, 1e-9)
-        sum_weights = np.sum(raw_weights)
-        if sum_weights > 1e-9:
-            normalized_weights = raw_weights * (num_images / sum_weights)
-        else:
-            normalized_weights = np.ones(num_images, dtype=np.float32)
-        normalized_weights = np.maximum(normalized_weights, self.min_weight)
-        sum_weights_final = np.sum(normalized_weights)
-        if sum_weights_final > 1e-9:
-            normalized_weights = normalized_weights * (num_images / sum_weights_final)
-        else:
-            normalized_weights = np.ones(num_images, dtype=np.float32)
-        return normalized_weights
+        q_ref = self._pinned_quality_reference_scale()
+        if q_ref is None:
+            raise _QualityReferenceError(
+                "quality-weighted stacking requires a pinned finite positive "
+                "quality reference scale (q_ref); refusing to fall back to the "
+                "absolute domain"
+            )
+        raw_weights = np.array(
+            [self._raw_quality_metric(s) for s in batch_scores],
+            dtype=np.float64,
+        )
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            relative_weights = raw_weights / q_ref
+        # Deterministic robustness: never emit NaN/Inf/negative weights.  NaN /
+        # negative relative weights collapse to 0 (the floor binds); a +Inf
+        # relative weight (positive overflow only) saturates to the finite
+        # float32 max — never the minimum.
+        relative_weights = np.where(
+            np.isnan(relative_weights) | (relative_weights < 0.0),
+            0.0,
+            relative_weights,
+        )
+        relative_weights = np.where(
+            np.isposinf(relative_weights),
+            float(np.finfo(np.float32).max),
+            relative_weights,
+        )
+        relative_weights = np.maximum(relative_weights, 0.0)
+        weights = np.maximum(relative_weights, float(self.min_weight))
+        weights = np.minimum(weights, float(np.finfo(np.float32).max))
+        return weights.astype(np.float32)
 
     def _reproject_to_reference(self, image_array, input_wcs):
         """Reproject ``image_array`` from ``input_wcs`` to the reference WCS.
@@ -9427,10 +10264,16 @@ class SeestarQueuedStacker:
                     "INFO_DETAIL",
                 )
 
-        if batch_coverage_map_2d.shape != expected_shape_hw:
+        # The batch weight map may be 2-D (channel-invariant) or 3-D
+        # (per-channel denominator, e.g. per-channel rejection).
+        cov_hw = batch_coverage_map_2d.shape[:2]
+        if cov_hw != expected_shape_hw:
             handled_cov = False
-            if batch_coverage_map_2d.shape == expected_shape_hw[::-1]:
-                batch_coverage_map_2d = batch_coverage_map_2d.T
+            if cov_hw == expected_shape_hw[::-1]:
+                if batch_coverage_map_2d.ndim == 2:
+                    batch_coverage_map_2d = batch_coverage_map_2d.T
+                else:
+                    batch_coverage_map_2d = batch_coverage_map_2d.transpose(1, 0, 2)
                 handled_cov = True
                 logger.debug(
                     "DEBUG QM [_combine_batch_result]: transposed coverage map to match memmap_shape"
@@ -9556,29 +10399,20 @@ class SeestarQueuedStacker:
             # stacked_batch_data_np est déjà en float32
             # batch_coverage_map_2d est déjà float32
 
-            # Calculer le signal total à ajouter à SUM: ImageMoyenneDuLot * SaCarteDeCouverturePondérée
-            # Si stacked_batch_data_np est HWC et batch_coverage_map_2d est HW, il faut broadcaster.
-            signal_to_add_to_sum_float64 = (
-                None  # Utiliser float64 pour la multiplication et l'accumulation
+            # Broadcast V and W to the 3-channel accumulator shape (H, W, 3).
+            # V*W is the numerator contribution of this batch; W is its
+            # effective denominator (channel-specific for per-channel rejection).
+            if stacked_batch_data_np.ndim == 2:
+                v3 = np.stack([stacked_batch_data_np] * 3, axis=-1)
+            else:
+                v3 = stacked_batch_data_np
+            if batch_coverage_map_2d.ndim == 2:
+                w3 = np.broadcast_to(batch_coverage_map_2d[:, :, None], v3.shape)
+            else:
+                w3 = batch_coverage_map_2d
+            signal_to_add_to_sum_float64 = v3.astype(np.float64) * w3.astype(
+                np.float64
             )
-            if is_color_batch_data:  # Image couleur HWC
-                signal_to_add_to_sum_float64 = (
-                    stacked_batch_data_np.astype(np.float64)
-                    * batch_coverage_map_2d.astype(np.float64)[:, :, np.newaxis]
-                )
-            else:  # Image N&B HW
-                # Si SUM memmap est HWC (ce qui est le cas avec memmap_shape), il faut adapter
-                if self.memmap_shape[2] == 3:  # Si l'accumulateur global est couleur
-                    # On met l'image N&B dans les 3 canaux de l'accumulateur
-                    temp_hwc = np.stack([stacked_batch_data_np] * 3, axis=-1)
-                    signal_to_add_to_sum_float64 = (
-                        temp_hwc.astype(np.float64)
-                        * batch_coverage_map_2d.astype(np.float64)[:, :, np.newaxis]
-                    )
-                else:  # Si l'accumulateur global est N&B (ne devrait pas arriver avec memmap_shape HWC)
-                    signal_to_add_to_sum_float64 = stacked_batch_data_np.astype(
-                        np.float64
-                    ) * batch_coverage_map_2d.astype(np.float64)
 
             logger.debug(
                 f"DEBUG QM [_combine_batch_result SUM/W]: Accumulation pour {num_physical_images_in_batch} images physiques."
@@ -9590,7 +10424,7 @@ class SeestarQueuedStacker:
             )
 
             batch_sum = signal_to_add_to_sum_float64.astype(np.float32)
-            batch_wht = batch_coverage_map_2d.astype(np.float32)
+            batch_wht = np.ascontiguousarray(w3, dtype=np.float32)
 
             if not (
                 np.all(np.isfinite(batch_sum))
@@ -9615,19 +10449,23 @@ class SeestarQueuedStacker:
                     "WARN",
                 )
                 batch_sum = batch_sum.reshape(self.memmap_shape)
-            if batch_wht.shape != tuple(self.memmap_shape[:2]):
+            if batch_wht.shape != tuple(self.memmap_shape):
                 self.update_progress(
-                    f"⚠️ Batch #{current_batch_num} coverage shape {batch_wht.shape} incompatible with memmap {self.memmap_shape[:2]}",
+                    f"⚠️ Batch #{current_batch_num} coverage shape {batch_wht.shape} incompatible with memmap {self.memmap_shape}",
                     "WARN",
                 )
-                batch_wht = batch_wht.reshape(self.memmap_shape[:2])
+                batch_wht = batch_wht.reshape(self.memmap_shape)
 
             mask = batch_wht > 0
             # Direct multiplication avoids advanced-indexing copies which can
             # silently drop updates when using memmaps.  Broadcast the mask
             # across colour channels for SUM.
+            # HSI-2B: dirty-before-mutation — a crash mid-mutation leaves the
+            # checkpoint dirty and later resume refuses rather than double-count
+            # or skip a partially-mutated batch.
+            self._checkpoint_mark_dirty()
             self.cumulative_sum_memmap += (
-                batch_sum.astype(self.memmap_dtype_sum) * mask[..., None]
+                batch_sum.astype(self.memmap_dtype_sum) * mask
             )
             self.cumulative_wht_memmap += (
                 batch_wht.astype(self.memmap_dtype_wht) * mask
@@ -9787,10 +10625,26 @@ class SeestarQueuedStacker:
                 "Approx. max sum of weights in WHT map",
             )
 
+            # HSI-2B C1: clean commit only at the real end of a successful
+            # transaction — after SUM/WHT flush, cumulative image/exposure
+            # counters and the cumulative header (NIMAGES/TOTEXP/SUMWGHTS) are
+            # all durable.  A failure here leaves the manifest dirty and is
+            # surfaced as a processing failure (never a clean claim).
+            self._checkpoint_commit_batch()
+
             logger.debug(
                 "DEBUG QM [_combine_batch_result SUM/W]: Accumulation batch classique terminée."
             )
 
+        except _ResumeCheckpointError as ckpt_err:
+            logger.debug(
+                f"ERREUR QM [_combine_batch_result SUM/W]: checkpoint failure - {ckpt_err}"
+            )
+            self.update_progress(
+                f"❌ Échec checkpoint (reprise refusée): {ckpt_err}", "ERROR"
+            )
+            self.processing_error = str(ckpt_err)
+            self.stop_processing = True
         except MemoryError as mem_err:
             logger.debug(
                 f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}"
@@ -9915,6 +10769,7 @@ class SeestarQueuedStacker:
         winsor_limits=(0.05, 0.05),
         apply_rewinsor=True,
         max_mem_bytes=int(os.getenv("SEESTAR_MAX_MEM", 1_000_000_000)),
+        return_weights=False,
     ):
         """Run winsorized sigma clipping in a separate process."""
         self.update_progress(
@@ -9929,6 +10784,7 @@ class SeestarQueuedStacker:
             kappa,
             winsor_limits,
             apply_rewinsor,
+            return_weights,
         )
 
         cube_bytes = sum(img.nbytes for img in images)
@@ -9944,14 +10800,42 @@ class SeestarQueuedStacker:
                 max_workers=self.max_stack_workers,
                 mp_context=get_context("spawn"),
             ) as exe:
-                stacked, rejected_pct = exe.submit(_stack_worker, stack_args).result()
+                res = exe.submit(_stack_worker, stack_args).result()
         else:
-            stacked, rejected_pct = _stack_worker(stack_args)
+            res = _stack_worker(stack_args)
+        if return_weights:
+            stacked, w_map, rejected_pct = res
+        else:
+            stacked, rejected_pct = res
         self.update_progress(
             f"RejWinsor: done - {rejected_pct:.2f}% pixels rejected",
             None,
         )
+        if return_weights:
+            return stacked, w_map, rejected_pct
         return stacked, rejected_pct
+
+    def _feather_batch_coverage(self, coverage_map):
+        """Apply radial batch feathering to a 2-D or 3-D coverage/weight map."""
+        if not getattr(self, "apply_batch_feathering", True):
+            return coverage_map
+        h, w = coverage_map.shape[:2]
+        if not hasattr(self, "_radial_w_base") or self._radial_w_base.shape != (h, w):
+            self._radial_w_base = make_radial_weight_map(h, w)
+        radial = self._radial_w_base
+        if coverage_map.ndim == 3:
+            coverage_map *= radial[..., None]
+        else:
+            coverage_map *= radial
+        return coverage_map
+
+    def _geometric_coverage_map(self, coverage_maps_list):
+        """Geometric (mask-count) coverage fallback for legacy reducers."""
+        shape = np.asarray(coverage_maps_list[0]).shape
+        cov = np.zeros(shape, dtype=np.float32)
+        for m in coverage_maps_list:
+            cov += np.asarray(m, dtype=np.float32)
+        return cov
 
     def _combine_hq_by_tiles(
         self,
@@ -10022,7 +10906,7 @@ class SeestarQueuedStacker:
                 )
                 tile_sum_mm[:] = 0.0
                 tile_wht_mm = open_memmap(
-                    tmp_path + "_wht", mode="w+", dtype=np.float32, shape=(tile_h, W)
+                    tmp_path + "_wht", mode="w+", dtype=np.float32, shape=(tile_h, W, C)
                 )
                 tile_wht_mm[:] = 0.0
             except Exception as e:
@@ -10032,7 +10916,7 @@ class SeestarQueuedStacker:
             tile_sum_mm = None
             tile_wht_mm = None
 
-        wht = np.zeros((H, W), dtype=np.float32)
+        wht = np.zeros((H, W, C), dtype=np.float32)
 
         # ``max_hq_mem`` is already stored in bytes. Do not multiply again
         # otherwise the computed group size becomes enormous, causing
@@ -10058,7 +10942,7 @@ class SeestarQueuedStacker:
                 tile_wht[:] = 0.0
             else:
                 tile_sum = np.zeros((y1 - y0, W, C), dtype=np.float32)
-                tile_wht = np.zeros((y1 - y0, W), dtype=np.float32)
+                tile_wht = np.zeros((y1 - y0, W, C), dtype=np.float32)
 
             per_img_bytes = (y1 - y0) * W * C * 4 + (y1 - y0) * W * 4
             group_size = max(1, max_bytes // max(per_img_bytes, 1))
@@ -10070,16 +10954,13 @@ class SeestarQueuedStacker:
             )
             for s in range(0, total_items, group_size):
                 imgs = []
-                covs = []
                 q_slice = (
                     quality_weights[s : s + group_size]
                     if quality_weights is not None
                     else None
                 )
                 if file_paths is not None:
-                    for idx, (fp, cov) in enumerate(
-                        zip(file_paths[s : s + group_size], weights[s : s + group_size])
-                    ):
+                    for idx, fp in enumerate(file_paths[s : s + group_size]):
                         ext = os.path.splitext(fp)[1].lower()
                         if ext in [".fit", ".fits", ".fts", ".tif", ".tiff"]:
                             with _fits_open_safe(fp, memmap=use_memmap) as hd:
@@ -10106,83 +10987,78 @@ class SeestarQueuedStacker:
                             mask_slice = (
                                 m[y0:y1][..., None] if sl.ndim == 3 else m[y0:y1]
                             )
-                            sl *= mask_slice
+                            sl = np.where(mask_slice, sl, np.nan)
                         imgs.append(sl)
-                        covs.append(cov[y0:y1])
                 else:
-                    for idx, (img, cov) in enumerate(
-                        zip(
-                            images_list[s : s + group_size], weights[s : s + group_size]
-                        )
-                    ):
+                    for idx, img in enumerate(images_list[s : s + group_size]):
                         sl = img[y0:y1]
                         if masks_list is not None:
                             m = masks_list[s + idx]
                             mask_slice = (
                                 m[y0:y1][..., None] if img.ndim == 3 else m[y0:y1]
                             )
-                            sl = sl * mask_slice
+                            sl = np.where(mask_slice, sl, np.nan)
                         imgs.append(sl.astype(np.float32))
-                        covs.append(cov[y0:y1])
 
-                if (
-                    mode == "winsorized-sigma"
-                    or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
+                if _is_winsorized_mode(mode) or _is_winsorized_mode(
+                    getattr(self, "stack_reject_algo", "")
                 ):
-                    stacked, _ = self._stack_winsorized_sigma(
+                    stacked, wht_g, _ = self._stack_winsorized_sigma(
                         imgs,
                         q_slice,
                         kappa=kappa,
                         winsor_limits=winsor_limits,
                         max_mem_bytes=max_bytes,
+                        return_weights=True,
                     )
                 elif (
                     mode == "kappa-sigma"
                     or getattr(self, "stack_reject_algo", "") == "kappa_sigma"
                 ):
-                    stacked, _ = _stack_kappa_sigma(
+                    stacked, wht_g, _ = _stack_kappa_sigma(
                         imgs,
                         q_slice,
                         sigma_low=self.stack_kappa_low,
                         sigma_high=self.stack_kappa_high,
+                        return_weights=True,
                     )
-                elif (
-                    mode == "linear_fit_clip"
-                    or getattr(self, "stack_reject_algo", "") == "linear_fit_clip"
+                elif _is_linear_fit_clip_mode(mode) or _is_linear_fit_clip_mode(
+                    getattr(self, "stack_reject_algo", "")
                 ):
-                    stacked, _ = _stack_linear_fit_clip(imgs, q_slice)
-                elif mode == "median":
-                    stacked, _ = _stack_median(imgs, q_slice)
-                else:
-                    stacked, _ = _stack_mean(imgs, q_slice)
-
-                cov_sum = np.sum(covs, axis=0)
-                if use_memmap:
-
-                    np.multiply(
-                        stacked, cov_sum[..., None], out=stacked, casting="unsafe"
+                    stacked, wht_g, _ = _stack_linear_fit_clip(
+                        imgs, q_slice, return_weights=True
                     )
-                    np.add(tile_sum, stacked, out=tile_sum)
-                    np.add(tile_wht, cov_sum, out=tile_wht)
+                elif mode == "median":
+                    stacked, wht_g, _ = _stack_median(imgs, q_slice, return_weights=True)
                 else:
-                    tile_sum += stacked * cov_sum[..., None]
-                    tile_wht += cov_sum
+                    stacked, wht_g, _ = _stack_mean(imgs, q_slice, return_weights=True)
+
+                # Effective denominator of this subgroup: compose via
+                # sum(V * W) / sum(W) instead of geometric coverage.
+                stacked_b = stacked[..., None] if stacked.ndim == 2 else stacked
+                wht_b = wht_g[..., None] if wht_g.ndim == 2 else wht_g
+                if use_memmap:
+                    np.add(tile_sum, stacked_b * wht_b, out=tile_sum)
+                    np.add(tile_wht, wht_b, out=tile_wht)
+                else:
+                    tile_sum += stacked_b * wht_b
+                    tile_wht += wht_b
                 del stacked  # FIX MEMLEAK
                 gc.collect()  # FIX MEMLEAK
 
             if use_memmap:
                 np.divide(
                     tile_sum,
-                    tile_wht[..., None],
+                    tile_wht,
                     out=final[y0:y1],
-                    where=tile_wht[..., None] > 0,
+                    where=tile_wht > 0,
                 )
             else:
                 final[y0:y1] = np.divide(
                     tile_sum,
-                    tile_wht[..., None],
+                    tile_wht,
                     out=np.zeros_like(tile_sum),
-                    where=tile_wht[..., None] > 0,
+                    where=tile_wht > 0,
                 )
             wht[y0:y1] = tile_wht
             if use_memmap:
@@ -10219,9 +11095,9 @@ class SeestarQueuedStacker:
             except Exception:
                 pass
 
-            return final
+            return final, (wht[:, :, 0] if C == 1 else wht)
 
-        return final.astype(np.float32)
+        return final.astype(np.float32), (wht[:, :, 0] if C == 1 else wht)
 
     def _stack_batch(
         self, batch_items_with_masks, current_batch_num=0, total_batches_est=0
@@ -10417,6 +11293,23 @@ class SeestarQueuedStacker:
             )
             return None, None, None
 
+        # P1-FIX (HSI closure): for the plain-classic SUM/WHT path only,
+        # normalize every aligned source observation against the immutable
+        # session reference *before* any reduction, including the singleton
+        # fast path.  ``none`` is a no-op; ``linear_fit``/``sky_mean`` fail
+        # closed (RuntimeError) when the session reference is missing.  The
+        # fixed reference and transform are shared by singleton and multi-image
+        # batches at every hierarchy level, so the SUM/WHT result no longer
+        # depends on batch boundaries or order.
+        #
+        # Non-plain (mosaic/drizzle/reproject) paths keep their historical
+        # batch-local index-0 source normalization (restored below) and are NOT
+        # normalized here.
+        if self._is_plain_classic():
+            valid_images_for_ccdproc = self._normalize_sources_against_reference(
+                valid_images_for_ccdproc
+            )
+
         # Optimization for batch_size == 1 and mean stacking: if only one image
         # is present, simply return that image and its mask as the stacked
         # result.  This avoids issues observed where the regular stacking path
@@ -10427,6 +11320,21 @@ class SeestarQueuedStacker:
         ):
             single_img = valid_images_for_ccdproc[0].astype(np.float32)
             batch_coverage_map_2d = valid_pixel_masks_for_coverage[0].astype(np.float32)
+            # Fold the batch-independent quality weight into the coverage map
+            # so a single-image batch still carries its effective denominator
+            # (V * W == image * mask * quality_weight).
+            if self.use_quality_weighting:
+                try:
+                    qw = self._calculate_weights(valid_scores_for_quality_weights)
+                    if qw is not None and qw.size == 1:
+                        batch_coverage_map_2d = batch_coverage_map_2d * float(qw[0])
+                except _QualityReferenceError:
+                    # A missing/malformed q_ref must abort the scientific
+                    # reduction (never silently continue unweighted).
+                    raise
+                except Exception:
+                    # Only non-scientific robustness failures are tolerated.
+                    pass
             if getattr(self, "apply_batch_feathering", True):
                 h, w = batch_coverage_map_2d.shape
                 if not hasattr(self, "_radial_w_base") or self._radial_w_base.shape != (h, w):
@@ -10498,6 +11406,10 @@ class SeestarQueuedStacker:
                         f"   ⚠️ Erreur calcul poids scalaires. Utilisation poids uniformes (1.0)."
                     )
                     # sum_of_quality_weights_applied reste num_valid_images_for_processing
+            except _QualityReferenceError:
+                # A missing/malformed q_ref must abort the scientific reduction
+                # (never silently continue unweighted or absolute-weighted).
+                raise
             except Exception as w_err:
                 self.update_progress(
                     f"   ⚠️ Erreur pendant calcul poids scalaires: {w_err}. Utilisation poids uniformes (1.0)."
@@ -10519,19 +11431,21 @@ class SeestarQueuedStacker:
             image_data_list = valid_images_for_ccdproc
             coverage_maps_list = valid_pixel_masks_for_coverage
 
-            coverage_sum = np.zeros(shape_2d_for_coverage_map, dtype=np.float32)
-            for cov in coverage_maps_list:
-                coverage_sum += cov.astype(np.float32)
-
             quality_weights = weight_scalars_for_ccdproc
             if quality_weights is None:
                 quality_weights = np.ones(
                     num_valid_images_for_processing, dtype=np.float32
                 )
 
-            # Apply normalization only when multiple images are present
+            # Non-plain (mosaic/drizzle/reproject) source normalization keeps
+            # the historical batch-local behavior: only multi-image batches are
+            # normalized, against the first image of THIS batch (index 0).
+            # Plain classic was already normalized per-observation against the
+            # immutable session reference above, so it must NOT be re-normalized
+            # here.
             if (
-                num_valid_images_for_processing > 1
+                not self._is_plain_classic()
+                and num_valid_images_for_processing > 1
                 and self.normalize_method != "none"
             ):
                 if self.normalize_method == "linear_fit":
@@ -10577,21 +11491,28 @@ class SeestarQueuedStacker:
                 # allocating the full stack in RAM.
                 use_tile_mode = True
 
-            tile_inputs = (
-                image_data_list
-                if getattr(self, "batch_size", 0) == 1
-                else list(self._current_batch_paths)
-            )
+            if self._is_plain_classic():
+                # P1-FIX (HSI closure): tiled/HQ and memmap reducers must consume
+                # the same aligned + source-normalized samples as RAM, never
+                # reload the raw source paths (which would discard alignment and
+                # normalization).  Reproject/drizzle/mosaic keep their existing
+                # source-loading behaviour.
+                tile_inputs = image_data_list
+            else:
+                tile_inputs = (
+                    image_data_list
+                    if getattr(self, "batch_size", 0) == 1
+                    else list(self._current_batch_paths)
+                )
 
-            if (
-                mode == "winsorized-sigma"
-                or getattr(self, "stack_reject_algo", "") == "winsorized_sigma_clip"
+            if _is_winsorized_mode(mode) or _is_winsorized_mode(
+                getattr(self, "stack_reject_algo", "")
             ):
                 if use_tile_mode:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                    stacked_batch_data_np, batch_coverage_map_2d = self._combine_hq_by_tiles(
                         tile_inputs,
                         coverage_maps_list,
                         max(self.stack_kappa_low, self.stack_kappa_high),
@@ -10606,25 +11527,32 @@ class SeestarQueuedStacker:
                     )
                 else:
                     images_for_stack = [
-                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, _ = self._stack_winsorized_sigma(
+                    winsor_res = self._stack_winsorized_sigma(
                         images_for_stack,
                         quality_weights,
                         kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                         winsor_limits=self.winsor_limits,
                         max_mem_bytes=self.max_hq_mem,
+                        return_weights=True,
                     )
+                    if isinstance(winsor_res, tuple) and len(winsor_res) == 3:
+                        stacked_batch_data_np, batch_coverage_map_2d, _ = winsor_res
+                    else:
+                        # Legacy 2-tuple return (no effective denominator):
+                        # fall back to geometric coverage, backwards compatible.
+                        stacked_batch_data_np, _ = winsor_res
+                        batch_coverage_map_2d = None
                     gc.collect()  # FIX MEMLEAK
-                batch_coverage_map_2d = coverage_sum.astype(np.float32)
-                if getattr(self, "apply_batch_feathering", True):
-                    h, w = batch_coverage_map_2d.shape
-                    if not hasattr(
-                        self, "_radial_w_base"
-                    ) or self._radial_w_base.shape != (h, w):
-                        self._radial_w_base = make_radial_weight_map(h, w)
-                    batch_coverage_map_2d *= self._radial_w_base
+                if batch_coverage_map_2d is None:
+                    batch_coverage_map_2d = self._geometric_coverage_map(
+                        coverage_maps_list
+                    )
+                batch_coverage_map_2d = self._feather_batch_coverage(
+                    batch_coverage_map_2d.astype(np.float32)
+                )
                 stack_note = "winsorized sigma clip"
             elif (
                 mode == "kappa-sigma"
@@ -10634,7 +11562,7 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                    stacked_batch_data_np, batch_coverage_map_2d = self._combine_hq_by_tiles(
                         tile_inputs,
                         coverage_maps_list,
                         self.stack_kappa_high,
@@ -10649,33 +11577,28 @@ class SeestarQueuedStacker:
                     )
                 else:
                     images_for_stack = [
-                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, _ = _stack_kappa_sigma(
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = _stack_kappa_sigma(
                         images_for_stack,
                         quality_weights,
                         sigma_low=self.stack_kappa_low,
                         sigma_high=self.stack_kappa_high,
+                        return_weights=True,
                     )
-                batch_coverage_map_2d = coverage_sum.astype(np.float32)
-                if getattr(self, "apply_batch_feathering", True):
-                    h, w = batch_coverage_map_2d.shape
-                    if not hasattr(
-                        self, "_radial_w_base"
-                    ) or self._radial_w_base.shape != (h, w):
-                        self._radial_w_base = make_radial_weight_map(h, w)
-                    batch_coverage_map_2d *= self._radial_w_base
+                batch_coverage_map_2d = self._feather_batch_coverage(
+                    batch_coverage_map_2d.astype(np.float32)
+                )
                 stack_note = "kappa sigma"
-            elif (
-                mode == "linear_fit_clip"
-                or getattr(self, "stack_reject_algo", "") == "linear_fit_clip"
+            elif _is_linear_fit_clip_mode(mode) or _is_linear_fit_clip_mode(
+                getattr(self, "stack_reject_algo", "")
             ):
                 if use_tile_mode:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                    stacked_batch_data_np, batch_coverage_map_2d = self._combine_hq_by_tiles(
                         tile_inputs,
                         coverage_maps_list,
                         self.stack_kappa_high,
@@ -10690,28 +11613,24 @@ class SeestarQueuedStacker:
                     )
                 else:
                     images_for_stack = [
-                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, _ = _stack_linear_fit_clip(
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = _stack_linear_fit_clip(
                         images_for_stack,
                         quality_weights,
+                        return_weights=True,
                     )
-                batch_coverage_map_2d = coverage_sum.astype(np.float32)
-                if getattr(self, "apply_batch_feathering", True):
-                    h, w = batch_coverage_map_2d.shape
-                    if not hasattr(
-                        self, "_radial_w_base"
-                    ) or self._radial_w_base.shape != (h, w):
-                        self._radial_w_base = make_radial_weight_map(h, w)
-                    batch_coverage_map_2d *= self._radial_w_base
+                batch_coverage_map_2d = self._feather_batch_coverage(
+                    batch_coverage_map_2d.astype(np.float32)
+                )
                 stack_note = "linear fit clip"
             elif mode == "median":
                 if use_tile_mode:
                     self.update_progress(
                         "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
                     )
-                    stacked_batch_data_np = self._combine_hq_by_tiles(
+                    stacked_batch_data_np, batch_coverage_map_2d = self._combine_hq_by_tiles(
                         tile_inputs,
                         coverage_maps_list,
                         self.stack_kappa_high,
@@ -10726,21 +11645,17 @@ class SeestarQueuedStacker:
                     )
                 else:
                     images_for_stack = [
-                        img * (mask[..., None] if img.ndim == 3 else mask)
+                        _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, _ = _stack_median(
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = _stack_median(
                         images_for_stack,
                         quality_weights,
+                        return_weights=True,
                     )
-                batch_coverage_map_2d = coverage_sum.astype(np.float32)
-                if getattr(self, "apply_batch_feathering", True):
-                    h, w = batch_coverage_map_2d.shape
-                    if not hasattr(
-                        self, "_radial_w_base"
-                    ) or self._radial_w_base.shape != (h, w):
-                        self._radial_w_base = make_radial_weight_map(h, w)
-                    batch_coverage_map_2d *= self._radial_w_base
+                batch_coverage_map_2d = self._feather_batch_coverage(
+                    batch_coverage_map_2d.astype(np.float32)
+                )
                 stack_note = "median"
             else:
                 # ------------------------------------------------------------------
@@ -10782,14 +11697,9 @@ class SeestarQueuedStacker:
                     where=sum_weights > 1e-9,
                 ).astype(np.float32)
 
-                batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
-                if getattr(self, "apply_batch_feathering", True):
-                    h, w = batch_coverage_map_2d.shape
-                    if not hasattr(
-                        self, "_radial_w_base"
-                    ) or self._radial_w_base.shape != (h, w):
-                        self._radial_w_base = make_radial_weight_map(h, w)
-                    batch_coverage_map_2d *= self._radial_w_base
+                batch_coverage_map_2d = self._feather_batch_coverage(
+                    sum_weights.squeeze().astype(np.float32)
+                )
 
                 stack_note = f"mean ({max_workers} threads)"
             if (
@@ -10976,9 +11886,11 @@ class SeestarQueuedStacker:
 
         sum_arr = np.array(self.cumulative_sum_memmap, dtype=np.float32)
         wht_arr = np.array(self.cumulative_wht_memmap, dtype=np.float32)
+        if wht_arr.ndim == 2:
+            wht_arr = wht_arr[:, :, None]
         with np.errstate(divide="ignore", invalid="ignore"):
             wht_safe = np.maximum(wht_arr, 1e-6)
-            stack = np.nan_to_num(sum_arr / wht_safe[:, :, np.newaxis])
+            stack = np.nan_to_num(sum_arr / wht_safe)
 
         hdr = self.reference_header_for_wcs.copy()
 
@@ -11039,13 +11951,1047 @@ class SeestarQueuedStacker:
         wht = np.ones(data.shape[:2], dtype=np.float32)
         return data, wht, hdr, input_wcs
 
-    def _can_resume(self, out_dir: Path) -> bool:
-        req = [
-            "memmap_accumulators/cumulative_SUM.npy",
-            "memmap_accumulators/cumulative_WHT.npy",
-            "batches_count.txt",
+    # ------------------------------------------------------------------
+    # HSI-2B: versioned resume manifest + fail-closed checkpoint helpers
+    # ------------------------------------------------------------------
+
+    def _resume_manifest_path(self) -> Path:
+        return (
+            Path(self.output_folder)
+            / "memmap_accumulators"
+            / _RESUME_MANIFEST_FILENAME
+        )
+
+    def _resume_artifacts_present(self, out_dir) -> bool:
+        """True when *any* resume artifact is present in ``out_dir``.
+
+        A coarse presence signal, not a validity verdict: if any of the old
+        three-file artifacts or the new manifest exists, the resume decision
+        must go through full validation (and fail closed when invalid) instead
+        of silently recreating/overwriting the accumulators.
+        """
+        out = Path(out_dir)
+        memdir = out / "memmap_accumulators"
+        candidates = [
+            memdir / "cumulative_SUM.npy",
+            memdir / "cumulative_WHT.npy",
+            memdir / _RESUME_MANIFEST_FILENAME,
+            out / "batches_count.txt",
         ]
-        return all((out_dir / r).exists() for r in req)
+        return any(p.exists() for p in candidates)
+
+    def _can_resume(self, out_dir: Path) -> bool:
+        """Coarse resume signal used before session setup.
+
+        Returns True when resume artifacts are present (so the full validation
+        runs later in ``initialize``); it does NOT assert scientific validity.
+        """
+        return self._resume_artifacts_present(out_dir)
+
+    def _is_plain_classic(self) -> bool:
+        """True only for the supported, resumable plain classic SUM/W mode."""
+        return (
+            not getattr(self, "is_mosaic_run", False)
+            and not getattr(self, "drizzle_active_session", False)
+            and not getattr(self, "reproject_between_batches", False)
+            and not getattr(self, "reproject_coadd_final", False)
+        )
+
+    def _should_capture_norm_reference(self) -> bool:
+        """True when this plain-classic session configures reference-based
+        source normalization (``linear_fit`` or ``sky_mean``).
+
+        Non-plain (mosaic/drizzle/reproject) sessions and plain-classic ``none``
+        sessions never need the immutable session reference, so they must not
+        pay for the full-frame copy.
+        """
+        return self._is_plain_classic() and getattr(
+            self, "normalize_method", "none"
+        ) in ("linear_fit", "sky_mean")
+
+    def _capture_normalization_reference(self, reference_data) -> None:
+        """Capture the immutable float32 normalization reference for a session.
+
+        Called once per worker/session immediately after the real global classic
+        alignment reference is obtained, before that reference array can later be
+        replaced by intermediate stacks (reproject path).  The stored reference
+        is a private float32 copy: it is never mutated and costs exactly one
+        frame of memory regardless of observation count.  ``None`` clears it.
+        """
+        if reference_data is None:
+            self._norm_reference = None
+            return
+        self._norm_reference = np.array(reference_data, dtype=np.float32, copy=True)
+
+    def _release_norm_reference(self) -> None:
+        """Release the session-scoped normalization reference (idempotent).
+
+        Called from the worker ``finally`` block so the one-frame full-frame
+        copy never outlives the worker, regardless of success/failure or the
+        cleanup setting.
+        """
+        self._norm_reference = None
+
+    def _normalize_sources_against_reference(self, image_data_list):
+        """Normalize aligned source arrays against the immutable session reference.
+
+        ``normalize_method == "none"`` is a strict no-op that returns the list
+        unchanged.  For ``linear_fit`` / ``sky_mean`` the immutable session
+        reference is *mandatory*: if it has not been captured, a deterministic
+        ``RuntimeError`` is raised (fail closed) rather than silently returning
+        unnormalized inputs.  Every aligned source observation is normalized
+        independently against the same fixed reference using the existing
+        helpers: the immutable reference is placed at index 0 (so it is the
+        reference argument) and discarded from the returned list.  Unknown
+        normalization methods retain their existing no-op behavior.  The stored
+        reference is never mutated.
+        """
+        method = getattr(self, "normalize_method", "none")
+        if method == "none" or not image_data_list:
+            return image_data_list
+        if method not in ("linear_fit", "sky_mean"):
+            # Unknown normalization methods retain existing behavior (no-op).
+            return image_data_list
+        ref = getattr(self, "_norm_reference", None)
+        if ref is None:
+            raise RuntimeError(
+                "plain-classic source normalization requires the immutable "
+                "session reference, but none was captured "
+                f"(normalize_method={method!r})"
+            )
+        combined = [ref] + list(image_data_list)
+        if method == "linear_fit":
+            normalized = _normalize_images_linear_fit(combined, 0)
+        else:
+            normalized = _normalize_images_sky_mean(combined, 0)
+        return normalized[1:]
+
+    def _scientific_fingerprint(self) -> str:
+        """Deterministic fingerprint of the settings that change the classic
+        accumulated result (SUM numerator / WHT denominator)."""
+        payload = {}
+        for attr in _RESUME_FINGERPRINT_ATTRS:
+            payload[attr] = _json_safe(getattr(self, attr, None))
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _stat_identity(self, path):
+        """Stable identity evidence for one source observation, or None if the
+        file cannot be stat'ed (missing/unreadable).
+
+        Normalized absolute path plus enough file evidence (size + mtime_ns) to
+        reject a *different* observation masquerading under the same path.
+        """
+        p = os.path.abspath(str(path))
+        try:
+            st = os.stat(p)
+        except OSError:
+            return None
+        return {
+            "path": os.path.normcase(p),
+            "name": os.path.basename(p),
+            "size": int(st.st_size),
+            "mtime_ns": int(st.st_mtime_ns),
+        }
+
+    def _source_identity(self, path):
+        """Stable identity for one source observation (raises if unstat'able).
+
+        Used where a source *must* exist to be committed to the ledger; the
+        raise makes ledger identity acquisition fail closed rather than writing
+        ``size=None`` / ``mtime_ns=None`` entries.
+        """
+        ident = self._stat_identity(path)
+        if ident is None:
+            raise OSError(f"cannot stat source for identity: {path}")
+        return ident
+
+    def _identity_matches(self, path, ident):
+        """True when ``path`` currently carries the exact identity evidence.
+
+        Only size + mtime_ns are compared: those are the physical-observation
+        evidence that survives a ``_move_to_stacked`` move (which preserves
+        both).  The *path* is intentionally not compared here — the caller
+        supplies the candidate path (original or moved-to-stacked) and relies
+        on size+mtime to prove it is the same observation.
+        """
+        if not isinstance(ident, dict):
+            return False
+        cur = self._stat_identity(path)
+        if cur is None:
+            return False
+        return (
+            int(cur["size"]) == int(ident.get("size"))
+            and int(cur["mtime_ns"]) == int(ident.get("mtime_ns"))
+        )
+
+    def _resolve_source_path(self, ident):
+        """Resolve a source identity to an existing path with matching evidence.
+
+        A completed/reference source may have been moved to the default
+        ``<src_dir>/<stacked_subdir>/<basename>`` location by ``_move_to_stacked``
+        (``move_stacked=True``); a plain move preserves size and mtime, so the
+        identity evidence still matches.  Returns the resolved path or ``None``
+        when the source cannot be found at its original path *or* its verified
+        moved-to-stacked counterpart.
+        """
+        if not isinstance(ident, dict) or not ident.get("path"):
+            return None
+        orig = ident["path"]
+        if self._identity_matches(orig, ident):
+            return orig
+        src_dir = os.path.dirname(orig)
+        base = os.path.basename(orig)
+        stacked = os.path.join(
+            src_dir, getattr(self, "stacked_subdir_name", "stacked"), base
+        )
+        if self._identity_matches(stacked, ident):
+            return stacked
+        return None
+
+    def _resolve_resume_reference(self):
+        """Resolve the persisted classic-alignment reference for this resume.
+
+        Returns the resolved path (original or verified moved-to-stacked
+        counterpart) or ``None`` when the manifest is absent or the reference
+        cannot be resolved safely.  ``None`` is a refusal, never a fallback to
+        "first remaining frame".
+        """
+        manifest = self._read_resume_manifest()
+        if not manifest:
+            return None
+        ref_ident = (manifest.get("session") or {}).get("reference")
+        if not isinstance(ref_ident, dict) or not ref_ident.get("path"):
+            return None
+        return self._resolve_source_path(ref_ident)
+
+    def _serialize_cumulative_header(self):
+        """JSON-safe dict of the scientifically relevant cumulative header."""
+        hdr = getattr(self, "current_stack_header", None)
+        if hdr is None:
+            return {}
+        out = {}
+        for key in hdr.keys():
+            if key in ("HISTORY", "COMMENT"):
+                continue
+            try:
+                out[key] = _json_safe(hdr[key])
+            except Exception:
+                continue
+        return out
+
+    def _header_from_serialized(self, data):
+        """Rebuild a ``fits.Header`` from the serialized manifest dict."""
+        hdr = fits.Header()
+        for k, v in (data or {}).items():
+            try:
+                hdr[k] = v
+            except Exception:
+                continue
+        return hdr
+
+    def _compute_input_roots(self, additional_folders=None):
+        """Deterministic sorted list of the session input roots."""
+        roots = set()
+        cf = getattr(self, "current_folder", None)
+        if cf:
+            roots.add(os.path.normcase(os.path.abspath(cf)))
+        for f in additional_folders or []:
+            if f:
+                roots.add(os.path.normcase(os.path.abspath(str(f))))
+        return sorted(roots)
+
+    def _current_input_roots(self):
+        """Current session input roots (bound value or computed from state)."""
+        roots = getattr(self, "_resume_input_roots", None)
+        if roots is not None:
+            return sorted(roots)
+        return self._compute_input_roots(getattr(self, "additional_folders", None))
+
+    def _read_resume_manifest(self):
+        """Read and parse the manifest, or return None when absent/corrupt."""
+        try:
+            manifest_path = self._resume_manifest_path()
+            if not manifest_path.exists():
+                return None
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            return manifest if isinstance(manifest, dict) else None
+        except Exception:
+            return None
+
+    def _capture_reference_identity(self, folder, files, header):
+        """Determine the identity of the actual classic-alignment reference.
+
+        A manually selected reference (``aligner.reference_image_path``) wins;
+        otherwise the basename recorded by ``_get_reference_image`` in the
+        ``HIERARCH SEESTAR REF SRCFILE`` card is combined with the scan folder.
+        Returns ``None`` when the reference cannot be determined *without
+        guessing* (such a session is not resumable).
+        """
+        aligner = getattr(self, "aligner", None)
+        if aligner is not None:
+            manual = getattr(aligner, "reference_image_path", None)
+            if manual and os.path.isfile(manual):
+                ident = self._stat_identity(manual)
+                if ident is not None:
+                    return ident
+        basename = None
+        if header is not None:
+            try:
+                basename = header.get("HIERARCH SEESTAR REF SRCFILE")
+            except Exception:
+                basename = None
+        if basename and folder:
+            ident = self._stat_identity(os.path.join(folder, str(basename)))
+            if ident is not None:
+                return ident
+        return None
+
+    def _scan_queue_decomposition(self):
+        """Scan the queue into ordered sources + batch decomposition.
+
+        Returns ``(sources, decomposition, has_breaks)``.  With explicit
+        ``_BATCH_BREAK_TOKEN`` boundaries (stack-plan path) the decomposition
+        is the list of batch sizes between tokens; without any token (normal
+        automatic batching) it is the ``batch_size`` chunking of the ordered
+        sources (a final partial batch is allowed).  This single helper is
+        shared by fresh plan capture and resume plan validation so the two
+        derivations cannot drift.
+        """
+        sources = []
+        decomposition = []
+        batch = []
+        has_breaks = False
+        for item in list(self.queue.queue):
+            if item == _BATCH_BREAK_TOKEN:
+                has_breaks = True
+                if batch:
+                    decomposition.append(len(batch))
+                    batch = []
+                continue
+            ident = self._source_identity(str(item))
+            sources.append(ident)
+            batch.append(ident)
+        if has_breaks:
+            if batch:
+                decomposition.append(len(batch))
+        else:
+            bs = int(getattr(self, "batch_size", 0) or 0)
+            if bs > 0 and sources:
+                decomposition = [bs] * (len(sources) // bs)
+                if len(sources) % bs:
+                    decomposition.append(len(sources) % bs)
+            else:
+                decomposition = [len(sources)] if sources else []
+        return sources, decomposition, has_breaks
+
+    def _capture_plan_from_queue(self):
+        """Build the ordered observation plan from the current queue.
+
+        ``sources`` is the ordered list of source identities; ``decomposition``
+        is the list of batch sizes (from ``_BATCH_BREAK_TOKEN`` boundaries in
+        stack-plan mode, or from ``batch_size`` chunking otherwise).
+        """
+        sources, decomposition, _has_breaks = self._scan_queue_decomposition()
+        return {"sources": sources, "decomposition": decomposition}
+
+    def _validate_plan_against_manifest(self):
+        """Validate the persisted plan against the current (post-filter) queue.
+
+        Returns ``(True, None)`` or ``(False, reason)``.  The completed ledger
+        must be an exact ordered prefix of the persisted plan, and the remaining
+        queue must be the exact ordered suffix (identity, order and batch
+        decomposition).  Added/removed/replaced/reordered/regrouped
+        observations are refused (no method-specific equivalence guessing).
+        """
+        plan = getattr(self, "_resume_plan", None)
+        if not isinstance(plan, dict) or not isinstance(plan.get("sources"), list):
+            return (False, "checkpoint missing a valid session plan")
+        persisted_sources = plan["sources"]
+        ledger = list(getattr(self, "_resume_completed_sources", []) or [])
+        if len(ledger) > len(persisted_sources):
+            return (False, "completed ledger exceeds the persisted plan")
+        if persisted_sources[: len(ledger)] != ledger:
+            return (False, "completed ledger is not an ordered prefix of the persisted plan")
+
+        # Share the exact production decomposition rule with fresh plan
+        # capture: break-token boundaries when present, otherwise batch_size
+        # chunking (so an automatic [2,2,2] plan whose remaining four sources
+        # are auto-batched by batch_size=2 derives [2,2], not [4]).
+        (
+            current_remaining,
+            current_decomposition,
+            _has_breaks,
+        ) = self._scan_queue_decomposition()
+
+        expected_remaining = persisted_sources[len(ledger):]
+        if current_remaining != expected_remaining:
+            return (
+                False,
+                "remaining observation set/order differs from the persisted plan",
+            )
+
+        persisted_decomp = plan.get("decomposition")
+        if isinstance(persisted_decomp, list) and persisted_decomp:
+            cum = 0
+            completed_batches = 0
+            for b in persisted_decomp:
+                if cum + int(b) > len(ledger):
+                    break
+                cum += int(b)
+                completed_batches += 1
+                if cum == len(ledger):
+                    break
+            if cum != len(ledger):
+                return (False, "completed ledger does not align to persisted batch boundaries")
+            if current_decomposition != persisted_decomp[completed_batches:]:
+                return (False, "batch decomposition differs from the persisted plan")
+        return (True, None)
+
+    def _checkpoint_preflight(self):
+        """Session/reference/plan preflight before the worker starts.
+
+        On a fresh run this binds the plan into the manifest; on resume it
+        validates the current (already ledger-filtered) queue against the
+        persisted plan.  Returns ``False`` (with a progress/error reason) to
+        stop ``start_processing`` cleanly before any artifact overwrite or
+        worker launch.
+        """
+        if not getattr(self, "_checkpointing_enabled", False):
+            return True
+        if getattr(self, "_resume_active", False):
+            ok, reason = self._validate_plan_against_manifest()
+            if not ok:
+                self.update_progress(f"❌ Reprise impossible: {reason}", "ERROR")
+                return False
+        else:
+            self._resume_plan = self._capture_plan_from_queue()
+            self._write_resume_manifest(state=_RESUME_STATE_CLEAN)
+        return True
+
+    def _write_resume_manifest(
+        self, state, completed_sources=None, stacked_batches_count=None
+    ):
+        """Atomically write the versioned resume manifest (temp + os.replace)."""
+        # P5-FIX (HSI closure): a quality-weighted checkpoint must carry the
+        # exact pinned finite-positive q_ref it was produced with.  Refuse to
+        # write a manifest that a later resume would reject; never knowingly
+        # create a checkpoint with a missing/malformed scale.
+        if getattr(self, "use_quality_weighting", False):
+            if self._pinned_quality_reference_scale() is None:
+                raise _QualityReferenceError(
+                    "refusing to write a quality-weighted resume manifest "
+                    "without a pinned finite positive quality reference scale "
+                    "(q_ref)"
+                )
+        if completed_sources is None:
+            completed_sources = list(
+                getattr(self, "_resume_completed_sources", []) or []
+            )
+        if stacked_batches_count is None:
+            stacked_batches_count = int(
+                getattr(self, "stacked_batches_count", 0) or 0
+            )
+        shape = tuple(getattr(self, "memmap_shape", None) or (0, 0, 3))
+        manifest = {
+            "schema_version": _RESUME_MANIFEST_VERSION,
+            "state": state,
+            "mode": _RESUME_MODE_CLASSIC_SUMW,
+            "semantics": {
+                "sum": "HWC numerator: sum over completed batches of V * W",
+                "wht": "HWC effective denominator: sum over completed batches of W",
+                "final": "per-channel SUM / WHT",
+            },
+            "shape": list(shape),
+            "dtype_sum": np.dtype(
+                getattr(self, "memmap_dtype_sum", np.float32)
+            ).name,
+            "dtype_wht": np.dtype(
+                getattr(self, "memmap_dtype_wht", np.float32)
+            ).name,
+            "fingerprint": self._scientific_fingerprint(),
+            # P5-FIX (HSI closure): the immutable session quality reference
+            # scale.  ``None`` when quality weighting is disabled; otherwise a
+            # positive finite float pinned once from the session reference and
+            # restored verbatim on resume (never recomputed, so it cannot drift).
+            "quality_reference_scale": (
+                self._pinned_quality_reference_scale()
+                if getattr(self, "use_quality_weighting", False)
+                else None
+            ),
+            "stacked_batches_count": int(stacked_batches_count),
+            "images_in_cumulative_stack": int(
+                getattr(self, "images_in_cumulative_stack", 0) or 0
+            ),
+            "total_exposure_seconds": float(
+                getattr(self, "total_exposure_seconds", 0.0) or 0.0
+            ),
+            "cumulative_header": self._serialize_cumulative_header(),
+            "session": {
+                "input_roots": list(getattr(self, "_resume_input_roots", None) or []),
+                "reference": getattr(self, "_resume_reference_identity", None),
+                "plan": getattr(self, "_resume_plan", None),
+            },
+            "completed_sources": completed_sources,
+        }
+        memdir = Path(self.output_folder) / "memmap_accumulators"
+        memdir.mkdir(parents=True, exist_ok=True)
+        manifest_path = memdir / _RESUME_MANIFEST_FILENAME
+        tmp_path = manifest_path.with_name(_RESUME_MANIFEST_FILENAME + ".tmp")
+        tmp_path.write_text(
+            json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
+        )
+        os.replace(str(tmp_path), str(manifest_path))
+
+    def _close_memmap_handle(self, mmap_obj):
+        try:
+            if hasattr(mmap_obj, "flush"):
+                mmap_obj.flush()
+            if hasattr(mmap_obj, "_mmap") and mmap_obj._mmap is not None:
+                mmap_obj._mmap.close()
+        except Exception:
+            pass
+
+    def _validate_resume_headless(self):
+        """Read-only, shape-independent resume validation.
+
+        Validates every fact that does not require opening the SUM/WHT memmaps
+        ``r+`` or the reference *shape*: manifest parse/schema/version/state/
+        mode, scientific fingerprint, manifest shape/dtype schema, the counter
+        and cumulative-header schema, input roots, ledger schema/types/
+        uniqueness/prefix/boundary, completed-source resolution, the full
+        persisted session/reference/plan schema (reference and every planned
+        source use the same scientific identity schema; the decomposition is a
+        list of strictly positive integers summing to the source count), and
+        safe resolution of the original reference (original path or its
+        verified moved-to-stacked counterpart).
+
+        Returns ``(True, manifest, resolved_ref_path)`` on success or
+        ``(False, reason, None)`` on refusal.  Nothing is written and no
+        memmap is opened.  Shared by the early (pre-reference) preflight and
+        the full ``_validate_and_open_resume`` so the two cannot drift.
+        """
+        if not self._is_plain_classic():
+            return (
+                False,
+                "resume limited to plain classic SUM/W (drizzle/mosaic/reproject "
+                "sufficient state not covered by HSI-2B)",
+                None,
+            )
+
+        memdir = Path(self.output_folder) / "memmap_accumulators"
+        manifest_path = memdir / _RESUME_MANIFEST_FILENAME
+
+        if not manifest_path.exists():
+            return (False, "missing resume manifest (legacy/unversioned state)", None)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return (False, f"corrupt resume manifest: {e}", None)
+        if not isinstance(manifest, dict):
+            return (False, "corrupt resume manifest (not an object)", None)
+
+        if manifest.get("schema_version") != _RESUME_MANIFEST_VERSION:
+            return (
+                False,
+                f"unsupported manifest version {manifest.get('schema_version')}",
+                None,
+            )
+        if manifest.get("state") != _RESUME_STATE_CLEAN:
+            return (
+                False,
+                f"checkpoint state is {manifest.get('state')!r}, not clean",
+                None,
+            )
+        if manifest.get("mode") != _RESUME_MODE_CLASSIC_SUMW:
+            return (False, f"unsupported resume mode {manifest.get('mode')!r}", None)
+
+        fp = manifest.get("fingerprint")
+        if not fp or fp != self._scientific_fingerprint():
+            return (False, "scientific configuration mismatch", None)
+
+        # --- quality reference scale (fail-closed for quality-weighted) ---
+        # P5-FIX: a quality-weighted checkpoint must carry the exact positive
+        # finite q_ref it was produced with; a missing/malformed/nonfinite/
+        # nonpositive scale refuses resume before any artifact is opened.
+        if getattr(self, "use_quality_weighting", False):
+            q_ref = manifest.get("quality_reference_scale")
+            if isinstance(q_ref, bool) or not isinstance(q_ref, (int, float)):
+                return (
+                    False,
+                    "checkpoint missing/invalid quality reference scale "
+                    "(required for a quality-weighted resume)",
+                    None,
+                )
+            try:
+                q_ref_f = float(q_ref)
+            except (TypeError, ValueError):
+                return (False, "quality reference scale is not numeric", None)
+            if not np.isfinite(q_ref_f) or q_ref_f <= 0.0:
+                return (
+                    False,
+                    "quality reference scale must be finite and positive",
+                    None,
+                )
+
+        # --- manifest shape/dtype schema (read-only, before any artifact open) ---
+        raw_shape = manifest.get("shape")
+        if not isinstance(raw_shape, (list, tuple)) or len(raw_shape) != 3:
+            return (False, "invalid manifest shape", None)
+        shape_ints = []
+        for v in raw_shape:
+            if isinstance(v, bool) or not isinstance(v, int):
+                return (False, "manifest shape dimensions must be integers", None)
+            if v <= 0:
+                return (False, "manifest shape dimensions must be positive", None)
+            shape_ints.append(int(v))
+        if shape_ints[2] != 3:
+            return (False, "manifest shape must be HWC with 3 channels", None)
+
+        dtype_sum = manifest.get("dtype_sum")
+        dtype_wht = manifest.get("dtype_wht")
+        if not isinstance(dtype_sum, str) or not isinstance(dtype_wht, str):
+            return (False, "invalid manifest dtype schema", None)
+        try:
+            manifest_dtype_sum = np.dtype(dtype_sum)
+        except (TypeError, ValueError) as e:
+            return (False, f"invalid manifest SUM dtype name: {e}", None)
+        try:
+            manifest_dtype_wht = np.dtype(dtype_wht)
+        except (TypeError, ValueError) as e:
+            return (False, f"invalid manifest WHT dtype name: {e}", None)
+        # Fail-closed dtype contract: a persisted checkpoint is only resumable
+        # when its manifest SUM/WHT dtypes equal the runtime-configured
+        # scientific accumulator dtypes (float32 by default).  "Numeric" or
+        # "floating" is not sufficient — equality to the configured dtype is.
+        # This refuses int64/Unicode/complex/bool manifests *before* any
+        # artifact is opened, so np.isfinite/negativity checks can never be
+        # handed a non-numeric memmap.
+        runtime_dtype_sum = np.dtype(getattr(self, "memmap_dtype_sum", np.float32))
+        runtime_dtype_wht = np.dtype(getattr(self, "memmap_dtype_wht", np.float32))
+        if manifest_dtype_sum != runtime_dtype_sum:
+            return (
+                False,
+                f"manifest SUM dtype {manifest_dtype_sum} != configured scientific "
+                f"dtype {runtime_dtype_sum}",
+                None,
+            )
+        if manifest_dtype_wht != runtime_dtype_wht:
+            return (
+                False,
+                f"manifest WHT dtype {manifest_dtype_wht} != configured scientific "
+                f"dtype {runtime_dtype_wht}",
+                None,
+            )
+
+        # --- counter / cumulative-header schema (fail closed) ---
+        ok, reason = _validate_count_field(
+            manifest.get("stacked_batches_count"), "stacked_batches_count"
+        )
+        if not ok:
+            return (False, reason, None)
+        ok, reason = _validate_count_field(
+            manifest.get("images_in_cumulative_stack"), "images_in_cumulative_stack"
+        )
+        if not ok:
+            return (False, reason, None)
+        ok, reason = _validate_exposure_field(
+            manifest.get("total_exposure_seconds"), "total_exposure_seconds"
+        )
+        if not ok:
+            return (False, reason, None)
+        header_data = manifest.get("cumulative_header")
+        if not isinstance(header_data, dict):
+            return (False, "invalid cumulative_header (not an object)", None)
+
+        # --- ledger schema/types/uniqueness (fail closed) ---
+        ledger = manifest.get("completed_sources")
+        if ledger is None:
+            ledger = []
+        if not isinstance(ledger, list):
+            return (False, "invalid completed_sources ledger", None)
+        seen = set()
+        for entry in ledger:
+            ok, reason = _validate_source_identity(entry, "ledger")
+            if not ok:
+                return (False, reason, None)
+            key = _identity_evidence_key(entry)
+            if key in seen:
+                return (False, "ledger contains duplicate source identities", None)
+            seen.add(key)
+        # Every completed source must still exist at its original path or at
+        # the verified moved-to-stacked location.
+        for entry in ledger:
+            if self._resolve_source_path(entry) is None:
+                return (
+                    False,
+                    "completed source missing or changed: "
+                    f"{entry.get('name') or entry.get('path')}",
+                    None,
+                )
+
+        # --- session binding (roots + reference + plan schema) ---
+        session = manifest.get("session")
+        if not isinstance(session, dict):
+            return (False, "checkpoint missing session binding", None)
+        manifest_roots = session.get("input_roots")
+        if not isinstance(manifest_roots, list) or not all(
+            isinstance(r, str) for r in manifest_roots
+        ):
+            return (False, "checkpoint session has invalid input_roots", None)
+        if sorted(manifest_roots) != self._current_input_roots():
+            return (False, "session input roots differ from the checkpoint", None)
+
+        # Reference identity: full scientific identity schema.
+        ref_ident = session.get("reference")
+        ok, reason = _validate_source_identity(ref_ident, "reference")
+        if not ok:
+            return (False, f"checkpoint session reference: {reason}", None)
+
+        # Plan schema: sources list (each identity valid + unique) + a
+        # decomposition that is structurally compatible with the plan.
+        plan = session.get("plan")
+        if not isinstance(plan, dict):
+            return (False, "checkpoint session missing observation plan", None)
+        plan_sources = plan.get("sources")
+        if not isinstance(plan_sources, list):
+            return (False, "checkpoint plan sources must be a list", None)
+        plan_seen = set()
+        for entry in plan_sources:
+            ok, reason = _validate_source_identity(entry, "plan source")
+            if not ok:
+                return (False, reason, None)
+            key = _identity_evidence_key(entry)
+            if key in plan_seen:
+                return (False, "plan contains duplicate source identities", None)
+            plan_seen.add(key)
+        decomposition = plan.get("decomposition")
+        ok, reason = _validate_decomposition(decomposition, len(plan_sources))
+        if not ok:
+            return (False, reason, None)
+
+        # The completed ledger must be an exact ordered prefix of the persisted
+        # plan and its length must land exactly on a persisted decomposition
+        # boundary (early read-only preflight, not only after queue fill).
+        if len(ledger) > len(plan_sources):
+            return (False, "completed ledger exceeds the persisted plan", None)
+        for i, entry in enumerate(ledger):
+            if _identity_evidence_key(entry) != _identity_evidence_key(
+                plan_sources[i]
+            ):
+                return (
+                    False,
+                    "completed ledger is not an exact ordered prefix of the plan",
+                    None,
+                )
+        if not _ledger_on_boundary(len(ledger), decomposition):
+            return (
+                False,
+                "completed ledger does not align to persisted batch boundaries",
+                None,
+            )
+
+        # Resolve the original reference (original path or its verified
+        # moved-to-stacked counterpart).  Failure means the reference was
+        # moved away or replaced by a different observation.
+        resolved_ref = self._resolve_source_path(ref_ident)
+        if resolved_ref is None:
+            return (False, "session reference image missing or changed", None)
+
+        return (True, manifest, resolved_ref)
+
+    def _validate_checkpoint_artifacts_readonly(self, manifest):
+        """Read-only validation of the persisted SUM/WHT artifacts against the
+        manifest (before any target artifact is opened ``r+`` or written).
+
+        Validates SUM/WHT file existence, NPY readability, dimensionality and
+        shape agreement with the manifest, dtype agreement, SUM finiteness and
+        WHT finiteness/non-negativity.  Opens the memmaps read-only and closes
+        them; nothing is modified.
+        """
+        memdir = Path(self.output_folder) / "memmap_accumulators"
+        sum_path = memdir / "cumulative_SUM.npy"
+        wht_path = memdir / "cumulative_WHT.npy"
+        manifest_shape = tuple(manifest.get("shape") or ())
+        dtype_sum = manifest.get("dtype_sum")
+        dtype_wht = manifest.get("dtype_wht")
+
+        if not sum_path.exists():
+            return (False, "SUM memmap file missing")
+        if not wht_path.exists():
+            return (False, "WHT memmap file missing")
+        try:
+            sum_mm = np.lib.format.open_memmap(str(sum_path), mode="r")
+        except Exception as e:
+            return (False, f"cannot read SUM memmap: {e}")
+        wht_mm = None
+        try:
+            try:
+                wht_mm = np.lib.format.open_memmap(str(wht_path), mode="r")
+            except Exception as e:
+                return (False, f"cannot read WHT memmap: {e}")
+            if sum_mm.shape != manifest_shape:
+                return (
+                    False,
+                    f"SUM shape {sum_mm.shape} != manifest {manifest_shape}",
+                )
+            if wht_mm.ndim != 3:
+                return (
+                    False,
+                    f"WHT must be 3-D, got {wht_mm.ndim}-D (legacy 2-D refused)",
+                )
+            if wht_mm.shape != manifest_shape:
+                return (
+                    False,
+                    f"WHT shape {wht_mm.shape} != manifest {manifest_shape}",
+                )
+            if sum_mm.dtype != np.dtype(dtype_sum):
+                return (
+                    False,
+                    f"SUM dtype {sum_mm.dtype} != manifest {dtype_sum}",
+                )
+            if wht_mm.dtype != np.dtype(dtype_wht):
+                return (
+                    False,
+                    f"WHT dtype {wht_mm.dtype} != manifest {dtype_wht}",
+                )
+            try:
+                if not np.all(np.isfinite(sum_mm)):
+                    return (False, "SUM contains non-finite values")
+                if not np.all(np.isfinite(wht_mm)):
+                    return (False, "WHT contains non-finite values")
+                if np.any(wht_mm < 0):
+                    return (False, "WHT contains negative values")
+            except (TypeError, ValueError) as e:
+                # Never let a non-numeric dtype (should already be refused by
+                # the dtype contract) turn finiteness/negativity into an
+                # unhandled exception — fail closed deterministically instead.
+                return (False, f"SUM/WHT numeric validation failed: {e}")
+            return (True, None)
+        finally:
+            self._close_memmap_handle(sum_mm)
+            if wht_mm is not None:
+                self._close_memmap_handle(wht_mm)
+
+    def _probe_reference_shape_hwc(self, ref_path):
+        """Read-only probe of the reference FITS header to derive the expected
+        HWC output shape, or ``None`` when it cannot be determined safely.
+
+        A classic alignment reference is a 2-D Bayer frame (debayered to
+        ``(H, W, 3)``) or an already-colour ``(H, W, C)`` frame; in both cases
+        ``H = NAXIS2`` and ``W = NAXIS1`` of the first image HDU.  ``None``
+        means the shape cannot be asserted here and the cross-check is deferred
+        to ``_validate_and_open_resume`` (after reference preparation).
+        """
+        try:
+            with fits.open(ref_path, memmap=False) as hdul:
+                if not hdul:
+                    return None
+                hdr = hdul[0].header
+                naxis = hdr.get("NAXIS")
+                if naxis is None:
+                    return None
+                naxis = int(naxis)
+                if naxis == 2:
+                    h = int(hdr["NAXIS2"])
+                    w = int(hdr["NAXIS1"])
+                    return (h, w, 3)
+                if naxis == 3:
+                    h = int(hdr["NAXIS2"])
+                    w = int(hdr["NAXIS1"])
+                    c = int(hdr.get("NAXIS3", 3))
+                    return (h, w, c)
+                return None
+        except Exception:
+            return None
+
+    def _early_resume_preflight(self):
+        """Read-only pre-reference resume validation.
+
+        Runs after all scientific/session configuration and input-root binding
+        are known but before ``_get_reference_image`` (which writes/overwrites
+        ``temp_processing/reference_image.fit`` and ``.png``).  It refuses any
+        invalid resume session/reference/plan/artifact before any reference or
+        scientific artifact write, and returns the verified resolved original
+        reference path so ``start_processing`` can pin it before reference
+        preparation.
+
+        Returns ``(True, resolved_ref_path)`` (resolved path is ``None`` on a
+        fresh run) or ``(False, reason)``.
+        """
+        self._resume_preflight_passed = False
+        self._resume_preflight_manifest = None
+        self._resume_preflight_resolved_ref = None
+        if not getattr(self, "_resume_requested", False):
+            return (True, None)
+        ok, manifest, resolved_ref = self._validate_resume_headless()
+        if not ok:
+            return (False, manifest)
+        ok, reason = self._validate_checkpoint_artifacts_readonly(manifest)
+        if not ok:
+            return (False, reason)
+        # Read-only source shape probe: refuse a reference whose header shape
+        # does not match the persisted manifest shape before reference prep.
+        manifest_shape = tuple(manifest.get("shape") or ())
+        probed = self._probe_reference_shape_hwc(resolved_ref)
+        if probed is not None and probed != manifest_shape:
+            return (
+                False,
+                f"reference shape {probed!r} != manifest shape {manifest_shape!r}",
+            )
+        self._resume_preflight_passed = True
+        self._resume_preflight_manifest = manifest
+        self._resume_preflight_resolved_ref = resolved_ref
+        return (True, resolved_ref)
+
+    def _validate_and_open_resume(self, expected_shape_hwc):
+        """Full fail-closed validation of a versioned plain-classic checkpoint.
+
+        Returns ``(True, None)`` on success (SUM/WHT opened ``r+``, ledger and
+        batch count restored) or ``(False, reason)`` on any refusal.  On
+        refusal nothing is modified or deleted: the artifacts are left
+        untouched for the user to inspect/clear.  The shape-independent facts
+        are validated by the shared ``_validate_resume_headless`` (plus the
+        read-only artifact checks) first; this method adds the reference
+        *shape* cross-check, the reference identity *equivalence* (which
+        requires the captured reference identity from Step 2) and the
+        counter/header restoration.  When the early preflight already validated
+        the full artifacts (single-process model), that read-only full-array
+        scan is reused and only a cheap shape/dtype re-check is performed after
+        opening ``r+``.
+        """
+        try:
+            cached = getattr(self, "_resume_preflight_manifest", None)
+            if cached is not None and getattr(self, "_resume_preflight_passed", False):
+                manifest = cached
+                _resolved_ref = getattr(self, "_resume_preflight_resolved_ref", None)
+            else:
+                ok, manifest, _resolved_ref = self._validate_resume_headless()
+                if not ok:
+                    return (False, manifest)
+                ok, reason = self._validate_checkpoint_artifacts_readonly(manifest)
+                if not ok:
+                    return (False, reason)
+
+            memdir = Path(self.output_folder) / "memmap_accumulators"
+            sum_path = memdir / "cumulative_SUM.npy"
+            wht_path = memdir / "cumulative_WHT.npy"
+
+            manifest_shape = tuple(manifest.get("shape") or ())
+            dtype_sum = manifest.get("dtype_sum")
+            dtype_wht = manifest.get("dtype_wht")
+
+            expected = tuple(int(v) for v in expected_shape_hwc)
+            if manifest_shape != expected:
+                return (
+                    False,
+                    f"manifest shape {manifest_shape!r} != reference {expected!r}",
+                )
+
+            if not sum_path.exists() or not wht_path.exists():
+                return (False, "SUM/WHT memmap files missing")
+
+            try:
+                sum_mm = np.lib.format.open_memmap(str(sum_path), mode="r+")
+            except Exception as e:
+                return (False, f"cannot open SUM memmap: {e}")
+            wht_mm = None
+            try:
+                wht_mm = np.lib.format.open_memmap(str(wht_path), mode="r+")
+            except Exception as e:
+                self._close_memmap_handle(sum_mm)
+                return (False, f"cannot open WHT memmap: {e}")
+
+            try:
+                if sum_mm.shape != manifest_shape:
+                    return (
+                        False,
+                        f"SUM shape {sum_mm.shape} != manifest {manifest_shape}",
+                    )
+                if wht_mm.ndim != 3:
+                    return (
+                        False,
+                        f"WHT must be 3-D, got {wht_mm.ndim}-D (legacy 2-D refused)",
+                    )
+                if wht_mm.shape != manifest_shape:
+                    return (
+                        False,
+                        f"WHT shape {wht_mm.shape} != manifest {manifest_shape}",
+                    )
+                if sum_mm.dtype != np.dtype(dtype_sum):
+                    return (
+                        False,
+                        f"SUM dtype {sum_mm.dtype} != manifest {dtype_sum}",
+                    )
+                if wht_mm.dtype != np.dtype(dtype_wht):
+                    return (
+                        False,
+                        f"WHT dtype {wht_mm.dtype} != manifest {dtype_wht}",
+                    )
+
+                # The reference *resolution* is already validated headlessly;
+                # the *equivalence* of the persisted reference to the identity
+                # captured by reference preparation can only be checked here.
+                session = manifest.get("session") or {}
+                ref_ident = session.get("reference")
+                cur_ref = getattr(self, "_resume_reference_identity", None)
+                if not _identities_equivalent(ref_ident, cur_ref):
+                    return (
+                        False,
+                        "session reference identity differs from the checkpoint",
+                    )
+
+                manifest_roots = session.get("input_roots")
+                plan = session.get("plan")
+                ledger = manifest.get("completed_sources") or []
+
+                # Counters/header were already schema-validated headlessly, so
+                # they are known to be ints/floats (never bool/string/negative).
+                count = int(manifest.get("stacked_batches_count", 0))
+                images_in = int(manifest.get("images_in_cumulative_stack", 0))
+                totexp = float(manifest.get("total_exposure_seconds", 0.0))
+                header_data = manifest.get("cumulative_header", {})
+
+                self.cumulative_sum_memmap = sum_mm
+                self.cumulative_wht_memmap = wht_mm
+                self.memmap_shape = manifest_shape
+                self.sum_memmap_path = str(sum_path)
+                self.wht_memmap_path = str(wht_path)
+                self.batch_count_path = str(
+                    Path(self.output_folder) / "batches_count.txt"
+                )
+                self._resume_completed_sources = list(ledger)
+                self._resume_pending_count = count
+                self.stacked_batches_count = count
+                self._resume_active = True
+                self._checkpointing_enabled = True
+                self._resume_input_roots = sorted(manifest_roots)
+                self._resume_reference_identity = ref_ident
+                self._resume_plan = plan
+                # P5-FIX (HSI closure): restore the persisted quality reference
+                # scale verbatim so the remaining sources are weighted against
+                # the exact scale used before the checkpoint (never a recomputed
+                # one), guaranteeing fresh/resumed parity.
+                if getattr(self, "use_quality_weighting", False):
+                    self._quality_reference_scale = float(
+                        manifest.get("quality_reference_scale")
+                    )
+                self._resume_images_in_cumulative_stack = images_in
+                self._resume_total_exposure_seconds = totexp
+                self._resume_cumulative_header = header_data
+                self.images_in_cumulative_stack = images_in
+                self.total_exposure_seconds = totexp
+                self.current_stack_header = self._header_from_serialized(header_data)
+                return (True, None)
+            finally:
+                # On any refusal after opening, release the handles without
+                # modifying the files.
+                if not getattr(self, "_resume_active", False):
+                    self._close_memmap_handle(sum_mm)
+                    if wht_mm is not None:
+                        self._close_memmap_handle(wht_mm)
+        except Exception as e:
+            return (False, f"unexpected resume validation error: {e}")
 
     def _open_existing_memmaps(self) -> bool:
         try:
@@ -11070,6 +13016,174 @@ class SeestarQueuedStacker:
         except Exception as e:
             self.update_progress(f"⚠️ Reprise impossible: {e}", "WARN")
             return False
+
+    def _initialize_classic_sumw_accumulators(self, expected_hwc):
+        """Prepare the plain-classic SUM/W accumulators.
+
+        * Resume artifacts present  -> full validation; on success open r+
+          (preserve), on failure fail closed (return False).
+        * No artifacts              -> fresh run: zeroed HWC/HWC memmaps plus a
+          new clean versioned manifest.
+        """
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        os.makedirs(memmap_dir, exist_ok=True)
+        self.sum_memmap_path = os.path.join(memmap_dir, "cumulative_SUM.npy")
+        self.wht_memmap_path = os.path.join(memmap_dir, "cumulative_WHT.npy")
+        self.batch_count_path = os.path.join(self.output_folder, "batches_count.txt")
+
+        if self._resume_artifacts_present(self.output_folder):
+            ok, reason = self._validate_and_open_resume(expected_hwc)
+            if not ok:
+                self.update_progress(f"❌ Reprise impossible: {reason}", "ERROR")
+                return False
+            self.update_progress(
+                "♻️ Reprise validée: accumulateurs SUM/WHT conservés (r+)."
+            )
+            return True
+
+        # Fresh run.
+        self.cumulative_sum_memmap = np.lib.format.open_memmap(
+            self.sum_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_sum,
+            shape=expected_hwc,
+        )
+        self.cumulative_sum_memmap[:] = 0.0
+        self.cumulative_wht_memmap = np.lib.format.open_memmap(
+            self.wht_memmap_path,
+            mode="w+",
+            dtype=self.memmap_dtype_wht,
+            shape=expected_hwc,
+        )
+        self.cumulative_wht_memmap[:] = 0.0
+        self.memmap_shape = tuple(expected_hwc)
+        self._resume_active = False
+        self._resume_completed_sources = []
+        self._checkpointing_enabled = True
+        self._write_resume_manifest(
+            state=_RESUME_STATE_CLEAN,
+            completed_sources=[],
+            stacked_batches_count=0,
+        )
+        return True
+
+    def _checkpoint_mark_dirty(self):
+        """Mark the checkpoint dirty immediately before accumulator mutation.
+
+        A crash between this mark and the clean commit leaves the manifest in
+        the dirty state, which later resume refuses (no silent double-count or
+        skip of a partially-mutated batch).
+
+        This mark is *mandatory*: a failure to durably record ``dirty`` raises
+        ``_ResumeCheckpointError`` and aborts before either accumulator is
+        mutated.  It never warns-and-continues.
+        """
+        if not getattr(self, "_checkpointing_enabled", False):
+            return
+        try:
+            self._write_resume_manifest(state=_RESUME_STATE_DIRTY)
+        except Exception as e:
+            self.update_progress(f"❌ Échec marquage checkpoint dirty: {e}", "ERROR")
+            self.processing_error = f"Checkpoint dirty persist failed: {e}"
+            self.stop_processing = True
+            raise _ResumeCheckpointError(
+                f"failed to persist dirty checkpoint: {e}"
+            ) from e
+
+    def _checkpoint_commit_batch(self):
+        """Commit the just-flushed batch: extend the completed-source ledger and
+        write a clean manifest.  Runs only after SUM/WHT flush, counters and the
+        cumulative header are all updated.  Ledger identity acquisition and the
+        clean persist both fail closed (never write ``size=None`` entries, never
+        claim clean without a durable manifest)."""
+        if not getattr(self, "_checkpointing_enabled", False):
+            return
+        ledger = list(getattr(self, "_resume_completed_sources", []) or [])
+        for p in getattr(self, "_current_batch_paths", []) or []:
+            # Fail closed: a source that cannot be stat'ed must not become a
+            # clean ledger entry with size=None / mtime_ns=None.
+            ident = self._source_identity(p)
+            ledger.append(ident)
+        keys = set()
+        for e in ledger:
+            key = (e.get("path"), e.get("size"), e.get("mtime_ns"))
+            if key in keys:
+                raise _ResumeCheckpointError(
+                    f"duplicate source identity in ledger: {e.get('name')}"
+                )
+            keys.add(key)
+        self._resume_completed_sources = ledger
+        try:
+            self._write_resume_manifest(
+                state=_RESUME_STATE_CLEAN, completed_sources=ledger
+            )
+        except Exception as e:
+            # Leave the on-disk manifest dirty (it still is, from mark_dirty)
+            # and surface the failure; never claim clean without a durable
+            # manifest.
+            self.update_progress(f"❌ Échec écriture checkpoint clean: {e}", "ERROR")
+            self.processing_error = f"Checkpoint clean persist failed: {e}"
+            self.stop_processing = True
+            raise _ResumeCheckpointError(
+                f"failed to persist clean checkpoint: {e}"
+            ) from e
+
+    def _filter_queue_by_resume_ledger(self) -> int:
+        """Remove already-completed sources from the queue using the exact
+        completed-source ledger (path + size + mtime_ns), never count*batch_size.
+
+        Returns the number of items skipped.  A same logical path with a
+        different size/mtime identity is a hard mismatch that raises
+        ``_ResumeCheckpointError`` (refuse), never a remaining file to stack.
+        """
+        ledger = list(getattr(self, "_resume_completed_sources", []) or [])
+        if not getattr(self, "_resume_active", False) or not ledger:
+            return 0
+        completed = set()
+        completed_paths = {}
+        for entry in ledger:
+            if not isinstance(entry, dict):
+                continue
+            key = (entry.get("path"), entry.get("size"), entry.get("mtime_ns"))
+            completed.add(key)
+            completed_paths[entry.get("path")] = key
+
+        skipped = 0
+        new_queue = Queue()
+        while not self.queue.empty():
+            try:
+                item = self.queue.get_nowait()
+            except Empty:
+                break
+            if item == _BATCH_BREAK_TOKEN:
+                new_queue.put(item)
+                continue
+            try:
+                ident = self._source_identity(item)
+            except Exception:
+                ident = None
+            if ident is None:
+                new_queue.put(item)
+                continue
+            key = (ident["path"], ident["size"], ident["mtime_ns"])
+            if key in completed:
+                skipped += 1
+                try:
+                    self.queue.task_done()
+                except Exception:
+                    pass
+                continue
+            if ident["path"] in completed_paths and completed_paths[ident["path"]] != key:
+                raise _ResumeCheckpointError(
+                    f"source {ident['name']} at {ident['path']} changed identity "
+                    "(size/mtime) since the checkpoint; refusing resume"
+                )
+            new_queue.put(item)
+        self.queue = new_queue
+        if skipped:
+            self.files_in_queue = max(self.files_in_queue - skipped, 0)
+            self._recalculate_total_batches()
+        return skipped
 
     def _create_sum_wht_memmaps(self, shape_hw):
         """(Re)create SUM/WHT memmaps for the given output shape.
@@ -11096,7 +13210,7 @@ class SeestarQueuedStacker:
             self.wht_memmap_path,
             mode="w+",
             dtype=self.memmap_dtype_wht,
-            shape=shape_hw,
+            shape=self.memmap_shape,
         )
 
         self.cumulative_sum_memmap[:] = 0.0
@@ -11111,7 +13225,7 @@ class SeestarQueuedStacker:
             return
 
         expected_sum_shape = (self.reference_shape[0], self.reference_shape[1], 3)
-        expected_wht_shape = (self.reference_shape[0], self.reference_shape[1])
+        expected_wht_shape = expected_sum_shape
 
         need_recreate = (
             self.cumulative_sum_memmap is None
@@ -11151,12 +13265,20 @@ class SeestarQueuedStacker:
         wht = self.cumulative_wht_memmap
         sum_ = self.cumulative_sum_memmap
 
+        # Accept a legacy 2-D (channel-invariant) WHT map or the current
+        # per-channel (3-D) WHT map.
+        if wht.ndim == 2:
+            if sum_.ndim == 3:
+                wht = np.broadcast_to(wht[:, :, None], sum_.shape)
+            else:
+                wht = wht
         mask = wht > 0
         avg = np.zeros_like(sum_, dtype=np.float32)
         if np.any(mask):
-            avg[mask] = (sum_[mask] / wht[mask][..., None]).astype(np.float32)
+            avg[mask] = (sum_[mask] / wht[mask]).astype(np.float32)
 
-            ys, xs = np.where(mask)
+            mask2 = np.any(mask, axis=2)
+            ys, xs = np.where(mask2)
             y0, y1 = ys.min(), ys.max() + 1
             x0, x1 = xs.min(), xs.max() + 1
 
@@ -11235,6 +13357,33 @@ class SeestarQueuedStacker:
 
         self._save_final_stack(output_filename_suffix="_classic_sumw")
 
+    def _hsi_persist_sci_wht_pair(
+        self, final_stacked, final_wht, n_channels, header, sci_fits, wht_paths
+    ):
+        """Sanitize W, validate the V/W pair, then rewrite the persisted pair.
+
+        The effective denominator is coerced to the finite/nonnegative policy
+        (NaN / +/-inf / negative -> zero) and the V/W dimensional/spatial/channel
+        compatibility is validated *before* any FITS file is rewritten, so a
+        failed transformed-W validation can never leave a mismatched SCI/W pair
+        on disk.
+        """
+        final_wht = _hsi_finite_nonneg(final_wht)
+        _hsi_validate_wht(final_wht, final_stacked.shape[:2], n_channels)
+        header["NAXIS1"] = final_stacked.shape[1]
+        header["NAXIS2"] = final_stacked.shape[0]
+        data_cxhxw = np.moveaxis(final_stacked, -1, 0)
+        fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
+            sci_fits, overwrite=True, output_verify="ignore"
+        )
+        for i, wht_path in enumerate(wht_paths):
+            wht_data = np.ascontiguousarray(
+                _hsi_wht_channel(final_wht, i, n_channels), dtype=np.float32
+            )
+            fits.PrimaryHDU(
+                data=wht_data, header=_hsi_wht_header(i, n_channels)
+            ).writeto(wht_path, overwrite=True, output_verify="ignore")
+
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
         """Save a classic batch and optionally solve/reproject it."""
         out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
@@ -11244,8 +13393,16 @@ class SeestarQueuedStacker:
         wht_paths: list[str] = []
 
         final_stacked = stacked_np
+        n_channels = int(final_stacked.shape[2])
         final_wht = wht_2d
-        np.nan_to_num(final_wht, copy=False)
+        # Keep the effective denominator per-channel when the caller supplies a
+        # 3-D (HWC) WHT map; a legacy/inherently channel-invariant 2-D map is
+        # broadcast logically at write time (never collapsed).
+        if final_wht is None:
+            final_wht = np.ones(final_stacked.shape[:2], dtype=np.float32)
+        else:
+            final_wht = np.asarray(final_wht, dtype=np.float32)
+        final_wht = _hsi_finite_nonneg(final_wht)
         # Potential WCS present on the incoming header (e.g. from drizzle)
         input_wcs = None
         try:
@@ -11267,7 +13424,7 @@ class SeestarQueuedStacker:
                     end_h = -dh if dh != 0 else None
                     end_w = -dw if dw != 0 else None
                     final_stacked = final_stacked[dh:end_h, dw:end_w, :]
-                    final_wht = final_wht[dh:end_h, dw:end_w]
+                    final_wht = _hsi_crop_wht(final_wht, dh, dw, end_h, end_w)
                     header["CRPIX1"] = header.get("CRPIX1", 0) - dw
                     header["CRPIX2"] = header.get("CRPIX2", 0) - dh
                     header["NAXIS1"] = final_stacked.shape[1]
@@ -11338,18 +13495,33 @@ class SeestarQueuedStacker:
             header["CHNAME3"] = "B"
         except Exception:
             pass
+        header[HSI_VERSION_KEY] = (
+            HSI_CONTRACT_VERSION,
+            "Classic-batch science persistence version",
+        )
+        header[HSI_WHT_NCHANNEL_KEY] = (n_channels, "Number of colour channels")
+        header[HSI_WHT_SEMANTIC_KEY] = (
+            HSI_WHT_SEMANTIC,
+            "WHT sidecars carry effective denominator",
+        )
+
+        # Fail closed before writing anything: only an HW or HWC map whose
+        # spatial shape equals the science cube and whose channel count equals
+        # n_channels is accepted.  Never manufacture per-channel provenance.
+        _hsi_validate_wht(final_wht, final_stacked.shape[:2], n_channels)
 
         fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
             sci_fits, overwrite=True, output_verify="ignore"
         )
 
-        for ch_i in range(final_stacked.shape[2]):
-            wht_path = os.path.join(
-                out_dir, f"classic_batch_{batch_idx:03d}_wht_{ch_i}.fits"
+        for ch_i in range(n_channels):
+            wht_path = _hsi_wht_sidecar_path(out_dir, batch_idx, ch_i)
+            wht_data = np.ascontiguousarray(
+                _hsi_wht_channel(final_wht, ch_i, n_channels), dtype=np.float32
             )
-            fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                wht_path, overwrite=True, output_verify="ignore"
-            )
+            fits.PrimaryHDU(
+                data=wht_data, header=_hsi_wht_header(ch_i, n_channels)
+            ).writeto(wht_path, overwrite=True, output_verify="ignore")
             wht_paths.append(wht_path)
 
         # In reproject+coadd mode we postpone solving until all batches are
@@ -11407,16 +13579,14 @@ class SeestarQueuedStacker:
                             if k in self.reference_header_for_wcs
                         }
                     )
-                    header["NAXIS1"] = final_stacked.shape[1]
-                    header["NAXIS2"] = final_stacked.shape[0]
-                    data_cxhxw = np.moveaxis(final_stacked, -1, 0)
-                    fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
-                        sci_fits, overwrite=True, output_verify="ignore"
+                    self._hsi_persist_sci_wht_pair(
+                        final_stacked,
+                        final_wht,
+                        n_channels,
+                        header,
+                        sci_fits,
+                        wht_paths,
                     )
-                    for i, wht_path in enumerate(wht_paths):
-                        fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                            wht_path, overwrite=True, output_verify="ignore"
-                        )
                 else:
                     os.remove(sci_fits)
                     for p in wht_paths:
@@ -11465,16 +13635,14 @@ class SeestarQueuedStacker:
                         if k in self.reference_header_for_wcs
                     }
                 )
-                header["NAXIS1"] = final_stacked.shape[1]
-                header["NAXIS2"] = final_stacked.shape[0]
-                data_cxhxw = np.moveaxis(final_stacked, -1, 0)
-                fits.PrimaryHDU(data=data_cxhxw, header=header).writeto(
-                    sci_fits, overwrite=True, output_verify="ignore"
+                self._hsi_persist_sci_wht_pair(
+                    final_stacked,
+                    final_wht,
+                    n_channels,
+                    header,
+                    sci_fits,
+                    wht_paths,
                 )
-                for i, wht_path in enumerate(wht_paths):
-                    fits.PrimaryHDU(data=final_wht.astype(np.float32)).writeto(
-                        wht_path, overwrite=True, output_verify="ignore"
-                    )
 
         self._last_classic_batch_solved = solved_ok
 
@@ -11596,15 +13764,18 @@ class SeestarQueuedStacker:
             except Exception:
                 continue  # silently skip unreadable batch
 
-            # 2.2 Load coverage / weight map (or fallback)
+            # 2.2 Load per-channel coverage / weight maps (or fail closed)
+            n_ch = int(data_cxhxw.shape[0])
             try:
-                coverage = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
-                    np.float32, copy=False
+                channel_covs = _load_classic_batch_wht(wht_paths, n_ch, (h, w))
+            except ValueError as e:
+                self.update_progress(
+                    f"   -> Batch refusé (WHT inexploitable) {sci_path}: {e}",
+                    "ERROR",
                 )
-                np.nan_to_num(coverage, copy=False)
-                coverage *= make_radial_weight_map(*coverage.shape)
-            except Exception:
-                coverage = np.ones((h, w), dtype=np.float32)
+                continue
+            for ch in range(n_ch):
+                channel_covs[ch] *= make_radial_weight_map(h, w)
 
             # ------------------------------------------------------------------
             # 2.3 Prepare batch data
@@ -11632,9 +13803,9 @@ class SeestarQueuedStacker:
             wcs_for_grid.append(batch_wcs)
             headers_for_grid.append(hdr)
 
-            for ch in range(3):
+            for ch in range(n_ch):
                 channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
-                channel_footprints[ch].append(coverage)
+                channel_footprints[ch].append(channel_covs[ch])
 
         # --- 3. Sanity checks ----------------------------------------------------
         if len(wcs_for_grid) < 2:
@@ -12480,38 +14651,52 @@ class SeestarQueuedStacker:
                     data_cxhxw = hdul[0].data.astype(np.float32)
                     hdr = hdul[0].header
 
+                full_h = int(data_cxhxw.shape[1])
+                full_w = int(data_cxhxw.shape[2])
+                crop_win = None
                 if crop_tiles and crop_frac > 0.0:
-                    dh = int(data_cxhxw.shape[1] * crop_frac)
-                    dw = int(data_cxhxw.shape[2] * crop_frac)
+                    dh = int(full_h * crop_frac)
+                    dw = int(full_w * crop_frac)
                     if dh or dw:
                         end_h = -dh if dh else None
                         end_w = -dw if dw else None
+                        crop_win = (dh, dw, end_h, end_w)
+                        # Non-destructive in-memory crop: the persisted SCI cube
+                        # and its W sidecars stay at their full, mutually
+                        # compatible shape (the durable v2 pair is left intact);
+                        # only the in-memory working cube and its in-memory
+                        # header/WCS are cropped for this reproject pass.
                         data_cxhxw = data_cxhxw[:, dh:end_h, dw:end_w]
                         hdr["CRPIX1"] = hdr.get("CRPIX1", 0) - dw
                         hdr["CRPIX2"] = hdr.get("CRPIX2", 0) - dh
                         hdr["NAXIS1"] = data_cxhxw.shape[2]
                         hdr["NAXIS2"] = data_cxhxw.shape[1]
-                        fits.PrimaryHDU(data=data_cxhxw, header=hdr).writeto(
-                            sci_path, overwrite=True
-                        )
-                hdr = fits.getheader(sci_path)
 
                 wcs = WCS(hdr, naxis=2)
                 h = int(hdr.get("NAXIS2"))
                 w = int(hdr.get("NAXIS1"))
                 ensure_wcs_pixel_shape(wcs, h, w)
 
-                try:
-                    cov = _fits_getdata_safe(_wht_paths[0], memmap=True).astype(
-                        np.float32, copy=False
+                n_ch = int(data_cxhxw.shape[0])
+                if crop_win is not None:
+                    # Both the persisted SCI cube and its W sidecars remain at
+                    # the full, mutually compatible shape (the crop was applied
+                    # in memory only); load W at the full shape and apply the
+                    # *exact* same spatial window in memory.  Legacy/sidecar
+                    # files are never rewritten or deleted here.
+                    channel_covs = _load_classic_batch_wht(
+                        _wht_paths, n_ch, (full_h, full_w)
                     )
-                    np.nan_to_num(cov, copy=False)
-                    if getattr(self, "reproject_coadd_final", False):
-                        cov *= make_radial_weight_map(h, w)
-                    elif int(getattr(self, "batch_size", 0) or 0) == 1:
-                        cov *= make_radial_weight_map(h, w)
-                except Exception:
-                    cov = np.ones((h, w), dtype=np.float32)
+                    dh, dw, end_h, end_w = crop_win
+                    channel_covs = channel_covs[:, dh:end_h, dw:end_w]
+                else:
+                    channel_covs = _load_classic_batch_wht(_wht_paths, n_ch, (h, w))
+                if getattr(self, "reproject_coadd_final", False) or int(
+                    getattr(self, "batch_size", 0) or 0
+                ) == 1:
+                    radial = make_radial_weight_map(h, w)
+                    for ch in range(n_ch):
+                        channel_covs[ch] = channel_covs[ch] * radial
 
                 img_hwc = np.moveaxis(data_cxhxw, 0, -1)
 
@@ -12532,7 +14717,7 @@ class SeestarQueuedStacker:
                         ref_p1, ref_p99 = None, None
 
                 data_pairs.append((img_hwc, wcs))
-                weight_maps.append(cov)
+                weight_maps.append(channel_covs)
                 wcs_list.append(wcs)
                 headers.append(hdr)
             except Exception as e:
@@ -12634,7 +14819,7 @@ class SeestarQueuedStacker:
                     inputs_ch,
                     output_projection=out_wcs,
                     shape_out=out_shape,
-                    input_weights=weight_maps,
+                    input_weights=[wm[ch] for wm in weight_maps],
                     reproject_function=reproject_interp,
                     combine_function="mean",
                     match_background=match_bg,
@@ -12675,7 +14860,7 @@ class SeestarQueuedStacker:
                             inputs_ch,
                             output_projection=out_wcs,
                             shape_out=out_shape,
-                            input_weights=weight_maps,
+                            input_weights=[wm[ch] for wm in weight_maps],
                             reproject_function=reproject_interp,
                             combine_function="mean",
                             match_background=match_bg,
@@ -12812,10 +14997,13 @@ class SeestarQueuedStacker:
             self.update_progress(f"   -> Lecture batch échouée: {e}", "WARN")
             return
         try:
-            cov = _fits_getdata_safe(wht_paths[0], memmap=True).astype(
-                np.float32, copy=False
+            n_ch = data.shape[2]
+            channel_covs = _load_classic_batch_wht(
+                wht_paths, n_ch, data.shape[:2], display_only=True
             )
-            np.nan_to_num(cov, copy=False)
+            # Non-scientific display/coverage view: a single 2-D map derived
+            # from every channel (mean), never channel 0 alone.
+            cov = np.mean(channel_covs, axis=0).astype(np.float32)
         except Exception:
             cov = np.ones(data.shape[:2], dtype=np.float32)
         self.current_stack_header = hdr.copy()
@@ -13194,24 +15382,31 @@ class SeestarQueuedStacker:
                 if "final_sum" in locals():
                     self._close_memmaps()
 
-                    final_wht_map_for_postproc = np.maximum(
-                        final_wht_map_2d_from_memmap, 0.0
-                    )
-                    cumulative_sum = final_sum.astype(np.float64, copy=False)
-                    cumulative_wht = final_wht_map_for_postproc.astype(
-                        np.float64, copy=False
-                    )
-                    valid_mask = cumulative_wht > 0
-                    final_image = np.zeros_like(cumulative_sum, dtype=np.float64)
-                    if final_image.ndim == 3:
-                        final_image[valid_mask] = (
-                            cumulative_sum[valid_mask]
-                            / cumulative_wht[valid_mask][:, None]
-                        )
+                    final_wht = np.maximum(final_wht_map_2d_from_memmap, 0.0)
+                    # 2-D coverage view for display / post-processing only.
+                    # The scientific division below keeps the full per-channel
+                    # denominator when the accumulator is 3-D.
+                    if final_wht.ndim == 3:
+                        final_wht_map_for_postproc = np.mean(
+                            final_wht, axis=2
+                        ).astype(np.float32)
                     else:
-                        final_image[valid_mask] = (
-                            cumulative_sum[valid_mask]
-                            / cumulative_wht[valid_mask]
+                        final_wht_map_for_postproc = final_wht.astype(np.float32)
+                    cumulative_sum = final_sum.astype(np.float64, copy=False)
+                    cumulative_wht = final_wht.astype(np.float64, copy=False)
+                    # Shape-aware scientific division: a legacy 2-D WHT
+                    # broadcasts across colour channels; an HWC WHT divides
+                    # per channel (preserving per-channel denominators).
+                    if cumulative_sum.ndim == 3 and cumulative_wht.ndim == 2:
+                        wht_div = cumulative_wht[..., None]
+                    else:
+                        wht_div = cumulative_wht
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        final_image = np.divide(
+                            cumulative_sum,
+                            wht_div,
+                            out=np.zeros_like(cumulative_sum, dtype=np.float64),
+                            where=wht_div > 0,
                         )
                     final_image = np.nan_to_num(
                         final_image, nan=0.0, posinf=0.0, neginf=0.0
@@ -13882,7 +16077,10 @@ class SeestarQueuedStacker:
         eps = 1e-9
         with np.errstate(divide="ignore", invalid="ignore"):
             if sum_data.ndim == 3:
-                avg = sum_data / np.maximum(wht_data[..., None], eps)
+                wht_div = np.maximum(wht_data, eps)
+                if wht_div.ndim == 2:
+                    wht_div = wht_div[:, :, None]
+                avg = sum_data / wht_div
             else:
                 avg = sum_data / np.maximum(wht_data, eps)
         avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
@@ -14606,16 +16804,14 @@ class SeestarQueuedStacker:
         self.bayer_pattern = str(bayer_pattern) if bayer_pattern else "GRBG"
         self.perform_cleanup = bool(perform_cleanup)
 
-        self._interbatch_start_session()
-        self._final_combine_ibn_started = False
-        self._final_combine_ibn_master_set = False
-        self._final_combine_ibn_master_batch_idx = None
-
         self.weight_by_snr = bool(weight_by_snr)
         self.weight_by_stars = bool(weight_by_stars)
         self.snr_exponent = float(snr_exp)
         self.stars_exponent = float(stars_exp)
-        self.min_weight = float(max(0.01, min(1.0, min_w)))
+        # P5-FIX (HSI closure): normalize the transport value at the backend
+        # seam so NaN/Inf/nonnumeric map to the documented default (0.01) and
+        # finite values clamp to [0.01, 1.0] — identical to the settings seam.
+        self.min_weight = _normalize_min_weight(min_w)
 
         self.drizzle_scale = float(drizzle_scale) if drizzle_scale else 2.0
         self.drizzle_wht_threshold = float(drizzle_wht_threshold)
@@ -14653,6 +16849,13 @@ class SeestarQueuedStacker:
         self.move_stacked = bool(move_stacked)
         self.partial_save_interval = max(1, int(partial_save_interval))
         self.chunk_size = int(chunk_size) if chunk_size else None
+
+        # HSI-2B C1: bind the session input roots as early as the configuration
+        # is known, so a resume can prove it is operating on the same dataset
+        # (not merely the same shape/settings).  Dynamic/additional folders are
+        # captured here from the start-time set only; a resume whose input set
+        # differs is refused (no guessing).
+        self._resume_input_roots = self._compute_input_roots(initial_additional_folders)
 
         # --- NOUVEAU : Assignation du paramètre de sauvegarde à l'attribut de l'instance ---
 
@@ -14831,6 +17034,22 @@ class SeestarQueuedStacker:
             "DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session."
         )
 
+        # HSI-2B C2: read-only early resume preflight.  All scientific/session
+        # configuration and input-root binding are now known, but no reference
+        # or temp/scientific artifact has been written yet.  Any invalid resume
+        # session/reference/configuration (dirty/corrupt/fingerprint/root/
+        # missing-or-replaced reference/unsupported mode) is refused here,
+        # before ``_get_reference_image`` can create or overwrite
+        # temp_processing/reference_image.fit/.png.
+        ok_early, early_result = self._early_resume_preflight()
+        if not ok_early:
+            self.update_progress(f"❌ Reprise impossible: {early_result}", "ERROR")
+            self.processing_active = False
+            return False
+        # Pin the verified resolved original reference (original path or its
+        # verified moved-to-stacked counterpart) for reference preparation.
+        self._resume_resolved_reference = early_result
+
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
         # ... (le reste de la méthode est inchangé) ...
         logger.debug(
@@ -14915,6 +17134,23 @@ class SeestarQueuedStacker:
             self.aligner.bayer_pattern = self.bayer_pattern
             self.aligner.reference_image_path = reference_path_ui or None
 
+            # HSI-2B C2: on resume, pin the already-verified resolved original
+            # reference (from the early preflight) *before* auto-selection so
+            # the same physical observation (original path or its verified
+            # moved-to-stacked counterpart) is used — the first remaining frame
+            # must never silently replace it.
+            if self._resume_requested:
+                resolved_ref = getattr(self, "_resume_resolved_reference", None)
+                if resolved_ref is None:
+                    self.update_progress(
+                        "❌ Reprise impossible: image de référence de la "
+                        "session introuvable ou modifiée.",
+                        "ERROR",
+                    )
+                    return False
+                self.aligner.reference_image_path = resolved_ref
+                reference_path_ui = resolved_ref
+
             (
                 reference_image_data_for_shape_determination,
                 reference_header_for_shape_determination,
@@ -14949,6 +17185,14 @@ class SeestarQueuedStacker:
                 reference_header_for_shape_determination.copy()
             )
             self.ref_wcs_header = self.reference_header_for_wcs
+            # HSI-2B C1: persist the identity of the actual source used as the
+            # classic-alignment reference (part of the scientific session
+            # contract, not cosmetic metadata).
+            self._resume_reference_identity = self._capture_reference_identity(
+                current_folder_to_scan_for_shape,
+                files_in_folder_for_shape,
+                reference_header_for_shape_determination,
+            )
             logger.debug(
                 f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}"
             )
@@ -15111,6 +17355,18 @@ class SeestarQueuedStacker:
                     "DEBUG QM (start_processing): Plate-solving de la référence globale ignoré (mode Stacking Classique sans reprojection)."
                 )
                 self.reference_wcs_object = None
+
+            # P5-FIX (HSI closure): pin the immutable quality reference scale
+            # ``q_ref`` exactly once, from the actual session reference image,
+            # before any source can be stacked.  On a fresh run this is the
+            # single source of truth for the relative quality domain; on a
+            # resume the persisted scale is restored later by
+            # ``_validate_and_open_resume`` (never recomputed here) so fresh and
+            # resumed continuation stay bit-identical.
+            if self.use_quality_weighting and not self._resume_requested:
+                self._capture_quality_reference(
+                    reference_image_data_for_shape_determination
+                )
 
             if reference_image_data_for_shape_determination is not None:
                 del reference_image_data_for_shape_determination
@@ -15401,23 +17657,29 @@ class SeestarQueuedStacker:
                     "⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente."
                 )
 
-        if (
-            self._resume_requested
-            and self.stacked_batches_count > 0
-            and self.batch_size > 0
-        ):
-            skip_files = self.stacked_batches_count * self.batch_size
-            skipped = 0
-            while skipped < skip_files and not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                    skipped += 1
-                except Empty:
-                    break
+        # HSI-2B: queue filtering uses the exact completed-source ledger (path +
+        # size + mtime_ns), never ``stacked_batches_count * batch_size``.  This
+        # stays correct for unequal/partial batches and ordering changes.  A
+        # same-path/different-identity queue item is a hard refusal.
+        if self._resume_requested and getattr(self, "_resume_active", False):
+            try:
+                skipped = self._filter_queue_by_resume_ledger()
+            except _ResumeCheckpointError as ckpt_err:
+                self.update_progress(f"❌ Reprise impossible: {ckpt_err}", "ERROR")
+                self.processing_error = str(ckpt_err)
+                return False
             if skipped:
-                self.files_in_queue = max(self.files_in_queue - skipped, 0)
-                self._recalculate_total_batches()
-                self.update_progress(f"Resuming: {skipped} fichiers ignorés.")
+                self.update_progress(
+                    f"Resuming: {skipped} fichiers déjà empilés ignorés."
+                )
+
+        # HSI-2B C1: session/reference/plan preflight — full validation happens
+        # before any legacy/artifact overwrite and before the worker thread is
+        # started.  On resume this proves the remaining queue is the exact
+        # ordered suffix of the persisted plan; on a fresh run it binds the plan.
+        if not self._checkpoint_preflight():
+            self.processing_active = False
+            return False
 
         if self.is_mosaic_run and self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
@@ -15443,6 +17705,18 @@ class SeestarQueuedStacker:
             self.fixed_output_shape = self.reference_shape
 
         self.aligner.reference_image_path = reference_path_ui or None
+
+        # P1-FIX (HSI closure): auto-start the batch-output IBN (MASTER_REF +
+        # BG2D) layer only for non-plain sessions.  Plain classic SUM/WHT must
+        # never receive IBN; its exact-composition path is guarded here, after
+        # every mode flag (mosaic/drizzle/reproject) is finally resolved.
+        self._final_combine_ibn_started = False
+        self._final_combine_ibn_master_set = False
+        self._final_combine_ibn_master_batch_idx = None
+        if not self._is_plain_classic():
+            self._interbatch_start_session()
+        else:
+            self.interbatch_norm_active = False
 
         logger.debug(
             "DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker..."

@@ -410,7 +410,7 @@ SETTINGS_SECTIONS = [
             _field("weight_by_stars", "Weight by stars", "bool"),
             _field("snr_exponent", "SNR exponent", "float", 0.0, 10.0, 0.1, 2),
             _field("stars_exponent", "Stars exponent", "float", 0.0, 10.0, 0.1, 2),
-            _field("min_weight", "Minimum weight", "float", 0.0, 1.0, 0.01, 3),
+            _field("min_weight", "Minimum weight", "float", 0.01, 1.0, 0.01, 3),
         ],
     ),
     (
