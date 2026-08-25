@@ -43,6 +43,8 @@ import time
 from typing import Any, Callable, Optional
 
 from .run_bridge import RunRequest, split_backend_kwargs
+from .run_log import RunLog
+from .startup_refusal import StartupRefusedError, build_payload_from_engine
 from .summary_payload import SummaryPayload, build_summary_payload
 
 
@@ -266,6 +268,9 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         self._stacker_kwargs = dict(stacker_kwargs)
         self._stacker: Optional[Any] = None
         self._cancel_requested = False
+        # Durable per-run lifecycle log carrier (shared with worker/controller/
+        # MainWindow via ``backend.run_log``).  ``None`` until a run starts.
+        self.run_log: Optional[RunLog] = None
         # Thread-safe control channel (GUI thread -> worker thread).  The GUI
         # thread enqueues live-control requests via
         # :meth:`set_preview_downsample_factor`; :meth:`run` drains them on the
@@ -323,17 +328,32 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
     def _make_progress_callback(
         progress_callback: ProgressCallback,
         log_callback: LogCallback,
+        run_log: Optional[RunLog] = None,
     ) -> Callable[..., None]:
         """Adapt the stacker's ``cb(message, progress, level)`` to two callbacks.
 
         The real backend invokes ``progress_callback(message, progress, level)``
         (with a ``TypeError`` fallback to ``(message, progress)``).  We forward
         the human-readable message to ``log_callback`` and the numeric percent
-        to ``progress_callback`` (clamped to 0..100).
+        to ``progress_callback`` (clamped to 0..100).  When a ``run_log`` is
+        supplied, the message/percent/level are also recorded as a bounded
+        ``ENGINE_PROGRESS`` durable event (best-effort).
         """
 
         def _cb(message: Any, progress: Any = None, level: Any = None) -> None:
-            log_callback(str(message))
+            msg = str(message)
+            log_callback(msg)
+            if run_log is not None:
+                try:
+                    fields = {"message": msg}
+                    if progress is not None:
+                        fields["percent"] = progress
+                    if level is not None:
+                        fields["level"] = level
+                    run_log.emit("ENGINE_PROGRESS", **fields)
+                except Exception:
+                    # Instrumentation is best-effort; never break the run.
+                    pass
             if progress is None:
                 return
             try:
@@ -341,6 +361,23 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             except (TypeError, ValueError):
                 return
             progress_callback(max(0, min(100, percent)))
+
+        return _cb
+
+    @staticmethod
+    def _make_lifecycle_callback(run_log: RunLog) -> Callable[[str, dict], None]:
+        """Adapt the engine's ``(event, fields)`` lifecycle seam to the run log.
+
+        The engine calls this through :meth:`SeestarQueuedStacker._emit_lifecycle`
+        (fail-open) at its actual entry/return seams.  Any error here is
+        swallowed so durable instrumentation can never break science.
+        """
+
+        def _cb(event: str, fields: dict) -> None:
+            try:
+                run_log.emit(str(event), **dict(fields or {}))
+            except Exception:
+                pass
 
         return _cb
 
@@ -513,6 +550,74 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         except Exception:
             pass
 
+    @staticmethod
+    def _allowlisted_metadata(start_kwargs: dict) -> dict:
+        """Return a small allowlisted config/mode metadata mapping for the log.
+
+        Only stable, bounded, non-secret fields are carried; no arrays, no
+        full configuration dump.
+        """
+        keys = (
+            "stacking_mode",
+            "use_drizzle",
+            "drizzle_mode",
+            "is_mosaic_run",
+            "batch_size",
+            "input_dir",
+            "output_dir",
+            "reference_path_ui",
+        )
+        return {
+            key: start_kwargs[key]
+            for key in keys
+            if key in start_kwargs and start_kwargs[key] is not None
+        }
+
+    @staticmethod
+    def _product_version() -> str:
+        """Return the product version string (``"version codename"``) for the log.
+
+        Cheap and import-hygienic: reads ``seestar.__version__`` /
+        ``seestar.__codename__`` from the already-imported parent package (its
+        ``__init__`` only binds those two names plus lazy re-exports — no engine,
+        Tk or astropy).  Never raises; degrades to ``""``.
+        """
+        try:
+            import seestar
+        except Exception:
+            return ""
+        version = getattr(seestar, "__version__", "") or ""
+        codename = getattr(seestar, "__codename__", "") or ""
+        if version and codename:
+            return f"{version} {codename}"
+        return version
+
+    def _wait_for_engine_termination(
+        self, stacker: Any, is_cancel_requested: IsCancelRequested
+    ) -> None:
+        """Wait until the engine thread has *actually* terminated.
+
+        ``is_running()`` can report False (``processing_active`` cleared) while
+        the engine thread is still finishing cleanup (autotuner stop, executor
+        shutdown, gc).  Thread liveness is authoritative: we must not return
+        FINISHED while the thread is alive.  We join in small bounded slices on
+        the worker thread (never the GUI thread) and keep draining the deferred
+        GUI event queue so terminal progress still flows while the engine tail
+        finishes; cancellation keeps calling ``stop()`` (idempotent) to help the
+        tail terminate.
+        """
+        thread = getattr(stacker, "processing_thread", None)
+        if thread is None or not thread.is_alive():
+            return
+        while thread.is_alive():
+            if is_cancel_requested() or self._cancel_requested:
+                self._stop_stackers()
+            self._drain_gui_event_queue(stacker)
+            self._drain_control_queue(stacker)
+            thread.join(timeout=self._poll_interval)
+        self._drain_gui_event_queue(stacker)
+        self._drain_control_queue(stacker)
+
     def run(
         self,
         request: RunRequest,
@@ -527,8 +632,18 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         stacker = self._ensure_stackers(request)
         start_kwargs, seam_kwargs = split_backend_kwargs(request.backend_kwargs)
         self._apply_seam_kwargs(stacker, seam_kwargs)
+
+        # Create the run-log carrier *before* start_processing so a tiny number
+        # of pre-accept engine lifecycle events can be buffered (no file is
+        # created until the run is accepted).
+        run_log = RunLog()
+        self.run_log = run_log
+        lifecycle_setter = getattr(stacker, "set_lifecycle_callback", None)
+        if callable(lifecycle_setter):
+            lifecycle_setter(self._make_lifecycle_callback(run_log))
+
         stacker.set_progress_callback(
-            self._make_progress_callback(progress_callback, log_callback)
+            self._make_progress_callback(progress_callback, log_callback, run_log)
         )
         if preview_callback is not None:
             setter = getattr(stacker, "set_preview_callback", None)
@@ -538,9 +653,32 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         started = stacker.start_processing(**start_kwargs)
         if not started:
             self._stop_stackers()
+            # Structured startup refusal (known code) vs generic false start.
+            payload = build_payload_from_engine(
+                getattr(stacker, "startup_refusal", None)
+            )
+            if payload is not None:
+                raise StartupRefusedError(payload)
             raise RuntimeError(
                 "SeestarQueuedStacker.start_processing() reported it did not start"
             )
+
+        # Accepted: open the durable run log now (never in an incompatible
+        # folder, never overwriting an earlier run's log).
+        run_log.warning = log_callback
+        metadata = self._allowlisted_metadata(start_kwargs)
+        metadata["product_version"] = self._product_version()
+        run_log.open(
+            start_kwargs.get("output_dir") or getattr(stacker, "output_folder", None),
+            metadata=metadata,
+        )
+        run_log.emit("RUN_ACCEPTED", output_dir=start_kwargs.get("output_dir"))
+        run_log.emit(
+            "RUN_STARTED",
+            mode=start_kwargs.get("stacking_mode"),
+            use_drizzle=bool(start_kwargs.get("use_drizzle")),
+            input_count=getattr(stacker, "files_in_queue", None),
+        )
 
         while not (is_cancel_requested() or self._cancel_requested):
             if not stacker.is_running():
@@ -558,16 +696,48 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         # instant (best-effort; the run is already terminal).
         self._drain_control_queue(stacker)
 
+        # Truthful completion: ``is_running()`` may already be False while the
+        # engine thread is still finishing cleanup.  Wait for the thread to
+        # actually terminate before recording the return (thread liveness is
+        # authoritative).  The backend runs off the GUI thread, so this bounded
+        # slice join never blocks the GUI.
+        self._wait_for_engine_termination(stacker, is_cancel_requested)
+        self._drain_gui_event_queue(stacker)
+        run_log.emit("ENGINE_PROCESSING_RETURNED")
+
         if is_cancel_requested() or self._cancel_requested:
             # Cancellation observed (worker flag or backend.cancel()).  stop()
             # is idempotent, so the double call on this path is harmless.
             self._stop_stackers()
+            run_log.emit("BACKEND_RETURNING", status="cancelled")
             return BackendRunResult.CANCELLED
+
+        # After engine termination, a populated processing_error means failure,
+        # never success.
+        processing_error = getattr(stacker, "processing_error", None)
+        if processing_error:
+            # Stop the stacker (cleanup) *before* claiming the backend is
+            # returning — ``BACKEND_RETURNING(status=failed)`` must be written at
+            # the actual pre-raise seam, never before potentially blocking
+            # cleanup work.
+            self._stop_stackers()
+            run_log.emit(
+                "BACKEND_RETURNING", status="failed", error=str(processing_error)
+            )
+            raise RuntimeError(f"Engine processing failed: {processing_error}")
+
         self._emit_summary(
             stacker,
             start_kwargs,
             time.monotonic() - start_time,
             summary_callback,
+        )
+        # Backend exit seam: recorded immediately before ``run`` returns.  The
+        # worker records BACKEND_RETURNED immediately after ``run`` returns.
+        run_log.emit(
+            "BACKEND_RETURNING",
+            status="finished",
+            processed_files_count=getattr(stacker, "processed_files_count", None),
         )
         return BackendRunResult.FINISHED
 

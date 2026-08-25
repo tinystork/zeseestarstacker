@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import enum
 import inspect
+import traceback
 from typing import Optional
 
 from PySide6.QtCore import QMutex, QObject, QThread, Signal, Slot
@@ -36,7 +37,25 @@ from .backend_runner import (
     BaseRunBackend,
     SimulatedRunBackend,
 )
+from .startup_refusal import StartupRefusedError
 from .run_bridge import RunRequest
+
+
+# Bound the length of a persisted traceback so a fatal engine error can never
+# bloat the durable run log (no image arrays / secrets / unbounded dumps).
+_MAX_TRACEBACK_LEN = 2000
+
+
+def _bounded_traceback() -> str:
+    """Return a bounded, single-line traceback string (best-effort, never raises)."""
+    try:
+        text = traceback.format_exc() or ""
+    except Exception:
+        return ""
+    text = " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    if len(text) > _MAX_TRACEBACK_LEN:
+        text = text[:_MAX_TRACEBACK_LEN] + "…"
+    return text
 
 
 class RunStatus(enum.Enum):
@@ -83,6 +102,11 @@ class RunWorker(QObject):
     cancelled = Signal()
     preview = Signal(object)
     summary = Signal(object)
+    # Durable run-log carrier handed back to the controller once the backend
+    # has produced it (shared by reference across backend/worker/controller).
+    lifecycle_log = Signal(object)
+    # Structured startup refusal (vs. generic ``failed``).
+    refused = Signal(object)
 
     def __init__(
         self,
@@ -191,12 +215,46 @@ class RunWorker(QObject):
                 run_kwargs["summary_callback"] = self._emit_summary
             result = self._backend.run(request, **run_kwargs)
 
+            run_log = getattr(self._backend, "run_log", None)
+            status = (
+                "cancelled" if result is BackendRunResult.CANCELLED else "finished"
+            )
+            kind = "cancelled" if result is BackendRunResult.CANCELLED else "finished"
+            if run_log is not None:
+                run_log.emit("BACKEND_RETURNED", status=status)
+                # The completion callback is the worker's own terminal signal,
+                # not the backend's summary callback.
+                run_log.emit("COMPLETION_CALLBACK_EMITTING", kind=kind)
+                # Hand the durable run log to the controller *before* emitting
+                # the terminal outcome.  Same-sender FIFO guarantees the
+                # controller's run-log carrier is set before it can observe the
+                # outcome or QThread.finished, eliminating the cross-sender
+                # handoff race by construction (no timing luck).
+                self.lifecycle_log.emit(run_log)
             if result is BackendRunResult.CANCELLED:
                 self.cancelled.emit()
             else:
                 self.finished.emit()
+            if run_log is not None:
+                run_log.emit("COMPLETION_CALLBACK_EMITTED", kind=kind)
+                run_log.emit("WORKER_OUTCOME", status=status)
+        except StartupRefusedError as exc:  # pragma: no cover - defensive guard
+            # A refused start never opened a run log; emit only the structured
+            # refusal (no lifecycle-log handoff, no worker-outcome record).
+            self.refused.emit(exc.payload)
         except Exception as exc:  # pragma: no cover - defensive guard
+            run_log = getattr(self._backend, "run_log", None)
+            tb = _bounded_traceback()
+            if run_log is not None:
+                run_log.emit("BACKEND_RAISED", error=str(exc), traceback=tb)
+                run_log.emit("COMPLETION_CALLBACK_EMITTING", kind="failed")
+                self.lifecycle_log.emit(run_log)
             self.failed.emit(str(exc))
+            if run_log is not None:
+                run_log.emit("COMPLETION_CALLBACK_EMITTED", kind="failed")
+                run_log.emit(
+                    "WORKER_OUTCOME", status="failed", error=str(exc), traceback=tb
+                )
         finally:
             # Stop the worker thread's event loop as soon as ``run`` returns.
             # ``QThread.quit`` is thread-safe, so no GUI-thread round trip is

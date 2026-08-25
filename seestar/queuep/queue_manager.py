@@ -324,6 +324,123 @@ _FINALIZATION_MODES = frozenset(
 )
 
 
+def _bounded_traceback(limit: int = 3, max_len: int = 2000) -> str:
+    """Return a bounded, single-line traceback string (best-effort, never raises).
+
+    ZSSS-LIFECYCLE-01: used by the engine's worker except blocks to record a
+    *bounded* fatal traceback in the durable run log, without leaking image
+    arrays, secrets or unbounded dumps.  ``traceback.format_exc`` must be called
+    from inside an ``except`` block; elsewhere it returns ``""``.
+    """
+    try:
+        text = traceback.format_exc(limit=limit) or ""
+    except Exception:
+        return ""
+    text = " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    if len(text) > max_len:
+        text = text[:max_len] + "…"
+    return text
+
+
+def _emit_lifecycle_failopen(obj, event, **fields) -> None:
+    """Emit one durable lifecycle event through ``obj._emit_lifecycle`` (fail-open).
+
+    ZSSS-LIFECYCLE-01-C2: ``_save_final_stack`` (and its extracted
+    ``_save_final_preview_png`` helper) are invoked by tests on a lightweight
+    ``_FinalizerDummy`` that has no ``_emit_lifecycle``.  This helper keeps those
+    call sites fail-open — a missing or raising emitter is a silent no-op — while
+    real ``SeestarQueuedStacker`` instances still route through the normal
+    ``_emit_lifecycle`` method (which itself is fail-open on a missing callback).
+    """
+    emitter = getattr(obj, "_emit_lifecycle", None)
+    if emitter is None:
+        return
+    try:
+        emitter(event, **fields)
+    except Exception:
+        pass
+
+
+def _save_final_preview_png(obj, data_after_postproc, preview_path) -> None:
+    """Save the final preview PNG and emit truthful FINAL_PREVIEW_SAVE_* events.
+
+    ZSSS-LIFECYCLE-01: ``success`` must represent the *actual*
+    ``save_preview_image`` result, never a hardcoded ``True``.  A raising
+    ``save_preview_image`` yields ``success=False`` with a bounded ``error``,
+    while preserving the existing progress/stderr behaviour.  ``None`` data
+    (nothing to save) is a distinct ``success=False`` with no error.
+
+    ZSSS-LIFECYCLE-01-C2: kept as a module-level helper (not a method) so it
+    also works on the ``_FinalizerDummy`` duck-call path — which carries
+    ``update_progress`` but has no ``_save_final_preview_png`` method.
+    """
+    if data_after_postproc is None:
+        obj.update_progress(
+            "ⓘ Aucune image a sauvegarder pour preview PNG (data_after_postproc est None)."
+        )
+        _emit_lifecycle_failopen(obj, "FINAL_PREVIEW_SAVE_RETURNED", success=False)
+        return
+
+    _emit_lifecycle_failopen(
+        obj,
+        "FINAL_PREVIEW_SAVE_ENTERED",
+        path=os.path.basename(preview_path),
+    )
+    obj.update_progress(
+        f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}"
+    )
+    logger.debug(
+        f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}"
+    )
+    success = False
+    error = None
+    try:
+        save_preview_image(
+            data_after_postproc, preview_path, apply_stretch=True, enhanced_stretch=False
+        )  # ou True si vous préférez le stretch "enhanced" pour le PNG
+        obj.update_progress("     ✅ Sauvegarde Preview PNG terminee.")
+        success = True
+    except Exception as prev_err:
+        error = str(prev_err)
+        obj.update_progress(f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}.")
+    _emit_lifecycle_failopen(
+        obj,
+        "FINAL_PREVIEW_SAVE_RETURNED",
+        success=success,
+        path=os.path.basename(preview_path),
+        error=error,
+    )
+
+
+class StartupRefusal:
+    """Structured, read-only startup-refusal carrier (engine -> adapter).
+
+    ZSSS-LIFECYCLE-01 boundary A.  ``start_processing`` resets this to ``None``
+    at each start attempt and sets it on a *known* refusal so the Qt adapter can
+    raise a distinct, structured refusal (instead of a generic false start)
+    without parsing progress/log strings.
+
+    Attributes
+    ----------
+    code:
+        Stable machine code (e.g. ``OUTPUT_STATE_INCOMPATIBLE``).
+    technical_detail:
+        Free-form technical reason from the engine (never parsed downstream).
+    semantic_key:
+        User-facing semantic key consumed by the GUI localization layer.
+    semantic_data:
+        Bounded key/value data for the presentation layer (never behavioural).
+    """
+
+    CODE_OUTPUT_STATE_INCOMPATIBLE = "OUTPUT_STATE_INCOMPATIBLE"
+
+    def __init__(self, code, technical_detail="", semantic_key=None, semantic_data=None):
+        self.code = code
+        self.technical_detail = technical_detail
+        self.semantic_key = semantic_key
+        self.semantic_data = dict(semantic_data or {})
+
+
 # ----------------------------------------------------------------------
 # HSI-2B: versioned, fail-closed resume contract for the *plain classic*
 # SUM/W path only.  Drizzle, mosaic and (inter-batch / final) reproject are
@@ -2706,6 +2823,11 @@ class SeestarQueuedStacker:
         self.processing_active = False
         self.stop_processing = False
         self.processing_error = None
+        # ZSSS-LIFECYCLE-01: structured startup refusal (reset per start attempt)
+        # and fail-open lifecycle callback (installed by the Qt adapter so the
+        # engine can record durable lifecycle events without ever touching Qt).
+        self.startup_refusal = None
+        self._lifecycle_callback = None
         self.is_mosaic_run = False
         self.drizzle_active_session = False
         self.mosaic_alignment_mode = "local_fast_fallback"
@@ -5172,6 +5294,31 @@ class SeestarQueuedStacker:
 
     ##################################################################################################################
 
+    def set_lifecycle_callback(self, callback):
+        """Install the fail-open durable lifecycle callback (Qt adapter).
+
+        The engine calls :meth:`_emit_lifecycle` at its actual entry/return
+        seams (Drizzle finalization, final FITS save, final preview save,
+        worker finish).  The callback receives ``(event_name, fields_dict)`` and
+        must never raise; it is never Qt access and never affects science.
+        """
+        self._lifecycle_callback = callback
+
+    def _emit_lifecycle(self, event, **fields):
+        """Emit one durable lifecycle event through the installed callback.
+
+        Fail-open: with no callback installed (headless/Tk consumers) this is a
+        silent no-op; a raising callback is swallowed so instrumentation can
+        never break science or the worker.
+        """
+        callback = getattr(self, "_lifecycle_callback", None)
+        if callback is None:
+            return
+        try:
+            callback(event, fields)
+        except Exception:
+            pass
+
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
         # logger.debug("DEBUG QM: Appel de set_progress_callback.") # Optionnel
@@ -6880,6 +7027,14 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=3)
             self.processing_error = f"RuntimeError: {rte}"
             self.stop_processing = True  # Provoquer l'arrêt propre du thread
+            # ZSSS-LIFECYCLE-01: record a bounded fatal traceback in an engine
+            # lifecycle failure event *before* the finally tail, while preserving
+            # the existing stderr print and ``processing_error`` semantics.
+            self._emit_lifecycle(
+                "ENGINE_PROCESSING_FAILED",
+                error=str(rte),
+                traceback=_bounded_traceback(),
+            )
         except Exception as e_global_worker:
             self.update_progress(
                 f"❌ ERREUR INATTENDUE GLOBALE dans le worker: {e_global_worker}",
@@ -6891,6 +7046,12 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=3)
             self.processing_error = f"Erreur Globale: {e_global_worker}"
             self.stop_processing = True  # Provoquer l'arrêt propre du thread
+            # ZSSS-LIFECYCLE-01: same bounded fatal-traceback capture as above.
+            self._emit_lifecycle(
+                "ENGINE_PROCESSING_FAILED",
+                error=str(e_global_worker),
+                traceback=_bounded_traceback(),
+            )
         finally:
             logger.debug(
                 f"DEBUG QM [_worker V_NoDerotation]: Entree dans le bloc FINALLY principal du worker."
@@ -6934,6 +7095,15 @@ class SeestarQueuedStacker:
                 f"DEBUG QM [_worker V_NoDerotation]: Fin du bloc FINALLY principal. Flag processing_active mis à False."
             )
             self.update_progress("🚪 Thread de traitement principal terminé.")
+            # ZSSS-LIFECYCLE-01: record ENGINE_PROCESSING_RETURNING only *after*
+            # the required cleanup (autotuner stop, executor shutdown,
+            # norm-reference release, memmap close, gc) has completed and
+            # immediately before the worker function exits — the engine's actual
+            # returning seam, not an inferred alias.
+            self._emit_lifecycle(
+                "ENGINE_PROCESSING_RETURNING",
+                error=bool(getattr(self, "processing_error", None)),
+            )
 
     ############################################################################################################################
 
@@ -12048,6 +12218,39 @@ class SeestarQueuedStacker:
             and not getattr(self, "reproject_coadd_final", False)
         )
 
+    def _session_mode_label(self) -> str:
+        """Return a short stable label for the configured (non-plain) mode.
+
+        Used only for the bounded ``semantic_data`` of a startup refusal; it is
+        presentation metadata, never behavioural.
+        """
+        if getattr(self, "is_mosaic_run", False):
+            return "mosaic"
+        if getattr(self, "drizzle_active_session", False):
+            return "drizzle"
+        if getattr(self, "reproject_between_batches", False) or getattr(
+            self, "reproject_coadd_final", False
+        ):
+            return "reproject"
+        return "plain_classic"
+
+    def _build_startup_refusal(self, early_result) -> "StartupRefusal":
+        """Build the structured startup refusal for a *known* early refusal.
+
+        Only the confirmed incompatible case — existing resume artifacts plus a
+        non-plain (Drizzle / mosaic / reproject) mode — carries the stable
+        ``OUTPUT_STATE_INCOMPATIBLE`` code.  Any other early refusal returns
+        ``None`` so it stays a generic false start.
+        """
+        if getattr(self, "_resume_requested", False) and not self._is_plain_classic():
+            return StartupRefusal(
+                StartupRefusal.CODE_OUTPUT_STATE_INCOMPATIBLE,
+                early_result,
+                semantic_key="output_state_incompatible",
+                semantic_data={"mode": self._session_mode_label()},
+            )
+        return None
+
     def _should_capture_norm_reference(self) -> bool:
         """True when this plain-classic session configures reference-based
         source normalization (``linear_fit`` or ``sky_mean``).
@@ -15275,8 +15478,12 @@ class SeestarQueuedStacker:
                 logger.debug(
                     "  DEBUG QM [SaveFinalStack M3] Mode: Drizzle Standard (accumulateur unique)"
                 )
+                _emit_lifecycle_failopen(self, "DRIZZLE_FINALIZATION_ENTERED")
                 accs = self.drizzle_accumulators
                 if not accs or len(accs) != 3:
+                    _emit_lifecycle_failopen(
+                        self, "DRIZZLE_FINALIZATION_RETURNED", success=False
+                    )
                     raise ValueError("Accumulateurs Drizzle invalides ou manquants.")
 
                 logger.info("DRIZZLE FINALIZE: single accumulator (policy-independent)")
@@ -15295,6 +15502,9 @@ class SeestarQueuedStacker:
                     )
                     logger.error(
                         "ERROR QM [_save_final_stack M3]: All drizzle weights are zero."
+                    )
+                    _emit_lifecycle_failopen(
+                        self, "DRIZZLE_FINALIZATION_RETURNED", success=False
                     )
                     self.final_stacked_path = None
                     return
@@ -15318,6 +15528,9 @@ class SeestarQueuedStacker:
                 )
 
                 self._close_memmaps()
+                _emit_lifecycle_failopen(
+                    self, "DRIZZLE_FINALIZATION_RETURNED", success=True
+                )
                 self.update_progress(
                     f"    DEBUG QM: Drizzle Std (accumulateur) - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
                 )
@@ -15902,6 +16115,14 @@ class SeestarQueuedStacker:
         )
 
         # --- ÉTAPE 6: Sauvegarde FITS effective ---
+        _emit_lifecycle_failopen(
+            self, "FINAL_FITS_SAVE_ENTERED", path=os.path.basename(fits_path)
+        )
+        # ZSSS-LIFECYCLE-01: ``success`` must represent the *actual* write, not
+        # the earlier ``self.final_stacked_path = fits_path`` assignment (which
+        # is set before the write and may be stale).  Use a local flag set only
+        # when ``writeto`` completed.
+        fits_write_success = False
         try:
             primary_hdu = fits.PrimaryHDU(
                 data=data_for_primary_hdu_save_cxhxw, header=final_header
@@ -15919,36 +16140,24 @@ class SeestarQueuedStacker:
                     hd0.header["BSCALE"] = 1
                     hd0.header["BZERO"] = 32768
                     hdul_fix.flush()
+            fits_write_success = True
             self.update_progress(
                 f"   ✅ Sauvegarde FITS ({'float32' if save_as_float32_setting else 'uint16'}) terminee."
             )
         except Exception as save_err:
             self.update_progress(f"   ❌ Erreur Sauvegarde FITS: {save_err}")
             self.final_stacked_path = None
+        _emit_lifecycle_failopen(
+            self,
+            "FINAL_FITS_SAVE_RETURNED",
+            success=fits_write_success,
+            path=os.path.basename(fits_path),
+        )
 
         # --- ÉTAPE 7: Sauvegarde preview PNG ---
         # Utiliser data_after_postproc (qui est l'image [0,1] après tous les post-traitements)
         # et laisser save_preview_image appliquer son propre stretch par défaut.
-        if data_after_postproc is not None:
-            self.update_progress(
-                f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}"
-            )
-            logger.debug(
-                f"  DEBUG QM (_save_final_stack): Données pour save_preview_image (data_after_postproc) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Shape: {data_after_postproc.shape}, Dtype: {data_after_postproc.dtype}"
-            )
-            try:
-                save_preview_image(
-                    data_after_postproc, preview_path, apply_stretch=True, enhanced_stretch=False
-                )  # ou True si vous préférez le stretch "enhanced" pour le PNG
-                self.update_progress("     ✅ Sauvegarde Preview PNG terminee.")
-            except Exception as prev_err:
-                self.update_progress(
-                    f"     ❌ Erreur Sauvegarde Preview PNG: {prev_err}."
-                )
-        else:
-            self.update_progress(
-                "ⓘ Aucune image a sauvegarder pour preview PNG (data_after_postproc est None)."
-            )
+        _save_final_preview_png(self, data_after_postproc, preview_path)
 
         self.update_progress(
             f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."
@@ -16712,6 +16921,9 @@ class SeestarQueuedStacker:
 
         self.stop_processing = False
         self.user_requested_stop = False
+        # ZSSS-LIFECYCLE-01: reset any stale refusal from a previous start
+        # attempt so a new attempt starts with a clean carrier.
+        self.startup_refusal = None
         if hasattr(self, "aligner") and self.aligner is not None:
             self.aligner.stop_processing = False
         else:
@@ -17094,8 +17306,24 @@ class SeestarQueuedStacker:
         # temp_processing/reference_image.fit/.png.
         ok_early, early_result = self._early_resume_preflight()
         if not ok_early:
+            # ZSSS-LIFECYCLE-01: structured refusal for the *known* incompatible
+            # case — existing resume artifacts + a non-plain (Drizzle / mosaic /
+            # reproject) mode.  All other early refusals stay generic.
+            self.startup_refusal = self._build_startup_refusal(early_result)
             self.update_progress(f"❌ Reprise impossible: {early_result}", "ERROR")
             self.processing_active = False
+            # Startup-side resource unwind: ``autotuner`` was started before this
+            # early refusal and ``stacker.stop()`` returns early while
+            # ``processing_active`` is False, so stop it here directly (smallest
+            # safe correction) to avoid leaking a started service.
+            # ZSSS-LIFECYCLE-01-C2: the cleanup itself must never raise — a
+            # failing ``autotuner.stop()`` must not replace the known structured
+            # refusal (fail-closed output state and no artifact writes).
+            if self.autotuner:
+                try:
+                    self.autotuner.stop()
+                except Exception:
+                    pass
             return False
         # Pin the verified resolved original reference (original path or its
         # verified moved-to-stacked counterpart) for reference preparation.

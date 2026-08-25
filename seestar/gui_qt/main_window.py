@@ -1834,6 +1834,7 @@ class MainWindow(QMainWindow):
         self.controller.finished.connect(self._on_run_finished)
         self.controller.failed.connect(self._on_run_failed)
         self.controller.cancelled.connect(self._on_run_cancelled)
+        self.controller.refused.connect(self._on_run_refused)
 
     def _wire_settings_controls(self) -> None:
         """Mirror every settings widget into ``self.settings_state`` on change."""
@@ -3187,11 +3188,64 @@ class MainWindow(QMainWindow):
             text = f"{self._tr('histogram_stats')} {self._histogram_stats}"
         self.right_histogram_status.setText(text)
 
+    # ------------------------------------------------------ run-log helpers
+    def _run_log_emit(self, event: str, **fields) -> None:
+        """Emit one durable lifecycle event to the shared run log (if any)."""
+        run_log = self.controller.run_log
+        if run_log is not None:
+            run_log.emit(event, **fields)
+
+    def _format_refusal(self, payload) -> tuple:
+        """Map a structured refusal payload to a localized (title, body) pair.
+
+        The known ``OUTPUT_STATE_INCOMPATIBLE`` code is mapped through the
+        existing localization architecture; any unknown code falls back to a
+        generic (English) refusal so generic false starts stay generic.  The
+        Drizzle case keeps the exact Drizzle EN/FR wording; mosaic/reproject
+        use mode-correct wording selected from ``semantic_data.mode``.
+        """
+        code = getattr(payload, "code", None)
+        if code == "OUTPUT_STATE_INCOMPATIBLE":
+            title = self._tr("startup_refusal_output_state_incompatible_title")
+            semantic_data = getattr(payload, "semantic_data", None) or {}
+            mode = semantic_data.get("mode")
+            if mode == "drizzle":
+                body = self._tr("startup_refusal_output_state_incompatible_body")
+            else:
+                mode_label = self._refusal_mode_label(mode)
+                body = self._tr(
+                    "startup_refusal_output_state_incompatible_body_generic"
+                ).format(mode=mode_label)
+            return title, body
+        detail = getattr(payload, "technical_detail", "") or str(code)
+        return "Cannot start run", f"Cannot start run: {detail}"
+
+    def _refusal_mode_label(self, mode) -> str:
+        """Return a localized mode label for a non-plain startup refusal."""
+        key = {
+            "mosaic": "startup_refusal_mode_mosaic",
+            "reproject": "startup_refusal_mode_reproject",
+        }.get(mode)
+        if key:
+            return self._tr(key)
+        return self._tr("startup_refusal_mode_generic", default="processing")
+
+    def _on_run_refused(self, payload) -> None:
+        """Handle a structured startup refusal (non-blocking, localized)."""
+        title, body = self._format_refusal(payload)
+        self._running = False
+        self._update_run_state()
+        self.statusBar().showMessage(title)
+        self.log(body)
+        self._mark_time_terminal("failed")
+
     def _on_run_finished(self) -> None:
+        self._run_log_emit("QT_COMPLETION_HANDLER_ENTERED", outcome="finished")
+        terminal_status = derive_terminal_status(self._last_summary_payload)
         self._running = False
         self._update_run_state()
         self.progress.setValue(100)
-        if derive_terminal_status(self._last_summary_payload) == "success":
+        if terminal_status == "success":
             self.statusBar().showMessage("Finished.")
             self.log("Run finished.")
         else:
@@ -3206,20 +3260,40 @@ class MainWindow(QMainWindow):
             )
         self._mark_time_terminal("0:00")
         self._show_pending_summary()
+        self._run_log_emit("CONTROLS_RESTORED")
+        self._run_log_emit("GUI_IDLE")
+        if terminal_status == "success":
+            self._run_log_emit("RUN_SUCCEEDED", terminal_status="success")
+        else:
+            self._run_log_emit("RUN_FINISHED_NO_OUTPUT", terminal_status="empty")
+        # QT_COMPLETION_HANDLER_RETURNED and the log close are owned by the
+        # controller, immediately after this slot (the public terminal signal
+        # emit) returns — so RETURNED is only written once this handler has
+        # actually returned, never before a blocking close/tail.
 
     def _on_run_failed(self, message: str) -> None:
+        self._run_log_emit("QT_COMPLETION_HANDLER_ENTERED", outcome="failed")
         self._running = False
         self._update_run_state()
         self.statusBar().showMessage(f"Failed: {message}")
         self.log(f"Run failed: {message}")
         self._mark_time_terminal("failed")
+        self._run_log_emit("CONTROLS_RESTORED")
+        self._run_log_emit("GUI_IDLE")
+        self._run_log_emit("RUN_FAILED", error=message)
+        # Controller-owned RETURNED + close (after this slot returns).
 
     def _on_run_cancelled(self) -> None:
+        self._run_log_emit("QT_COMPLETION_HANDLER_ENTERED", outcome="cancelled")
         self._running = False
         self._update_run_state()
         self.statusBar().showMessage("Cancelled.")
         self.log("Run cancelled.")
         self._mark_time_terminal("cancelled")
+        self._run_log_emit("CONTROLS_RESTORED")
+        self._run_log_emit("GUI_IDLE")
+        self._run_log_emit("RUN_CANCELLED")
+        # Controller-owned RETURNED + close (after this slot returns).
 
     # --------------------------------------------------- run summary (M23)
     def _on_summary_payload(self, payload: SummaryPayload) -> None:

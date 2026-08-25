@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from .backend_runner import BaseRunBackend
 from .run_bridge import RunRequest
@@ -53,6 +53,7 @@ class RunController(QObject):
     finished = Signal()
     failed = Signal(str)
     cancelled = Signal()
+    refused = Signal(object)
     preview_updated = Signal(object)
     summary_updated = Signal(object)
 
@@ -61,6 +62,16 @@ class RunController(QObject):
         self._status: RunStatus = RunStatus.IDLE
         self._thread: Optional[QThread] = None
         self._worker: Optional[RunWorker] = None
+        # Terminal worker outcome stored until the QThread has actually
+        # finished (then published from the GUI thread).  Tuple of
+        # (kind, payload) where kind is one of finished/failed/cancelled/refused.
+        self._pending_outcome: Optional[tuple] = None
+        # Durable run-log carrier handed back by the worker (shared by
+        # reference); consumed/closed by the terminal GUI handler.
+        self._run_log = None
+        # True while a one-event-turn deferred publication is pending (used to
+        # close the cross-sender queued-signal race without a GUI-thread wait).
+        self._publish_deferred = False
 
     # ------------------------------------------------------------------ state
     @property
@@ -76,6 +87,11 @@ class RunController(QObject):
         """True while a QThread owned by this controller is still running."""
         thread = self._thread
         return thread is not None and thread.isRunning()
+
+    @property
+    def run_log(self):
+        """The shared durable run-log carrier for the current run (or None)."""
+        return self._run_log
 
     # ---------------------------------------------------------------- start
     def start(
@@ -109,6 +125,11 @@ class RunController(QObject):
         worker.set_request(request)
         worker.moveToThread(thread)
 
+        # Reset per-run terminal state (a controller may be reused across runs).
+        self._pending_outcome = None
+        self._run_log = None
+        self._publish_deferred = False
+
         # Worker (worker thread) -> controller (GUI thread): auto connections
         # are queued because the two objects live on different threads.
         thread.started.connect(worker.run)
@@ -116,12 +137,15 @@ class RunController(QObject):
         worker.log.connect(self._on_worker_log)
         worker.preview.connect(self._on_worker_preview)
         worker.summary.connect(self._on_worker_summary)
+        worker.lifecycle_log.connect(self._on_worker_lifecycle_log)
         worker.finished.connect(self._on_worker_finished)
         worker.failed.connect(self._on_worker_failed)
         worker.cancelled.connect(self._on_worker_cancelled)
+        worker.refused.connect(self._on_worker_refused)
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
         worker.cancelled.connect(worker.deleteLater)
+        worker.refused.connect(worker.deleteLater)
         thread.finished.connect(self._on_thread_finished)
         thread.finished.connect(thread.deleteLater)
 
@@ -160,31 +184,119 @@ class RunController(QObject):
     def _on_worker_finished(self) -> None:
         if self._status is not RunStatus.RUNNING:
             return
-        self._status = RunStatus.FINISHED
-        self.finished.emit()
+        self._pending_outcome = ("finished", None)
 
     @Slot(str)
     def _on_worker_failed(self, message: str) -> None:
         if self._status is not RunStatus.RUNNING:
             return
-        self._status = RunStatus.FAILED
-        self.failed.emit(message)
+        self._pending_outcome = ("failed", message)
 
     @Slot()
     def _on_worker_cancelled(self) -> None:
         if self._status is not RunStatus.RUNNING:
             return
-        self._status = RunStatus.CANCELLED
-        self.cancelled.emit()
+        self._pending_outcome = ("cancelled", None)
+
+    @Slot(object)
+    def _on_worker_refused(self, payload) -> None:
+        if self._status is not RunStatus.RUNNING:
+            return
+        self._pending_outcome = ("refused", payload)
+
+    @Slot(object)
+    def _on_worker_lifecycle_log(self, run_log) -> None:
+        self._run_log = run_log
 
     @Slot()
     def _on_thread_finished(self) -> None:
+        """Reap the finished QThread, then publish the stored worker outcome.
+
+        The public terminal signal (which makes MainWindow idle / re-enables
+        Start) must not fire before the owned QThread has actually finished:
+        the outcome is stored when the worker signals arrive and published here,
+        after the thread is dead, on the GUI thread.
+        """
         self._thread = None
         self._worker = None
-        # Defensive: a thread that ended without a terminal worker signal is
-        # not a normal path for this stub, but never leave it stuck RUNNING.
-        if self._status is RunStatus.RUNNING:
+        if self._status is not RunStatus.RUNNING:
+            # ``shutdown`` already tore the run down (status IDLE); never
+            # publish a spurious terminal signal after a forced shutdown.
+            return
+        if self._pending_outcome is None and not self._publish_deferred:
+            # Cross-sender queued-signal race: the worker's terminal signal may
+            # still be in the GUI event queue.  Defer exactly one GUI event turn
+            # (no GUI-thread wait/join) so the queued outcome can land first.
+            self._publish_deferred = True
+            QTimer.singleShot(0, self._on_deferred_publication)
+            return
+        self._publish_thread_outcome()
+
+    @Slot()
+    def _on_deferred_publication(self) -> None:
+        """Publish the thread outcome after one GUI event turn (race-close)."""
+        self._publish_deferred = False
+        self._publish_thread_outcome()
+
+    def _publish_thread_outcome(self) -> None:
+        """Publish the stored terminal outcome (or an explicit missing outcome)."""
+        if self._status is not RunStatus.RUNNING:
+            return
+        outcome = self._pending_outcome
+        self._pending_outcome = None
+        run_log = self._run_log
+        if run_log is not None:
+            run_log.emit("QTHREAD_FINISHED")
+        if outcome is None:
+            # A thread that ended without a terminal worker notification must
+            # never become false success: report an explicit failure.
+            if run_log is not None:
+                run_log.emit("WORKER_OUTCOME_MISSING")
+            self._status = RunStatus.FAILED
+            self.failed.emit(
+                "Worker thread finished without a terminal outcome notification"
+            )
+            self._finalize_run_log("failed")
+            return
+        self._publish_outcome(outcome)
+
+    def _publish_outcome(self, outcome: tuple) -> None:
+        """Publish the stored terminal outcome from the GUI thread."""
+        kind, payload = outcome
+        if kind == "failed":
+            self._status = RunStatus.FAILED
+            self.failed.emit(payload)
+        elif kind == "cancelled":
+            self._status = RunStatus.CANCELLED
+            self.cancelled.emit()
+        elif kind == "refused":
+            self._status = RunStatus.FAILED
+            self.refused.emit(payload)
+            # A refused run never opened a run log; nothing to finalize.
+            return
+        else:
             self._status = RunStatus.FINISHED
+            self.finished.emit()
+        # ``self.<signal>.emit(...)`` returns only after the connected terminal
+        # slots (MainWindow) have actually returned.  Record the truthful
+        # QT_COMPLETION_HANDLER_RETURNED and close the durable run log here, on
+        # the controller side, so the event is never written before the handler
+        # (or a blocking close/tail) has truly finished.
+        self._finalize_run_log(kind)
+
+    def _finalize_run_log(self, outcome: str) -> None:
+        """Record the truthful handler-return and close the durable run log.
+
+        Called immediately after the public terminal signal emit has returned,
+        so ``QT_COMPLETION_HANDLER_RETURNED`` is only written once the MainWindow
+        terminal slot has actually finished.  A refused run never opened a run
+        log (``_run_log`` is ``None``), so this is a no-op for it.
+        """
+        run_log = self._run_log
+        if run_log is None:
+            return
+        run_log.emit("QT_COMPLETION_HANDLER_RETURNED", outcome=outcome)
+        run_log.close()
 
     # ---------------------------------------------------------------- stop
     def cancel(self) -> None:
@@ -236,5 +348,8 @@ class RunController(QObject):
                     return False
         self._thread = None
         self._worker = None
+        self._pending_outcome = None
+        self._run_log = None
+        self._publish_deferred = False
         self._status = RunStatus.IDLE
         return True

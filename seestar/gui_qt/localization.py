@@ -382,6 +382,45 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     },
     "summary_status_success": {"en": "SUCCESS", "fr": "SUCCÈS"},
     "summary_status_empty": {"en": "EMPTY/NO OUTPUT", "fr": "VIDE/AUCUNE SORTIE"},
+    # ZSSS-LIFECYCLE-01: structured startup refusal for the known
+    # OUTPUT_STATE_INCOMPATIBLE code (existing processing/resume artifacts in a
+    # non-plain Drizzle/mosaic/reproject run).  Mapped by stable code, never by
+    # parsing progress/log strings.
+    "startup_refusal_output_state_incompatible_title": {
+        "en": "Output folder already contains processing data",
+        "fr": "Le dossier de sortie contient déjà un traitement",
+    },
+    "startup_refusal_output_state_incompatible_body": {
+        "en": (
+            "The selected output folder contains data from a previous "
+            "processing session and cannot be reused for this Drizzle run. "
+            "Please select a new output folder."
+        ),
+        "fr": (
+            "Le dossier de sortie sélectionné contient les données d'un "
+            "traitement précédent et ne peut pas être réutilisé pour ce "
+            "traitement Drizzle. Veuillez sélectionner un nouveau dossier "
+            "de sortie."
+        ),
+    },
+    # Mode-correct wording for non-Drizzle refusals (mosaic / reproject): the
+    # generic body takes a localized ``{mode}`` label instead of falsely
+    # claiming "Drizzle".
+    "startup_refusal_output_state_incompatible_body_generic": {
+        "en": (
+            "The selected output folder contains data from a previous "
+            "processing session and cannot be reused for this {mode} run. "
+            "Please select a new output folder."
+        ),
+        "fr": (
+            "Le dossier de sortie sélectionné contient les données d'un "
+            "traitement précédent et ne peut pas être réutilisé pour ce "
+            "traitement {mode}. Veuillez sélectionner un nouveau dossier "
+            "de sortie."
+        ),
+    },
+    "startup_refusal_mode_mosaic": {"en": "mosaic", "fr": "mosaïque"},
+    "startup_refusal_mode_reproject": {"en": "reproject", "fr": "reprojection"},
 }
 
 
