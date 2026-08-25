@@ -138,7 +138,7 @@ class SeestarAligner:
 # --- DANS LA CLASSE SeestarAligner (dans seestar/core/alignment.py) ---
 # ... (imports et début de la méthode inchangés) ...
 
-    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True, use_disk=False, return_M=False):
+    def _align_image(self, img_to_align, reference_image, file_name, force_same_shape_as_ref=True, use_disk=False, return_M=False, transform_only=False, return_diagnostics=False):
         """
         Aligns a single image to the reference.
 
@@ -155,15 +155,36 @@ class SeestarAligner:
         reference grid).  ``M`` is ``None`` on every failure path (no matrix
         was computed).  The default (``return_M=False``) keeps the historic
         2-tuple return and must not break ``align_single_image_task``.
+
+        RF2 additions (both backward-compatible, default ``False``):
+
+        * ``transform_only=True`` skips the resampling/warp entirely and returns
+          the *original* image as the first element while still computing and
+          returning the exact same 2x3 ``M`` (and diagnostics).  This is the
+          transform-only / skip-resampling contract used by the Drizzle standard
+          path, whose warp image is discarded.  The same matcher and Euclidean
+          scale-discard run; only the pixel warp is skipped.
+        * ``return_diagnostics=True`` returns a 4-tuple
+          ``(aligned_img, success, M, diag)`` where ``diag`` is a dict of
+          passive, observational diagnostics (raw similarity scale before
+          discard, applied rotation/translation, match count, and the residual
+          of the returned match pairs under the *applied* Euclidean matrix), or
+          ``None`` on failure.  Diagnostics never affect the alignment result.
         """
         logger.debug(f"  DEBUG ALIGNER (_align_image V_ClassicStackingRegression_1) pour '{file_name}':")
         logger.debug(f"    force_same_shape_as_ref = {force_same_shape_as_ref}")
+
+        def _result(success, img, M=None, diag=None):
+            if return_diagnostics:
+                return img, success, M, diag
+            if return_M or transform_only:
+                return img, success, M
+            return img, success
+
         # ... (début de la méthode jusqu'à find_transform inchangé) ...
         if img_to_align is None:
             print(f"    Input img_to_align: None. Retour échec.")
-            if return_M:
-                return None, False, None
-            return None, False
+            return _result(False, None)
         
         tmp_in_path = None
         if use_disk:
@@ -190,12 +211,11 @@ class SeestarAligner:
         
         if reference_image is None:
             self.update_progress(f"❌ Alignement impossible {file_name}: Référence non disponible.")
-            if return_M:
-                return img_to_align, False, None
-            return img_to_align, False
+            return _result(False, img_to_align)
 
         reference_image_float = reference_image.astype(np.float32, copy=False)
 
+        diag = None
         try:
             source_for_detection = img_to_align_for_transform_application
             if not input_was_likely_01: 
@@ -211,9 +231,7 @@ class SeestarAligner:
 
             if source_2d_for_detection.shape != ref_2d_for_detection.shape:
                 self.update_progress(f"❌ Alignement {file_name}: Dimensions incompatibles pour détection.")
-                if return_M:
-                    return img_to_align, False, None
-                return img_to_align, False
+                return _result(False, img_to_align)
             
             print(f"    AVANT aa.find_transform: source_2d_for_detection Range: [{np.min(source_2d_for_detection):.4g}, {np.max(source_2d_for_detection):.4g}]")
 
@@ -241,7 +259,45 @@ class SeestarAligner:
                 f"{np.degrees(theta):.2f}° and translation ({tx:.1f}, {ty:.1f}) px"
             )
             # ---------------------------------------------------------------
-            
+
+            # RF2: passive, observational diagnostics (never affect the result).
+            if return_diagnostics:
+                try:
+                    src_m = np.asarray(source_matches, dtype=np.float64)
+                    tgt_m = np.asarray(target_matches, dtype=np.float64)
+                    match_count = int(len(src_m))
+                    tx_f = float(tx)
+                    ty_f = float(ty)
+                    diag = {
+                        "model": "euclidean",
+                        "raw_scale": float(np.hypot(a, b)),
+                        "applied_rotation_deg": float(np.degrees(theta)),
+                        "applied_translation": [tx_f, ty_f],
+                        "match_count": match_count,
+                        "residual_px": None,
+                    }
+                    if (
+                        match_count >= 2
+                        and src_m.ndim == 2
+                        and src_m.shape[1] == 2
+                        and tgt_m.shape == src_m.shape
+                    ):
+                        c = float(np.cos(theta))
+                        s = float(np.sin(theta))
+                        rot = np.array([[c, -s], [s, c]], dtype=np.float64)
+                        predicted = src_m @ rot.T + np.array(
+                            [tx_f, ty_f], dtype=np.float64
+                        )
+                        res = np.linalg.norm(predicted - tgt_m, axis=1)
+                        diag["residual_px"] = {
+                            "p50": float(np.percentile(res, 50)),
+                            "p95": float(np.percentile(res, 95)),
+                            "rms": float(np.sqrt(np.mean(res ** 2))),
+                        }
+                except Exception:
+                    # diagnostics must never affect alignment; drop to None
+                    diag = None
+
             h_ref, w_ref = reference_image_float.shape[:2]
 
             if force_same_shape_as_ref:
@@ -260,6 +316,36 @@ class SeestarAligner:
                 cv2_M_3x3 = np.vstack([cv2_M, [0, 0, 1]]).astype(np.float32)
                 cv2_M_final = (shift_M @ cv2_M_3x3)[:2, :]
                 dsize_cv2 = (w_out, h_out)
+
+            if transform_only:
+                # RF2: transform-only / skip-resampling contract.  The matcher
+                # and Euclidean scale-discard already ran; only the pixel warp
+                # is skipped (the Drizzle standard path discards the warp image).
+                # Return the exact 2x3 tf warpAffine would have applied, and the
+                # original (unwarped) image as the first element.
+                if use_disk:
+                    if isinstance(img_to_align_for_transform_application, np.memmap):
+                        try:
+                            img_to_align_for_transform_application.flush()
+                            if (
+                                hasattr(img_to_align_for_transform_application, "_mmap")
+                                and img_to_align_for_transform_application._mmap is not None
+                            ):
+                                img_to_align_for_transform_application._mmap.close()
+                        except Exception:
+                            pass
+                    if tmp_in_path and os.path.exists(tmp_in_path):
+                        try:
+                            os.remove(tmp_in_path)
+                        except Exception:
+                            pass
+                    gc.collect()
+                return _result(
+                    True,
+                    img_to_align,
+                    M=np.asarray(cv2_M_final, dtype=np.float64),
+                    diag=diag,
+                )
 
             align = self._align_cuda if (getattr(self, "use_cuda", False) and not use_disk) else self._align_cpu
             try:
@@ -340,31 +426,28 @@ class SeestarAligner:
                     except Exception:
                         pass
                 gc.collect()
-            if return_M:
-                return (
-                    aligned_img_final,
-                    True,
-                    np.asarray(cv2_M_final, dtype=np.float64),
-                )
-            return aligned_img_final, True
+            return _result(
+                True,
+                aligned_img_final,
+                M=(
+                    np.asarray(cv2_M_final, dtype=np.float64)
+                    if (return_M or transform_only)
+                    else None
+                ),
+                diag=diag,
+            )
 
         except aa.MaxIterError as ae:
             self.update_progress(f"⚠️ Alignement échoué {file_name}: {ae}")
-            if return_M:
-                return img_to_align, False, None
-            return img_to_align, False
-        except ValueError as ve: 
+            return _result(False, img_to_align)
+        except ValueError as ve:
             self.update_progress(f"❌ Erreur alignement {file_name} (ValueError): {ve}")
             traceback.print_exc(limit=1)
-            if return_M:
-                return img_to_align, False, None
-            return img_to_align, False
+            return _result(False, img_to_align)
         except Exception as e:
             self.update_progress(f"❌ Erreur alignement inattendue {file_name}: {e}")
             traceback.print_exc(limit=3)
-            if return_M:
-                return img_to_align, False, None
-            return img_to_align, False
+            return _result(False, img_to_align)
 
 
 

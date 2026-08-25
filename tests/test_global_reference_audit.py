@@ -2,15 +2,23 @@
 reassigned to a stacked/cumulative image) inside **positive**
 ``reproject_between_batches`` branches.
 
-RF-1 corrective C.  This is a **structural path guard**, not experimental proof:
-it pins the *lexical* fact that every reference mutation lives inside a
-positively-guarded ``if self.reproject_between_batches`` branch (so the plain
-classic / M3-Drizzle / batch-plan-flush paths never reassign the reference to a
-stack).  It does **not** execute the worker and does **not** demonstrate any
-*behavioural* consequence; the behavioural evidence is the batching-dependence
-POC (``research/registration_field_rotation/batch_dependence_poc.py`` and
-``tests/test_batch_dependence_poc.py``), and the RF-2 worker test gate remains
-in ``docs/registration_field_rotation_research.md`` §8.3.
+RF-1 corrective C, updated by the **RF2 accepted decision** (STABLE REGISTRATION
+TARGET REQUIRED).  This is a **structural path guard**, not experimental proof.
+
+RF2 acceptance changed the reference lifecycle: the initially-selected reference
+image (``_get_reference_image``) is now **immutable for the whole run**, so the
+worker-target mutation set (the reassignments of
+``reference_image_data_for_global_alignment`` to a stack at batch/finalize seams)
+is now **empty**.  The batch-plan flush seam remains a no-op reassignment.  This
+is an *intentional RF2 decision*, not a rewrite of RF-1 history: RF-1 measured
+the mutation seams as they existed at HEAD 61291aa; RF2 removed them.
+
+The test still pins the lexical facts that:
+  * the reference is initialised exactly once (``= None``) and assigned exactly
+    once from ``_get_reference_image`` (immutable initial reference);
+  * there are **zero** worker-target mutations to a stack (RF2);
+  * the ``_flush_current_batch`` seam is a single no-op reassignment living
+    outside the reproject guard.
 
 Corrective-C fixes to the previous iteration
 --------------------------------------------
@@ -45,8 +53,10 @@ VAR = "reference_image_data_for_global_alignment"
 GUARD_ATTR = "reproject_between_batches"
 
 # Exact line numbers (in ``seestar/queuep/queue_manager.py``) of every reference
-# mutation (reassignment to a stack), verified against HEAD 61291aa.
-MUTATION_LINES = {6252, 6259, 6266, 6749, 6754, 6759}
+# mutation (reassignment to a stack).  RF2 removed all of them: the registration
+# target is immutable, so the worker-target mutation set is empty.  (The
+# historical set at HEAD 61291aa was {6252, 6259, 6266, 6749, 6754, 6759}.)
+MUTATION_LINES = set()
 
 
 def _walk_with_parents(tree):
@@ -155,6 +165,17 @@ def test_exact_mutation_line_set():
     assert lines == MUTATION_LINES, (
         f"reference mutation line set changed: got {sorted(lines)}, "
         f"expected {sorted(MUTATION_LINES)}"
+    )
+
+
+def test_worker_target_mutation_set_is_empty_rf2():
+    """RF2 acceptance: the registration target is immutable, so there are no
+    worker-target mutations to a stack anywhere in the worker."""
+    _, _, _, mutations = _classify(_collect_assignments())
+    assert mutations == [], (
+        "RF2 requires an immutable registration target: no reassignment of "
+        "``reference_image_data_for_global_alignment`` to a stack may remain. "
+        f"Found mutations at lines {sorted(a.lineno for a in mutations)}"
     )
 
 

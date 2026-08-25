@@ -230,17 +230,23 @@ def test_weight_provenance_and_original_return(tmp_path):
 
     class FakeAligner:
         def _align_image(self, img, ref, file_name, force_same_shape_as_ref=True,
-                         use_disk=False, return_M=False):
+                         use_disk=False, return_M=False, transform_only=False,
+                         return_diagnostics=False):
             # A warpAffine-like transformation, clearly different from the
             # original: shift every column by 3.  This must NOT be what the
             # drizzle path returns.
             out = np.roll(img, 3, axis=1).astype(np.float32)
+            M = np.array([[1.0, 0.0, 3.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+            diag = {"model": "euclidean", "match_count": 0} if return_diagnostics else None
+            if transform_only:
+                # RF2 transform-only contract: no warp, return original + tf.
+                if return_diagnostics:
+                    return img, True, M, diag
+                if return_M:
+                    return img, True, M
+                return img, True
             if return_M:
-                return (
-                    out,
-                    True,
-                    np.array([[1.0, 0.0, 3.0], [0.0, 1.0, 0.0]], dtype=np.float64),
-                )
+                return out, True, M
             return out, True
 
     qm.aligner = FakeAligner()

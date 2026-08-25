@@ -2651,6 +2651,11 @@ class SeestarQueuedStacker:
         self.use_gpu = bool(gpu)
         self.align_on_disk = align_on_disk
         self.settings = settings
+        # RF2: registration target provenance / passive diagnostics session id.
+        # The registration target (initially-selected reference) is immutable for
+        # the whole run; these fields are observational only.
+        self._registration_target_provenance_id = None
+        self._registration_session_id = None
         # Keep track of background drizzle processes
         self.drizzle_processes = []
         # Dedicated pool for drizzle tasks.  Instance methods are made
@@ -5231,6 +5236,8 @@ class SeestarQueuedStacker:
         # session start; it is re-captured once the real global reference is
         # obtained below.
         self._norm_reference = None
+        # RF2: session-scoped identity for passive registration diagnostics.
+        self._registration_session_id = f"{time.time_ns()}"
 
         reference_image_data_for_global_alignment = None
         reference_header_for_global_alignment = None
@@ -5431,11 +5438,9 @@ class SeestarQueuedStacker:
                 )
 
             # P1-FIX (HSI closure): capture the immutable normalization reference
-            # now, immediately after the real global reference is obtained and
-            # before ``reference_image_data_for_global_alignment`` can later be
-            # replaced by intermediate stacks (reproject path).  Plain classic
-            # normalizes every aligned observation against THIS frame (or the
-            # pinned resume reference), never a batch output.
+            # now, immediately after the real global reference is obtained.
+            # Plain classic normalizes every aligned observation against THIS
+            # frame (or the pinned resume reference), never a batch output.
             #
             # Only plain-classic sessions that actually configure linear_fit or
             # sky_mean carry the full-frame copy; non-plain paths never pay for
@@ -5449,6 +5454,16 @@ class SeestarQueuedStacker:
             # Préparation du header qui sera utilisé pour le WCS de référence global
             self.reference_header_for_wcs = reference_header_for_global_alignment.copy()
             self.ref_wcs_header = self.reference_header_for_wcs
+            # RF2: record the immutable registration target provenance (basename).
+            # This is the source identifier carried by the header returned from
+            # _get_reference_image (HIERARCH SEESTAR REF SRCFILE).  The temporary
+            # reference_image.fit deliberately omits it, so this stays
+            # session-local and introduces no persistence-format change.  It
+            # identifies the target for passive diagnostics and is never used as
+            # a science input.
+            self._registration_target_provenance_id = reference_header_for_global_alignment.get(
+                "HIERARCH SEESTAR REF SRCFILE"
+            )
 
             # La clé '_SOURCE_PATH' dans reference_header_for_global_alignment vient de
             # la logique interne de _get_reference_image. Si cette clé contient un chemin complet,
@@ -6239,36 +6254,16 @@ class SeestarQueuedStacker:
                                         if not self.drizzle_active_session:
                                             self._update_preview_sum_w()
 
-                                        # After accumulation, solve the cumulative stack
+                                        # After accumulation, solve the cumulative
+                                        # stack (grid/WCS side effect only).
+                                        # RF2: the registration target is the
+                                        # initially-selected reference image and
+                                        # stays immutable for the whole run.  The
+                                        # cumulative stack is NEVER used as the
+                                        # registration target; only its WCS/grid
+                                        # update side effect is preserved.
                                         if self.reproject_between_batches:
-                                            (
-                                                stack_img,
-                                                solved_hdr,
-                                            ) = self._solve_cumulative_stack()
-                                            if (
-                                                stack_img is not None
-                                                and solved_hdr is not None
-                                            ):
-                                                reference_image_data_for_global_alignment = (
-                                                    stack_img
-                                                )
-                                                reference_header_for_global_alignment = (
-                                                    solved_hdr.copy()
-                                                )
-                                            else:
-                                                reference_image_data_for_global_alignment = stacked_np.astype(
-                                                    np.float32, copy=True
-                                                )
-                                                reference_header_for_global_alignment = (
-                                                    hdr.copy()
-                                                )
-                                        else:
-                                            reference_image_data_for_global_alignment = stacked_np.astype(
-                                                np.float32, copy=True
-                                            )
-                                            reference_header_for_global_alignment = (
-                                                hdr.copy()
-                                            )
+                                            self._solve_cumulative_stack()
 
                                         current_batch_items_with_masks_for_stack_batch.clear()
                                         self._current_batch_paths = []
@@ -6743,23 +6738,10 @@ class SeestarQueuedStacker:
                                 "WARN",
                             )
 
+                        # RF2: registration target stays immutable; preserve only
+                        # the cumulative-stack WCS/grid update side effect.
                         if self.reproject_between_batches:
-                            stack_img, solved_hdr = self._solve_cumulative_stack()
-                            if stack_img is not None and solved_hdr is not None:
-                                reference_image_data_for_global_alignment = stack_img
-                                reference_header_for_global_alignment = (
-                                    solved_hdr.copy()
-                                )
-                            else:
-                                reference_image_data_for_global_alignment = (
-                                    stacked_np.astype(np.float32, copy=True)
-                                )
-                                reference_header_for_global_alignment = hdr.copy()
-                        else:
-                            reference_image_data_for_global_alignment = (
-                                stacked_np.astype(np.float32, copy=True)
-                            )
-                            reference_header_for_global_alignment = hdr.copy()
+                            self._solve_cumulative_stack()
 
                         if hasattr(self.cumulative_sum_memmap, "flush"):
                             self.cumulative_sum_memmap.flush()
@@ -8231,6 +8213,60 @@ class SeestarQueuedStacker:
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
+    def _record_registration_diagnostics(self, frame_basename, success, diag):
+        """RF2: passive, fail-open registration diagnostics (never affect science).
+
+        Assembles a versioned JSON-Lines record and appends it to
+        ``registration_diagnostics.jsonl`` in the output folder.  Any failure
+        to build or write the record is caught and swallowed: diagnostics I/O
+        must never alter the registration result.  ``diag`` is the per-call
+        transform diagnostics returned by ``SeestarAligner._align_image``
+        (``None`` on failure, so no stale frame attribution can survive).
+        """
+        try:
+            out_dir = getattr(self, "output_folder", None)
+            if not out_dir:
+                return
+            from seestar.core.registration_diagnostics import (
+                DIAGNOSTICS_FILENAME,
+                MODEL,
+                TARGET_POLICY,
+                append_record,
+                build_record,
+            )
+
+            d = diag if isinstance(diag, dict) else {}
+            session_id = getattr(self, "_registration_session_id", None)
+            if session_id is None:
+                session_id = f"{time.time_ns()}"
+                try:
+                    self._registration_session_id = session_id
+                except Exception:
+                    pass
+            record = build_record(
+                frame=str(frame_basename),
+                reference_provenance=getattr(
+                    self, "_registration_target_provenance_id", None
+                ),
+                target_policy=TARGET_POLICY,
+                model=d.get("model", MODEL),
+                success=bool(success),
+                raw_scale=d.get("raw_scale"),
+                applied_rotation_deg=d.get("applied_rotation_deg"),
+                applied_translation=d.get("applied_translation"),
+                match_count=d.get("match_count"),
+                residual_px=d.get("residual_px"),
+                error=d.get("error"),
+                session_id=session_id,
+            )
+            path = os.path.join(str(out_dir), DIAGNOSTICS_FILENAME)
+            append_record(path, record)
+        except Exception:
+            logger.debug(
+                "registration diagnostics recording failed (non-fatal)",
+                exc_info=True,
+            )
+
     def _process_file(
         self,
         file_path,
@@ -8624,16 +8660,19 @@ class SeestarQueuedStacker:
                 if reference_image_data_for_alignment is None:
                     raise RuntimeError("Image de référence Astroalign manquante.")
 
-                # M3: en Drizzle standard (non-mosaïque), demander la matrice
-                # de transformation effectivement utilisée par warpAffine pour
-                # alimenter le tf du noyau drizzle.  Classique/mosaïque
-                # inchangés (return_M=False, 2-tuple).
+                # M3/RF2: en Drizzle standard (non-mosaïque), demander la
+                # matrice de transformation effectivement utilisée par
+                # warpAffine pour alimenter le tf du noyau drizzle, via le
+                # contrat transform-only (pas de rééchantillonnage : l'image
+                # warpée est de toute façon jetée).  Classique inchangé
+                # (return_M=False) mais avec diagnostics passifs.
                 _want_M = is_drizzle_or_mosaic_mode and not self.is_mosaic_run
                 if _want_M:
                     (
                         aligned_img_astroalign,
                         align_success_astroalign,
                         M_astroalign,
+                        diag_align,
                     ) = self.aligner._align_image(
                         image_for_alignment_or_drizzle_input,
                         reference_image_data_for_alignment,
@@ -8641,19 +8680,30 @@ class SeestarQueuedStacker:
                         force_same_shape_as_ref=True,
                         use_disk=align_on_disk,
                         return_M=True,
+                        transform_only=True,
+                        return_diagnostics=True,
                     )
                 else:
                     (
                         aligned_img_astroalign,
                         align_success_astroalign,
+                        _M_ignored,
+                        diag_align,
                     ) = self.aligner._align_image(
                         image_for_alignment_or_drizzle_input,
                         reference_image_data_for_alignment,
                         file_name,
                         force_same_shape_as_ref=True,
                         use_disk=align_on_disk,
+                        return_diagnostics=True,
                     )
                     M_astroalign = None
+
+                # RF2: passive, fail-open registration diagnostics (never affect
+                # the alignment result or any science output).
+                self._record_registration_diagnostics(
+                    file_name, align_success_astroalign, diag_align
+                )
 
                 if align_success_astroalign and aligned_img_astroalign is not None:
                     align_method_log_msg = "Astroalign_Standard_Success"
@@ -8850,8 +8900,9 @@ class SeestarQueuedStacker:
 
             # M3: dans la branche Drizzle standard (non-mosaïque), l'image
             # retournée est l'image ORIGINALE préparée (non rééchantillonnée).
-            # L'image alignée (warpAffine) n'est PAS utilisée comme entrée du
-            # noyau drizzle : elle ne sert qu'à estimer le tf (matrice_M_calculee).
+            # Le chemin transform-only estime le tf (matrice_M_calculee) sans
+            # produire d'image warpée; le noyau drizzle reçoit les pixels
+            # originaux préparés.
             if self.drizzle_active_session and not self.is_mosaic_run:
                 data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(
                     np.float32
