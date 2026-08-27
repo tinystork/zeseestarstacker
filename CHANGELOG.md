@@ -2,6 +2,17 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.1.0] — Phoenix consedit
+- hierarchical stacking integrity and effective SUM/WHT semantics
+- immutable registration reference and registration diagnostics
+- stabilized Classic, Reproject and Drizzle preview architecture
+- truthful exposure metadata including resume
+- float RGB histogram with detachable interactive view
+- deterministic Auto Stretch and Auto White Balance with live updates
+- persistent zoom, rotation, pan and preview resolution across stack updates
+- hardened PySide6 lifecycle, persistent diagnostics and actionable startup refusal UX
+- validated with real Boring, resume and Drizzle witnesses
+
 ## [8.1.0b2]
 - truthful exposure metadata across Classic, Reproject, Drizzle and resume
 - stable raw-linear preview and float RGB histogram pipeline
