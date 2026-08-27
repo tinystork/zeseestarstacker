@@ -2,6 +2,14 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.1.0b2]
+- truthful exposure metadata across Classic, Reproject, Drizzle and resume
+- stable raw-linear preview and float RGB histogram pipeline
+- detachable interactive histogram with synchronized black/white points
+- deterministic Auto Stretch and Auto White Balance with live preview updates
+- persistent rotation, zoom, pan and preview resolution across stack updates
+- hardened startup-refusal propagation and localized output-folder guidance
+
 ## [8.1.0b1]
 - hierarchical stacking integrity and effective SUM/WHT semantics
 - immutable registration reference
