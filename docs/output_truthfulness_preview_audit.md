@@ -513,7 +513,7 @@ never move it.
    - failed alignment,
    - quality pre-rejection,
    - failed Drizzle accumulator adds (`_add_frame_to_drizzle_accumulators` → `False`),
-   
+
    must **not** increase `NIMAGES`. Concretely, an accepted-frame counter **already exists** —
    `_drizzle_frame_count`, bumped in `_drizzle_group_tick()` (`18146-18148`) which the worker
    calls only inside the `if added:` branch (`6454-6465`). The fix is to **read that counter** in
