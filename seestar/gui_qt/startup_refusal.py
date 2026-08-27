@@ -19,7 +19,10 @@ from typing import Any, Dict, Optional
 
 
 # Stable code for "the output folder already holds processing/resume state that
-# cannot be reused for this (non-plain) run".
+# this run cannot resume": any session that requested resume and was refused
+# (non-plain mode without supported resume, missing/corrupt/legacy manifest,
+# scientific fingerprint or dtype mismatch, incompatible reference shape,
+# invalid quality reference scale, etc.).
 CODE_OUTPUT_STATE_INCOMPATIBLE = "OUTPUT_STATE_INCOMPATIBLE"
 
 

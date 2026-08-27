@@ -354,6 +354,65 @@ def test_master_reference_is_the_first_batch():
     assert float(s._ibn_last_scale) == 1.0
 
 
+def test_reproject_rgb_winsorized_accepts_channel_specific_weights():
+    """Regression: rejection reducers return HWC effective denominators.
+
+    The IBN master builder must consume those weights directly rather than
+    append a second channel axis (the production M16 Reproject crash).
+    """
+    D = _build_dataset((32, 32))
+    A = np.stack((D["A"], 0.8 * D["A"], 1.2 * D["A"]), axis=-1).astype(
+        np.float32
+    )
+    B = np.stack((D["B"], 0.9 * D["B"], 1.1 * D["B"]), axis=-1).astype(
+        np.float32
+    )
+    full = _mask_full(A.shape[:2])
+
+    s = make_stack(
+        "winsorized-sigma-clip",
+        norm="none",
+        batch_size=10,
+        plain=False,
+        non_plain_kind="reproject_between",
+    )
+    s._ibn_min_overlap = 1
+
+    V, _hdr, W = s._stack_batch(
+        [fresh_item(A, full), fresh_item(B, full)], 1, 1
+    )
+
+    assert V.shape == A.shape
+    assert W.shape == A.shape
+    assert np.all(np.isfinite(V))
+    assert np.all(np.isfinite(W))
+    assert s._ibn_master_ready is True
+    assert s._ibn_ref_image.shape == A.shape
+    assert s._ibn_ref_wht.shape == A.shape
+
+
+def test_ibn_rgb_master_preserves_channel_invariant_weight_contract():
+    """The historical HWC-data/HW-weight path remains byte-for-byte weighted."""
+    s = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    s._ibn_master_min = 1
+    s._ibn_candidate_limit = 8
+
+    data_a = np.full((4, 5, 3), 2.0, dtype=np.float32)
+    data_b = np.full((4, 5, 3), 8.0, dtype=np.float32)
+    weight_a = np.full((4, 5), 1.0, dtype=np.float32)
+    weight_b = np.full((4, 5), 3.0, dtype=np.float32)
+    s._ibn_candidate_pool = [
+        {"data": data_a, "weights": weight_a},
+        {"data": data_b, "weights": weight_b},
+    ]
+
+    assert s._interbatch_build_master_reference() == 2
+    assert s._ibn_ref_image.shape == data_a.shape
+    assert s._ibn_ref_wht.shape == weight_a.shape
+    assert np.array_equal(s._ibn_ref_image, np.full_like(data_a, 6.5))
+    assert np.array_equal(s._ibn_ref_wht, np.full_like(weight_a, 4.0))
+
+
 def test_gain_layer_skipped_below_min_overlap():
     small = _build_dataset((32, 32))["A"]  # 1024 px < 10000
     B2 = (1.5 * small + 40.0).astype(np.float32)

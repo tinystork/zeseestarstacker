@@ -766,18 +766,21 @@ def test_rotation_swaps_dimensions_and_is_cumulative(qapp):
         win.shutdown()
 
 
-def test_rotation_resets_on_new_image_and_clear(qapp):
+def test_rotation_preserved_on_new_image_and_reset_on_clear(qapp):
     win = MainWindow()
     try:
         win._on_preview(BackendPreviewPayload(data=_preview_uint8(20, 10), stack_name="a"))
         win.rotate_right_button.click()
         assert win.preview_rotation == 90
 
-        # A new image starts unrotated and re-renders at the current zoom.
+        # STABLE-B: a valid successive preview preserves the accumulated
+        # rotation (content freshness and view state are independent).
         win._on_preview(BackendPreviewPayload(data=_preview_uint8(8, 12), stack_name="b"))
-        assert win.preview_rotation == 0
-        assert win.preview_image_label.pixmap().width() == 8
-        assert win.preview_image_label.pixmap().height() == 12
+        assert win.preview_rotation == 90
+        # The rendered geometry reflects the preserved 90° rotation: the 8x12
+        # source is displayed swapped (12 wide, 8 high at 100%).
+        assert win.preview_image_label.pixmap().width() == 12
+        assert win.preview_image_label.pixmap().height() == 8
 
         # Clearing the image resets rotation and disables the controls.
         win._on_preview(BackendPreviewPayload(data=None, stack_name="none"))

@@ -19,6 +19,7 @@ numpy so the Qt shell never imports the engine or the Tk tooling.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 from PySide6.QtGui import QImage
@@ -54,6 +55,96 @@ GAMMA_MIN, GAMMA_MAX, GAMMA_STEP = 0.1, 5.0, 0.01
 BRIGHTNESS_MIN, BRIGHTNESS_MAX, BRIGHTNESS_STEP = 0.1, 3.0, 0.01
 CONTRAST_MIN, CONTRAST_MAX, CONTRAST_STEP = 0.1, 3.0, 0.01
 SATURATION_MIN, SATURATION_MAX, SATURATION_STEP = 0.0, 3.0, 0.01
+
+# Deterministic BP/WP minimum separation: exactly one black/white slider+spin
+# step, so the enforced gap is always representable by the control resolution
+# (BLACK_POINT_STEP == WHITE_POINT_STEP == 0.001).  This is the single
+# authoritative separation used by MainWindow, the stretch sliders/spins and
+# the histogram BP/WP handles.
+BP_WP_MIN_SEPARATION = BLACK_POINT_STEP
+
+
+def normalize_bp_wp(bp, wp, min_separation=BP_WP_MIN_SEPARATION):
+    """Normalize a black/white point pair to a valid ``0 <= BP < WP <= 1`` pair.
+
+    Non-finite or non-numeric inputs fall back to the deterministic neutral
+    defaults.  Finite values are clamped to ``[0, 1]`` and, when they overlap
+    or invert, separated by at least ``min_separation`` with the black point
+    taking priority (the white point is pushed up, or the black point pulled
+    down when the white point would overflow ``1.0``).  Always returns a valid
+    pair and never raises.
+    """
+    try:
+        bp = float(bp)
+        wp = float(wp)
+    except (TypeError, ValueError):
+        return DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT
+    if not (math.isfinite(bp) and math.isfinite(wp)):
+        return DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT
+    bp = min(max(bp, 0.0), 1.0)
+    wp = min(max(wp, 0.0), 1.0)
+    if wp - bp < min_separation:
+        wp = min(1.0, bp + min_separation)
+        if wp - bp < min_separation:
+            bp = max(0.0, wp - min_separation)
+    return bp, wp
+
+
+def quantize_bp_wp(value, step=BP_WP_MIN_SEPARATION):
+    """Snap a single BP/WP value to the shared control-resolution grid.
+
+    Returns the nearest ``k * step`` grid point (``k`` an integer) expressed as
+    ``k / factor`` where ``factor = round(1.0 / step)`` — i.e. the *exact*
+    double the stretch spinbox stores for its ``decimals=3`` resolution, so a
+    value quantized here round-trips through ``QDoubleSpinBox`` bit-identically.
+
+    Non-finite or non-numeric input falls back to the neutral black-point
+    default and every result is clamped to ``[0, 1]``.  This is the single
+    quantization seam shared by the histogram handle drag and the MainWindow
+    stretch controls so all surfaces agree *during* a live drag, not just on
+    release.
+    """
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_BLACK_POINT
+    if not math.isfinite(value):
+        return DEFAULT_BLACK_POINT
+    value = min(max(value, 0.0), 1.0)
+    factor = int(round(1.0 / step))
+    return round(value * factor) / factor
+
+
+def clamp_bp_wp_edit(driver, value, other, min_separation=BP_WP_MIN_SEPARATION):
+    """Return the valid ``(bp, wp)`` pair after editing one endpoint to ``value``.
+
+    ``driver`` is ``"bp"`` or ``"wp"``; ``other`` is the current value of the
+    un-edited endpoint.  The edited endpoint is clamped into ``[0, 1]`` and, if
+    it would cross the other endpoint, clamped to preserve the deterministic
+    ``min_separation`` gap (the un-edited endpoint is never moved).  Non-finite
+    input falls back to the neutral defaults.  Always returns a valid pair and
+    never raises.
+    """
+    try:
+        value = float(value)
+        other = float(other)
+    except (TypeError, ValueError):
+        return DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT
+    if not (math.isfinite(value) and math.isfinite(other)):
+        return DEFAULT_BLACK_POINT, DEFAULT_WHITE_POINT
+    other = min(max(other, 0.0), 1.0)
+    if driver == "bp":
+        bp = min(max(value, 0.0), 1.0)
+        wp = min(other, 1.0)
+        if bp >= wp - min_separation:
+            bp = max(0.0, wp - min_separation)
+    else:
+        wp = min(max(value, 0.0), 1.0)
+        bp = min(other, 1.0)
+        if wp <= bp + min_separation:
+            wp = min(1.0, bp + min_separation)
+    # Final invariant enforcement (also guards pathological ``other`` values).
+    return normalize_bp_wp(bp, wp, min_separation)
 
 
 def _load_numpy():

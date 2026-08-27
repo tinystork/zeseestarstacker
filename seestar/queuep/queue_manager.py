@@ -703,6 +703,152 @@ def _validate_exposure_field(value, name="total_exposure_seconds"):
     return (True, None)
 
 
+# --- Exposure metadata truthfulness (ZSSS-OTPUX-A-01) ---
+#
+# Canonical per-frame exposure parse and composable batch provenance.  These
+# are *metadata* quantities (seconds/counts) for ``NIMAGES``/``TOTEXP``/
+# ``NEXPUNK``/final ``EXPTIME``.  They are deliberately unrelated to the
+# Drizzle accumulator's scientific ``1.0`` scaling fallback (``in_units``
+# counts scaling in ``_add_frame_to_drizzle_accumulators``), which is left
+# pixel-identical.
+
+# Documented tight tolerance (seconds) for declaring a set of per-input
+# exposures "uniform" (final ``EXPTIME`` is only written when every accepted
+# exposure is known and equal within this tolerance).
+_EXPOSURE_UNIFORM_TOLERANCE = 1e-6
+
+
+def _frame_exposure_seconds(header) -> Optional[float]:
+    """Canonical per-frame metadata exposure in seconds.
+
+    Parse ``EXPTIME`` first, then ``EXPOSURE``.  A value is valid iff it is
+    numeric, finite and strictly positive.  Anything else (absent,
+    non-numeric, NaN, inf, or <= 0) is *unknown* and returns ``None``.  This
+    parser never fabricates ``0.0``/``1.0`` and is the single metadata read
+    site for ``TOTEXP``/``NEXPUNK``/final ``EXPTIME``.
+    """
+    if header is None:
+        return None
+    for key in ("EXPTIME", "EXPOSURE"):
+        if key not in header:
+            continue
+        try:
+            value = float(header[key])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return value
+    return None
+
+
+def _batch_exposure_provenance(headers):
+    """Composable per-batch exposure provenance over accepted frame headers.
+
+    Returns ``(known_sum, unknown_count, min_known, max_known)``: the exact
+    nominal sum of known exposures, the count of unknown exposures, and the
+    min/max of the known exposures (``None`` when there is no known exposure).
+    Grouping-independent: summing these scalars across any partition of the
+    same accepted population yields the same aggregate.  Weights/coverage are
+    never encoded as seconds.
+    """
+    known_sum = 0.0
+    unknown_count = 0
+    min_known = None
+    max_known = None
+    for hdr in headers:
+        exp = _frame_exposure_seconds(hdr)
+        if exp is None:
+            unknown_count += 1
+            continue
+        known_sum += exp
+        min_known = exp if min_known is None else min(min_known, exp)
+        max_known = exp if max_known is None else max(max_known, exp)
+    return known_sum, unknown_count, min_known, max_known
+
+
+def _validate_optional_exposure_field(value, name):
+    """Validate an optional known-exposure bound (``None`` or finite > 0)."""
+    if value is None:
+        return (True, None)
+    if isinstance(value, bool):
+        return (False, f"{name} must be numeric or null")
+    if not isinstance(value, (int, float)):
+        return (False, f"{name} must be numeric or null")
+    try:
+        fv = float(value)
+    except (TypeError, ValueError):
+        return (False, f"{name} must be numeric or null")
+    if not np.isfinite(fv) or fv <= 0:
+        return (False, f"{name} must be finite and positive (or null)")
+    return (True, None)
+
+
+def _apply_exposure_metadata(stacker, final_header, accepted_count):
+    """Apply the ratified exposure metadata contract to a final header.
+
+    Module-level helper (mirrors ``_emit_lifecycle_failopen`` /
+    ``_save_final_preview_png``) so it also works on lightweight finalizer
+    test doubles.  Called for classic SUM/W, Drizzle, and classic
+    reproject/coadd finalization (the modes with a well-defined per-frame
+    accepted population).  ``NIMAGES`` is set by the caller to the exact
+    accepted contributor count; this helper only owns
+    ``TOTEXP``/``NEXPUNK``/final ``EXPTIME``/``EXPOSURE``:
+
+    * ``TOTEXP`` = ``round(known_sum, 2)`` when *every* accepted exposure is
+      known; otherwise ``TOTEXP`` is removed and ``NEXPUNK`` = the exact
+      accepted-unknown count.  ``0.0``/``1.0`` are never fabricated.
+    * final ``EXPTIME`` is set only when all accepted exposures are known and
+      uniform within ``_EXPOSURE_UNIFORM_TOLERANCE`` (comment names the
+      per-input exposure).  Otherwise any inherited ``EXPTIME``/``EXPOSURE`` is
+      explicitly deleted (no stale mode-dependent inheritance).
+    """
+    unknown_count = int(getattr(stacker, "_exposure_unknown_count", 0) or 0)
+    known_sum = float(getattr(stacker, "total_exposure_seconds", 0.0) or 0.0)
+    exp_min = getattr(stacker, "_exposure_min", None)
+    exp_max = getattr(stacker, "_exposure_max", None)
+
+    if accepted_count <= 0:
+        # No accepted contributors: nothing truthful to claim; drop any
+        # inherited scalar exposure keywords rather than fabricate 0/1.
+        for key in ("TOTEXP", "NEXPUNK", "EXPTIME", "EXPOSURE"):
+            if key in final_header:
+                del final_header[key]
+        return
+
+    if unknown_count > 0:
+        if "TOTEXP" in final_header:
+            del final_header["TOTEXP"]
+        final_header["NEXPUNK"] = (
+            unknown_count,
+            "Accepted frames with unknown exposure",
+        )
+    else:
+        final_header["TOTEXP"] = (
+            round(known_sum, 2),
+            "[s] Total exposure (sum of accepted per-input exposures)",
+        )
+        if "NEXPUNK" in final_header:
+            del final_header["NEXPUNK"]
+
+    uniform = (
+        unknown_count == 0
+        and exp_min is not None
+        and exp_max is not None
+        and float(exp_max) - float(exp_min) <= _EXPOSURE_UNIFORM_TOLERANCE
+    )
+    if uniform:
+        final_header["EXPTIME"] = (
+            round((float(exp_min) + float(exp_max)) / 2.0, 6),
+            "per-input exposure; all accepted frames",
+        )
+        if "EXPOSURE" in final_header:
+            del final_header["EXPOSURE"]
+    else:
+        for key in ("EXPTIME", "EXPOSURE"):
+            if key in final_header:
+                del final_header[key]
+
+
 def _decide_finalization_mode(stacker) -> str:
     """Map the stacker flag state to a single coherent finalization mode.
 
@@ -2658,9 +2804,44 @@ class SeestarQueuedStacker:
             weight_sum = np.sum(w_stack, axis=0)
             eps = 1e-6
             if data_stack.ndim == 4:
-                num = np.sum(data_stack * w_stack[..., None], axis=0)
-                master = num / np.maximum(weight_sum[..., None], eps)
+                # Colour batches accept either a channel-invariant NHW weight
+                # stack or an already channel-specific NHWC stack.  Rejection
+                # reducers (winsorized/kappa/linear-fit/median) return the
+                # latter; appending another singleton axis to NHWC produced a
+                # five-dimensional array and crashed Reproject on its first
+                # master batch (NHWC * NHWC1).
+                if w_stack.ndim == 3:
+                    if w_stack.shape != data_stack.shape[:3]:
+                        raise ValueError(
+                            "IBN spatial weight shape does not match colour data: "
+                            f"data={data_stack.shape}, weights={w_stack.shape}"
+                        )
+                    weights_for_data = w_stack[..., None]
+                    denominator = weight_sum[..., None]
+                elif w_stack.ndim == 4:
+                    if (
+                        w_stack.shape[:3] != data_stack.shape[:3]
+                        or w_stack.shape[3] not in (1, data_stack.shape[3])
+                    ):
+                        raise ValueError(
+                            "IBN channel weight shape does not match colour data: "
+                            f"data={data_stack.shape}, weights={w_stack.shape}"
+                        )
+                    weights_for_data = w_stack
+                    denominator = weight_sum
+                else:
+                    raise ValueError(
+                        "IBN colour weights must be NHW or NHWC: "
+                        f"data={data_stack.shape}, weights={w_stack.shape}"
+                    )
+                num = np.sum(data_stack * weights_for_data, axis=0)
+                master = num / np.maximum(denominator, eps)
             else:
+                if w_stack.shape != data_stack.shape:
+                    raise ValueError(
+                        "IBN monochrome weight shape does not match data: "
+                        f"data={data_stack.shape}, weights={w_stack.shape}"
+                    )
                 num = np.sum(data_stack * w_stack, axis=0)
                 master = num / np.maximum(weight_sum, eps)
             master_wht = weight_sum.astype(np.float32)
@@ -2937,6 +3118,9 @@ class SeestarQueuedStacker:
         # reapplied after the common ``initialize`` reset).
         self._resume_images_in_cumulative_stack = 0
         self._resume_total_exposure_seconds = 0.0
+        self._resume_exposure_unknown_count = 0
+        self._resume_exposure_min = None
+        self._resume_exposure_max = None
         self._resume_cumulative_header = None
 
         # Flag indicating the queue was pre-populated externally
@@ -3048,6 +3232,14 @@ class SeestarQueuedStacker:
         self.cumulative_drizzle_data = None
         self.cumulative_drizzle_data_raw = None
         self.total_exposure_seconds = 0.0
+        # Exposure metadata truthfulness (ZSSS-OTPUX-A-01): scalar aggregate of
+        # the *accepted* contributor population.  ``total_exposure_seconds`` is
+        # the known-exposure sum; ``_exposure_unknown_count`` counts accepted
+        # frames with unknown exposure; ``_exposure_min``/``_exposure_max``
+        # bound the known exposures for the final-EXPTIME uniformity decision.
+        self._exposure_unknown_count = 0
+        self._exposure_min = None
+        self._exposure_max = None
         # M3-D OBSOLETE LEGACY: intermediate drizzle batch files from the
         # invalidated double-pass incremental path. Kept empty in M3 (the only
         # writer was ``_wait_drizzle_processes``).
@@ -3700,6 +3892,9 @@ class SeestarQueuedStacker:
             self.images_in_cumulative_stack = 0
             self.cumulative_drizzle_data = None
             self.total_exposure_seconds = 0.0
+            self._exposure_unknown_count = 0
+            self._exposure_min = None
+            self._exposure_max = None
             self.final_stacked_path = None
             self.processing_error = None
             self.files_in_queue = 0
@@ -3746,6 +3941,11 @@ class SeestarQueuedStacker:
             self.total_exposure_seconds = float(
                 getattr(self, "_resume_total_exposure_seconds", 0.0) or 0.0
             )
+            self._exposure_unknown_count = int(
+                getattr(self, "_resume_exposure_unknown_count", 0) or 0
+            )
+            self._exposure_min = getattr(self, "_resume_exposure_min", None)
+            self._exposure_max = getattr(self, "_resume_exposure_max", None)
             self.current_stack_header = self._header_from_serialized(
                 getattr(self, "_resume_cumulative_header", None)
             )
@@ -4284,6 +4484,11 @@ class SeestarQueuedStacker:
             # ou pour re-normaliser si Low WHT Mask a modifié la plage de manière inattendue,
             # bien qu'il soit censé retourner 0-1). Une double normalisation ne nuit pas ici
             # car la première (avant mask) était pour la fonction mask, celle-ci est pour l'affichage.
+            # Option A (ZSSS-OTPUX-PREVIEW-CORE-01): capture an *immutable* raw-linear
+            # copy of the SUM/W divide (after any display-only masks) BEFORE the
+            # min/max normalization.  It travels as the second element of the
+            # preview tuple and is display-analysis data only (never science).
+            raw_linear_fullres = avg_img_fullres.astype(np.float32)
             min_val_final = np.nanmin(avg_img_fullres)
             max_val_final = np.nanmax(avg_img_fullres)
             preview_data_normalized = avg_img_fullres  # Par défaut si déjà 0-1
@@ -4307,6 +4512,7 @@ class SeestarQueuedStacker:
 
             # Sous-échantillonnage pour l'affichage
             preview_data_to_send = preview_data_normalized
+            raw_linear_to_send = raw_linear_fullres
             # Resolve effective downsample factor: parameter > attribute > default(2)
             try:
                 eff_factor = int(downsample_factor) if downsample_factor is not None else int(getattr(self, "preview_downsample_factor", 2))
@@ -4329,6 +4535,12 @@ class SeestarQueuedStacker:
                         # cv2.resize attend (W, H) pour dsize
                         preview_data_to_send = cv2.resize(
                             preview_data_normalized,
+                            (new_w, new_h),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        # Same geometry for the raw-linear second element.
+                        raw_linear_to_send = cv2.resize(
+                            raw_linear_fullres,
                             (new_w, new_h),
                             interpolation=cv2.INTER_AREA,
                         )
@@ -4379,7 +4591,7 @@ class SeestarQueuedStacker:
                 f"DEBUG QM [_update_preview_sum_w]: Appel du callback preview avec image APERÇU shape {preview_data_to_send.shape}..."
             )
             self.preview_callback(
-                preview_data_to_send,
+                (preview_data_to_send, raw_linear_to_send),
                 header_copy,
                 stack_name,
                 img_count,
@@ -6453,17 +6665,35 @@ class SeestarQueuedStacker:
                                     )
                                     if added:
                                         self._current_batch_paths.append(file_path)
+                                        # Exposure metadata truthfulness: commit
+                                        # the accepted count + exposure
+                                        # IMMEDIATELY after successful scientific
+                                        # admission, BEFORE any fallible
+                                        # non-scientific side effect (move,
+                                        # partial save, batch-count file).  A
+                                        # failure below must never leave the
+                                        # accepted count/exposure out of lockstep
+                                        # with the admitted frame.
+                                        self._drizzle_group_tick()
+                                        _frame_exp = _frame_exposure_seconds(
+                                            header_orig
+                                        )
+                                        if _frame_exp is None:
+                                            self._admit_exposure(0.0, 1)
+                                        else:
+                                            self._admit_exposure(
+                                                _frame_exp, 0, _frame_exp, _frame_exp
+                                            )
                                         # Drizzle: accumulateur unique -> pas de
-                                        # combinaison de lot. Finaliser la
-                                        # comptabilité (déplacement + état
-                                        # partiel) immédiatement.
+                                        # combinaison de lot.  Fallible
+                                        # non-scientific side effects run only
+                                        # after the accepted bookkeeping above.
                                         self.stacked_batches_count += 1
                                         self._send_eta_update()
                                         self._move_to_stacked(self._current_batch_paths)
                                         self._save_partial_stack()
                                         self._update_batch_count_file()
                                         self._current_batch_paths = []
-                                        self._drizzle_group_tick()
                                     else:
                                         self.failed_stack_count += 1
                                         logger.debug(
@@ -10342,6 +10572,35 @@ class SeestarQueuedStacker:
 
     ###############################################################################################################################################
 
+    def _admit_exposure(self, known_sum, unknown_count, min_known=None, max_known=None):
+        """Fold one accepted contributor's exposure provenance exactly once.
+
+        Called *only* after successful scientific admission — a classic batch
+        that passed the ``_combine_batch_result`` gates, or a Drizzle frame for
+        which ``_add_frame_to_drizzle_accumulators`` returned ``True``.  It
+        mutates no scientific array/weight/accumulator: only the scalar
+        metadata aggregate (``total_exposure_seconds`` + unknown count +
+        min/max bounds) changes, once per admitted frame/batch.
+        """
+        # Defensive getattr: bare ``__new__`` test doubles may not have run
+        # ``__init__``, so the aggregate attributes are initialised lazily.
+        self.total_exposure_seconds = (
+            float(getattr(self, "total_exposure_seconds", 0.0) or 0.0)
+            + float(known_sum or 0.0)
+        )
+        self._exposure_unknown_count = (
+            int(getattr(self, "_exposure_unknown_count", 0) or 0)
+            + int(unknown_count or 0)
+        )
+        cur_min = getattr(self, "_exposure_min", None)
+        cur_max = getattr(self, "_exposure_max", None)
+        if min_known is not None:
+            fmin = float(min_known)
+            self._exposure_min = fmin if cur_min is None else min(cur_min, fmin)
+        if max_known is not None:
+            fmax = float(max_known)
+            self._exposure_max = fmax if cur_max is None else max(cur_max, fmax)
+
     def _combine_batch_result(
         self,
         stacked_batch_data_np,
@@ -10597,7 +10856,12 @@ class SeestarQueuedStacker:
 
         try:
             num_physical_images_in_batch = int(stack_info_header.get("NIMAGES", 1))
-            batch_exposure = float(stack_info_header.get("TOTEXP", 0.0))
+            # Exposure truthfulness: read the full-precision nominal sum
+            # (``EXP_SUM``), never the rounded display ``TOTEXP``.  A legacy
+            # header without ``EXP_SUM`` falls back to ``TOTEXP`` unchanged.
+            batch_exposure = float(
+                stack_info_header.get("EXP_SUM", stack_info_header.get("TOTEXP", 0.0))
+            )
 
             # Vérifier si la carte de couverture a des poids significatifs
 
@@ -10753,7 +11017,15 @@ class SeestarQueuedStacker:
             self.images_in_cumulative_stack += (
                 num_physical_images_in_batch  # Compte les images physiques
             )
-            self.total_exposure_seconds += batch_exposure
+            # Exposure metadata truthfulness: fold this accepted batch's
+            # provenance exactly once (post-gate).  ``batch_exposure`` is the
+            # known sum; unknown exposures are counted, never silently 0.
+            self._admit_exposure(
+                batch_exposure,
+                int(stack_info_header.get("NEXPUNK", 0)),
+                stack_info_header.get("EXP_MIN", None),
+                stack_info_header.get("EXP_MAX", None),
+            )
             logger.debug(
                 f"DEBUG QM [_combine_batch_result SUM/W]: {num_physical_images_in_batch} images ajoutées -> "
                 f"images_in_cumulative_stack={self.images_in_cumulative_stack}"
@@ -11566,11 +11838,44 @@ class SeestarQueuedStacker:
             stack_info_header["NIMAGES"] = (1, "Images in this batch stack")
             stack_info_header["STK_NOTE"] = "single image"
             stack_info_header["NEXP_SUM"] = (1, "Number of exposures summed")
-            try:
-                tot_exp = float(stack_info_header.get("EXPTIME", stack_info_header.get("EXPOSURE", 0.0)))
-            except Exception:
-                tot_exp = 0.0
-            stack_info_header["TOTEXP"] = (round(tot_exp, 2), "[s] Total exposure for this batch")
+            _single_exposure = _frame_exposure_seconds(stack_info_header)
+            if _single_exposure is None:
+                stack_info_header["TOTEXP"] = (
+                    0.0,
+                    "[s] Total exposure for this batch",
+                )
+                # Full-precision nominal sum (never the rounded display
+                # ``TOTEXP``): the aggregation below reads this so fractional
+                # exposures (e.g. EXPTIME=0.0049) survive batch provenance.
+                stack_info_header["EXP_SUM"] = (
+                    0.0,
+                    "Exact nominal exposure sum [s]",
+                )
+                stack_info_header["NEXPUNK"] = (
+                    1,
+                    "Accepted frames with unknown exposure",
+                )
+            else:
+                stack_info_header["TOTEXP"] = (
+                    round(_single_exposure, 2),
+                    "[s] Total exposure for this batch",
+                )
+                stack_info_header["EXP_SUM"] = (
+                    _single_exposure,
+                    "Exact nominal exposure sum [s]",
+                )
+                stack_info_header["NEXPUNK"] = (
+                    0,
+                    "Accepted frames with unknown exposure",
+                )
+                stack_info_header["EXP_MIN"] = (
+                    _single_exposure,
+                    "Min accepted exposure [s]",
+                )
+                stack_info_header["EXP_MAX"] = (
+                    _single_exposure,
+                    "Max accepted exposure [s]",
+                )
             _log_mem("after_stack")
             return single_img, stack_info_header, batch_coverage_map_2d
 
@@ -11941,21 +12246,36 @@ class SeestarQueuedStacker:
                 num_valid_images_for_processing,
                 "Number of exposures summed",
             )
-            tot_exp = 0.0
-            for _hdr in valid_headers_for_ccdproc:
-                if _hdr is None:
-                    continue
-                for k in ("EXPTIME", "EXPOSURE"):
-                    if k in _hdr:
-                        try:
-                            tot_exp += float(_hdr[k])
-                            break
-                        except Exception:
-                            continue
+            (
+                tot_exp,
+                n_unknown,
+                exp_min,
+                exp_max,
+            ) = _batch_exposure_provenance(valid_headers_for_ccdproc)
             stack_info_header["TOTEXP"] = (
                 round(tot_exp, 2),
                 "[s] Total exposure for this batch",
             )
+            # Full-precision nominal sum (never the rounded display ``TOTEXP``):
+            # the aggregation below reads this so fractional exposures survive
+            # batch provenance (rounding happens only on final FITS output).
+            stack_info_header["EXP_SUM"] = (
+                float(tot_exp),
+                "Exact nominal exposure sum [s]",
+            )
+            stack_info_header["NEXPUNK"] = (
+                int(n_unknown),
+                "Accepted frames with unknown exposure",
+            )
+            if exp_min is not None:
+                stack_info_header["EXP_MIN"] = (
+                    float(exp_min),
+                    "Min accepted exposure [s]",
+                )
+                stack_info_header["EXP_MAX"] = (
+                    float(exp_max),
+                    "Max accepted exposure [s]",
+                )
 
             if valid_headers_for_ccdproc:
                 first_hdr = valid_headers_for_ccdproc[0]
@@ -12237,12 +12557,17 @@ class SeestarQueuedStacker:
     def _build_startup_refusal(self, early_result) -> "StartupRefusal":
         """Build the structured startup refusal for a *known* early refusal.
 
-        Only the confirmed incompatible case — existing resume artifacts plus a
-        non-plain (Drizzle / mosaic / reproject) mode — carries the stable
-        ``OUTPUT_STATE_INCOMPATIBLE`` code.  Any other early refusal returns
-        ``None`` so it stays a generic false start.
+        Every early refusal of a session that requested resume carries the
+        stable ``OUTPUT_STATE_INCOMPATIBLE`` code: the refusal means the
+        selected output folder already holds processing/resume state that this
+        run cannot resume (non-plain Drizzle/mosaic/reproject mode, missing/
+        corrupt/legacy manifest, scientific fingerprint or dtype mismatch,
+        incompatible reference shape, invalid quality reference scale, etc.).
+        The precise reason stays in ``technical_detail`` and is never parsed
+        downstream.  Early refusals of sessions without resume artifacts (a
+        genuinely unknown false start) return ``None`` so they stay generic.
         """
-        if getattr(self, "_resume_requested", False) and not self._is_plain_classic():
+        if getattr(self, "_resume_requested", False):
             return StartupRefusal(
                 StartupRefusal.CODE_OUTPUT_STATE_INCOMPATIBLE,
                 early_result,
@@ -12680,6 +13005,11 @@ class SeestarQueuedStacker:
             "total_exposure_seconds": float(
                 getattr(self, "total_exposure_seconds", 0.0) or 0.0
             ),
+            "exposure_unknown_count": int(
+                getattr(self, "_exposure_unknown_count", 0) or 0
+            ),
+            "exposure_min": getattr(self, "_exposure_min", None),
+            "exposure_max": getattr(self, "_exposure_max", None),
             "cumulative_header": self._serialize_cumulative_header(),
             "session": {
                 "input_roots": list(getattr(self, "_resume_input_roots", None) or []),
@@ -12854,6 +13184,82 @@ class SeestarQueuedStacker:
         )
         if not ok:
             return (False, reason, None)
+        # Exposure truthfulness (ZSSS-OTPUX-A-01): the manifest must carry the
+        # accepted-unknown count and known-exposure bounds.  An older manifest
+        # (written before the exposure contract) lacks these keys and *cannot*
+        # be resumed truthfully (the legacy ``total_exposure_seconds`` silently
+        # dropped unknown exposures), so it fails closed rather than inventing
+        # metadata.
+        if "exposure_unknown_count" not in manifest:
+            return (
+                False,
+                "checkpoint predates the exposure truthfulness contract "
+                "(missing exposure_unknown_count)",
+                None,
+            )
+        ok, reason = _validate_count_field(
+            manifest.get("exposure_unknown_count"), "exposure_unknown_count"
+        )
+        if not ok:
+            return (False, reason, None)
+        for key in ("exposure_min", "exposure_max"):
+            if key not in manifest:
+                return (
+                    False,
+                    "checkpoint predates the exposure truthfulness contract "
+                    f"(missing {key})",
+                    None,
+                )
+            ok, reason = _validate_optional_exposure_field(
+                manifest.get(key), key
+            )
+            if not ok:
+                return (False, reason, None)
+        # Exposure aggregate coherence (fail-closed): impossible provenance
+        # must never survive resume to fabricate a false final TOTEXP.  The
+        # unknown count cannot exceed the accepted count, and the known-count /
+        # min / max / sum relationships must be internally consistent whenever
+        # the known-exposure bounds are present.
+        exp_unknown_count = int(manifest.get("exposure_unknown_count"))
+        exp_accepted_count = int(manifest.get("images_in_cumulative_stack", 0))
+        if exp_unknown_count > exp_accepted_count:
+            return (
+                False,
+                "exposure_unknown_count > images_in_cumulative_stack",
+                None,
+            )
+        exp_min_v = manifest.get("exposure_min")
+        exp_max_v = manifest.get("exposure_max")
+        exp_known_sum = float(manifest.get("total_exposure_seconds", 0.0))
+        exp_known_count = exp_accepted_count - exp_unknown_count
+        # Bounds are either both present or both absent: a known exposure always
+        # carries both bounds, so a lone bound is malformed provenance.
+        if (exp_min_v is None) != (exp_max_v is None):
+            return (False, "exposure bounds partially present", None)
+        if exp_min_v is not None:
+            exp_min_f = float(exp_min_v)
+            exp_max_f = float(exp_max_v)
+            if exp_min_f > exp_max_f:
+                return (False, "exposure_min > exposure_max", None)
+            if exp_known_count > 0:
+                # The known sum must lie within [known_count*min, known_count*max].
+                lo = exp_known_count * exp_min_f
+                hi = exp_known_count * exp_max_f
+                tol = 1e-6 * max(1.0, abs(lo), abs(hi))
+                if exp_known_sum < lo - tol or exp_known_sum > hi + tol:
+                    return (
+                        False,
+                        "known exposure sum inconsistent with exposure bounds",
+                        None,
+                    )
+            elif exp_known_sum != 0.0:
+                # All accepted exposures are unknown: a non-zero known sum is
+                # impossible provenance (a false TOTEXP would otherwise result).
+                return (
+                    False,
+                    "known exposure sum non-zero with all-unknown exposure",
+                    None,
+                )
         header_data = manifest.get("cumulative_header")
         if not isinstance(header_data, dict):
             return (False, "invalid cumulative_header (not an object)", None)
@@ -13204,6 +13610,9 @@ class SeestarQueuedStacker:
                 count = int(manifest.get("stacked_batches_count", 0))
                 images_in = int(manifest.get("images_in_cumulative_stack", 0))
                 totexp = float(manifest.get("total_exposure_seconds", 0.0))
+                unknown_count = int(manifest.get("exposure_unknown_count", 0))
+                exposure_min = manifest.get("exposure_min", None)
+                exposure_max = manifest.get("exposure_max", None)
                 header_data = manifest.get("cumulative_header", {})
 
                 self.cumulative_sum_memmap = sum_mm
@@ -13232,9 +13641,15 @@ class SeestarQueuedStacker:
                     )
                 self._resume_images_in_cumulative_stack = images_in
                 self._resume_total_exposure_seconds = totexp
+                self._resume_exposure_unknown_count = unknown_count
+                self._resume_exposure_min = exposure_min
+                self._resume_exposure_max = exposure_max
                 self._resume_cumulative_header = header_data
                 self.images_in_cumulative_stack = images_in
                 self.total_exposure_seconds = totexp
+                self._exposure_unknown_count = unknown_count
+                self._exposure_min = exposure_min
+                self._exposure_max = exposure_max
                 self.current_stack_header = self._header_from_serialized(header_data)
                 return (True, None)
             finally:
@@ -15261,6 +15676,20 @@ class SeestarQueuedStacker:
         except Exception:
             cov = np.ones(data.shape[:2], dtype=np.float32)
         self.current_stack_header = hdr.copy()
+        # Exposure metadata truthfulness (ZSSS-OTPUX-A-01): the accepted
+        # population for a single-classic-batch finalization is exactly this
+        # batch.  Seed the scalar aggregate from the batch header (full-
+        # precision ``EXP_SUM``) so the final save emits truthful
+        # NIMAGES/TOTEXP/NEXPUNK and deletes any stale inherited
+        # EXPTIME/EXPOSURE.  Assignment (not accumulation) is idempotent even
+        # when ``_combine_batch_result`` already folded the same batch.
+        self.images_in_cumulative_stack = int(hdr.get("NIMAGES", 1) or 0)
+        self.total_exposure_seconds = float(
+            hdr.get("EXP_SUM", hdr.get("TOTEXP", 0.0)) or 0.0
+        )
+        self._exposure_unknown_count = int(hdr.get("NEXPUNK", 0) or 0)
+        self._exposure_min = hdr.get("EXP_MIN", None)
+        self._exposure_max = hdr.get("EXP_MAX", None)
         self._save_final_stack(
             "_classic_reproject",
             drizzle_final_sci_data=data,
@@ -15915,15 +16344,28 @@ class SeestarQueuedStacker:
 
         # --- ÉTAPE 4: Préparation du header FITS final et du nom de fichier ---
         # (Logique identique)
-        effective_image_count = (
-            self.images_in_cumulative_stack
-            if self.images_in_cumulative_stack > 0
-            else (
-                getattr(self, "aligned_files_count", 1)
-                if (is_drizzle_standard_from_accumulators or is_reproject_mosaic_mode)
-                else 1
+        # Exposure metadata truthfulness: NIMAGES must count *accepted*
+        # contributors.  Drizzle uses the existing post-admission
+        # ``_drizzle_frame_count`` (never ``aligned_files_count``, which is
+        # incremented before the add and never rolled back on failure).
+        if is_drizzle_standard_from_accumulators:
+            # Drizzle NIMAGES is the exact accepted-frame count (post-admission
+            # ``_drizzle_frame_count``).  ``aligned_files_count`` is
+            # attempted/aligned bookkeeping only and must NEVER feed Drizzle
+            # NIMAGES (ratified contract §5.1 point 1).  ``_check_finalization_ready``
+            # already refuses to finalize an empty accumulator, so a zero count
+            # here is truthful (no accepted frames), never a fabricated fallback.
+            effective_image_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+        else:
+            effective_image_count = (
+                self.images_in_cumulative_stack
+                if self.images_in_cumulative_stack > 0
+                else (
+                    getattr(self, "aligned_files_count", 1)
+                    if is_reproject_mosaic_mode
+                    else 1
+                )
             )
-        )
         final_header = (
             self.current_stack_header.copy()
             if self.current_stack_header
@@ -15945,10 +16387,20 @@ class SeestarQueuedStacker:
             effective_image_count,
             "Effective images/Total Weight for final stack",
         )
-        final_header["TOTEXP"] = (
-            round(self.total_exposure_seconds, 2),
-            "[s] Approx total exposure",
-        )
+        if (
+            is_drizzle_standard_from_accumulators
+            or is_classic_stacking_mode
+            or is_classic_reproject_mode
+        ):
+            _apply_exposure_metadata(self, final_header, effective_image_count)
+        else:
+            # Mosaic (reproject_and_coadd): no single per-frame accepted
+            # exposure population; keep the legacy approximate scalar
+            # (unchanged behaviour, out of scope for LOT A).
+            final_header["TOTEXP"] = (
+                round(self.total_exposure_seconds, 2),
+                "[s] Approx total exposure",
+            )
         # Propagate basic pointing information if absent
 
         if "RA" not in final_header:
@@ -17307,8 +17759,9 @@ class SeestarQueuedStacker:
         ok_early, early_result = self._early_resume_preflight()
         if not ok_early:
             # ZSSS-LIFECYCLE-01: structured refusal for the *known* incompatible
-            # case — existing resume artifacts + a non-plain (Drizzle / mosaic /
-            # reproject) mode.  All other early refusals stay generic.
+            # output state — any early refusal of a resume-requested session
+            # (the output folder holds previous processing/resume state that
+            # this run cannot resume).  All other early refusals stay generic.
             self.startup_refusal = self._build_startup_refusal(early_result)
             self.update_progress(f"❌ Reprise impossible: {early_result}", "ERROR")
             self.processing_active = False
@@ -18190,7 +18643,12 @@ class SeestarQueuedStacker:
         copies).  The result is stored in ``self.cumulative_drizzle_data`` so
         ``refresh_preview`` keeps working during drizzle, and sent through
         ``self.preview_callback`` with the same contract as
-        ``_update_preview_sum_w`` (single HWC float32 array in [0,1]).
+        ``_update_preview_sum_w``: an Option-A tuple
+        ``(legacy_normalized, raw_linear)`` (both HWC float32, same final
+        geometry), where the first element is the percentile-stretched [0,1]
+        array (unchanged from the pre-Option-A single-array callback) and the
+        second is the raw-linear ``finalize("divide")`` HWC before the
+        percentile normalization.
         """
         accs = getattr(self, "drizzle_accumulators", None)
         if not accs:
@@ -18200,6 +18658,11 @@ class SeestarQueuedStacker:
         try:
             channels = [acc.finalize("divide").astype(np.float32) for acc in accs]
             preview_hwc = np.stack(channels, axis=-1)
+
+            # Option A (ZSSS-OTPUX-PREVIEW-CORE-01): immutable raw-linear copy
+            # of the Drizzle ``finalize("divide")`` HWC stack BEFORE the 1%/99%
+            # percentile normalization.  Display-analysis data only.
+            raw_linear = preview_hwc.copy()
 
             # Percentile stretch to [0,1] for display.
             with np.errstate(all="ignore"):
@@ -18214,6 +18677,7 @@ class SeestarQueuedStacker:
 
             # Downsample if the preview is large (display-only).
             preview_to_send = preview_hwc
+            raw_linear_to_send = raw_linear
             if max(preview_hwc.shape[:2]) > _MAX_PREVIEW_SIDE_PX:
                 scale = _MAX_PREVIEW_SIDE_PX / max(preview_hwc.shape[:2])
                 new_size = (
@@ -18222,6 +18686,9 @@ class SeestarQueuedStacker:
                 )
                 preview_to_send = cv2.resize(
                     preview_hwc, new_size, interpolation=cv2.INTER_AREA
+                )
+                raw_linear_to_send = cv2.resize(
+                    raw_linear, new_size, interpolation=cv2.INTER_AREA
                 )
 
             # Apply the GUI-selected downsample factor as a final step (1..4).
@@ -18235,6 +18702,9 @@ class SeestarQueuedStacker:
                 new_size = (max(1, w // eff_factor), max(1, h // eff_factor))
                 preview_to_send = cv2.resize(
                     preview_to_send, new_size, interpolation=cv2.INTER_AREA
+                )
+                raw_linear_to_send = cv2.resize(
+                    raw_linear_to_send, new_size, interpolation=cv2.INTER_AREA
                 )
 
             # Store the DISPLAY artifact so ``refresh_preview`` can serve it.
@@ -18257,7 +18727,7 @@ class SeestarQueuedStacker:
             stack_name = f"Aperçu Drizzle ({img_count}/{total_imgs_est} Img)"
 
             self.preview_callback(
-                preview_to_send,
+                (preview_to_send, raw_linear_to_send),
                 header_copy,
                 stack_name,
                 img_count,

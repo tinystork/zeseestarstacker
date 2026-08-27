@@ -102,17 +102,31 @@ def test_resume_artifacts_with_drizzle_refused_readonly(tmp_path):
 
 
 def test_generic_early_refusal_is_not_output_state_incompatible(tmp_path):
-    """A non-resume or plain-classic refusal never carries the known code."""
+    """An early refusal without resume artifacts never carries the known code."""
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
     SeestarQueuedStacker, o = _bare_stacker(out_dir, drizzle=False)
-    # Plain classic is resumable-eligible; without resume artifacts there is no
-    # known incompatible-output refusal, so _build_startup_refusal returns None.
     o._resume_requested = False
     o.drizzle_active_session = True  # drizzle active but no resume artifacts
     assert o._build_startup_refusal("some other reason") is None
 
+
+def test_plain_classic_resume_refusal_is_structured(tmp_path):
+    """A resume-requested refusal is the known output-state condition, even in
+    plain classic mode (e.g. scientific fingerprint mismatch): the structured
+    OUTPUT_STATE_INCOMPATIBLE carrier must be produced with the precise reason
+    kept as technical detail — never flattened to a generic false start."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    SeestarQueuedStacker, o = _bare_stacker(out_dir, drizzle=False)
+    from seestar.queuep.queue_manager import StartupRefusal
+
     o._resume_requested = True
     o.drizzle_active_session = False  # resume artifacts but plain classic
-    assert o._build_startup_refusal("some other reason") is None
+    refusal = o._build_startup_refusal("scientific configuration mismatch")
+    assert refusal is not None
+    assert refusal.code == StartupRefusal.CODE_OUTPUT_STATE_INCOMPATIBLE
+    assert refusal.semantic_key == "output_state_incompatible"
+    assert refusal.technical_detail == "scientific configuration mismatch"

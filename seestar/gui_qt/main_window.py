@@ -51,7 +51,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QImage, QPalette
@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -104,6 +105,7 @@ from .final_combine import (
 )
 from .preview_render import render_preview_image
 from .preview_adjust import (
+    BP_WP_MIN_SEPARATION,
     BLACK_POINT_MAX,
     BLACK_POINT_MIN,
     BLACK_POINT_STEP,
@@ -136,11 +138,25 @@ from .preview_adjust import (
     WHITE_POINT_STEP,
     apply_preview_adjustments,
     apply_preview_wb,
+    clamp_bp_wp_edit,
     compute_auto_wb,
     compute_auto_stretch,
+    compute_histogram,
+    compute_histogram_percentile,
     compute_histogram_stats,
+    normalize_bp_wp,
 )
-from .histogram_view import HistogramView
+from .preview_analysis import (
+    apply_wb_float,
+    compute_anchors,
+    compute_auto_stretch_float,
+    compute_auto_wb_float,
+    extract_raw_linear,
+    map_raw_linear,
+)
+from .histogram_view import HistogramView, format_histogram_stats
+from .histogram_window import DetachedHistogramWindow
+from .histogram_worker import HistogramCoordinator
 from .preview_image_view import PreviewImageView
 from .preview_view import (
     ZOOM_FACTORS,
@@ -671,6 +687,65 @@ EXPERT_RESET_ATTRS = [
 ]
 
 
+def _is_option_a_preview_payload(data) -> bool:
+    """Return ``True`` when ``data`` is an Option-A ``(legacy, raw_linear)`` pair.
+
+    Option-A payloads are 2+ element tuples/lists whose *second* element is a
+    valid 2D/3D numeric array (the raw-linear source) whose dtype kind is
+    ``f``/``i``/``u`` — exactly the arrays that
+    :func:`preview_analysis._as_float_array` will ingest.  Legacy producers
+    send a lone array (or a tuple whose second element is not such an image
+    array — e.g. bool, text, bytes, object or structured data), which keeps the
+    existing ``render_preview_image`` QImage path.  Detection is structural
+    (``ndim``/``shape``/``dtype.kind`` attributes, no numpy import) so the
+    fresh ``import seestar.gui_qt`` hygiene invariant holds.
+    """
+    if not isinstance(data, (tuple, list)) or len(data) < 2:
+        return False
+    second = data[1]
+    ndim = getattr(second, "ndim", None)
+    shape = getattr(second, "shape", None)
+    if ndim not in (2, 3) or shape is None:
+        return False
+    try:
+        if not all(int(d) > 0 for d in shape):
+            return False
+    except (TypeError, ValueError):
+        return False
+    # The float core (preview_analysis._as_float_array) accepts only float,
+    # signed-integer and unsigned-integer arrays.  Anything else (bool, string,
+    # bytes, object, structured/void, or a missing/unsupported dtype) must not
+    # be classified Option-A and instead follows the legacy QImage path.
+    kind = getattr(getattr(second, "dtype", None), "kind", None)
+    return kind in ("f", "i", "u")
+
+
+# ZSSS-OTPUX-STABLE-A: authoritative engine preview-source labels.  The engine
+# tags every live preview payload header with ``PREV_SRC``; these are the two
+# labels the backend actually emits (see ``queue_manager._update_preview_sum_w``
+# and ``queue_manager._update_preview_drizzle_accumulator``).  A payload whose
+# header carries no ``PREV_SRC`` is the legacy incremental-reprojection/coadd
+# path (``queue_manager._update_preview``).
+_DRIZZLE_PREVIEW_SRC = "Drizzle Accumulator"
+_SUMW_PREVIEW_SRC = "SUM/W Accumulators"
+
+
+def _positive_int(value) -> Optional[int]:
+    """Return ``value`` as a strictly-positive ``int``, else ``None``.
+
+    Used to read engine-provided counters (``image_count`` / ``current_batch``)
+    defensively: a missing, non-numeric or non-positive counter never produces
+    a fabricated identity.
+    """
+    try:
+        ival = int(value)
+    except (TypeError, ValueError):
+        return None
+    if ival <= 0:
+        return None
+    return ival
+
+
 class MainWindow(QMainWindow):
     """Minimal side-by-side Qt main window used for offscreen smoke tests.
 
@@ -702,6 +777,7 @@ class MainWindow(QMainWindow):
         analyzer_command_file_maker: Optional[Callable[[], str]] = None,
         shutdown_wait_ms: int = 5000,
         settings_path: Optional[str] = None,
+        histogram_compute_fn: Optional[Callable[[Any], Any]] = None,
     ):
         super().__init__(parent)
         if backend_mode not in BACKEND_MODES:
@@ -740,6 +816,12 @@ class MainWindow(QMainWindow):
         # Currently shown (non-modal) summary dialog, retained so it stays
         # alive and is inspectable by tests.
         self._summary_dialog: Optional[QDialog] = None
+        # Currently shown (window-modal, non-blocking) terminal-failure box.
+        # Reused across failures so repeated signals never pile boxes up; the
+        # single owned reference keeps it alive and inspectable by tests.
+        self._error_message_box: Optional[QMessageBox] = None
+        # Presentation count for the owned error box (read-only test seam).
+        self._error_box_count: int = 0
         self.solver_probe = (
             solver_probe if solver_probe is not None else probe_zesolver_operational
         )
@@ -813,6 +895,27 @@ class MainWindow(QMainWindow):
         # accumulated clockwise rotation in degrees (0/90/180/270).
         self._preview_source: Optional[QImage] = None
         self._preview_rotation: int = 0
+        # Option-A display-analysis state (ZSSS-OTPUX-QT-DISPLAY-STATE-01).
+        # These are *display-only* owned copies and never feed the backend or
+        # any scientific output:
+        #   _raw_linear     - independent float64 copy of the raw-linear source
+        #   _pristine_float - mapped pre-WB float buffer in [0, 1]
+        #   _wb_only_float  - derived WB-only float buffer in [0, 1]
+        #   _anchor_lo/hi   - frozen p0.5/p99.5 anchors (immutable within a
+        #                     run/context; None until the first valid preview)
+        #   _analysis_generation - explicit context/generation counter,
+        #                     incremented on every analysis reset
+        #   _wb_only_wb     - the WB gains used to derive _wb_only_float
+        #   _wb_only_revision - monotonic counter bumped each time the WB-only
+        #                     buffer is actually re-derived (WB/source change)
+        self._raw_linear = None
+        self._pristine_float = None
+        self._wb_only_float = None
+        self._wb_only_wb = None
+        self._anchor_lo = None
+        self._anchor_hi = None
+        self._analysis_generation: int = 0
+        self._wb_only_revision: int = 0
         # Preview-resolution cycle factor (Tk ``preview_res_button`` parity,
         # M17).  Display-only GUI state; never touches the engine or
         # ``_preview_source``.  Default 1 (native) — see the module comment.
@@ -848,6 +951,76 @@ class MainWindow(QMainWindow):
         self._contrast: float = DEFAULT_CONTRAST
         self._saturation: float = DEFAULT_SATURATION
         self._histogram_stats: Optional[str] = None
+        # Cached authoritative histogram model (H1/H2).  The model is computed
+        # *off the GUI thread* only when the WB-only analysis buffer is
+        # re-derived (a new raw source or a WB change) — never on BP/WP/stretch/
+        # gamma/BCS/zoom/pan/rotation.  ``_histogram_model_revision`` is the
+        # ``_wb_only_revision`` the applied model was computed from;
+        # ``_histogram_scheduled_revision`` is the revision a request was last
+        # scheduled for (prevents duplicate scheduling on unrelated refreshes);
+        # ``_histogram_compute_count`` is a testable seam counting real
+        # recompute *decisions* (one per WB/source revision; see the property);
+        # ``_histogram_source_stale`` counts results the GUI-thread source check
+        # rejected (defence-in-depth on top of the coordinator generation check).
+        self._histogram_model = None
+        self._histogram_model_revision = None
+        self._histogram_scheduled_revision = None
+        self._histogram_source_stale: int = 0
+        # Final OTPUX UX addendum: the detached histogram is a lazy, non-modal
+        # second presentation surface.  It never owns a model or worker; the
+        # reference stays alive across close/reopen so its geometry/view state
+        # can be restored without altering processing or display state.
+        self._detached_histogram_window: Optional[DetachedHistogramWindow] = None
+        # Independent live-auto intent.  Enabled by default to restore batch-
+        # boundary adaptation; direct manual BP/WP or WB-gain edits disable
+        # only their corresponding flag.  One-shot Auto buttons do not.
+        self._live_auto_stretch_enabled: bool = True
+        self._live_auto_wb_enabled: bool = True
+        self._last_live_auto_batch_token = None
+        self._live_auto_stretch_count: int = 0
+        self._live_auto_wb_count: int = 0
+        # ZSSS-OTPUX-STABLE-A — stable scientific-preview identity.  The live
+        # auto dedupe token is now the full identity ``(run_context_id, family,
+        # counter)`` derived from engine metadata (positive ``image_count`` /
+        # ``current_batch``), never the GUI ``drizzle_group_spin`` cadence.
+        # ``family`` is ``"drizzle"`` (accepted-frame counter) or ``"batch"``
+        # (Classic/Reproject share ``current_batch``); the ``PREV_SRC`` header
+        # is *not* an identity dimension within the batch family because
+        # ``refresh_preview`` re-renders every non-Drizzle session through the
+        # SUM/W route.  ``_run_context_id`` is bumped once per run so identities
+        # never collide across runs.  ``_raw_revision`` advances once per *new*
+        # displayed scientific preview (a changed identity) and never on a
+        # duplicate callback / repaint / same-batch route change.  ``_live_bp`` /
+        # ``_live_wp`` record the BP/WP last written by live auto stretch so the
+        # witness can compare live vs one-shot Auto Stretch on the same buffer.
+        self._run_context_id: int = 0
+        self._preview_mode = None
+        self._preview_identity = None
+        self._displayed_identity = None
+        self._raw_revision: int = 0
+        self._live_bp = None
+        self._live_wp = None
+        # Bounded latest-wins histogram coordinator (owns the worker QThread).
+        # Created here (before widgets) so the GUI-thread result channel can be
+        # wired in ``_wire_controls``; the thread itself is lazy (first
+        # ``schedule``), so a bare ``MainWindow()`` spawns no thread.
+        self._histogram_coordinator = HistogramCoordinator(
+            compute_fn=histogram_compute_fn, parent=self
+        )
+        # True once teardown has begun (set at the top of ``shutdown``) so an
+        # in-flight histogram result can never touch the UI during/after close.
+        self._shutting_down: bool = False
+        # Legacy single-array histogram/stats cache (H1 corrective).  Keyed by
+        # ``(id(_preview_source), _wb)`` so a new source or a WB change
+        # recomputes exactly once, while BP/WP/stretch/gamma/BCS/zoom/pan/
+        # rotation refreshes only re-sync markers with zero recompute.
+        self._legacy_hist_key: Optional[tuple] = None
+        self._legacy_hist: Optional[Dict[str, Any]] = None
+        self._legacy_hist_percentile: float = 1.0
+        self._legacy_hist_stats: Optional[str] = None
+        # Re-entrancy guards for atomic BP/WP and WB control application.
+        self._bp_wp_sync_guard: bool = False
+        self._wb_sync_guard: bool = False
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
 
@@ -1219,10 +1392,14 @@ class MainWindow(QMainWindow):
         wb_btn_row.setContentsMargins(0, 0, 0, 0)
         self.auto_wb_button = QPushButton(self._tr("auto_wb"))
         self._bind_text(self.auto_wb_button, "auto_wb")
+        self.live_auto_wb_check = QCheckBox(self._tr("live_auto_wb"))
+        self._bind_text(self.live_auto_wb_check, "live_auto_wb")
+        self.live_auto_wb_check.setChecked(self._live_auto_wb_enabled)
         self.wb_reset_button = QPushButton(self._tr("wb_reset"))
         self._bind_text(self.wb_reset_button, "wb_reset")
         wb_btn_row.addWidget(self.auto_wb_button)
         wb_btn_row.addWidget(self.wb_reset_button)
+        wb_btn_row.addWidget(self.live_auto_wb_check)
         wb_btn_row.addStretch(1)
         wb_form.addRow("", wb_buttons)
         self.wb_r_row, self.wb_r_slider, self.wb_r_spin = self._make_slider_spin_pair(
@@ -1257,7 +1434,7 @@ class MainWindow(QMainWindow):
             BLACK_POINT_STEP,
             3,
             DEFAULT_BLACK_POINT,
-            self._on_stretch_params_changed,
+            self._on_stretch_bp_changed,
         )
         (
             self.stretch_wp_row,
@@ -1269,7 +1446,7 @@ class MainWindow(QMainWindow):
             WHITE_POINT_STEP,
             3,
             DEFAULT_WHITE_POINT,
-            self._on_stretch_params_changed,
+            self._on_stretch_wp_changed,
         )
         (
             self.stretch_gamma_row,
@@ -1281,13 +1458,16 @@ class MainWindow(QMainWindow):
             GAMMA_STEP,
             2,
             DEFAULT_GAMMA,
-            self._on_stretch_params_changed,
+            self._on_stretch_gamma_changed,
         )
         self._add_form_row(stretch_form, "stretch_black", self.stretch_bp_row)
         self._add_form_row(stretch_form, "stretch_white", self.stretch_wp_row)
         self._add_form_row(stretch_form, "stretch_gamma", self.stretch_gamma_row)
         self.auto_stretch_button = QPushButton(self._tr("auto_stretch"))
         self._bind_text(self.auto_stretch_button, "auto_stretch")
+        self.live_auto_stretch_check = QCheckBox(self._tr("live_auto_stretch"))
+        self._bind_text(self.live_auto_stretch_check, "live_auto_stretch")
+        self.live_auto_stretch_check.setChecked(self._live_auto_stretch_enabled)
         self.stretch_reset_button = QPushButton(self._tr("stretch_reset"))
         self._bind_text(self.stretch_reset_button, "stretch_reset")
         stretch_buttons = QWidget()
@@ -1295,6 +1475,7 @@ class MainWindow(QMainWindow):
         stretch_btn_row.setContentsMargins(0, 0, 0, 0)
         stretch_btn_row.addWidget(self.auto_stretch_button)
         stretch_btn_row.addWidget(self.stretch_reset_button)
+        stretch_btn_row.addWidget(self.live_auto_stretch_check)
         stretch_btn_row.addStretch(1)
         stretch_form.addRow("", stretch_buttons)
         layout.addWidget(self.stretch_group)
@@ -1439,16 +1620,23 @@ class MainWindow(QMainWindow):
         self._bind_text(self.hist_zoom_button, "histo_zoom")
         self.hist_reset_button = QPushButton("R")
         self.hist_reset_button.setToolTip("Reset zoom")
+        self.hist_expand_button = QPushButton(self._tr("histo_expand"))
+        self._bind_text(self.hist_expand_button, "histo_expand")
+        self.hist_expand_button.setToolTip(
+            "Open the live histogram in a large window"
+        )
         # Inert until a renderable preview arrives (matches the WB/stretch
         # controls); ``_set_preview_controls_enabled`` re-arms them.
         self.auto_zoom_histo_check.setEnabled(False)
         self.hist_reset_view_button.setEnabled(False)
         self.hist_zoom_button.setEnabled(False)
         self.hist_reset_button.setEnabled(False)
+        self.hist_expand_button.setEnabled(False)
         histo_toolbar_row.addWidget(self.auto_zoom_histo_check)
         histo_toolbar_row.addWidget(self.hist_reset_view_button)
         histo_toolbar_row.addWidget(self.hist_zoom_button)
         histo_toolbar_row.addWidget(self.hist_reset_button)
+        histo_toolbar_row.addWidget(self.hist_expand_button)
         histo_toolbar_row.addStretch(1)
         right_histo_layout.addWidget(histo_toolbar)
         layout.addWidget(self.right_histogram_group)
@@ -1792,9 +1980,13 @@ class MainWindow(QMainWindow):
         # ``on_change`` callback), so only the discrete buttons are connected
         # here.
         self.auto_wb_button.clicked.connect(self._on_auto_wb)
+        self.live_auto_wb_check.toggled.connect(self._set_live_auto_wb_enabled)
         self.wb_reset_button.clicked.connect(self._on_wb_reset)
         self.stretch_combo.currentIndexChanged.connect(self._on_stretch_changed)
         self.auto_stretch_button.clicked.connect(self._on_auto_stretch)
+        self.live_auto_stretch_check.toggled.connect(
+            self._set_live_auto_stretch_enabled
+        )
         self.stretch_reset_button.clicked.connect(self._on_stretch_reset)
         self.bcs_reset_button.clicked.connect(self._on_bcs_reset)
         # Histogram interactions (M14): the persistent right-panel histogram
@@ -1802,15 +1994,24 @@ class MainWindow(QMainWindow):
         # mirrors BP/WP line drags back into the stretch sliders.
         self.auto_zoom_histo_check.toggled.connect(self._on_hist_auto_zoom_toggled)
         self.hist_reset_view_button.clicked.connect(
-            lambda *_: self.right_histogram_view.reset_histogram_view()
+            self._reset_histogram_view
         )
         self.hist_zoom_button.clicked.connect(
-            lambda *_: self.right_histogram_view.zoom_histogram()
+            self._zoom_histogram
         )
         self.hist_reset_button.clicked.connect(
-            lambda *_: self.right_histogram_view.reset_zoom()
+            self._reset_histogram_zoom
         )
+        self.hist_expand_button.clicked.connect(self._open_detached_histogram)
         self.right_histogram_view.rangeChanged.connect(self._on_hist_range_changed)
+        self.right_histogram_view.expandRequested.connect(
+            self._open_detached_histogram
+        )
+        # Histogram worker -> GUI thread: the coordinator lives on the GUI
+        # thread and emits ``result_ready`` only for the latest (non-stale)
+        # result; the queued connection guarantees ``_on_histogram_result`` runs
+        # on the GUI thread (the only place widgets may be updated).
+        self._histogram_coordinator.result_ready.connect(self._on_histogram_result)
         # Initial-preview auto-load delivery: the daemon worker thread emits
         # this signal; the explicit queued connection guarantees the slot runs
         # on the GUI thread even though the emitter is not a QThread.
@@ -1946,10 +2147,21 @@ class MainWindow(QMainWindow):
         self._report_preflight_failure("Cannot start real backend", errors)
 
     def _report_preflight_failure(self, prefix: str, errors: List[str]) -> None:
-        """Surface a preflight failure (prefix + errors) and stay idle."""
+        """Surface a preflight failure (prefix + errors) and stay idle.
+
+        The status bar and log keep the exact ``prefix + errors`` message; the
+        owned failure box presents the same plain-text message as a *warning*
+        (user-correctable), so a validation attempt yields exactly one box, not
+        one per error string.  No ``RunController`` call happens.
+        """
         message = prefix + ": " + "; ".join(errors)
         self.log(message)
         self.statusBar().showMessage(message)
+        self._show_error_box(
+            self._tr("error_box_preflight_title", default="Cannot start run"),
+            message,
+            severity="warning",
+        )
         self._running = False
         self._update_run_state()
 
@@ -2054,6 +2266,11 @@ class MainWindow(QMainWindow):
         self._update_run_state()
         self.statusBar().showMessage(f"Boring stack failed: {message}")
         self.log(f"Boring stack failed: {message}")
+        self._show_error_box(
+            self._tr("error_box_boring_failed_title", default="Boring stack failed"),
+            message,
+            severity="critical",
+        )
         self._mark_time_terminal("failed")
 
     def _on_boring_cancelled(self) -> None:
@@ -2578,6 +2795,37 @@ class MainWindow(QMainWindow):
     def _on_run_started(self) -> None:
         self._running = True
         self._run_started_at = self._now()
+        # New run, new scientific-preview identity domain: bump the run/context
+        # identity and reset all per-run live-auto dedupe/instrumentation state.
+        # Live-auto enablement itself is user intent and deliberately survives
+        # between runs; only dedupe state and per-run instrumentation reset here.
+        self._run_context_id += 1
+        self._last_live_auto_batch_token = None
+        self._live_auto_stretch_count = 0
+        self._live_auto_wb_count = 0
+        self._live_bp = None
+        self._live_wp = None
+        # A new run is a fresh frozen-anchor context: drop any anchors / float
+        # analysis buffers from a previous run (never reused across runs).
+        self._reset_preview_analysis()
+        # STABLE-B: a new run is also a fresh view-state context.  Reset the
+        # accumulated rotation, continuous zoom and pan offsets exactly once so
+        # the next run's first preview starts at the defaults (0°, 100%,
+        # centred) instead of inheriting the previous run's view state.
+        self._preview_rotation = 0
+        self._reset_view_transform()
+        # STABLE-B-R1: make the reset atomic from the user's perspective.  A
+        # retained valid preview must agree with the reset view state (0°,
+        # 100%, centred) on screen immediately, before the next backend
+        # preview arrives (which can take significant time).  Reconcile the
+        # displayed pixmap + resolution label now.  This is a pure view
+        # reconciliation (``histogram=False``): it never touches the
+        # scientific identity / ``raw_revision``, never mutates the payload /
+        # science, and schedules zero histogram compute for the unchanged
+        # source.  With no retained preview there is nothing to reconcile and
+        # the controls stay correctly disabled.
+        if self.has_preview_image:
+            self._refresh_preview_view(histogram=False)
         # A second run must not reuse the previous run's terminal progress:
         # reset the bar (and the elapsed/remaining surface) before the first
         # progress signal of the new run arrives.
@@ -2599,9 +2847,12 @@ class MainWindow(QMainWindow):
         Additionally, when ``payload.data`` is image-like, it is converted
         (strictly display-only, via :func:`preview_render.render_preview_image`)
         and kept as the copied source image for the view transforms (zoom /
-        rotation / resolution).  Invalid/missing data never raises and clears
-        the stored source, the image area, the rotation state and the view
-        controls, so no stale preview survives a failed render.
+        rotation / resolution).  A *valid* preview replaces only the content:
+        the user's accumulated rotation, continuous zoom and pan offsets are
+        preserved across successive scientific previews (content freshness and
+        view state are independent).  Invalid/missing data never raises and
+        clears the stored source, the image area, the rotation state and the
+        view controls, so no stale preview survives a failed render.
         """
         name = payload.stack_name or "(no stack)"
         detail = name
@@ -2616,20 +2867,296 @@ class MainWindow(QMainWindow):
         self._preview_detail = detail
         self._render_preview_label()
 
-        image = render_preview_image(payload.data)
+        # Derive the engine-authoritative scientific-preview identity up front
+        # so the displayed preview and the live-auto target always agree on the
+        # *same* identity (Classic/Reproject share the batch counter; Drizzle:
+        # accepted frame).  The route label (``PREV_SRC``) is recorded
+        # separately for truthful instrumentation and is deliberately *not* an
+        # identity dimension (``refresh_preview`` re-renders via SUM/W
+        # regardless of the run's stacking mode).
+        identity = self._derive_preview_identity(payload)
+        preview_mode = self._derive_preview_mode(payload)
+
+        option_a = _is_option_a_preview_payload(payload.data)
+        if option_a:
+            # Option-A: derive the display source from the frozen-anchor mapped
+            # pristine pre-WB float buffer (never from legacy_normalized once
+            # raw extraction succeeds).
+            image = self._ingest_option_a_preview(payload.data)
+        else:
+            # Legacy single-array payload: keep the existing QImage render path.
+            image = render_preview_image(payload.data)
         if image is not None and not image.isNull():
             # ``render_preview_image`` already returns a deep copy, so storing
             # it here is safe and independent of the payload's buffers.
             self._preview_source = image
-            self._preview_rotation = 0
+            # STABLE-B: preserve the user's accumulated rotation across a valid
+            # successive preview.  Rotation (and zoom/pan, below) are view
+            # state, independent of the scientific content; they only reset at
+            # lifecycle boundaries (_on_run_started, new initial folder, clear,
+            # invalid payload).
+            if not option_a:
+                # A legacy payload carries no raw-linear analysis: drop any
+                # stale Option-A buffers so the float state always describes
+                # the current (legacy) source.
+                self._reset_preview_analysis()
+            # Record the displayed scientific-preview identity (and advance the
+            # raw revision exactly once per new preview) before live auto runs,
+            # so live auto targets the identity currently being displayed.
+            self._record_preview_identity(identity, preview_mode)
+            # Apply deterministic live display adaptation only when this
+            # payload represents a *new completed batch/group*.  The method is
+            # atomic (no intermediate refresh), so the unconditional refresh
+            # below remains the single render/histogram scheduling point.
+            self._apply_live_auto_for_batch(payload)
         else:
             self._preview_source = None
             self._preview_rotation = 0
-        # A new preview image resets zoom + pan to the Tk defaults (100%,
-        # centred) before re-rendering — ``PreviewManager.reset_zoom_and_pan``
-        # parity on a new ``_preview_source`` / new render.
-        self._reset_view_transform()
+            # Invalid/missing data clears any stale frozen-anchor analysis so
+            # the next valid preview re-establishes anchors from scratch (and
+            # drops any identity instrumentation for the vanished preview).
+            self._reset_preview_analysis()
+            # An invalid/unrenderable payload is a lifecycle boundary: reset
+            # zoom + pan to the Tk defaults (rotation was reset above).
+            self._reset_view_transform()
         self._refresh_preview_view()
+
+    def _live_auto_batch_token(self, payload: BackendPreviewPayload):
+        """Return a deduplicatable scientific-preview identity, or ``None``.
+
+        A ``(run_context_id, family, counter)`` tuple that changes exactly when
+        a *new displayed scientific preview* arrives and stays stable across
+        duplicate callbacks (repaints / resolution refreshes) for the same
+        preview.  Live auto is gated to an active run and derives the identity
+        from engine metadata only — the positive ``image_count`` (Drizzle
+        accepted-frame counter) or ``current_batch`` (Classic/Reproject batch
+        counter).  The ``PREV_SRC`` header selects only the *family* (Drizzle vs
+        batch); within the batch family it is deliberately *not* an identity
+        dimension, because ``refresh_preview`` re-renders every non-Drizzle
+        session through the SUM/W route (``PREV_SRC="SUM/W Accumulators"``)
+        even for a Reproject run, so a same-batch resolution refresh must stay
+        inert.  The GUI ``drizzle_group_spin`` widget is deliberately *not* a
+        freshness authority: every delivered scientific preview gets its own
+        identity, so a displayed preview N can never carry live-auto parameters
+        computed for a different identity.
+        """
+        if not self._running:
+            return None
+        identity = self._derive_preview_identity(payload)
+        if identity is None:
+            return None
+        family, counter = identity
+        return (self._run_context_id, family, counter)
+
+    def _payload_preview_source(self, payload: BackendPreviewPayload) -> str:
+        """Return the engine ``PREV_SRC`` label for a payload (``""`` if absent)."""
+        header = getattr(payload, "header", None)
+        try:
+            return str(header.get("PREV_SRC", "")) if header is not None else ""
+        except Exception:
+            return ""
+
+    def _derive_preview_identity(self, payload: BackendPreviewPayload):
+        """Derive the engine-authoritative scientific-preview identity.
+
+        Returns ``(family, counter)`` or ``None`` when the payload carries no
+        usable identity.  ``family`` is one of:
+
+        * ``"drizzle"`` — ``image_count`` (accepted-frame counter).  The
+          standard policy emits one preview per accepted frame and the
+          incremental policy one per group, so ``image_count`` is distinct for
+          every delivered preview.  The ``drizzle_group_spin`` widget cadence is
+          *not* consulted.
+        * ``"batch"``    — ``current_batch`` (``stacked_batches_count``), shared
+          by the Classic SUM/W and the legacy Reproject/coadd paths.
+
+        The ``PREV_SRC`` header selects only the *family* (Drizzle vs batch); it
+        is deliberately **not** an identity dimension within the batch family.
+        ``queue_manager._update_preview`` (legacy incremental reproject/coadd)
+        emits no ``PREV_SRC``, while ``queue_manager.refresh_preview`` routes
+        every non-Drizzle session through ``_update_preview_sum_w`` with
+        ``PREV_SRC="SUM/W Accumulators"`` — both key on the same
+        ``stacked_batches_count``.  Treating them as the same ``("batch", N)``
+        keeps a same-batch resolution refresh inert for dedupe and
+        ``raw_revision``.
+        """
+        preview_source = self._payload_preview_source(payload)
+        if _DRIZZLE_PREVIEW_SRC in preview_source:
+            family = "drizzle"
+            counter = _positive_int(getattr(payload, "image_count", None))
+        else:
+            family = "batch"
+            counter = _positive_int(getattr(payload, "current_batch", None))
+        if counter is None:
+            return None
+        return (family, counter)
+
+    def _derive_preview_mode(self, payload: BackendPreviewPayload) -> str:
+        """Return the truthful engine renderer route label for a payload.
+
+        ``"drizzle"`` (Drizzle Accumulator), ``"classic"`` (SUM/W Accumulators)
+        or ``"reproject"`` (legacy incremental-reprojection/coadd with no
+        ``PREV_SRC``).  This is a *route* observation for the witness only — it
+        is deliberately **not** part of the scientific-preview identity, because
+        ``refresh_preview`` re-renders every non-Drizzle session through the
+        SUM/W route regardless of the run's stacking mode (so a Reproject run's
+        resolution refresh truthfully carries ``"classic"`` while remaining the
+        same scientific batch).
+        """
+        preview_source = self._payload_preview_source(payload)
+        if _DRIZZLE_PREVIEW_SRC in preview_source:
+            return "drizzle"
+        if _SUMW_PREVIEW_SRC in preview_source:
+            return "classic"
+        return "reproject"
+
+    def _record_preview_identity(self, identity, mode) -> None:
+        """Record the scientific-preview identity of the displayed source.
+
+        ``identity`` is ``(family, counter)`` from
+        :meth:`_derive_preview_identity`, or ``None`` (no usable identity);
+        ``mode`` is the truthful route label from :meth:`_derive_preview_mode`.
+        The full identity ``(run_context_id, family, counter)`` is stored for
+        the witness, and ``_raw_revision`` advances exactly once per *new*
+        displayed scientific preview (a changed identity) — never on a duplicate
+        callback, an ordinary repaint, or a same-batch resolution refresh whose
+        carrier route (``PREV_SRC``) changed.  Display-only: no scientific state
+        is touched.
+        """
+        if identity is None:
+            self._preview_mode = None
+            self._preview_identity = None
+            self._displayed_identity = None
+            return
+        family, counter = identity
+        full = (self._run_context_id, family, counter)
+        self._preview_mode = mode
+        if full != self._preview_identity:
+            self._raw_revision += 1
+        self._preview_identity = full
+        self._displayed_identity = full
+
+    def _apply_live_auto_for_batch(self, payload: BackendPreviewPayload) -> bool:
+        """Apply each enabled live-auto operation once for a new batch.
+
+        Returns whether any operation ran.  The payload/scientific arrays are
+        read-only inputs; only Qt-owned controls and display buffers change.
+        """
+        token = self._live_auto_batch_token(payload)
+        if token is None or token == self._last_live_auto_batch_token:
+            return False
+        # Record the boundary even when both features are disabled.  Enabling a
+        # checkbox later must not retroactively process a duplicate callback.
+        self._last_live_auto_batch_token = token
+        ran = False
+        if self._live_auto_wb_enabled:
+            gains = self._compute_auto_wb_gains()
+            if gains is not None:
+                self._apply_wb_gains(gains, refresh=False)
+                self._live_auto_wb_count += 1
+                ran = True
+        if self._live_auto_stretch_enabled:
+            points = self._compute_auto_stretch_points()
+            if points is not None:
+                bp, wp = points
+                self.stretch_combo.blockSignals(True)
+                try:
+                    self.stretch_combo.setCurrentText("asinh")
+                finally:
+                    self.stretch_combo.blockSignals(False)
+                self._stretch = "asinh"
+                bp, wp = normalize_bp_wp(
+                    round(float(bp), 4), round(float(wp), 4)
+                )
+                self._write_bp_wp_state(bp, wp)
+                # Witness: record the BP/WP live auto just wrote so tests can
+                # compare live vs one-shot Auto Stretch on the same WB-only
+                # buffer within control quantization.
+                self._live_bp = self._black_point
+                self._live_wp = self._white_point
+                self._live_auto_stretch_count += 1
+                ran = True
+        return ran
+
+    def _reset_preview_analysis(self) -> None:
+        """Clear frozen anchors and the display-only float analysis buffers.
+
+        Called at run start, on a genuinely new initial-preview folder, on an
+        explicit preview clear, and on an invalid payload — never on ordinary
+        successive backend preview updates (anchors are immutable within one
+        run/context).  Display-only: it never touches the backend, science
+        accumulators, or the stored ``_preview_source`` QImage.
+        """
+        self._raw_linear = None
+        self._pristine_float = None
+        self._wb_only_float = None
+        self._wb_only_wb = None
+        self._anchor_lo = None
+        self._anchor_hi = None
+        # A fresh analysis context also drops the scientific-preview identity
+        # instrumentation (the displayed preview no longer exists).  The
+        # monotonic ``_raw_revision`` and the run-scoped live-auto target state
+        # are deliberately preserved here (reset only at run start).
+        self._preview_mode = None
+        self._preview_identity = None
+        self._displayed_identity = None
+        self._analysis_generation += 1
+        # A new analysis context invalidates any cached histogram model (the
+        # WB-only source is gone; the next refresh recomputes from scratch) and
+        # any in-flight/pending worker computation so a stale result cannot
+        # repopulate the cleared UI.
+        self._histogram_coordinator.invalidate()
+        self._histogram_model = None
+        self._histogram_model_revision = None
+        self._histogram_scheduled_revision = None
+        # Same for the legacy single-array histogram/stats cache.
+        self._legacy_hist_key = None
+        self._legacy_hist = None
+        self._legacy_hist_percentile = 1.0
+        self._legacy_hist_stats = None
+
+    def _ensure_wb_only_float(self):
+        """Return the cached WB-only float buffer, re-deriving it only when stale.
+
+        Re-derives from ``_pristine_float`` when there is no cached buffer yet
+        or the stored WB gains no longer match the current ``self._wb`` (a WB
+        change).  Each actual re-derivation bumps ``_wb_only_revision`` (the
+        histogram-model cache key).  Never mutates ``_pristine_float``.
+        """
+        if self._pristine_float is None:
+            self._wb_only_float = None
+            self._wb_only_wb = None
+            return None
+        if self._wb_only_float is not None and self._wb_only_wb == self._wb:
+            return self._wb_only_float
+        self._wb_only_float = apply_wb_float(self._pristine_float, self._wb)
+        self._wb_only_wb = self._wb
+        self._wb_only_revision += 1
+        return self._wb_only_float
+
+    def _ingest_option_a_preview(self, data):
+        """Ingest an Option-A payload into frozen-anchor display state.
+
+        Extracts an independent raw-linear copy via the accepted core, computes
+        p0.5/p99.5 anchors only on the first valid preview of the current
+        context, maps through the frozen anchors into the pristine pre-WB float
+        buffer, and returns that buffer as a copied ``QImage`` (or ``None`` when
+        the payload is unusable).  The input payload arrays are never mutated.
+        """
+        raw = extract_raw_linear(data)
+        if raw is None:
+            return None
+        if self._anchor_lo is None or self._anchor_hi is None:
+            self._anchor_lo, self._anchor_hi = compute_anchors(raw)
+        mapped = map_raw_linear(raw, self._anchor_lo, self._anchor_hi)
+        if mapped is None:
+            return None
+        self._raw_linear = raw
+        self._pristine_float = mapped
+        # New mapped source: the WB-only buffer is stale until re-derived.
+        self._wb_only_float = None
+        self._wb_only_wb = None
+        return render_preview_image(mapped)
 
     # ------------------------------------------------ initial preview (M12)
     def _try_show_first_input_image(self) -> None:
@@ -2665,6 +3192,11 @@ class MainWindow(QMainWindow):
         # the new one arrives (Tk parity).
         self._preview_detail = f"{self._tr('preview_loading')} {first}"
         self._render_preview_label()
+
+        # A genuinely new folder is a new frozen-anchor context: drop any
+        # anchors / float analysis buffers from a previous folder or run before
+        # the (async) load lands.  Redundant reloads were already skipped above.
+        self._reset_preview_analysis()
 
         bayer_pattern = self.settings_state.bayer_pattern or "GRBG"
         threading.Thread(
@@ -2731,6 +3263,7 @@ class MainWindow(QMainWindow):
         self._render_preview_label()
         self._preview_source = None
         self._preview_rotation = 0
+        self._reset_preview_analysis()
         self._reset_view_transform()
         self._refresh_preview_view()
 
@@ -2884,7 +3417,18 @@ class MainWindow(QMainWindow):
             self.controller.set_preview_downsample_factor(self._preview_res_factor)
 
     def _on_wb_changed(self, *_ignored) -> None:
-        """Update the white-balance gains and re-render the preview (display-only)."""
+        """Update the white-balance gains and re-render the preview (display-only).
+
+        A single-user WB control edit updates the authoritative ``_wb`` and
+        re-renders once.  When the edit arrives while :meth:`_apply_wb_gains`
+        is atomically writing several controls (Auto WB / WB Reset) the guard
+        suppresses the intermediate callback so only one refresh/job occurs.
+        """
+        if self._wb_sync_guard:
+            return
+        # Direct gain edit = explicit user intent.  It disables only live WB;
+        # live stretch remains independent.
+        self._set_live_auto_wb_enabled(False)
         self._wb = (
             self.wb_r_spin.value(),
             self.wb_g_spin.value(),
@@ -2892,11 +3436,73 @@ class MainWindow(QMainWindow):
         )
         self._refresh_preview_view()
 
+    def _apply_wb_gains(self, gains: tuple, *, refresh: bool = True) -> None:
+        """Apply the three WB gains atomically (Auto WB / WB Reset).
+
+        Writes all three slider/spin pairs and the authoritative ``_wb`` under
+        a re-entrancy guard so no intermediate callback/job fires, then triggers
+        exactly one preview refresh/histogram recompute.  When the effective
+        control values are unchanged (idempotent repeat / neutral reset) it
+        triggers zero recomputes.
+        """
+        old_wb = self._wb
+        self._wb_sync_guard = True
+        try:
+            self.wb_r_spin.setValue(gains[0])
+            self.wb_g_spin.setValue(gains[1])
+            self.wb_b_spin.setValue(gains[2])
+        finally:
+            self._wb_sync_guard = False
+        self._wb = (
+            self.wb_r_spin.value(),
+            self.wb_g_spin.value(),
+            self.wb_b_spin.value(),
+        )
+        if self._wb == old_wb or not refresh:
+            return
+        self._refresh_preview_view()
+
+    def _set_live_auto_wb_enabled(self, enabled: bool) -> None:
+        """Set/synchronize the independent Live Auto WB intent."""
+        enabled = bool(enabled)
+        self._live_auto_wb_enabled = enabled
+        for checkbox in (
+            getattr(self, "live_auto_wb_check", None),
+            getattr(
+                getattr(self, "_detached_histogram_window", None),
+                "live_auto_wb_check",
+                None,
+            ),
+        ):
+            if checkbox is not None and checkbox.isChecked() != enabled:
+                checkbox.blockSignals(True)
+                try:
+                    checkbox.setChecked(enabled)
+                finally:
+                    checkbox.blockSignals(False)
+
+    def _set_live_auto_stretch_enabled(self, enabled: bool) -> None:
+        """Set/synchronize the independent Live Auto Stretch intent."""
+        enabled = bool(enabled)
+        self._live_auto_stretch_enabled = enabled
+        for checkbox in (
+            getattr(self, "live_auto_stretch_check", None),
+            getattr(
+                getattr(self, "_detached_histogram_window", None),
+                "live_auto_stretch_check",
+                None,
+            ),
+        ):
+            if checkbox is not None and checkbox.isChecked() != enabled:
+                checkbox.blockSignals(True)
+                try:
+                    checkbox.setChecked(enabled)
+                finally:
+                    checkbox.blockSignals(False)
+
     def _on_wb_reset(self) -> None:
-        """Reset the three white-balance gains to their neutral values."""
-        self.wb_r_spin.setValue(1.0)
-        self.wb_g_spin.setValue(1.0)
-        self.wb_b_spin.setValue(1.0)
+        """Reset the three white-balance gains to their neutral values (atomic)."""
+        self._apply_wb_gains(DEFAULT_WB)
 
     def _on_stretch_changed(self, _index: int) -> None:
         """Update the display-stretch mode and re-render the preview (display-only)."""
@@ -2904,26 +3510,98 @@ class MainWindow(QMainWindow):
         self._refresh_preview_view()
 
     def _on_auto_wb(self) -> None:
-        """Compute auto white-balance gains from the display image (Tk parity).
+        """Compute auto white-balance gains (display-only).
 
-        The gains are derived from the stored display image (``_preview_source``,
-        the same image the other adjustments act on) via the pure-numpy
-        ``compute_auto_wb`` helper; they are written back to the WB controls,
-        whose change callbacks re-render the preview.
+        For an Option-A preview the gains come from the pristine *pre-WB*
+        mapped float buffer via ``compute_auto_wb_float`` (never from the
+        already-WB buffer, so repeated explicit calls are deterministic and
+        never move the frozen anchors).  Legacy single-array previews keep the
+        existing ``compute_auto_wb`` QImage path.  Gains are written back to
+        the WB controls atomically: when the gains actually change, all three
+        slider/spin pairs and ``_wb`` update with a single preview refresh /
+        histogram recompute; when they are unchanged (repeat AutoWB) zero
+        recomputes occur.
         """
-        if self._preview_source is None or self._preview_source.isNull():
-            return
-        r_gain, g_gain, b_gain = compute_auto_wb(self._preview_source)
-        self.wb_r_spin.setValue(round(float(r_gain), 3))
-        self.wb_g_spin.setValue(round(float(g_gain), 3))
-        self.wb_b_spin.setValue(round(float(b_gain), 3))
+        gains = self._compute_auto_wb_gains()
+        if gains is not None:
+            self._apply_wb_gains(gains)
 
-    def _on_stretch_params_changed(self, *_ignored) -> None:
-        """Update black/white/gamma and re-render the preview (display-only)."""
-        self._black_point = self.stretch_bp_spin.value()
-        self._white_point = self.stretch_wp_spin.value()
+    def _compute_auto_wb_gains(self):
+        """Return deterministic display-only AutoWB gains, or ``None``."""
+        if self._preview_source is None or self._preview_source.isNull():
+            return None
+        if self._pristine_float is not None:
+            r_gain, g_gain, b_gain = compute_auto_wb_float(self._pristine_float)
+        else:
+            r_gain, g_gain, b_gain = compute_auto_wb(self._preview_source)
+        return (
+            round(float(r_gain), 3),
+            round(float(g_gain), 3),
+            round(float(b_gain), 3),
+        )
+
+    def _on_stretch_bp_changed(self, *_ignored) -> None:
+        """Black-point control edited: normalize + re-render (display-only)."""
+        if not self._bp_wp_sync_guard:
+            self._set_live_auto_stretch_enabled(False)
+        self._apply_bp_wp_edit("bp")
+
+    def _on_stretch_wp_changed(self, *_ignored) -> None:
+        """White-point control edited: normalize + re-render (display-only)."""
+        if not self._bp_wp_sync_guard:
+            self._set_live_auto_stretch_enabled(False)
+        self._apply_bp_wp_edit("wp")
+
+    def _on_stretch_gamma_changed(self, *_ignored) -> None:
+        """Gamma control edited: re-render the preview (display-only)."""
         self._gamma = self.stretch_gamma_spin.value()
         self._refresh_preview_view()
+
+    def _apply_bp_wp_edit(self, driver: str) -> None:
+        """Normalize a single-endpoint BP/WP edit and sync every surface.
+
+        Reads the edited spin value, clamps it against the other (un-edited)
+        endpoint via :func:`preview_adjust.clamp_bp_wp_edit` so a crossing edit
+        deterministically clamps the edited endpoint (never the other), then
+        writes the authoritative pair into both controls, ``_black_point`` /
+        ``_white_point`` and the histogram handles in one pass.
+        """
+        if self._bp_wp_sync_guard:
+            return
+        value = (
+            self.stretch_bp_spin.value()
+            if driver == "bp"
+            else self.stretch_wp_spin.value()
+        )
+        other = self._white_point if driver == "bp" else self._black_point
+        bp, wp = clamp_bp_wp_edit(driver, value, other)
+        self._write_bp_wp_state(bp, wp)
+        self._refresh_preview_view()
+
+    def _set_bp_wp_pair(self, bp: float, wp: float) -> None:
+        """Set both BP/WP points atomically from a validated pair (histogram
+        drag mirror / auto stretch).  Normalizes + quantizes via the shared
+        seam, writes controls/state once and refreshes once."""
+        bp, wp = normalize_bp_wp(bp, wp)
+        self._write_bp_wp_state(bp, wp)
+        self._refresh_preview_view()
+
+    def _write_bp_wp_state(self, bp: float, wp: float) -> None:
+        """Write the authoritative BP/WP into both controls + state atomically.
+
+        Sets both spins under a re-entrancy guard (so their ``on_change``
+        handlers do not recurse), then reads back the spin values (already
+        quantized to the 3-decimal control resolution) as the single
+        authoritative ``_black_point`` / ``_white_point`` state.
+        """
+        self._bp_wp_sync_guard = True
+        try:
+            self.stretch_bp_spin.setValue(bp)
+            self.stretch_wp_spin.setValue(wp)
+        finally:
+            self._bp_wp_sync_guard = False
+        self._black_point = self.stretch_bp_spin.value()
+        self._white_point = self.stretch_wp_spin.value()
 
     def _on_stretch_reset(self) -> None:
         """Reset the stretch controls to the Tk defaults (Asinh, 0.01/0.99/1.0)."""
@@ -2933,36 +3611,148 @@ class MainWindow(QMainWindow):
         self.stretch_gamma_spin.setValue(DEFAULT_GAMMA)
 
     def _on_auto_stretch(self) -> None:
-        """Auto Stretch (Tk ``apply_auto_stretch`` parity, display-only).
+        """Auto Stretch (display-only).
 
-        Black/white points are computed from the *WB-only* derived image (the
-        same source the Tk ``image_data_wb`` uses), written into the black/
-        white slider+spin controls, and the stretch method is switched to
-        ``asinh`` (Asinh).  The change callbacks then refresh the display.
+        For an Option-A preview the black/white points come from
+        ``compute_auto_stretch_float`` on the cached WB-only float buffer (no
+        QImage min/max renormalization).  Legacy single-array previews keep the
+        existing ``compute_auto_stretch`` QImage path.  Both write the points
+        into the black/white slider+spin controls (atomically, so a stale
+        in-between white point never clamps the new black point) and switch the
+        stretch method to ``asinh``.  The frozen anchors / raw / pristine
+        buffers are never mutated.
         """
-        if self._preview_source is None or self._preview_source.isNull():
+        points = self._compute_auto_stretch_points()
+        if points is None:
             return
+        bp, wp = points
+        self.stretch_combo.setCurrentText("asinh")
+        self._set_bp_wp_pair(round(float(bp), 4), round(float(wp), 4))
+
+    def _compute_auto_stretch_points(self):
+        """Return deterministic display-only Auto Stretch BP/WP, or ``None``."""
+        if self._preview_source is None or self._preview_source.isNull():
+            return None
+        if self._pristine_float is not None:
+            wb_only = self._ensure_wb_only_float()
+            if wb_only is None:
+                return None
+            return compute_auto_stretch_float(wb_only)
         wb_only = apply_preview_wb(self._preview_source, wb=self._wb)
         if wb_only is None or wb_only.isNull():
-            return
-        bp, wp = compute_auto_stretch(wb_only)
-        self.stretch_combo.setCurrentText("asinh")
-        self.stretch_bp_spin.setValue(round(float(bp), 4))
-        self.stretch_wp_spin.setValue(round(float(wp), 4))
+            return None
+        return compute_auto_stretch(wb_only)
 
     def _on_hist_range_changed(self, bp: float, wp: float) -> None:
         """Mirror a histogram BP/WP drag into the stretch sliders (Tk
-        ``update_stretch_from_histogram``)."""
-        self.stretch_bp_spin.setValue(round(float(bp), 4))
-        self.stretch_wp_spin.setValue(round(float(wp), 4))
+        ``update_stretch_from_histogram``).  Routed through the shared BP/WP
+        normalization seam so the sliders/spins, authoritative state and
+        histogram handles always agree (quantized to one control resolution)."""
+        self._set_live_auto_stretch_enabled(False)
+        self._set_bp_wp_pair(bp, wp)
 
     def _on_hist_auto_zoom_toggled(self, checked: bool) -> None:
         """Toggle auto-zoom on the histogram (Tk ``auto_zoom_histogram_var``)."""
-        self.right_histogram_view.auto_zoom_enabled = bool(checked)
-        if checked:
-            self.right_histogram_view.zoom_histogram()
+        checked = bool(checked)
+        for checkbox in (
+            getattr(self, "auto_zoom_histo_check", None),
+            getattr(
+                getattr(self, "_detached_histogram_window", None),
+                "auto_zoom_check",
+                None,
+            ),
+        ):
+            if checkbox is not None and checkbox.isChecked() != checked:
+                checkbox.blockSignals(True)
+                try:
+                    checkbox.setChecked(checked)
+                finally:
+                    checkbox.blockSignals(False)
+        for view in self._histogram_views():
+            view.auto_zoom_enabled = checked
+            if checked:
+                view.zoom_histogram()
+            else:
+                view.reset_zoom()
+
+    def _histogram_views(self):
+        """Return all live presentation views (one worker/model owner)."""
+        views = [self.right_histogram_view]
+        detached = self._detached_histogram_window
+        if detached is not None:
+            views.append(detached.histogram_view)
+        return views
+
+    def _zoom_histogram(self, *_ignored) -> None:
+        for view in self._histogram_views():
+            view.zoom_histogram()
+
+    def _reset_histogram_view(self, *_ignored) -> None:
+        for view in self._histogram_views():
+            view.reset_histogram_view()
+
+    def _reset_histogram_zoom(self, *_ignored) -> None:
+        for view in self._histogram_views():
+            view.reset_zoom()
+
+    def _open_detached_histogram(self, *_ignored):
+        """Show the large histogram mirror without scheduling analysis."""
+        if self._detached_histogram_window is None:
+            dialog = DetachedHistogramWindow(self)
+            dialog.rangeChanged.connect(self._on_hist_range_changed)
+            dialog.autoZoomToggled.connect(self._on_hist_auto_zoom_toggled)
+            dialog.resetViewRequested.connect(self._reset_histogram_view)
+            dialog.zoomRequested.connect(self._zoom_histogram)
+            dialog.resetZoomRequested.connect(self._reset_histogram_zoom)
+            dialog.autoStretchRequested.connect(self._on_auto_stretch)
+            dialog.autoWbRequested.connect(self._on_auto_wb)
+            dialog.liveAutoStretchToggled.connect(
+                self._set_live_auto_stretch_enabled
+            )
+            dialog.liveAutoWbToggled.connect(self._set_live_auto_wb_enabled)
+            dialog.set_texts(self._tr)
+            self._detached_histogram_window = dialog
+        dialog = self._detached_histogram_window
+        self._sync_detached_histogram()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _sync_detached_histogram(self) -> None:
+        """Mirror cached model/state into the detached view with zero compute."""
+        dialog = self._detached_histogram_window
+        if dialog is None:
+            return
+        if self._pristine_float is not None:
+            dialog.set_model(self._histogram_model)
         else:
-            self.right_histogram_view.reset_zoom()
+            dialog.set_legacy_data(
+                self._legacy_hist, self._legacy_hist_percentile
+            )
+        dialog.histogram_view.set_range(self._black_point, self._white_point)
+        view_min, view_max = self.right_histogram_view.view_range
+        dialog.histogram_view.set_view_range(view_min, view_max)
+        dialog.histogram_view.auto_zoom_enabled = (
+            self.right_histogram_view.auto_zoom_enabled
+        )
+        dialog.auto_zoom_check.blockSignals(True)
+        dialog.live_auto_stretch_check.blockSignals(True)
+        dialog.live_auto_wb_check.blockSignals(True)
+        try:
+            dialog.auto_zoom_check.setChecked(
+                self.right_histogram_view.auto_zoom_enabled
+            )
+            dialog.live_auto_stretch_check.setChecked(
+                self._live_auto_stretch_enabled
+            )
+            dialog.live_auto_wb_check.setChecked(self._live_auto_wb_enabled)
+        finally:
+            dialog.auto_zoom_check.blockSignals(False)
+            dialog.live_auto_stretch_check.blockSignals(False)
+            dialog.live_auto_wb_check.blockSignals(False)
+        dialog.stats_label.setText(self.right_histogram_status.text())
+        dialog.set_histogram_actions_enabled(self.has_preview_image)
 
     def _on_bcs_changed(self, *_ignored) -> None:
         """Update brightness/contrast/saturation and re-render (display-only)."""
@@ -3017,7 +3807,7 @@ class MainWindow(QMainWindow):
             )
         self.preview_image_label.setPixmap(pixmap)
 
-    def _refresh_preview_view(self) -> None:
+    def _refresh_preview_view(self, *, histogram: bool = True) -> None:
         """Repaint the preview image + resolution label + histogram from the
         stored source.
 
@@ -3026,10 +3816,19 @@ class MainWindow(QMainWindow):
         saturation) is produced from it, then ``render_view`` applies the
         current rotation and zoom to that derived image, so zoom reapplies
         cleanly after rotation and the original display image stays pristine.
-        The display histogram is computed from a *WB-only* derived image (the
-        Tk ``image_data_wb`` source), so it tracks white balance but not the
-        stretch / gamma / brightness-contrast-saturation (M14 histogram-source
-        alignment).
+        The display histogram is computed from the *WB-only* analysis buffer
+        (the Tk ``image_data_wb`` source), so it tracks white balance but not
+        the stretch / gamma / brightness-contrast-saturation (M14 histogram-
+        source alignment).  For an Option-A preview the histogram model is
+        derived directly from the cached WB-only float buffer (no QImage
+        round-trip) and reused unchanged on every refresh that does not change
+        the WB-only source (BP/WP/stretch/gamma/BCS/zoom/pan/rotation).
+
+        ``histogram=False`` re-renders only the pixmap + resolution label and
+        skips the histogram refresh.  It is used for pure view-state
+        reconciliation (e.g. ``_on_run_started`` resetting to 0°/100%/centred)
+        where the unchanged source must not schedule any histogram recompute
+        decision/job.
         """
         source = self._preview_source
         if source is None or source.isNull():
@@ -3037,11 +3836,9 @@ class MainWindow(QMainWindow):
             self._set_view_controls_enabled(False)
             self._set_preview_controls_enabled(False)
             self.resolution_label.setText("—")
-            self._refresh_histogram(None)
+            if histogram:
+                self._refresh_histogram()
             return
-        # Histogram source: WB-only (Tk ``image_data_wb``), never the fully
-        # stretched display image.
-        wb_only = apply_preview_wb(source, wb=self._wb)
         adjusted = apply_preview_adjustments(
             source,
             wb=self._wb,
@@ -3076,7 +3873,8 @@ class MainWindow(QMainWindow):
             self._set_view_controls_enabled(False)
             self._set_preview_controls_enabled(False)
             self.resolution_label.setText("—")
-            self._refresh_histogram(None)
+            if histogram:
+                self._refresh_histogram()
             return
         self.preview_image_label.setPixmap(pixmap)
         self._set_view_controls_enabled(True)
@@ -3091,7 +3889,8 @@ class MainWindow(QMainWindow):
                 self._preview_zoom_factor,
             )
         self.resolution_label.setText(self._resolution_text(source, disp_w, disp_h))
-        self._refresh_histogram(wb_only)
+        if histogram:
+            self._refresh_histogram()
 
     def _resolution_text(self, source: QImage, disp_w: int, disp_h: int) -> str:
         """Build the resolution label: original → displayed size + zoom + rotation."""
@@ -3157,27 +3956,149 @@ class MainWindow(QMainWindow):
             "hist_reset_view_button",
             "hist_zoom_button",
             "hist_reset_button",
+            "hist_expand_button",
         ):
             widget = getattr(self, attr, None)
             if widget is not None:
                 widget.setEnabled(enabled)
+        if self._detached_histogram_window is not None:
+            self._detached_histogram_window.set_histogram_actions_enabled(enabled)
 
-    def _refresh_histogram(self, image: Optional[QImage]) -> None:
-        """Update the single persistent histogram surface from the WB-only image.
+    def _refresh_histogram(self) -> None:
+        """Sync the single persistent histogram surface + stats label.
 
         The right-panel ``HistogramView`` is the only live histogram surface
-        (the M10 duplicated tab histogram was removed in M14).  It is fed the
-        *WB-only* derived image (Tk ``image_data_wb`` source) and its BP/WP
-        lines are re-synced to the current stretch slider values.
+        (the M10 duplicated tab histogram was removed in M14).  For an
+        Option-A preview the authoritative float model is computed from the
+        cached WB-only float buffer (no QImage round-trip) and cached so that
+        BP/WP/stretch/gamma/BCS/zoom/pan/rotation refreshes only re-sync the
+        BP/WP markers without recomputing the histogram.  Legacy single-array
+        previews keep the historical QImage ``set_data`` path.  BP/WP lines are
+        re-synced to the current stretch slider values on every call.
         """
-        if image is None or image.isNull():
-            self.right_histogram_view.clear()
+        if self._pristine_float is not None:
+            self._refresh_histogram_float()
+        else:
+            self._refresh_histogram_legacy()
+
+    def _refresh_histogram_float(self) -> None:
+        """Option-A path: authoritative float model, computed off the GUI thread.
+
+        A request is scheduled through the bounded latest-wins coordinator only
+        when the WB-only analysis buffer was actually re-derived (a new raw
+        source or a WB change).  BP/WP/stretch/gamma/BCS/zoom/pan/rotation
+        refreshes only re-sync the BP/WP markers and re-render the status label
+        with zero compute.  The model is applied by :meth:`_on_histogram_result`
+        on the GUI thread once the worker finishes.
+        """
+        wb_only = self._ensure_wb_only_float()
+        if wb_only is None:
+            # No usable source: invalidate any in-flight/pending computation so
+            # a stale result can never repopulate the cleared surface.
+            self._histogram_coordinator.invalidate()
+            self._histogram_model = None
+            self._histogram_model_revision = None
+            self._histogram_scheduled_revision = None
+            for view in self._histogram_views():
+                view.clear()
             self._histogram_stats = None
             self._render_histogram_status()
             return
-        self.right_histogram_view.set_data(image)
-        self.right_histogram_view.set_range(self._black_point, self._white_point)
-        self._histogram_stats = compute_histogram_stats(image)
+        revision = self._wb_only_revision
+        if self._histogram_scheduled_revision != revision:
+            self._histogram_scheduled_revision = revision
+            # The WB-only buffer is replaced (never mutated) on re-derivation,
+            # so it is safe to hand to the worker by reference (read-only).
+            self._histogram_coordinator.schedule(
+                wb_only, source_token=(self._analysis_generation, revision)
+            )
+        # Re-sync the BP/WP markers immediately: they do not depend on the model
+        # and must stay in lockstep with the sliders on every refresh.
+        for view in self._histogram_views():
+            view.set_range(self._black_point, self._white_point)
+        self._render_histogram_status()
+
+    def _on_histogram_result(self, generation: int, result, source_token) -> None:
+        """GUI-thread slot: apply or discard a worker histogram result.
+
+        The coordinator already applied the generation check (latest-wins), so
+        this slot performs the *source* check as defence-in-depth: the result is
+        applied only when the analysis context and the WB-only revision it was
+        computed from still match the current state, and the window has not begun
+        shutting down.  Otherwise it is discarded so a stale result can never
+        repopulate a cleared/updated UI.  All widget/status updates happen here,
+        on the GUI thread.
+        """
+        if self._shutting_down or self._shutdown_called:
+            self._histogram_source_stale += 1
+            return
+        if not isinstance(source_token, tuple) or len(source_token) != 2:
+            self._histogram_source_stale += 1
+            return
+        context, revision = source_token
+        if context != self._analysis_generation or revision != self._wb_only_revision:
+            self._histogram_source_stale += 1
+            return
+        if result is None:
+            # Fail-closed: never fabricate a histogram for an unusable buffer.
+            self._histogram_model = None
+            self._histogram_model_revision = None
+            for view in self._histogram_views():
+                view.clear()
+            self._histogram_stats = None
+            self._render_histogram_status()
+            return
+        self._histogram_model = result
+        self._histogram_model_revision = revision
+        for view in self._histogram_views():
+            # Both surfaces receive the exact same authoritative model object.
+            view.set_model(result)
+            view.set_range(self._black_point, self._white_point)
+        self._histogram_stats = format_histogram_stats(result.get("stats"))
+        self._render_histogram_status()
+
+    def _refresh_histogram_legacy(self) -> None:
+        """Legacy single-array path: keep the historical QImage histogram.
+
+        The histogram + stats are cached by ``(id(source), _wb)`` so a new
+        source or a WB change recomputes exactly once, while BP/WP/stretch/
+        gamma/BCS/zoom/pan/rotation refreshes only re-sync the BP/WP markers
+        and re-render the status label with zero ``compute_histogram`` /
+        ``compute_histogram_stats`` calls.
+        """
+        source = self._preview_source
+        if source is None or source.isNull():
+            self._legacy_hist_key = None
+            self._legacy_hist = None
+            self._legacy_hist_percentile = 1.0
+            self._legacy_hist_stats = None
+            for view in self._histogram_views():
+                view.clear()
+            self._histogram_stats = None
+            self._render_histogram_status()
+            return
+        key = (id(source), self._wb)
+        if self._legacy_hist is None or self._legacy_hist_key != key:
+            wb_only = apply_preview_wb(source, wb=self._wb)
+            if wb_only is None or wb_only.isNull():
+                for view in self._histogram_views():
+                    view.clear()
+                self._histogram_stats = None
+                self._render_histogram_status()
+                return
+            histogram = compute_histogram(wb_only, bins=256)
+            percentile = compute_histogram_percentile(wb_only, 99.5)
+            self._legacy_hist = histogram
+            self._legacy_hist_percentile = 1.0 if percentile is None else percentile
+            self._legacy_hist_stats = compute_histogram_stats(wb_only)
+            self._legacy_hist_key = key
+            for view in self._histogram_views():
+                view.set_legacy_data(
+                    self._legacy_hist, self._legacy_hist_percentile
+                )
+        for view in self._histogram_views():
+            view.set_range(self._black_point, self._white_point)
+        self._histogram_stats = self._legacy_hist_stats
         self._render_histogram_status()
 
     def _render_histogram_status(self) -> None:
@@ -3187,6 +4108,8 @@ class MainWindow(QMainWindow):
         else:
             text = f"{self._tr('histogram_stats')} {self._histogram_stats}"
         self.right_histogram_status.setText(text)
+        if self._detached_histogram_window is not None:
+            self._detached_histogram_window.stats_label.setText(text)
 
     # ------------------------------------------------------ run-log helpers
     def _run_log_emit(self, event: str, **fields) -> None:
@@ -3201,34 +4124,17 @@ class MainWindow(QMainWindow):
         The known ``OUTPUT_STATE_INCOMPATIBLE`` code is mapped through the
         existing localization architecture; any unknown code falls back to a
         generic (English) refusal so generic false starts stay generic.  The
-        Drizzle case keeps the exact Drizzle EN/FR wording; mosaic/reproject
-        use mode-correct wording selected from ``semantic_data.mode``.
+        wording is mode-independent: it distinguishes resuming the previous
+        run from starting a new stack and never promises a specific mode is
+        resumable.
         """
         code = getattr(payload, "code", None)
         if code == "OUTPUT_STATE_INCOMPATIBLE":
             title = self._tr("startup_refusal_output_state_incompatible_title")
-            semantic_data = getattr(payload, "semantic_data", None) or {}
-            mode = semantic_data.get("mode")
-            if mode == "drizzle":
-                body = self._tr("startup_refusal_output_state_incompatible_body")
-            else:
-                mode_label = self._refusal_mode_label(mode)
-                body = self._tr(
-                    "startup_refusal_output_state_incompatible_body_generic"
-                ).format(mode=mode_label)
+            body = self._tr("startup_refusal_output_state_incompatible_body")
             return title, body
         detail = getattr(payload, "technical_detail", "") or str(code)
         return "Cannot start run", f"Cannot start run: {detail}"
-
-    def _refusal_mode_label(self, mode) -> str:
-        """Return a localized mode label for a non-plain startup refusal."""
-        key = {
-            "mosaic": "startup_refusal_mode_mosaic",
-            "reproject": "startup_refusal_mode_reproject",
-        }.get(mode)
-        if key:
-            return self._tr(key)
-        return self._tr("startup_refusal_mode_generic", default="processing")
 
     def _on_run_refused(self, payload) -> None:
         """Handle a structured startup refusal (non-blocking, localized)."""
@@ -3237,6 +4143,13 @@ class MainWindow(QMainWindow):
         self._update_run_state()
         self.statusBar().showMessage(title)
         self.log(body)
+        # The status bar and run log keep the engine's precise technical
+        # reason (never parsed, never the dialog's primary text); the owned
+        # Warning box presents only the localized actionable guidance.
+        detail = getattr(payload, "technical_detail", "") or ""
+        if detail:
+            self.log(detail)
+        self._show_error_box(title, body, severity="warning")
         self._mark_time_terminal("failed")
 
     def _on_run_finished(self) -> None:
@@ -3277,6 +4190,11 @@ class MainWindow(QMainWindow):
         self._update_run_state()
         self.statusBar().showMessage(f"Failed: {message}")
         self.log(f"Run failed: {message}")
+        self._show_error_box(
+            self._tr("error_box_run_failed_title", default="Run failed"),
+            message,
+            severity="critical",
+        )
         self._mark_time_terminal("failed")
         self._run_log_emit("CONTROLS_RESTORED")
         self._run_log_emit("GUI_IDLE")
@@ -3389,6 +4307,57 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
         self._summary_dialog = dialog
         dialog.show()
+
+    # --------------------------------------------- terminal-failure surface
+    def _show_error_box(
+        self, title: str, body: str, severity: str = "critical"
+    ) -> QMessageBox:
+        """Present ``title``/``body`` through one owned, non-blocking QMessageBox.
+
+        The box is a genuine :class:`QMessageBox` parented to the window and
+        retained on ``self._error_message_box`` so it can never be
+        garbage-collected.  A new failure **reuses the same box** (replacing the
+        previous title/body) so repeated signals never pile boxes up; the
+        previous content is deterministically replaced, not appended.
+
+        Presentation is non-blocking by construction: the box is shown via
+        :meth:`QWidget.show` with window modality (never ``exec()`` and never a
+        static ``QMessageBox.critical/warning/information``), so this method
+        returns immediately and never blocks the controller-owned terminal
+        cleanup that runs immediately after the failure/refusal signal handler
+        returns.
+
+        ``severity`` is ``"warning"`` or ``"critical"`` (default; anything else
+        is treated as critical).  The body is always rendered as **plain text**
+        so error detail is never interpreted as (possibly malformed) rich text.
+        """
+        box = self._error_message_box
+        if box is None:
+            box = QMessageBox(self)
+            box.setWindowModality(Qt.WindowModality.WindowModal)
+            self._error_message_box = box
+        box.setIcon(
+            QMessageBox.Icon.Warning
+            if severity == "warning"
+            else QMessageBox.Icon.Critical
+        )
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setWindowTitle(title)
+        box.setText(body)
+        self._error_box_count += 1
+        box.show()
+        box.raise_()
+        return box
+
+    @property
+    def error_message_box(self) -> Optional[QMessageBox]:
+        """The currently owned terminal-failure box (None when none shown)."""
+        return self._error_message_box
+
+    @property
+    def error_box_count(self) -> int:
+        """Number of times the owned failure box was presented (test seam)."""
+        return self._error_box_count
 
     def _update_run_state(self) -> None:
         self.start_button.setEnabled(not self._running)
@@ -3924,6 +4893,8 @@ class MainWindow(QMainWindow):
         self._render_preview_label()
         self._render_histogram_status()
         self._render_preview_res_button()
+        if self._detached_histogram_window is not None:
+            self._detached_histogram_window.set_texts(self._tr)
         if hasattr(self, "backend_notice_label"):
             self.backend_notice_label.setText(self._backend_notice_text())
 
@@ -3957,6 +4928,71 @@ class MainWindow(QMainWindow):
     def shutdown_called(self) -> bool:
         return self._shutdown_called
 
+    @property
+    def _histogram_compute_count(self) -> int:
+        """Option-A histogram recompute *decisions* (generations requested).
+
+        Each real WB/source revision schedules exactly one request; this mirrors
+        the bounded coordinator's ``requests_scheduled`` counter so the H1
+        recompute-trigger tests keep their single "compute count" seam while the
+        actual computation now runs off the GUI thread (and rapid revisions are
+        coalesced into ``jobs_started`` worker invocations).
+        """
+        return self._histogram_coordinator.requests_scheduled
+
+    @property
+    def live_auto_stretch_count(self) -> int:
+        """Per-run completed-batch Auto Stretch invocation count."""
+        return self._live_auto_stretch_count
+
+    @property
+    def live_auto_wb_count(self) -> int:
+        """Per-run completed-batch AutoWB invocation count."""
+        return self._live_auto_wb_count
+
+    # ---- ZSSS-OTPUX-STABLE-A instrumentation (read-only witness seams) ----
+    @property
+    def preview_mode(self):
+        """Truthful engine renderer route label (``classic``/``reproject``/``drizzle``).
+
+        A route observation of the last displayed preview's ``PREV_SRC`` header,
+        *not* a scientific-preview identity dimension (Classic and Reproject
+        share the ``"batch"`` identity family keyed by ``current_batch``).
+        """
+        return self._preview_mode
+
+    @property
+    def preview_identity(self):
+        """Full identity ``(run_context_id, family, counter)`` of the last
+        ingested scientific preview, or ``None``."""
+        return self._preview_identity
+
+    @property
+    def displayed_identity(self):
+        """Full identity ``(run_context_id, family, counter)`` of the currently
+        displayed scientific preview, or ``None``."""
+        return self._displayed_identity
+
+    @property
+    def raw_revision(self) -> int:
+        """Monotonic counter of new displayed scientific previews."""
+        return self._raw_revision
+
+    @property
+    def wb_revision(self) -> int:
+        """Monotonic counter of WB-only analysis-buffer re-derivations."""
+        return self._wb_only_revision
+
+    @property
+    def live_target_identity(self):
+        """Full identity last targeted by live auto, or ``None``."""
+        return self._last_live_auto_batch_token
+
+    @property
+    def live_bp_wp(self):
+        """BP/WP pair last written by live auto stretch, or ``(None, None)``."""
+        return (self._live_bp, self._live_wp)
+
     def shutdown(self, wait_ms: Optional[int] = None) -> bool:
         """Idempotent teardown hook.
 
@@ -3974,6 +5010,19 @@ class MainWindow(QMainWindow):
         """
         if wait_ms is None:
             wait_ms = self._shutdown_wait_ms
+        # Mark teardown as begun so an in-flight histogram result can never
+        # touch the UI during/after close (belt-and-suspenders on top of the
+        # coordinator's own invalidation + disconnect).
+        self._shutting_down = True
+        if self._detached_histogram_window is not None:
+            self._detached_histogram_window.hide()
+        # Close/hide any outstanding terminal-failure box so a normal window
+        # close never leaves a stale window-modal dialog behind.
+        if self._error_message_box is not None:
+            try:
+                self._error_message_box.close()
+            except Exception:
+                pass
         # Stop the ZeAnalyser reference-return watcher so a closing window never
         # leaves a live QTimer callback behind (no zombie timer; M25.5-A).
         self._analyzer_watch_timer.stop()
@@ -3986,8 +5035,10 @@ class MainWindow(QMainWindow):
                 self._boring_runner.cancel()
             except Exception:
                 pass
+        # Stop + join the bounded histogram worker (invalidates in-flight work).
+        histogram_stopped = self._histogram_coordinator.shutdown(wait_ms=wait_ms)
         shutdown_complete = self.controller.shutdown(wait_ms=wait_ms)
-        if shutdown_complete:
+        if shutdown_complete and histogram_stopped:
             self._shutdown_called = True
             self._running = False
             self._update_run_state()

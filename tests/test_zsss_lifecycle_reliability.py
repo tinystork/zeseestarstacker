@@ -35,6 +35,7 @@ import pytest
 from PySide6.QtCore import QObject, QThread, Slot
 from PySide6.QtWidgets import QApplication
 
+import seestar
 from seestar.gui_qt import (
     MainWindow,
     RunController,
@@ -267,7 +268,8 @@ def test_fresh_output_drizzle_accepted_creates_run_log(qapp, tmp_path):
     assert "RUN_STARTED" in text
     assert "RUN_METADATA" in text
     # Product version/codename is recorded in the run metadata (point 4).
-    assert "8.0.0" in text
+    expected_version = f"{seestar.__version__} {seestar.__codename__}"
+    assert f"product_version={expected_version}" in text
     assert "DRIZZLE_FINALIZATION_ENTERED" in text
     assert "FINAL_FITS_SAVE_ENTERED" in text
     assert "FINAL_PREVIEW_SAVE_ENTERED" in text
@@ -356,18 +358,18 @@ def test_qt_maps_known_refusal_to_localized_en_and_fr(qapp):
         assert _pump_until(qapp, lambda: win.is_running is False)
         # EN (default language) title/body surfaced via the status bar + log.
         assert win.statusBar().currentMessage() == (
-            "Output folder already contains processing data"
+            "Output folder already in use"
         )
         assert (
             "The selected output folder contains data from a previous "
-            "processing session" in win.log_view.toPlainText()
+            "processing run" in win.log_view.toPlainText()
         )
         # FR mapping is exercised directly through the same architecture.
         win._language = "fr"
         title, body = win._format_refusal(payload)
-        assert title == "Le dossier de sortie contient déjà un traitement"
+        assert title == "Dossier de sortie déjà utilisé"
         assert "traitement précédent" in body
-        assert "Drizzle" in body
+        assert "Drizzle" not in body  # wording is mode-independent
         # A refused run never opened a run log (never touched the output folder).
         assert win.controller.run_log is None
     finally:
@@ -385,8 +387,8 @@ def test_generic_false_start_stays_generic(qapp):
         win.shutdown()
 
 
-def test_qt_maps_non_drizzle_refusal_to_mode_correct_wording(qapp):
-    """mosaic/reproject refusals must not falsely claim "Drizzle" (point 5)."""
+def test_qt_refusal_wording_is_mode_independent_for_mosaic(qapp):
+    """The refusal wording is mode-independent: no mode label at all (point 5)."""
     payload = StartupRefusalPayload(
         code=CODE_OUTPUT_STATE_INCOMPATIBLE,
         technical_detail="resume limited to plain classic SUM/W",
@@ -397,22 +399,25 @@ def test_qt_maps_non_drizzle_refusal_to_mode_correct_wording(qapp):
     try:
         win.start_button.click()
         assert _pump_until(qapp, lambda: win.is_running is False)
-        # EN body uses "mosaic", never "Drizzle".
+        # EN body is the standard mode-independent wording: never a mode label.
         en_text = win.log_view.toPlainText()
-        assert "mosaic" in en_text
+        assert "previous processing run" in en_text
+        assert "mosaic" not in en_text
         assert "Drizzle" not in en_text
 
         # FR mapping through the same architecture.
         win._language = "fr"
         title, body = win._format_refusal(payload)
-        assert title == "Le dossier de sortie contient déjà un traitement"
-        assert "mosaïque" in body
+        assert title == "Dossier de sortie déjà utilisé"
+        assert "traitement précédent" in body
+        assert "mosaïque" not in body
         assert "Drizzle" not in body
     finally:
         win.shutdown()
 
 
-def test_reproject_refusal_uses_reproject_wording(qapp):
+def test_refusal_wording_is_mode_independent_for_reproject(qapp):
+    """reproject refusals use the same mode-independent wording (point 5)."""
     payload = StartupRefusalPayload(
         code=CODE_OUTPUT_STATE_INCOMPATIBLE,
         technical_detail="resume limited to plain classic SUM/W",
@@ -423,11 +428,13 @@ def test_reproject_refusal_uses_reproject_wording(qapp):
     try:
         win._language = "en"
         title, body = win._format_refusal(payload)
-        assert "reproject" in body
+        assert title == "Output folder already in use"
+        assert "reproject" not in body
         assert "Drizzle" not in body
         win._language = "fr"
         title, body = win._format_refusal(payload)
-        assert "reprojection" in body
+        assert title == "Dossier de sortie déjà utilisé"
+        assert "reprojection" not in body
         assert "Drizzle" not in body
     finally:
         win.shutdown()

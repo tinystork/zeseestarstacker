@@ -19,13 +19,15 @@ def _read_version_from_init() -> str:
     return m.group(1)
 
 
-def test_version_is_pep440_8_0_0():
+def test_version_is_valid_pep440():
     from packaging.version import Version
 
     v = _read_version_from_init()
-    assert v == "8.0.0"
     # Raises if the version is not valid PEP 440.
     Version(v)
+    # Exact source-derived check: the declared string is already in canonical
+    # PEP 440 form (no normalization drift), not merely non-empty.
+    assert Version(v).public == v
 
 
 def test_pyproject_declares_version_and_entry_point():

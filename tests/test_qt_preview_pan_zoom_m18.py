@@ -11,7 +11,7 @@ Offscreen tests for the M18 lot:
 * the ``zoom_combo`` presets interact with wheel zoom per the documented rule
   (presets set the factor + recentre; wheel zoom sets a continuous factor that
   may fall outside the presets and shows a blank combo),
-* pan/zoom reset on a new preview image and on "Zoom Fit",
+* pan/zoom persist across a new preview image (STABLE-B) and reset on "Zoom Fit",
 * the numeric zoom label is language-neutral (no new FR/EN keys required), and
 * the engine-coupled absence assertions hold (no engine/Tk import paths).
 
@@ -278,24 +278,25 @@ def test_wheel_zoom_exits_fit_and_continues_from_fit_scale(window):
 
 
 # --------------------------------------------------------------------------
-# (4) reset semantics: new preview image + Zoom Fit
+# (4) view-state semantics: Zoom Fit recentre + new-preview persistence
 # --------------------------------------------------------------------------
-def test_pan_zoom_resets_on_new_preview_image(window):
+def test_pan_zoom_preserved_on_new_preview_image(window):
     source_a = _load(window, name="a")
     cx = window.preview_image_label.width() / 2.0
     cy = window.preview_image_label.height() / 2.0
     window._on_wheel_zoom(1, cx, cy)
     window._on_pan_delta(20.0, 20.0)
-    assert window._preview_zoom_factor != 1.0
+    factor = window._preview_zoom_factor
+    assert factor != 1.0
     assert window._view_offset_x == 20.0
 
-    # A new preview image resets zoom + pan to the defaults.
+    # STABLE-B: a valid successive preview preserves zoom + pan (content
+    # freshness and view state are independent).
     source_b = _load(window, width=80, height=40, name="b")
     assert source_b is not source_a
-    assert window._preview_zoom_factor == 1.0
-    assert window._view_offset_x == 0.0
-    assert window._view_offset_y == 0.0
-    assert window.zoom_combo.currentText() == "100%"
+    assert window._preview_zoom_factor == factor
+    assert window._view_offset_x == 20.0
+    assert window._view_offset_y == 20.0
 
 
 def test_zoom_fit_resets_pan(window):

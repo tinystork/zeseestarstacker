@@ -126,6 +126,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "wb_blue": {"en": "Blue", "fr": "Bleu"},
     "wb_reset": {"en": "Reset", "fr": "Réinitialiser"},
     "auto_wb": {"en": "Auto WB", "fr": "Balance auto"},
+    "live_auto_wb": {"en": "Live Auto WB", "fr": "Balance auto en direct"},
     "stretch_group": {"en": "Stretch", "fr": "Étirement"},
     "stretch_label": {"en": "Stretch:", "fr": "Étirement :"},
     "stretch_black": {"en": "Black point", "fr": "Point noir"},
@@ -133,6 +134,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "stretch_gamma": {"en": "Gamma", "fr": "Gamma"},
     "stretch_reset": {"en": "Reset Stretch", "fr": "Réinitialiser l'étirement"},
     "auto_stretch": {"en": "Auto Stretch", "fr": "Étirement auto"},
+    "live_auto_stretch": {
+        "en": "Live Auto Stretch",
+        "fr": "Étirement auto en direct",
+    },
     "bcs_group": {"en": "Image Adjustments", "fr": "Ajustements d'image"},
     "brightness": {"en": "Brightness", "fr": "Luminosité"},
     "contrast": {"en": "Contrast", "fr": "Contraste"},
@@ -143,6 +148,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "histo_auto_zoom": {"en": "Auto zoom histogram", "fr": "Zoom auto histogramme"},
     "histo_reset": {"en": "Reset Histogram", "fr": "Réinitialiser l'histogramme"},
     "histo_zoom": {"en": "Zoom Histogram", "fr": "Zoom histogramme"},
+    "histo_expand": {"en": "Expand", "fr": "Agrandir"},
+    "histogram_window_title": {
+        "en": "Live Histogram",
+        "fr": "Histogramme en direct",
+    },
+    "close": {"en": "Close", "fr": "Fermer"},
     # Initial preview auto-load states (M12): auto-load first FITS.
     "preview_no_input_folder": {
         "en": "Input folder not found or not set",
@@ -383,44 +394,46 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "summary_status_success": {"en": "SUCCESS", "fr": "SUCCÈS"},
     "summary_status_empty": {"en": "EMPTY/NO OUTPUT", "fr": "VIDE/AUCUNE SORTIE"},
     # ZSSS-LIFECYCLE-01: structured startup refusal for the known
-    # OUTPUT_STATE_INCOMPATIBLE code (existing processing/resume artifacts in a
-    # non-plain Drizzle/mosaic/reproject run).  Mapped by stable code, never by
-    # parsing progress/log strings.
+    # OUTPUT_STATE_INCOMPATIBLE code (the output folder holds previous
+    # processing/resume state that this run cannot resume).  Mapped by stable
+    # code, never by parsing progress/log strings.  The wording is
+    # mode-independent: it distinguishes resuming the previous run from
+    # starting a new stack and never says the folder cannot be reused.
     "startup_refusal_output_state_incompatible_title": {
-        "en": "Output folder already contains processing data",
-        "fr": "Le dossier de sortie contient déjà un traitement",
+        "en": "Output folder already in use",
+        "fr": "Dossier de sortie déjà utilisé",
     },
     "startup_refusal_output_state_incompatible_body": {
         "en": (
             "The selected output folder contains data from a previous "
-            "processing session and cannot be reused for this Drizzle run. "
-            "Please select a new output folder."
+            "processing run.\n\n"
+            "If you want to resume that run, make sure the selected "
+            "processing mode supports resume.\n\n"
+            "If you want to start a new stack, select a new or empty "
+            "output folder."
         ),
         "fr": (
-            "Le dossier de sortie sélectionné contient les données d'un "
-            "traitement précédent et ne peut pas être réutilisé pour ce "
-            "traitement Drizzle. Veuillez sélectionner un nouveau dossier "
-            "de sortie."
+            "Le dossier de sortie sélectionné contient les données d’un "
+            "traitement précédent.\n\n"
+            "Si vous souhaitez reprendre ce traitement, vérifiez que le "
+            "mode sélectionné est compatible avec la reprise.\n\n"
+            "Si vous souhaitez démarrer un nouveau stack, sélectionnez "
+            "un nouveau dossier de sortie ou un dossier vide."
         ),
     },
-    # Mode-correct wording for non-Drizzle refusals (mosaic / reproject): the
-    # generic body takes a localized ``{mode}`` label instead of falsely
-    # claiming "Drizzle".
-    "startup_refusal_output_state_incompatible_body_generic": {
-        "en": (
-            "The selected output folder contains data from a previous "
-            "processing session and cannot be reused for this {mode} run. "
-            "Please select a new output folder."
-        ),
-        "fr": (
-            "Le dossier de sortie sélectionné contient les données d'un "
-            "traitement précédent et ne peut pas être réutilisé pour ce "
-            "traitement {mode}. Veuillez sélectionner un nouveau dossier "
-            "de sortie."
-        ),
+    # Terminal-failure QMessageBox titles (ZSSS-OTPUX-STABLE-C).  The dialog is
+    # additive to the truthful status-bar/log text; the title is the only new
+    # visible chrome, so it localizes like every other visible string.  The
+    # body always carries the raw (plain-text) failure detail.
+    "error_box_run_failed_title": {"en": "Run failed", "fr": "Échec de l'exécution"},
+    "error_box_boring_failed_title": {
+        "en": "Boring stack failed",
+        "fr": "Échec de l'empilement Boring",
     },
-    "startup_refusal_mode_mosaic": {"en": "mosaic", "fr": "mosaïque"},
-    "startup_refusal_mode_reproject": {"en": "reproject", "fr": "reprojection"},
+    "error_box_preflight_title": {
+        "en": "Cannot start run",
+        "fr": "Impossible de démarrer",
+    },
 }
 
 

@@ -29,6 +29,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+import seestar
 from seestar.gui_qt import MainWindow, RunStatus, create_application
 from seestar.gui_qt.backend_runner import (
     BackendRunResult,
@@ -612,7 +613,10 @@ def test_startup_witness_resolves_real_backend_offscreen():
     )
     out = proc.stdout
     assert "ZSSS_QT_STARTUP_WITNESS_TITLE=" in out
-    assert "ZSSS_QT_STARTUP_WITNESS_VERSION='8.0.0 Phoenix consedit'" in out
+    # Exact source-derived product version (subprocess reads the same
+    # seestar/__init__.py via cwd=ROOT, so this matches the in-process value).
+    expected_version = f"{seestar.__version__} {seestar.__codename__}"
+    assert f"ZSSS_QT_STARTUP_WITNESS_VERSION={expected_version!r}" in out
     assert "ZSSS_QT_STARTUP_WITNESS_BACKEND_MODE='seestar'" in out
     assert "ZSSS_QT_STARTUP_WITNESS_BACKEND_CLASS=SeestarQueuedStackerBackend" in out
     assert "ZSSS_QT_STARTUP_WITNESS_ICON=present" in out

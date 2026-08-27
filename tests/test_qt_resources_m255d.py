@@ -23,6 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+import seestar
 import seestar.gui_qt.main_window as main_window
 from seestar.gui_qt import (
     PRODUCT_TITLE,
@@ -115,15 +116,20 @@ def test_empty_preview_missing_resource_keeps_old_behavior(qapp, monkeypatch):
 # --------------------------------------------------------------------------
 # Real product title (Tk byte-identical)
 # --------------------------------------------------------------------------
+def _expected_product_version() -> str:
+    """Authoritative product version string, derived from the package source."""
+    return f"{seestar.__version__} {seestar.__codename__}"
+
+
 def test_product_version_from_source():
-    assert product_version() == "8.0.0 Phoenix consedit"
+    assert product_version() == _expected_product_version()
 
 
 def test_default_title_matches_tk_exactly():
     # Tk: f"{self.tr('title')}  –  {self.app_version}" where tr('title') is
-    # "Seestar Stacker" and app_version is "8.0.0 Phoenix consedit"; separator
-    # is two spaces, EN DASH (U+2013), two spaces.
-    expected = "Seestar Stacker  \u2013  8.0.0 Phoenix consedit"
+    # "Seestar Stacker" and app_version is "<__version__> <__codename__>";
+    # separator is two spaces, EN DASH (U+2013), two spaces.
+    expected = f"Seestar Stacker  \u2013  {_expected_product_version()}"
     assert default_window_title() == expected
     assert PRODUCT_TITLE == "Seestar Stacker"
 
@@ -132,8 +138,10 @@ def test_bare_main_window_title_includes_version(qapp):
     win = MainWindow()
     try:
         assert win.windowTitle() == default_window_title()
-        assert win.windowTitle() == "Seestar Stacker  \u2013  8.0.0 Phoenix consedit"
-        assert "8.0.0" in win.windowTitle()
+        assert (
+            win.windowTitle() == f"Seestar Stacker  \u2013  {_expected_product_version()}"
+        )
+        assert seestar.__version__ in win.windowTitle()
     finally:
         win.shutdown()
 
