@@ -36,6 +36,16 @@ Design goals
 
   ``.cfg`` extension, UTF-8, atomic write to an explicit caller path only.
 
+* **Two explicit fingerprint domains.** :func:`classic_fingerprint` reproduces
+  the legacy manifest-v1 engine hash
+  (``SeestarQueuedStacker._scientific_fingerprint``) byte-for-byte — every
+  legacy fingerprint attribute is present, ``None`` where unavailable, keyed by
+  the exact legacy attribute name with the documented percent->decimal
+  transform.  :func:`drizzle_fingerprint` is the effective-contract science
+  hash for the drizzle deposition path: it requires every effective field
+  (fail closed, never a partial payload) and embeds a stable domain token so
+  the two modes can never collide.  There is no implicit classic fallback.
+
 * **Secrets never serialise.** ``astrometry_api_key`` and any password/token/
   credential-like key are classified *unsafe* by the legacy migration and are
   never written to, fingerprinted from, or digested from.  Diagnostics may name
@@ -56,7 +66,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -64,6 +73,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 __all__ = [
     "SCHEMA_VERSION",
     "Section",
+    "FingerprintDomain",
     "LegacyClass",
     "FieldDef",
     "FIELD_DEFS",
@@ -76,21 +86,27 @@ __all__ = [
     "ConfigError",
     "ValidationError",
     "AmbiguousLegacyError",
+    "UnsafeConfigError",
     "UnsafeLegacyError",
     "collect_from_settings",
-    "collect_from_flat",
     "apply_to_settings",
     "map_to_backend",
     "scientific_fingerprint",
+    "classic_fingerprint",
+    "drizzle_fingerprint",
     "full_digest",
     "canonical_bytes",
     "diff_configs",
     "DiffResult",
     "write_cfg",
+    "read_cfg",
+    "ReadReport",
     "parse_legacy_cfg",
     "migrate_legacy",
     "LegacyMigrationResult",
     "classic_fingerprint_names",
+    "fingerprint_field_defs",
+    "required_fingerprint_names",
 ]
 
 
@@ -108,6 +124,23 @@ class Section:
     TOP = "__top__"
 
     ALL = (SCIENTIFIC, EXECUTION, PROVENANCE)
+
+
+class FingerprintDomain:
+    """Explicit scientific-fingerprint domains (mode separation).
+
+    The scientific fingerprint is always computed for one explicit domain;
+    there is no implicit classic fallback.  ``CLASSIC_SUMW`` reproduces the
+    legacy manifest-v1 engine hash
+    (``SeestarQueuedStacker._scientific_fingerprint``) byte-for-byte.
+    ``DRIZZLE`` is the effective-contract science hash for the drizzle
+    deposition path.
+    """
+
+    CLASSIC_SUMW = "classic_sumw"
+    DRIZZLE = "drizzle"
+
+    ALL = (CLASSIC_SUMW, DRIZZLE)
 
 
 class LegacyClass:
@@ -135,7 +168,11 @@ class AmbiguousLegacyError(ConfigError):
     """Two legacy keys map to one resume-critical field with conflicting values."""
 
 
-class UnsafeLegacyError(ConfigError):
+class UnsafeConfigError(ConfigError):
+    """A secret/credential-like key was found where it must never appear."""
+
+
+class UnsafeLegacyError(UnsafeConfigError):
     """A resume-critical field received a secret/unsafe value."""
 
 
@@ -155,6 +192,10 @@ KIND_STR_OR_NONE = "str_or_none"
 KIND_WINSOR = "winsor_limits"   # "0.05,0.05" | (0.05, 0.05) -> [lo, hi]
 KIND_LIST = "list"              # list of JSON-safe scalars/strings
 KIND_DICT = "dict"              # nested JSON object
+
+# Legacy fingerprint value transforms (applied only when building the
+# classic v1-compatible payload; canonical serialisation is never touched).
+TRANSFORM_PERCENT_TO_DECIMAL = "percent_to_decimal"
 
 # Presence: a field is serialised whenever it has a value; ``presence`` governs
 # *where* a value is expected to originate.
@@ -190,9 +231,20 @@ class FieldDef:
         derived / GUI-only fields.
     restore_eligible:
         Whether the value may be written back to a settings/UI state.
-    fingerprint:
-        Whether this field participates in the classic resume-critical
-        scientific fingerprint (i.e. changing it invalidates a SUM/W checkpoint).
+    fingerprint_domains:
+        The explicit fingerprint domains this field participates in (subset of
+        :class:`FingerprintDomain.ALL`).  Empty means "never fingerprinted".
+        A field may belong to several domains (e.g. a Bayer/weight field shared
+        by the classic SUM/W and drizzle contracts).
+    legacy_fingerprint_key:
+        Exact legacy engine attribute name used in the classic v1-compatible
+        payload when it differs from the canonical ``name`` (e.g.
+        ``master_tile_crop_percent`` -> ``master_tile_crop_percent_decimal``).
+        ``None`` means "same as ``name``".
+    legacy_fingerprint_transform:
+        Optional value transform applied when building the classic
+        v1-compatible payload (e.g. ``percent_to_decimal``).  ``None`` means
+        "no transform".
     presence:
         One of the ``PRESENCE_*`` constants.
     derived_from:
@@ -213,7 +265,9 @@ class FieldDef:
     backend_name: Optional[str] = None
     backend_mapped: bool = True
     restore_eligible: bool = True
-    fingerprint: bool = False
+    fingerprint_domains: Tuple[str, ...] = ()
+    legacy_fingerprint_key: Optional[str] = None
+    legacy_fingerprint_transform: Optional[str] = None
     presence: str = PRESENCE_ALWAYS
     derived_from: Optional[str] = None
     legacy_aliases: Tuple[str, ...] = ()
@@ -228,7 +282,9 @@ def _f(
     backend: Optional[str] = None,
     backend_mapped: Optional[bool] = None,
     restore: bool = True,
-    fp: bool = False,
+    fp: Tuple[str, ...] = (),
+    legacy_fp_key: Optional[str] = None,
+    legacy_fp_transform: Optional[str] = None,
     presence: str = PRESENCE_ALWAYS,
     derived: Optional[str] = None,
     legacy: Tuple[str, ...] = (),
@@ -248,12 +304,20 @@ def _f(
         backend_name=backend,
         backend_mapped=backend_mapped,
         restore_eligible=restore,
-        fingerprint=fp,
+        fingerprint_domains=fp,
+        legacy_fingerprint_key=legacy_fp_key,
+        legacy_fingerprint_transform=legacy_fp_transform,
         presence=presence,
         derived_from=derived,
         legacy_aliases=legacy,
         doc=doc,
     )
+
+
+# Fingerprint-domain tuples used throughout the field table.
+_FP_CLASSIC = (FingerprintDomain.CLASSIC_SUMW,)
+_FP_BOTH = (FingerprintDomain.CLASSIC_SUMW, FingerprintDomain.DRIZZLE)
+_FP_DRIZZLE = (FingerprintDomain.DRIZZLE,)
 
 
 # The canonical field table.  Order is documentation order, not serialisation
@@ -263,67 +327,76 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("product_version", Section.TOP, KIND_STR, legacy=("version",),
        doc="Product display version recorded in the legacy 'version' key."),
 
-    # --- scientific: stacking / rejection family (fingerprint) ---
+    # --- scientific: stacking / rejection family (classic fingerprint) ---
     _f("stacking_mode", Section.SCIENTIFIC, KIND_STR, qt="stacking_mode",
-       legacy=("stacking_mode", "stack_method", "stack_reject_algo"), fp=True,
+       legacy=("stacking_mode", "stack_method", "stack_reject_algo"), fp=_FP_CLASSIC,
        doc="Rejection/stacking method; legacy 'stack_method'/'stack_reject_algo' "
            "spell the same value with '_' instead of '-'."),
-    _f("kappa", Section.SCIENTIFIC, KIND_FLOAT, qt="kappa", fp=True),
-    _f("stack_kappa_low", Section.SCIENTIFIC, KIND_FLOAT, qt="stack_kappa_low", fp=True),
-    _f("stack_kappa_high", Section.SCIENTIFIC, KIND_FLOAT, qt="stack_kappa_high", fp=True),
+    _f("kappa", Section.SCIENTIFIC, KIND_FLOAT, qt="kappa", fp=_FP_CLASSIC),
+    _f("stack_kappa_low", Section.SCIENTIFIC, KIND_FLOAT, qt="stack_kappa_low",
+       fp=_FP_CLASSIC),
+    _f("stack_kappa_high", Section.SCIENTIFIC, KIND_FLOAT, qt="stack_kappa_high",
+       fp=_FP_CLASSIC),
     _f("winsor_limits", Section.SCIENTIFIC, KIND_WINSOR, qt="stack_winsor_limits",
-       backend="winsor_limits", fp=True, legacy=("stack_winsor_limits",),
+       backend="winsor_limits", fp=_FP_CLASSIC, legacy=("stack_winsor_limits",),
        doc="Winsorised-clip limits; canonical form [lo, hi] floats."),
 
-    # --- scientific: normalisation / weighting (fingerprint) ---
+    # --- scientific: normalisation / weighting (classic + drizzle fingerprint) ---
     _f("normalize_method", Section.SCIENTIFIC, KIND_STR, qt="stack_norm_method",
-       fp=True, legacy=("stack_norm_method",)),
+       fp=_FP_CLASSIC, legacy=("stack_norm_method",)),
     _f("weighting_method", Section.SCIENTIFIC, KIND_STR, qt="stack_weight_method",
-       fp=True, legacy=("stack_weight_method",)),
+       fp=_FP_BOTH, legacy=("stack_weight_method",)),
     _f("use_quality_weighting", Section.SCIENTIFIC, KIND_BOOL,
-       qt="use_quality_weighting", fp=True),
-    _f("weight_by_snr", Section.SCIENTIFIC, KIND_BOOL, qt="weight_by_snr", fp=True),
-    _f("weight_by_stars", Section.SCIENTIFIC, KIND_BOOL, qt="weight_by_stars", fp=True),
+       qt="use_quality_weighting", fp=_FP_BOTH),
+    _f("weight_by_snr", Section.SCIENTIFIC, KIND_BOOL, qt="weight_by_snr",
+       fp=_FP_BOTH),
+    _f("weight_by_stars", Section.SCIENTIFIC, KIND_BOOL, qt="weight_by_stars",
+       fp=_FP_BOTH),
     _f("snr_exponent", Section.SCIENTIFIC, KIND_FLOAT, qt="snr_exponent",
-       backend="snr_exp", fp=True),
+       backend="snr_exp", fp=_FP_BOTH),
     _f("stars_exponent", Section.SCIENTIFIC, KIND_FLOAT, qt="stars_exponent",
-       backend="stars_exp", fp=True),
+       backend="stars_exp", fp=_FP_BOTH),
     _f("min_weight", Section.SCIENTIFIC, KIND_FLOAT, qt="min_weight",
-       backend="min_w", fp=True),
+       backend="min_w", fp=_FP_BOTH),
 
-    # --- scientific: hot-pixel / debayer (fingerprint) ---
+    # --- scientific: hot-pixel / debayer (classic + drizzle fingerprint) ---
     _f("correct_hot_pixels", Section.SCIENTIFIC, KIND_BOOL,
-       qt="correct_hot_pixels", fp=True),
+       qt="correct_hot_pixels", fp=_FP_BOTH),
     _f("hot_pixel_threshold", Section.SCIENTIFIC, KIND_FLOAT,
-       qt="hot_pixel_threshold", fp=True),
+       qt="hot_pixel_threshold", fp=_FP_BOTH),
     _f("neighborhood_size", Section.SCIENTIFIC, KIND_INT,
-       qt="neighborhood_size", fp=True),
-    _f("bayer_pattern", Section.SCIENTIFIC, KIND_STR, qt="bayer_pattern", fp=True),
+       qt="neighborhood_size", fp=_FP_BOTH),
+    _f("bayer_pattern", Section.SCIENTIFIC, KIND_STR, qt="bayer_pattern",
+       fp=_FP_BOTH),
 
-    # --- scientific: batch decomposition (fingerprint) ---
-    _f("batch_size", Section.SCIENTIFIC, KIND_INT, qt="batch_size", fp=True),
+    # --- scientific: batch decomposition (classic fingerprint) ---
+    _f("batch_size", Section.SCIENTIFIC, KIND_INT, qt="batch_size", fp=_FP_CLASSIC),
     _f("chunk_size", Section.SCIENTIFIC, KIND_INT_OR_NONE, backend="chunk_size",
-       backend_mapped=True, fp=True, presence=PRESENCE_OPTIONAL,
+       backend_mapped=True, fp=_FP_CLASSIC, presence=PRESENCE_OPTIONAL,
        doc="Auto chunk size (batch_size==1 non-CSV path); runtime-derived."),
 
-    # --- scientific: feathering / crop applied before accumulation (fingerprint) ---
+    # --- scientific: feathering / crop applied before accumulation (classic) ---
     _f("apply_feathering", Section.SCIENTIFIC, KIND_BOOL, qt="apply_feathering",
-       fp=True),
+       fp=_FP_CLASSIC),
     _f("apply_batch_feathering", Section.SCIENTIFIC, KIND_BOOL,
-       qt="apply_batch_feathering", fp=True),
-    _f("feather_blur_px", Section.SCIENTIFIC, KIND_INT, qt="feather_blur_px", fp=True),
+       qt="apply_batch_feathering", fp=_FP_CLASSIC),
+    _f("feather_blur_px", Section.SCIENTIFIC, KIND_INT, qt="feather_blur_px",
+       fp=_FP_CLASSIC),
     _f("apply_master_tile_crop", Section.SCIENTIFIC, KIND_BOOL,
-       qt="apply_master_tile_crop", fp=True),
+       qt="apply_master_tile_crop", fp=_FP_CLASSIC),
     _f("master_tile_crop_percent", Section.SCIENTIFIC, KIND_FLOAT,
-       qt="master_tile_crop_percent", fp=True, legacy=("master_tile_crop_percent",),
+       qt="master_tile_crop_percent", fp=_FP_CLASSIC,
+       legacy=("master_tile_crop_percent",),
+       legacy_fp_key="master_tile_crop_percent_decimal",
+       legacy_fp_transform=TRANSFORM_PERCENT_TO_DECIMAL,
        doc="Canonical unit: percent. Engine fingerprint attribute "
            "'master_tile_crop_percent_decimal' = value/100."),
     _f("apply_low_wht_mask", Section.SCIENTIFIC, KIND_BOOL,
-       qt="apply_low_wht_mask", fp=True),
+       qt="apply_low_wht_mask", fp=_FP_CLASSIC),
     _f("low_wht_percentile", Section.SCIENTIFIC, KIND_INT,
-       qt="low_wht_percentile", fp=True),
+       qt="low_wht_percentile", fp=_FP_CLASSIC),
     _f("low_wht_soften_px", Section.SCIENTIFIC, KIND_INT,
-       qt="low_wht_soften_px", fp=True),
+       qt="low_wht_soften_px", fp=_FP_CLASSIC),
 
     # --- scientific: drizzle contract (M3) ---
     _f("use_drizzle", Section.SCIENTIFIC, KIND_BOOL, qt="use_drizzle"),
@@ -338,28 +411,34 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("drizzle_scale_requested", Section.SCIENTIFIC, KIND_FLOAT,
        qt="drizzle_scale", backend="drizzle_scale", legacy=("drizzle_scale",)),
     _f("drizzle_scale_effective", Section.SCIENTIFIC, KIND_FLOAT,
-       presence=PRESENCE_CHECKPOINT, doc="Runtime-effective scale."),
+       presence=PRESENCE_CHECKPOINT, fp=_FP_DRIZZLE,
+       doc="Runtime-effective scale."),
     _f("drizzle_kernel_requested", Section.SCIENTIFIC, KIND_STR,
        qt="drizzle_kernel", backend="drizzle_kernel", legacy=("drizzle_kernel",)),
     _f("drizzle_kernel_effective", Section.SCIENTIFIC, KIND_STR,
-       presence=PRESENCE_CHECKPOINT,
+       presence=PRESENCE_CHECKPOINT, fp=_FP_DRIZZLE,
        doc="Runtime-effective kernel (tophat coerces to square)."),
     _f("drizzle_pixfrac_requested", Section.SCIENTIFIC, KIND_FLOAT,
        qt="drizzle_pixfrac", backend="drizzle_pixfrac", legacy=("drizzle_pixfrac",)),
     _f("drizzle_pixfrac_effective", Section.SCIENTIFIC, KIND_FLOAT,
-       presence=PRESENCE_CHECKPOINT, doc="Runtime-effective pixfrac (1.0 for Lanczos)."),
+       presence=PRESENCE_CHECKPOINT, fp=_FP_DRIZZLE,
+       doc="Runtime-effective pixfrac (1.0 for Lanczos)."),
     _f("drizzle_wht_threshold_requested", Section.SCIENTIFIC, KIND_FLOAT,
        qt="drizzle_wht_threshold", backend="drizzle_wht_threshold",
        legacy=("drizzle_wht_threshold",)),
     _f("drizzle_wht_threshold_effective", Section.SCIENTIFIC, KIND_FLOAT,
-       presence=PRESENCE_CHECKPOINT, doc="Runtime-effective relative WHT threshold."),
+       presence=PRESENCE_CHECKPOINT, fp=_FP_DRIZZLE,
+       doc="Runtime-effective relative WHT threshold."),
     _f("drizzle_wht_policy", Section.SCIENTIFIC, KIND_STR, presence=PRESENCE_OPTIONAL,
+       fp=_FP_DRIZZLE,
        doc="Coverage-threshold policy token (e.g. 'relative_coverage_v1')."),
     _f("drizzle_fillval", Section.SCIENTIFIC, KIND_STR, presence=PRESENCE_CHECKPOINT,
+       fp=_FP_DRIZZLE,
        doc="Drizzle fillval; not retained by DrizzleAccumulator, so persisted "
            "separately at checkpoint."),
     _f("drizzle_double_norm_fix", Section.SCIENTIFIC, KIND_BOOL,
-       qt="drizzle_double_norm_fix", legacy=("drizzle_double_norm_fix",)),
+       qt="drizzle_double_norm_fix", legacy=("drizzle_double_norm_fix",),
+       fp=_FP_DRIZZLE),
 
     # --- scientific: final-output post-processing (not fingerprint) ---
     _f("apply_chroma_correction", Section.SCIENTIFIC, KIND_BOOL,
@@ -401,21 +480,24 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        presence=PRESENCE_OPTIONAL),
     _f("background_match_contract", Section.SCIENTIFIC, KIND_STR,
        presence=PRESENCE_OPTIONAL,
+       fp=_FP_DRIZZLE,
        doc="Background-match contract token (placeholder until runtime pins it)."),
     _f("background_match_contract_version", Section.SCIENTIFIC, KIND_INT,
-       presence=PRESENCE_OPTIONAL),
+       presence=PRESENCE_OPTIONAL, fp=_FP_DRIZZLE),
     _f("output_grid_contract", Section.SCIENTIFIC, KIND_STR,
        presence=PRESENCE_OPTIONAL,
+       fp=_FP_DRIZZLE,
        doc="Output-grid contract placeholder (runtime-effective values required "
            "at checkpoint)."),
     _f("output_grid_contract_version", Section.SCIENTIFIC, KIND_INT,
-       presence=PRESENCE_OPTIONAL),
+       presence=PRESENCE_OPTIONAL, fp=_FP_DRIZZLE),
     _f("registration_contract", Section.SCIENTIFIC, KIND_STR,
        presence=PRESENCE_OPTIONAL,
+       fp=_FP_DRIZZLE,
        doc="Registration contract placeholder (runtime-effective values required "
            "at checkpoint)."),
     _f("registration_contract_version", Section.SCIENTIFIC, KIND_INT,
-       presence=PRESENCE_OPTIONAL),
+       presence=PRESENCE_OPTIONAL, fp=_FP_DRIZZLE),
 
     # --- execution: paths (verbatim; no I/O, no normalisation on construction) ---
     _f("input_folder", Section.EXECUTION, KIND_STR, qt="input_folder",
@@ -784,9 +866,17 @@ class RunConfig:
             separators=(",", ":"),
         ).encode("utf-8")
 
-    def scientific_fingerprint(self) -> str:
-        """SHA-256 of the resume-critical scientific fields only."""
-        return scientific_fingerprint(self)
+    def scientific_fingerprint(self, domain: str) -> str:
+        """SHA-256 of the scientific fields of one explicit domain."""
+        return scientific_fingerprint(self, domain=domain)
+
+    def classic_fingerprint(self) -> str:
+        """v1-compatible classic SUM/W fingerprint (legacy engine parity)."""
+        return classic_fingerprint(self)
+
+    def drizzle_fingerprint(self) -> str:
+        """Effective Drizzle scientific-contract fingerprint."""
+        return drizzle_fingerprint(self)
 
     def full_digest(self) -> str:
         """SHA-256 of the whole canonical JSON document."""
@@ -845,35 +935,104 @@ def _derive(name: str, source: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _fingerprint_payload(cfg: RunConfig) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {}
-    for fd in FIELD_DEFS:
-        if not fd.fingerprint:
-            continue
-        value = cfg.get(fd.section, fd.name)
-        if value is None:
-            continue
-        payload[fd.name] = _json_safe(value)
-    return payload
-
-
 def canonical_bytes(cfg: RunConfig) -> bytes:
     """Deterministic canonical JSON bytes for a :class:`RunConfig`."""
     return cfg.to_canonical_bytes()
 
 
-def scientific_fingerprint(cfg: RunConfig) -> str:
-    """SHA-256 hex digest over the resume-critical scientific fields.
+def _classic_fingerprint_payload(cfg: RunConfig) -> Dict[str, Any]:
+    """Build the exact legacy v1 classic SUM/W fingerprint payload.
 
-    The fingerprint is derived from the *same* :data:`FIELD_DEFS` as
-    serialisation (``fingerprint=True``), never a parallel list.  A hash cannot
-    be used to reconstruct configuration.
+    Every classic fingerprint attribute is present, using ``None`` where the
+    value is unavailable, keyed by the exact legacy engine attribute name
+    (``legacy_fingerprint_key``) and value-transformed where documented
+    (``legacy_fingerprint_transform``).
     """
-    payload = _fingerprint_payload(cfg)
-    raw = json.dumps(
+    payload: Dict[str, Any] = {}
+    for fd in FIELD_DEFS:
+        if FingerprintDomain.CLASSIC_SUMW not in fd.fingerprint_domains:
+            continue
+        key = fd.legacy_fingerprint_key or fd.name
+        value = cfg.get(fd.section, fd.name)
+        if value is None:
+            payload[key] = None
+        else:
+            payload[key] = _legacy_fingerprint_value(fd, value)
+    return payload
+
+
+def _legacy_fingerprint_value(fd: FieldDef, value: Any) -> Any:
+    value = _json_safe(value)
+    if fd.legacy_fingerprint_transform == TRANSFORM_PERCENT_TO_DECIMAL:
+        return float(value) / 100.0
+    return value
+
+
+def _drizzle_fingerprint_payload(cfg: RunConfig) -> Dict[str, Any]:
+    """Build the effective Drizzle contract payload, failing closed on any
+    missing required effective field."""
+    payload: Dict[str, Any] = {}
+    missing: List[str] = []
+    for fd in FIELD_DEFS:
+        if FingerprintDomain.DRIZZLE not in fd.fingerprint_domains:
+            continue
+        value = cfg.get(fd.section, fd.name)
+        if value is None:
+            missing.append(fd.name)
+            continue
+        payload[fd.name] = _json_safe(value)
+    if missing:
+        missing.sort()
+        raise ValidationError(
+            "drizzle fingerprint missing required effective field(s): "
+            + ", ".join(missing)
+        )
+    # Stable domain token prevents any Classic/Drizzle payload collision and
+    # makes the mode explicit in the hashed bytes.
+    payload["fingerprint_domain"] = FingerprintDomain.DRIZZLE
+    return payload
+
+
+def classic_fingerprint(cfg: RunConfig) -> str:
+    """SHA-256 hex digest byte-for-byte identical to the legacy manifest-v1
+    engine hash (``SeestarQueuedStacker._scientific_fingerprint``).
+
+    Includes every legacy fingerprint attribute, using ``None`` where
+    unavailable, serialised with ``json.dumps(sort_keys=True,
+    separators=(',',':'))`` semantics.  A hash cannot be used to reconstruct
+    configuration.
+    """
+    payload = _classic_fingerprint_payload(cfg)
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def drizzle_fingerprint(cfg: RunConfig) -> str:
+    """SHA-256 hex digest of the effective Drizzle scientific contract.
+
+    Requires every Drizzle fingerprint field (fail closed, never a partial
+    payload) and embeds the stable Drizzle domain token.
+    """
+    payload = _drizzle_fingerprint_payload(cfg)
+    blob = json.dumps(
         payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def scientific_fingerprint(cfg: RunConfig, *, domain: str) -> str:
+    """SHA-256 hex digest over the scientific fields of one explicit domain.
+
+    The domain is required: there is no implicit classic fallback.  Prefer the
+    clearly named :func:`classic_fingerprint` (v1-compatible) or
+    :func:`drizzle_fingerprint` (effective contract), or pass a
+    :class:`FingerprintDomain` value.
+    """
+    if domain == FingerprintDomain.CLASSIC_SUMW:
+        return classic_fingerprint(cfg)
+    if domain == FingerprintDomain.DRIZZLE:
+        return drizzle_fingerprint(cfg)
+    raise ValidationError(f"unknown fingerprint domain {domain!r}")
 
 
 def full_digest(cfg: RunConfig) -> str:
@@ -882,8 +1041,32 @@ def full_digest(cfg: RunConfig) -> str:
 
 
 def classic_fingerprint_names() -> frozenset:
-    """Canonical names of the resume-critical scientific fingerprint fields."""
-    return frozenset(fd.name for fd in FIELD_DEFS if fd.fingerprint)
+    """Canonical names of the classic v1 SUM/W fingerprint fields."""
+    return frozenset(
+        fd.name for fd in FIELD_DEFS
+        if FingerprintDomain.CLASSIC_SUMW in fd.fingerprint_domains
+    )
+
+
+def fingerprint_field_defs(domain: str) -> Tuple[FieldDef, ...]:
+    """Field definitions participating in ``domain`` (in FIELD_DEFS order)."""
+    if domain not in FingerprintDomain.ALL:
+        raise ValidationError(f"unknown fingerprint domain {domain!r}")
+    return tuple(fd for fd in FIELD_DEFS if domain in fd.fingerprint_domains)
+
+
+def required_fingerprint_names(domain: str) -> frozenset:
+    """Canonical names that must be present to hash ``domain``.
+
+    Classic includes every attribute (``None`` where absent); Drizzle requires
+    every effective field (fail closed, never a partial payload).
+    """
+    return frozenset(fd.name for fd in fingerprint_field_defs(domain))
+
+
+def _is_classic_fingerprint(fd: FieldDef) -> bool:
+    """``True`` when a field participates in the classic resume-critical set."""
+    return FingerprintDomain.CLASSIC_SUMW in fd.fingerprint_domains
 
 
 @dataclass(frozen=True)
@@ -1140,6 +1323,150 @@ def write_cfg(cfg: RunConfig, path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# V2 reader (fail-closed, read-only)
+# ---------------------------------------------------------------------------
+
+_MAX_UNKNOWN_REPORT = 100
+
+
+@dataclass
+class ReadReport:
+    """Result of reading a schema-v2 ``.cfg``.
+
+    ``config`` is the validated :class:`RunConfig`.  ``unknown_keys`` reports
+    (bounded, name only, never promoted) keys found in the document that do not
+    map to a canonical field.  ``diagnostics`` carries bounded non-fatal notes.
+    """
+
+    config: RunConfig
+    unknown_keys: Tuple[str, ...] = ()
+    diagnostics: Tuple[str, ...] = ()
+
+
+def _reject_json_constant(value: str) -> Any:
+    """Reject non-standard JSON constants (``NaN``/``Infinity``/``-Infinity``)."""
+    raise ValidationError(f"non-finite JSON number {value!r}")
+
+
+def _scan_unsafe(value: Any, path: str = "") -> None:
+    """Fail closed on any secret/credential-like key, at any nesting depth.
+
+    Only the key *name* (and path) is ever reported; the value is never read,
+    compared or included in the error.
+    """
+    if isinstance(value, dict):
+        for k, v in value.items():
+            ks = str(k)
+            where = f"{path}.{ks}" if path else ks
+            if is_unsafe_key(ks):
+                raise UnsafeConfigError(f"unsafe key {ks!r} at {where or '<root>'}")
+            _scan_unsafe(v, where)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _scan_unsafe(v, f"{path}[{i}]")
+
+
+def read_cfg(path: str) -> ReadReport:
+    """Read and validate a schema-v2 ``.cfg`` (read-only, never writes).
+
+    Fails closed on: unreadable/non-UTF-8 bytes, non-JSON content (including
+    ``NaN``/``Infinity``), a non-object top level, ``schema_version`` other than
+    2, a non-string ``product_version``, missing/malformed config sections, any
+    secret/credential-like key (at any depth, value never reported), and any
+    field value that fails coercion.  Unknown keys are reported (bounded) and
+    never promoted.  Returns the validated :class:`RunConfig` plus a bounded
+    report.
+    """
+    try:
+        with open(os.fspath(path), "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise ValidationError(f"cannot read cfg {path!r}: {exc}") from exc
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError(f"cfg is not valid UTF-8: {exc}") from exc
+    try:
+        data = json.loads(text, parse_constant=_reject_json_constant)
+    except ValueError as exc:
+        raise ValidationError(f"cfg is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValidationError("cfg top-level is not a JSON object")
+
+    # Secret/credential-like keys anywhere fail closed (name only).
+    _scan_unsafe(data)
+
+    if data.get("schema_version") != SCHEMA_VERSION:
+        raise ValidationError(
+            f"unsupported schema_version {data.get('schema_version')!r} "
+            f"(expected {SCHEMA_VERSION})"
+        )
+
+    product_version = data.get("product_version")
+    if not isinstance(product_version, str):
+        raise ValidationError("product_version must be a string")
+
+    unknown: List[str] = []
+    diagnostics: List[str] = []
+
+    # Top-level unknown keys (bounded report).
+    _KNOWN_TOP = {"schema_version", "product_version", *Section.ALL}
+    for key in data:
+        if key not in _KNOWN_TOP:
+            unknown.append(str(key))
+
+    sections: Dict[str, Dict[str, Any]] = {}
+    for section in Section.ALL:
+        raw_section = data.get(section)
+        if not isinstance(raw_section, dict):
+            raise ValidationError(f"missing or malformed section {section!r}")
+        sections[section] = raw_section
+
+    sci: Dict[str, Any] = {}
+    exe: Dict[str, Any] = {}
+    prov: Dict[str, Any] = {}
+    targets = {
+        Section.SCIENTIFIC: sci,
+        Section.EXECUTION: exe,
+        Section.PROVENANCE: prov,
+    }
+    for section in Section.ALL:
+        target = targets[section]
+        for key, value in sections[section].items():
+            k = str(key)
+            fd = _FIELD_BY_NAME.get(k)
+            if fd is None or fd.section != section:
+                unknown.append(f"{section}.{k}")
+                continue
+            try:
+                coerced = _coerce(fd.kind, value)
+            except ValidationError as exc:
+                raise ValidationError(f"field {k!r}: {exc}") from exc
+            target[k] = _json_safe(coerced)
+
+    # Bound the unknown-key report; never promote any unknown field.
+    if len(unknown) > _MAX_UNKNOWN_REPORT:
+        diagnostics.append(
+            f"unknown-key report truncated to {_MAX_UNKNOWN_REPORT} "
+            f"(of {len(unknown)})"
+        )
+        unknown = unknown[:_MAX_UNKNOWN_REPORT]
+
+    cfg = RunConfig.from_sections(
+        product_version=product_version,
+        scientific=sci,
+        execution=exe,
+        provenance=prov,
+    )
+    return ReadReport(
+        config=cfg,
+        unknown_keys=tuple(unknown),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Legacy migration
 # ---------------------------------------------------------------------------
 
@@ -1266,7 +1593,7 @@ def migrate_legacy(data: Mapping[str, Any]) -> LegacyMigrationResult:
             try:
                 cv = _coerce(fd.kind, raw)
             except ValidationError as exc:
-                if fd.fingerprint:
+                if _is_classic_fingerprint(fd):
                     raise ValidationError(
                         f"resume-critical field {fd.name!r} has uncoercible "
                         f"value from {alias!r}: {exc}"
@@ -1285,7 +1612,7 @@ def migrate_legacy(data: Mapping[str, Any]) -> LegacyMigrationResult:
         first_alias, first_value = coerced_values[0]
         for alias, cv in coerced_values[1:]:
             if not _mode_values_equivalent(first_value, cv):
-                if fd.fingerprint:
+                if _is_classic_fingerprint(fd):
                     raise AmbiguousLegacyError(
                         f"resume-critical field {fd.name!r} has conflicting "
                         f"legacy values ({first_alias!r} vs {alias!r})"
@@ -1297,7 +1624,7 @@ def migrate_legacy(data: Mapping[str, Any]) -> LegacyMigrationResult:
 
         value = first_value
 
-        if fd.fingerprint and isinstance(value, str) and is_unsafe_key(str(value)):
+        if _is_classic_fingerprint(fd) and isinstance(value, str) and is_unsafe_key(str(value)):
             # Defensive: a resume-critical field must never hold secret material.
             raise UnsafeLegacyError(
                 f"resume-critical field {fd.name!r} carries an unsafe value"

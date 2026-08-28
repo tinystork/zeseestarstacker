@@ -182,7 +182,7 @@ def test_deterministic_bytes_and_digests():
     )
     assert a.to_canonical_bytes() == b.to_canonical_bytes()
     assert a.full_digest() == b.full_digest()
-    assert a.scientific_fingerprint() == b.scientific_fingerprint()
+    assert a.classic_fingerprint() == b.classic_fingerprint()
     # Bytes are UTF-8, compact JSON, deterministic key order.
     parsed = json.loads(a.to_canonical_bytes().decode("utf-8"))
     assert parsed["schema_version"] == 2
@@ -194,13 +194,13 @@ def test_fingerprint_only_tracks_fingerprint_fields():
     a = _config(scientific={**base["scientific"], "apply_final_scnr": False})
     b = _config(scientific={**base["scientific"], "apply_final_scnr": True})
     # SCNR is a non-fingerprint scientific field: fingerprint unchanged...
-    assert a.scientific_fingerprint() == b.scientific_fingerprint()
+    assert a.classic_fingerprint() == b.classic_fingerprint()
     # ...but the whole-config digest differs.
     assert a.full_digest() != b.full_digest()
 
     c = _config(scientific={**base["scientific"], "kappa": 2.5})
     d = _config(scientific={**base["scientific"], "kappa": 3.0})
-    assert c.scientific_fingerprint() != d.scientific_fingerprint()
+    assert c.classic_fingerprint() != d.classic_fingerprint()
 
 
 def test_reject_nan_inf_and_non_json():
@@ -219,7 +219,7 @@ def test_no_io_during_construction(tmp_path):
     try:
         cfg = _config(scientific={"stacking_mode": "mean"})
         cfg.to_canonical_bytes()
-        cfg.scientific_fingerprint()
+        cfg.classic_fingerprint()
         cfg.full_digest()
     finally:
         os.chdir(str(ROOT))
@@ -483,3 +483,303 @@ def test_real_witness_full_classification_and_secret_exclusion():
     # claim; the fingerprint fields that are present are consistent.
     assert res.config.product_version == "5.6.0"
     assert res.config.scientific["stacking_mode"] == "winsorized-sigma-clip"
+
+
+# ---------------------------------------------------------------------------
+# 9. V2 reader (fail-closed, read-only)
+# ---------------------------------------------------------------------------
+def _full_config():
+    return _config(
+        product_version="8.2.0",
+        scientific={
+            "stacking_mode": "kappa-sigma", "kappa": 2.5,
+            "winsor_limits": [0.05, 0.05], "chunk_size": None,
+            "use_drizzle": True,
+        },
+        execution={"input_folder": "/tmp/in", "save_as_float32": True},
+        provenance={"producer": "zeseestarstacker"},
+    )
+
+
+def test_read_cfg_roundtrip_bytes_and_digest(tmp_path):
+    cfg = _full_config()
+    target = tmp_path / "run_config.cfg"
+    rc.write_cfg(cfg, str(target))
+    report = rc.read_cfg(str(target))
+    reloaded = report.config
+    assert reloaded.to_canonical_bytes() == cfg.to_canonical_bytes()
+    assert reloaded.full_digest() == cfg.full_digest()
+    assert reloaded.classic_fingerprint() == cfg.classic_fingerprint()
+    assert report.unknown_keys == ()
+    # a null optional field (chunk_size) round-trips as null, not as absent.
+    assert "chunk_size" in reloaded.scientific
+    assert reloaded.scientific["chunk_size"] is None
+
+
+def test_read_cfg_wrong_schema_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 3,
+        "product_version": "8.2.0",
+        "scientific_config": {}, "execution_config": {}, "provenance": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_missing_schema_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "product_version": "8.2.0",
+        "scientific_config": {}, "execution_config": {}, "provenance": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_missing_section_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": "8.2.0",
+        "scientific_config": {}, "execution_config": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_product_version_not_string_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": 820,
+        "scientific_config": {}, "execution_config": {}, "provenance": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_corrupt_json_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text('{"schema_version": 2, "product_version": ', encoding="utf-8")
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_non_finite_json_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text(
+        '{"schema_version": 2, "product_version": "8.2.0", '
+        '"scientific_config": {"kappa": NaN}, '
+        '"execution_config": {}, "provenance": {}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_type_error_rejected(tmp_path):
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": "8.2.0",
+        "scientific_config": {"kappa": "not-a-number"},
+        "execution_config": {}, "provenance": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.ValidationError):
+        rc.read_cfg(str(target))
+
+
+def test_read_cfg_unsafe_key_fails_closed_without_value(tmp_path):
+    secret = "REDACTED_PLACEHOLDER_123"
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": "8.2.0",
+        "scientific_config": {"kappa": 2.5},
+        "execution_config": {"astrometry_api_key": secret},
+        "provenance": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.UnsafeConfigError) as excinfo:
+        rc.read_cfg(str(target))
+    # the key name is reported, the secret value never is
+    assert "astrometry_api_key" in str(excinfo.value)
+    assert secret not in str(excinfo.value)
+
+
+def test_read_cfg_unsafe_key_nested_fails_closed(tmp_path):
+    secret = "NESTED_TOKEN_XYZ"
+    target = tmp_path / "bad.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": "8.2.0",
+        "scientific_config": {},
+        "execution_config": {"mosaic_settings": {"api_token": secret}},
+        "provenance": {},
+    }), encoding="utf-8")
+    with pytest.raises(rc.UnsafeConfigError) as excinfo:
+        rc.read_cfg(str(target))
+    assert secret not in str(excinfo.value)
+
+
+def test_read_cfg_unknown_keys_reported_never_promoted(tmp_path):
+    target = tmp_path / "cfg.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": "8.2.0",
+        "scientific_config": {"kappa": 2.5, "bogus_science": 1},
+        "execution_config": {"input_folder": "/tmp", "extra_exec": 2},
+        "provenance": {},
+        "extra_top": 3,
+    }), encoding="utf-8")
+    report = rc.read_cfg(str(target))
+    assert "scientific_config.bogus_science" in report.unknown_keys
+    assert "execution_config.extra_exec" in report.unknown_keys
+    assert "extra_top" in report.unknown_keys
+    # never promoted into the canonical model
+    assert report.config.scientific.get("bogus_science") is None
+    assert report.config.execution.get("extra_exec") is None
+    assert report.config.scientific["kappa"] == 2.5
+
+
+def test_read_cfg_never_writes(tmp_path):
+    target = tmp_path / "cfg.cfg"
+    target.write_text(json.dumps({
+        "schema_version": 2, "product_version": "8.2.0",
+        "scientific_config": {}, "execution_config": {}, "provenance": {},
+    }), encoding="utf-8")
+    before = sorted(p.name for p in tmp_path.iterdir())
+    rc.read_cfg(str(target))
+    after = sorted(p.name for p in tmp_path.iterdir())
+    assert before == after == ["cfg.cfg"]
+
+
+def test_write_cfg_atomic_failure_raises(tmp_path):
+    cfg = _full_config()
+    missing_dir = tmp_path / "does" / "not" / "exist"
+    with pytest.raises(OSError):
+        rc.write_cfg(cfg, str(missing_dir / "run_config.cfg"))
+    assert not missing_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# 10. Fingerprint domains (classic v1 vs drizzle effective contract)
+# ---------------------------------------------------------------------------
+def _drizzle_complete(**overrides):
+    sci = {
+        "weighting_method": "noise_variance",
+        "use_quality_weighting": False,
+        "weight_by_snr": True,
+        "weight_by_stars": False,
+        "snr_exponent": 1.0,
+        "stars_exponent": 0.5,
+        "min_weight": 0.1,
+        "correct_hot_pixels": True,
+        "hot_pixel_threshold": 3.0,
+        "neighborhood_size": 5,
+        "bayer_pattern": "GRBG",
+        "drizzle_scale_effective": 2.0,
+        "drizzle_kernel_effective": "square",
+        "drizzle_pixfrac_effective": 1.0,
+        "drizzle_wht_threshold_effective": 0.7,
+        "drizzle_wht_policy": "relative_coverage_v1",
+        "drizzle_fillval": "indef",
+        "drizzle_double_norm_fix": False,
+        "background_match_contract": "bgmatch_v1",
+        "background_match_contract_version": 1,
+        "output_grid_contract": "grid_v1",
+        "output_grid_contract_version": 1,
+        "registration_contract": "reg_v1",
+        "registration_contract_version": 1,
+    }
+    sci.update(overrides)
+    return _config(scientific=sci)
+
+
+def test_scientific_fingerprint_requires_domain():
+    cfg = _config(scientific={"kappa": 2.5})
+    with pytest.raises(TypeError):
+        rc.scientific_fingerprint(cfg)  # noqa: domain is required
+    with pytest.raises(rc.ValidationError):
+        rc.scientific_fingerprint(cfg, domain="bogus")
+
+
+def test_fingerprint_domain_helpers():
+    classic = rc.fingerprint_field_defs(rc.FingerprintDomain.CLASSIC_SUMW)
+    drizzle = rc.fingerprint_field_defs(rc.FingerprintDomain.DRIZZLE)
+    assert len(classic) == 27
+    assert rc.required_fingerprint_names(rc.FingerprintDomain.CLASSIC_SUMW) == \
+        rc.classic_fingerprint_names()
+    assert len(drizzle) >= 24
+    # shared fields live in both domains
+    shared = rc.classic_fingerprint_names() & rc.required_fingerprint_names(
+        rc.FingerprintDomain.DRIZZLE
+    )
+    assert "bayer_pattern" in shared
+    assert "min_weight" in shared
+    with pytest.raises(rc.ValidationError):
+        rc.fingerprint_field_defs("nope")
+
+
+def test_drizzle_fingerprint_refuses_missing_effective_field():
+    for missing in (
+        "drizzle_scale_effective",
+        "drizzle_wht_policy",
+        "background_match_contract",
+        "registration_contract_version",
+        "bayer_pattern",
+        "min_weight",
+    ):
+        sci = _drizzle_complete().scientific.copy()
+        del sci[missing]
+        cfg = _config(scientific=sci)
+        with pytest.raises(rc.ValidationError):
+            cfg.drizzle_fingerprint()
+
+
+def test_drizzle_fingerprint_changes_per_effective_class():
+    base = _drizzle_complete()
+    base_fp = base.drizzle_fingerprint()
+    variants = [
+        {"bayer_pattern": "RGGB"},                       # Bayer/hot-pixel
+        {"correct_hot_pixels": False},
+        {"hot_pixel_threshold": 4.0},
+        {"min_weight": 0.5},                            # quality/weight policy
+        {"weighting_method": "snr"},
+        {"snr_exponent": 1.5},
+        {"drizzle_scale_effective": 3.0},               # effective scale/kernel/...
+        {"drizzle_kernel_effective": "point"},
+        {"drizzle_pixfrac_effective": 0.8},
+        {"drizzle_wht_threshold_effective": 0.9},
+        {"drizzle_wht_policy": "absolute_v1"},
+        {"drizzle_fillval": "nan"},
+        {"drizzle_double_norm_fix": True},
+        {"background_match_contract": "bgmatch_v2"},    # background-match contract
+        {"background_match_contract_version": 2},
+        {"output_grid_contract": "grid_v2"},            # output-grid contract
+        {"output_grid_contract_version": 2},
+        {"registration_contract": "reg_v2"},            # registration contract
+        {"registration_contract_version": 2},
+    ]
+    for overrides in variants:
+        assert _drizzle_complete(**overrides).drizzle_fingerprint() != base_fp, overrides
+
+
+def test_drizzle_fingerprint_ignores_requested_and_policy():
+    base = _drizzle_complete()
+    base_fp = base.drizzle_fingerprint()
+    # requested-only + presentation/resource policy must not change the hash
+    requested = _drizzle_complete(
+        drizzle_scale_requested=3.0,
+        drizzle_kernel_requested="lanczos",
+        drizzle_pixfrac_requested=0.6,
+        drizzle_wht_threshold_requested=0.5,
+        drizzle_mode="Incremental",
+        drizzle_group_size=99,
+        use_drizzle=False,
+    )
+    assert requested.drizzle_fingerprint() == base_fp
+
+
+def test_drizzle_domain_separated_from_classic():
+    cfg = _drizzle_complete()
+    assert cfg.drizzle_fingerprint() != cfg.classic_fingerprint()
+    # classic-only fields do not perturb the drizzle hash, and vice versa
+    assert _drizzle_complete(stacking_mode="mean").drizzle_fingerprint() == \
+        cfg.drizzle_fingerprint()
+    assert _drizzle_complete(drizzle_scale_effective=5.0).classic_fingerprint() == \
+        cfg.classic_fingerprint()
