@@ -667,12 +667,20 @@ def classify_legacy_key(name: str) -> Tuple[Optional[FieldDef], str]:
 def _coerce(kind: str, value: Any) -> Any:
     """Coerce ``value`` to the canonical form of ``kind``.
 
-    Raises :class:`ValidationError` when the value cannot be coerced.  ``None``
-    is preserved (callers decide whether to drop it) except for the strictly
-    typed kinds where ``None`` is rejected.
+    Raises :class:`ValidationError` when the value cannot be coerced.  Explicit
+    ``None`` is preserved for the nullable kinds (``*_or_none``); the strictly
+    typed kinds (``KIND_STR``/``KIND_INT``/``KIND_FLOAT``/``KIND_BOOL``/
+    ``KIND_WINSOR``/``KIND_LIST``/``KIND_DICT``) reject ``None``.
     """
     if value is None:
-        return None
+        if kind in (
+            KIND_INT_OR_NONE,
+            KIND_FLOAT_OR_NONE,
+            KIND_BOOL_OR_NONE,
+            KIND_STR_OR_NONE,
+        ):
+            return None
+        raise ValidationError(f"null is not permitted for {kind!r} fields")
     if kind == KIND_STR:
         return value if isinstance(value, str) else str(value)
     if kind == KIND_STR_OR_NONE:

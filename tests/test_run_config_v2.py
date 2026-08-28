@@ -657,6 +657,98 @@ def test_write_cfg_atomic_failure_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 9b. Strict-null semantics (v2 reader fail-closed)
+# ---------------------------------------------------------------------------
+def _write_v2_doc(tmp_path, *, scientific=None, execution=None, provenance=None,
+                  filename="strict_null.cfg"):
+    doc = {
+        "schema_version": 2,
+        "product_version": "8.2.0",
+        "scientific_config": scientific or {},
+        "execution_config": execution or {},
+        "provenance": provenance or {},
+    }
+    target = tmp_path / filename
+    target.write_text(json.dumps(doc), encoding="utf-8")
+    return target
+
+
+@pytest.mark.parametrize(
+    "section, field",
+    [
+        ("scientific_config", "stacking_mode"),    # KIND_STR
+        ("scientific_config", "kappa"),            # KIND_FLOAT
+        ("scientific_config", "neighborhood_size"),  # KIND_INT
+        ("scientific_config", "use_drizzle"),      # KIND_BOOL
+        ("scientific_config", "winsor_limits"),    # KIND_WINSOR
+        ("execution_config", "mosaic_settings"),   # KIND_DICT
+        ("execution_config", "input_folder"),      # KIND_STR (execution)
+    ],
+)
+def test_read_cfg_rejects_null_for_strict_kinds(tmp_path, section, field):
+    sections = {
+        "scientific_config": {},
+        "execution_config": {},
+    }
+    sections[section][field] = None
+    target = _write_v2_doc(
+        tmp_path,
+        scientific=sections["scientific_config"],
+        execution=sections["execution_config"],
+    )
+    with pytest.raises(rc.ValidationError) as excinfo:
+        rc.read_cfg(str(target))
+    # the field name is surfaced; no secret value can be involved
+    assert field in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "section, field, kind",
+    [
+        ("scientific_config", "chunk_size", "int_or_none"),
+        ("execution_config", "num_processing_workers", "int_or_none"),
+        ("scientific_config", "match_background_for_final", "bool_or_none"),
+    ],
+)
+def test_read_cfg_accepts_null_for_nullable_kinds(tmp_path, section, field, kind):
+    sections = {
+        "scientific_config": {},
+        "execution_config": {},
+    }
+    sections[section][field] = None
+    target = _write_v2_doc(
+        tmp_path,
+        scientific=sections["scientific_config"],
+        execution=sections["execution_config"],
+    )
+    report = rc.read_cfg(str(target))
+    section_map = {
+        "scientific_config": report.config.scientific,
+        "execution_config": report.config.execution,
+    }
+    # null is preserved (round-trippable), never dropped nor rejected.
+    assert field in section_map[section]
+    assert section_map[section][field] is None
+
+
+def test_coerce_strict_kinds_reject_none():
+    """Every strictly typed kind rejects explicit ``None`` (including kinds
+    with no reader-reachable field, e.g. ``KIND_LIST``)."""
+    for kind in (rc.KIND_STR, rc.KIND_INT, rc.KIND_FLOAT, rc.KIND_BOOL,
+                 rc.KIND_WINSOR, rc.KIND_LIST, rc.KIND_DICT):
+        with pytest.raises(rc.ValidationError):
+            rc._coerce(kind, None)
+
+
+def test_coerce_nullable_kinds_preserve_none():
+    """Every nullable kind preserves explicit ``None`` (including kinds with no
+    reader-reachable field, e.g. ``KIND_STR_OR_NONE``/``KIND_FLOAT_OR_NONE``)."""
+    for kind in (rc.KIND_INT_OR_NONE, rc.KIND_FLOAT_OR_NONE,
+                 rc.KIND_BOOL_OR_NONE, rc.KIND_STR_OR_NONE):
+        assert rc._coerce(kind, None) is None
+
+
+# ---------------------------------------------------------------------------
 # 10. Fingerprint domains (classic v1 vs drizzle effective contract)
 # ---------------------------------------------------------------------------
 def _drizzle_complete(**overrides):
