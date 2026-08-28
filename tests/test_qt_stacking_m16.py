@@ -118,7 +118,7 @@ def test_stacking_drizzle_and_scnr_controls_have_tk_defaults(window):
     assert isinstance(window.drizzle_wht_spin, QDoubleSpinBox)
     assert window.drizzle_wht_spin.value() == pytest.approx(
         defaults["drizzle_wht_threshold"]
-    )  # 0.7
+    )  # 0.0
     assert window.drizzle_wht_spin.minimum() == 0.0
     assert window.drizzle_wht_spin.maximum() == 1.0
     assert window.drizzle_wht_spin.decimals() == 3
@@ -258,6 +258,30 @@ def test_drizzle_enabler_gates_suboptions(window):
     assert not window.drizzle_group_spin.isEnabled()
     for w in _drizzle_advanced_widgets(window):
         assert not w.isEnabled()
+
+
+def test_signed_wht_kernel_disables_threshold_without_losing_requested_value(window):
+    """Lanczos marks WHT threshold N/A while preserving positive-kernel state."""
+    window.drizzle_check.setChecked(True)
+    window.drizzle_kernel_combo.setCurrentText("square")
+    window.drizzle_wht_spin.setValue(0.7)
+    assert window.drizzle_wht_spin.isEnabled()
+
+    for kernel in ("lanczos2", "lanczos3"):
+        window.drizzle_kernel_combo.setCurrentText(kernel)
+        assert not window.drizzle_wht_spin.isEnabled()
+        assert "signed" in window.drizzle_wht_spin.toolTip().lower()
+        assert window.collect_settings_state().drizzle_wht_threshold == pytest.approx(0.7)
+
+    window.language_combo.setCurrentText("Français")
+    assert "signé" in window.drizzle_wht_spin.toolTip().lower()
+    window.language_combo.setCurrentText("English")
+
+    window.drizzle_kernel_combo.setCurrentText("square")
+    assert window.drizzle_wht_spin.isEnabled()
+    assert window.drizzle_wht_spin.toolTip() == ""
+    assert window.drizzle_wht_spin.value() == pytest.approx(0.7)
+    assert window.collect_settings_state().drizzle_wht_threshold == pytest.approx(0.7)
 
 
 def test_group_size_mode_interaction_only_large_dataset(window):

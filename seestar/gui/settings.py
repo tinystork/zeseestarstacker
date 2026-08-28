@@ -380,7 +380,7 @@ class SettingsManager:
                 gui_instance,
                 "drizzle_wht_threshold_var",
                 tk.DoubleVar(
-                    value=default_values_from_code.get("drizzle_wht_threshold", 0.7)
+                    value=default_values_from_code.get("drizzle_wht_threshold", 0.0)
                 ),
             ).get()
             self.drizzle_mode = getattr(
@@ -1309,7 +1309,7 @@ class SettingsManager:
         # --- Paramètres Drizzle (Globaux) ---
         defaults_dict["use_drizzle"] = False
         defaults_dict["drizzle_scale"] = 2
-        defaults_dict["drizzle_wht_threshold"] = 0.7
+        defaults_dict["drizzle_wht_threshold"] = 0.0
         defaults_dict["drizzle_mode"] = "Final"
         defaults_dict["drizzle_kernel"] = "square"
         defaults_dict["drizzle_pixfrac"] = 1.0
@@ -1798,13 +1798,13 @@ class SettingsManager:
                 )
             try:
                 self.drizzle_wht_threshold = float(self.drizzle_wht_threshold)
-                if not (0.0 < self.drizzle_wht_threshold <= 1.0):
+                if not (0.0 <= self.drizzle_wht_threshold <= 1.0):
                     original = self.drizzle_wht_threshold
                     self.drizzle_wht_threshold = np.clip(
-                        self.drizzle_wht_threshold, 0.1, 1.0
+                        self.drizzle_wht_threshold, 0.0, 1.0
                     )
                     messages.append(
-                        f"Seuil Drizzle WHT ({original:.2f}) hors limites [0.1, 1.0], ajusté à {self.drizzle_wht_threshold:.2f}"
+                        f"Seuil Drizzle WHT ({original:.2f}) hors limites [0.0, 1.0], ajusté à {self.drizzle_wht_threshold:.2f}"
                     )
             except (ValueError, TypeError):
                 original = self.drizzle_wht_threshold

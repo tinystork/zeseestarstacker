@@ -4,6 +4,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
@@ -674,10 +675,11 @@ def _make_m3_provenance_obj(tmp_path, kernel="square", pixfrac_eff=1.0,
     return obj
 
 
-def test_m3_primary_and_companion_effective_drz_provenance(tmp_path):
+@pytest.mark.parametrize("kernel", ["lanczos2", "lanczos3"])
+def test_m3_primary_and_companion_effective_drz_provenance(tmp_path, kernel):
     obj = _make_m3_provenance_obj(
         tmp_path,
-        kernel="lanczos2",
+        kernel=kernel,
         pixfrac_eff=1.0,
         scale=2.0,
         wht_thr_eff=0.0,
@@ -689,7 +691,7 @@ def test_m3_primary_and_companion_effective_drz_provenance(tmp_path):
     )
 
     hdr = fits.getheader(obj.final_stacked_path)
-    assert hdr["DRZKERNEL"] == "lanczos2"
+    assert hdr["DRZKERNEL"] == kernel
     assert abs(hdr["DRZPIXFR"] - 1.0) < 1e-9   # effective (Lanczos -> 1.0)
     assert abs(hdr["DRZSCALE"] - 2.0) < 1e-9
     assert hdr["DRZMODE"] == "M3"

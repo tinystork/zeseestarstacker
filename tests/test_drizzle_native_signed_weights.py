@@ -19,6 +19,8 @@ sub-pixel-shifted partial-coverage frame, which reproduces negative ``out_wht``
 lobes in the installed ``drizzle`` 2.2.0 engine.
 """
 
+import inspect
+
 import numpy as np
 import pytest
 from astropy.wcs import WCS
@@ -34,6 +36,15 @@ from seestar.core.drizzle_core import (
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+
+def test_backend_fresh_wht_threshold_default_is_zero():
+    from seestar.queuep.queue_manager import SeestarQueuedStacker
+
+    default = inspect.signature(SeestarQueuedStacker.start_processing).parameters[
+        "drizzle_wht_threshold"
+    ].default
+    assert default == 0.0
 
 
 def _legacy_finalize_divide(acc):
@@ -284,10 +295,11 @@ def _make_initialized_qm(tmp_path, kernel, pixfrac, threshold):
     return qm
 
 
-def test_lanczos_effective_pixfrac_and_threshold_forced(tmp_path):
-    qm = _make_initialized_qm(tmp_path, "lanczos2", 0.6, 0.3)
+@pytest.mark.parametrize("kernel", ["lanczos2", "lanczos3"])
+def test_lanczos_effective_pixfrac_and_threshold_forced(tmp_path, kernel):
+    qm = _make_initialized_qm(tmp_path, kernel, 0.6, 0.3)
     for acc in qm.drizzle_accumulators:
-        assert acc.kernel == "lanczos2"
+        assert acc.kernel == kernel
         assert acc.pixfrac == 1.0  # upstream ignores pixfrac for Lanczos
     assert qm.drizzle_pixfrac_requested == 0.6
     assert qm.drizzle_wht_threshold_requested == 0.3

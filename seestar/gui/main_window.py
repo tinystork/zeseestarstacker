@@ -533,8 +533,8 @@ class SeestarStackerGUI:
 
         self.use_drizzle_var = tk.BooleanVar(value=False)
         self.drizzle_scale_var = tk.StringVar(value="2")
-        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.7)
-        self.drizzle_wht_display_var = tk.StringVar(value="70")
+        self.drizzle_wht_threshold_var = tk.DoubleVar(value=0.0)
+        self.drizzle_wht_display_var = tk.StringVar(value="0")
         self.drizzle_mode_var = tk.StringVar(value="Final")
         self.drizzle_kernel_var = tk.StringVar(value="square")
         self.drizzle_pixfrac_var = tk.DoubleVar(value=1.0)
@@ -1416,7 +1416,7 @@ class SeestarStackerGUI:
         self.drizzle_wht_label.pack(side=tk.LEFT, padx=(0, 5))
         self.drizzle_wht_spinbox = ttk.Spinbox(
             wht_frame,
-            from_=10.0,
+            from_=0.0,
             to=100.0,
             increment=5.0,
             textvariable=self.drizzle_wht_display_var,

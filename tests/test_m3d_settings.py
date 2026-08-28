@@ -88,6 +88,23 @@ def test_default_group_size(settings_manager):
     assert sm.get_default_values()["drizzle_group_size"] == 50
 
 
+def test_fresh_wht_threshold_default_is_zero(settings_manager):
+    sm = settings_manager(settings_file="unused.json")
+    assert sm.drizzle_wht_threshold == 0.0
+    assert sm.get_default_values()["drizzle_wht_threshold"] == 0.0
+
+
+def test_validate_wht_threshold_zero_and_existing_positive_are_kept(settings_manager):
+    sm = settings_manager(settings_file="unused.json")
+    sm.drizzle_wht_threshold = 0.0
+    sm.validate_settings()
+    assert sm.drizzle_wht_threshold == 0.0
+
+    sm.drizzle_wht_threshold = 0.7
+    sm.validate_settings()
+    assert sm.drizzle_wht_threshold == 0.7
+
+
 def test_validate_group_size_valid_kept(settings_manager):
     sm = settings_manager(settings_file="unused.json")
     sm.drizzle_group_size = 120

@@ -70,6 +70,13 @@ def test_defaults_cover_full_required_surface():
     assert "local_solver_preference" in defaults
     assert "mosaic_settings" in defaults
     assert "order_file_list" in defaults
+    assert defaults["drizzle_wht_threshold"] == 0.0
+
+
+def test_existing_positive_wht_threshold_round_trips_unchanged():
+    state = QtSettingsState.from_dict({"drizzle_wht_threshold": 0.7})
+    assert state.drizzle_wht_threshold == 0.7
+    assert state.to_dict()["drizzle_wht_threshold"] == 0.7
 
 
 def test_defaults_aligned_with_settings_manager():

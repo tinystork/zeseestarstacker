@@ -258,6 +258,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "field_weight_by_stars": {"en": "Weight by stars", "fr": "Pondérer par étoiles"},
     "field_drizzle_scale": {"en": "Drizzle scale", "fr": "Échelle du drizzle"},
     "field_drizzle_wht_threshold": {"en": "WHT threshold", "fr": "Seuil WHT"},
+    "drizzle_wht_threshold_signed_tooltip": {
+        "en": "N/A for Lanczos — native WHT is signed",
+        "fr": "N/A pour Lanczos — le WHT natif est signé",
+    },
     "field_drizzle_kernel": {"en": "Kernel", "fr": "Noyau"},
     "field_drizzle_pixfrac": {"en": "Pixfrac", "fr": "Pixfrac"},
     "field_master_tile_crop": {

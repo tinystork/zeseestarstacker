@@ -2079,6 +2079,9 @@ class MainWindow(QMainWindow):
         self.drizzle_kernel_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
+        self.drizzle_kernel_combo.currentIndexChanged.connect(
+            self._update_drizzle_gating
+        )
         self.drizzle_pixfrac_spin.valueChanged.connect(self._sync_state_from_controls)
         self.use_gpu_check.stateChanged.connect(self._sync_state_from_controls)
         self.solver_combo.currentIndexChanged.connect(self._sync_state_from_controls)
@@ -2368,7 +2371,14 @@ class MainWindow(QMainWindow):
         # Drizzle advanced sub-options (Stacking-tab Drizzle block, D3) share
         # the same global Enable-drizzle gate (Tk parity).
         self.drizzle_scale_spin.setEnabled(drizzle)
-        self.drizzle_wht_spin.setEnabled(drizzle)
+        signed_wht = self.drizzle_kernel_combo.currentText() in (
+            "lanczos2",
+            "lanczos3",
+        )
+        self.drizzle_wht_spin.setEnabled(drizzle and not signed_wht)
+        self.drizzle_wht_spin.setToolTip(
+            self._tr("drizzle_wht_threshold_signed_tooltip") if signed_wht else ""
+        )
         self.drizzle_kernel_combo.setEnabled(drizzle)
         self.drizzle_pixfrac_spin.setEnabled(drizzle)
 
@@ -4897,6 +4907,7 @@ class MainWindow(QMainWindow):
             self._detached_histogram_window.set_texts(self._tr)
         if hasattr(self, "backend_notice_label"):
             self.backend_notice_label.setText(self._backend_notice_text())
+        self._update_drizzle_gating()
 
     def _render_preview_label(self) -> None:
         """Render the preview metadata label from its stored detail + language."""

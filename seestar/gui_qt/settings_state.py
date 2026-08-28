@@ -192,7 +192,7 @@ class QtSettingsState:
     # --- Drizzle ---
     use_drizzle: bool = False
     drizzle_scale: int = 2
-    drizzle_wht_threshold: float = 0.7
+    drizzle_wht_threshold: float = 0.0
     drizzle_mode: str = "Final"
     drizzle_kernel: str = "square"
     drizzle_pixfrac: float = 1.0

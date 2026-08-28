@@ -17653,7 +17653,7 @@ class SeestarQueuedStacker:
         min_w=0.1,
         use_drizzle=False,
         drizzle_scale=2.0,
-        drizzle_wht_threshold=0.7,
+        drizzle_wht_threshold=0.0,
         drizzle_mode="Final",
         drizzle_kernel="square",
         drizzle_pixfrac=1.0,
