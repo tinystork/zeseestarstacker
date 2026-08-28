@@ -169,7 +169,12 @@ from .preview_view import (
     zoomed_image_size,
 )
 from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
-from .run_bridge import RunRequest, build_run_request as _build_run_request
+from .run_bridge import (
+    RUN_INTENT_FRESH,
+    RUN_INTENT_RESUME,
+    RunRequest,
+    build_run_request as _build_run_request,
+)
 from .run_controller import RunController
 from .run_handoff import attach_run_settings
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
@@ -180,6 +185,8 @@ from .solver_probe import probe_zesolver_operational
 from .summary_payload import SummaryPayload, derive_terminal_status
 
 from .resources import load_empty_preview_pixmap, load_window_icon
+
+from seestar import resume_locator
 
 # Real product window-title *name* (the Tk ``localization`` "title" key, en/fr
 # identical).  The full default window title appends the lazily-read package
@@ -1254,6 +1261,14 @@ class MainWindow(QMainWindow):
         self.solver_combo.addItems(SOLVER_PREFERENCES)
         self.solver_combo.setCurrentText("none")
 
+        # Explicit New/Resume selector (RSM2-02C).  Fresh/New by default on
+        # every construction; a persisted/browsed/edited last-stack path alone
+        # never selects Resume — only this explicit user choice does.
+        self.resume_mode_combo = QComboBox()
+        self.resume_mode_combo.addItem(self._tr("resume_mode_new"), "fresh")
+        self.resume_mode_combo.addItem(self._tr("resume_mode_resume"), "resume")
+        self.resume_mode_combo.setCurrentIndex(0)
+
         form = QFormLayout()
         self._add_form_row(
             form,
@@ -1281,6 +1296,7 @@ class MainWindow(QMainWindow):
             "last_stack",
             self._path_row(self.last_stack_edit, self.browse_last_stack_button),
         )
+        self._add_form_row(form, "resume_mode_label", self.resume_mode_combo)
         self._add_form_row(form, "batch_size", self.batch_spin)
         form.addRow("", self.boring_check)
         self._add_form_row(form, "stacking_mode", self.stacking_mode_combo)
@@ -2046,6 +2062,7 @@ class MainWindow(QMainWindow):
         self.reference_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._on_last_stack_changed)
+        self.resume_mode_combo.currentIndexChanged.connect(self._on_resume_mode_changed)
         self.browse_input_button.clicked.connect(self._browse_input)
         self.browse_output_button.clicked.connect(self._browse_output)
         self.browse_temp_button.clicked.connect(self._browse_temp)
@@ -2691,6 +2708,94 @@ class MainWindow(QMainWindow):
         p = self.last_stack_edit.text().strip()
         if p:
             self.output_edit.setText(os.path.dirname(p))
+
+    # ------------------------------------------------------ resume selector
+    def _on_resume_mode_changed(self, _index: Optional[int] = None) -> None:
+        """Handle an explicit New/Resume selector change (RSM2-02C).
+
+        ``Resume`` runs the bounded locator/restore flow; ``New`` (or any
+        non-resume value) clears the transient run intent only.  This is the
+        *only* path that sets ``resume_intent`` — editing/browsing the Last
+        Stack path never does.
+        """
+        mode = self.resume_mode_combo.currentData()
+        if mode == "resume":
+            self._activate_resume()
+        else:
+            self._clear_resume_intent()
+
+    def _clear_resume_intent(self) -> None:
+        """Clear the transient resume intent/source (keep last-stack history)."""
+        self.settings_state.resume_intent = RUN_INTENT_FRESH
+        self.settings_state.resume_source = ""
+
+    def _set_resume_mode_combo(self, mode: str) -> None:
+        """Set the selector to ``mode`` without re-firing the handler."""
+        index = 1 if mode == "resume" else 0
+        self.resume_mode_combo.blockSignals(True)
+        try:
+            self.resume_mode_combo.setCurrentIndex(index)
+        finally:
+            self.resume_mode_combo.blockSignals(False)
+
+    def _activate_resume(self) -> None:
+        """Run the explicit Resume flow from the current locator.
+
+        The locator is the selected previous-stack FITS (last-stack path) or,
+        when empty, the output folder.  A missing locator prompts a browse.  On
+        success the owning run directory's config is restored and the transient
+        resume intent/source are set; on failure the selector reverts to New and
+        a bounded warning is shown (never a hidden Resume intent).
+        """
+        locator = self.last_stack_edit.text().strip() or self.output_edit.text().strip()
+        if not locator:
+            self._browse_last_stack()
+            locator = self.last_stack_edit.text().strip()
+        result = resume_locator.discover_resume(locator)
+        if result.status == resume_locator.STATUS_READY:
+            self._apply_resume_result(result)
+        else:
+            self._refuse_resume(result)
+
+    def _apply_resume_result(self, result) -> None:
+        """Restore the discovered config and arm an explicit Resume run intent."""
+        state = self.settings_state
+        resume_locator.restore_to_settings(result.config, state)
+        # Coherent output folder: the resolved owning run directory.
+        state.output_folder = result.run_dir
+        state.resume_intent = RUN_INTENT_RESUME
+        state.resume_source = result.run_dir
+        self._apply_state_to_controls(state)
+        # The trailing control sync never touches resume_intent/resume_source,
+        # but re-assert them defensively so the model stays coherent.
+        self.settings_state.resume_intent = RUN_INTENT_RESUME
+        self.settings_state.resume_source = result.run_dir
+        self.log(
+            f"Resume prepared from {result.run_dir} "
+            f"(config: {result.config_source or 'none'})"
+        )
+        self.statusBar().showMessage(f"Resume: {result.run_dir}")
+
+    def _refuse_resume(self, result) -> None:
+        """Refuse an invalid Resume and leave the window Fresh (no mutation)."""
+        self._set_resume_mode_combo("fresh")
+        self._clear_resume_intent()
+        reason_key = resume_locator.STATUS_REASON_KEYS.get(
+            result.status, "resume_refuse_no_run"
+        )
+        body = self._tr(reason_key, default=reason_key)
+        if result.detail:
+            body = f"{body}\n\n{result.detail}"
+        self.log(
+            f"Resume refused: {reason_key}"
+            + (f" — {result.detail}" if result.detail else "")
+        )
+        self.statusBar().showMessage(self._tr("resume_refuse_title"))
+        self._show_error_box(
+            self._tr("resume_refuse_title", default="Cannot resume"),
+            body,
+            severity="warning",
+        )
 
     def _input_folder_summary_text(self) -> str:
         """Return the human-readable input-folder summary (main + staged)."""

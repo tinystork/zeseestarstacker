@@ -493,6 +493,71 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Cannot start run",
         "fr": "Impossible de démarrer",
     },
+    # Explicit New/Resume selector (RSM2-02C).  The run intent is chosen by the
+    # user here; a persisted last-stack path alone never selects Resume.
+    "resume_mode_label": {"en": "Run", "fr": "Exécution"},
+    "resume_mode_new": {"en": "New", "fr": "Nouveau"},
+    "resume_mode_resume": {"en": "Resume", "fr": "Reprendre"},
+    "resume_refuse_title": {"en": "Cannot resume", "fr": "Reprise impossible"},
+    "resume_refuse_no_run": {
+        "en": (
+            "No previous run was found at the selected location.\n\n"
+            "Select a previous stack (FITS) or its output folder, then "
+            "choose Resume again."
+        ),
+        "fr": (
+            "Aucune exécution précédente n’a été trouvée à l’emplacement "
+            "sélectionné.\n\n"
+            "Sélectionnez un stack précédent (FITS) ou son dossier de sortie, "
+            "puis choisissez à nouveau Reprendre."
+        ),
+    },
+    "resume_refuse_no_checkpoint": {
+        "en": (
+            "The selected location has saved configuration but no recognized "
+            "checkpoint to resume.\n\n"
+            "A configuration file alone is not proof of a resumable run."
+        ),
+        "fr": (
+            "L’emplacement sélectionné contient une configuration mais aucun "
+            "point de reprise reconnu.\n\n"
+            "Un fichier de configuration seul ne prouve pas qu’une reprise "
+            "est possible."
+        ),
+    },
+    "resume_refuse_config_unavailable": {
+        "en": (
+            "A checkpoint was found but its original settings cannot be "
+            "reconstructed automatically.\n\n"
+            "Start a new stack instead."
+        ),
+        "fr": (
+            "Un point de reprise a été trouvé mais ses réglages d’origine ne "
+            "peuvent pas être reconstruits automatiquement.\n\n"
+            "Démarrez plutôt un nouveau stack."
+        ),
+    },
+    "resume_refuse_corrupt_config": {
+        "en": "The saved configuration could not be read safely and was not applied.",
+        "fr": (
+            "La configuration enregistrée n’a pas pu être lue de façon sûre "
+            "et n’a pas été appliquée."
+        ),
+    },
+    "resume_refuse_unsafe_config": {
+        "en": "The saved configuration contains sensitive data and was not applied.",
+        "fr": (
+            "La configuration enregistrée contient des données sensibles et "
+            "n’a pas été appliquée."
+        ),
+    },
+    "resume_refuse_ambiguous_legacy": {
+        "en": "The saved configuration is ambiguous and could not be restored safely.",
+        "fr": (
+            "La configuration enregistrée est ambiguë et n’a pas pu être "
+            "restaurée de façon sûre."
+        ),
+    },
 }
 
 
