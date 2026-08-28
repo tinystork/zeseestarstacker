@@ -1,95 +1,30 @@
-import importlib.util
-import sys
-import types
-from pathlib import Path
+"""Regression test for ``preserve_linear_output`` in ``_save_final_stack``.
+
+Ensures that when ``preserve_linear_output=True`` the final stack keeps its
+linear dynamics (no percentile normalization to ``[0,1]``), so the data handed
+back for preview still spans the original linear range.
+
+The previous version of this test built a hand-rolled fake ``seestar`` package
+tree (``sys.modules`` stubs for ``seestar.alignment.astrometry_solver``,
+``seestar.enhancement.reproject_utils``, etc.) and then executed the *real*
+``queue_manager.py`` under the canonical name.  As production modules evolved
+(``reproject_utils`` gained ``ensure_wcs_pixel_shape`` and friends), the fake
+tree became incomplete, ``exec_module`` raised, and a partially-initialized
+``seestar.queuep.queue_manager`` was left in ``sys.modules`` — poisoning every
+later test that imports ``SeestarQueuedStacker``.  We now import the real
+internal modules directly and only mock the two file-writing operations that
+the test must not perform.
+"""
+
 import numpy as np
 from astropy.io import fits
 
-ROOT = Path(__file__).resolve().parents[1]
-
-# Create minimal package structure for seestar with required submodules
-seestar_pkg = sys.modules.get("seestar", types.ModuleType("seestar"))
-seestar_pkg.__path__ = []
-sys.modules["seestar"] = seestar_pkg
-
-core_spec = importlib.util.spec_from_file_location(
-    "seestar.core", ROOT / "seestar" / "core" / "__init__.py"
-)
-core_mod = importlib.util.module_from_spec(core_spec)
-sys.modules["seestar.core"] = core_mod
-core_spec.loader.exec_module(core_mod)
-
-gui_pkg = sys.modules.get("seestar.gui", types.ModuleType("seestar.gui"))
-gui_pkg.__path__ = []
-sys.modules["seestar.gui"] = gui_pkg
-settings_spec = importlib.util.spec_from_file_location(
-    "seestar.gui.settings", ROOT / "seestar" / "gui" / "settings.py"
-)
-settings_mod = importlib.util.module_from_spec(settings_spec)
-sys.modules["seestar.gui.settings"] = settings_mod
-settings_spec.loader.exec_module(settings_mod)
-
-queuep_pkg = sys.modules.get("seestar.queuep", types.ModuleType("seestar.queuep"))
-queuep_pkg.__path__ = []
-sys.modules["seestar.queuep"] = queuep_pkg
-
-align_pkg = types.ModuleType("seestar.alignment")
-align_pkg.__path__ = []
-solver_mod = types.ModuleType("seestar.alignment.astrometry_solver")
-class DummySolver:
-    def __init__(self, *a, **k):
-        pass
-    def solve(self, *a, **k):
-        return None
-
-def solve_image_wcs(*a, **k):
-    return None
-
-solver_mod.AstrometrySolver = DummySolver
-solver_mod.solve_image_wcs = solve_image_wcs
-align_pkg.astrometry_solver = solver_mod
-sys.modules["seestar.alignment"] = align_pkg
-sys.modules["seestar.alignment.astrometry_solver"] = solver_mod
-
-enhancement_pkg = types.ModuleType("seestar.enhancement")
-enhancement_pkg.__path__ = []
-stack_enh_spec = importlib.util.spec_from_file_location(
-    "seestar.enhancement.stack_enhancement",
-    ROOT / "seestar" / "enhancement" / "stack_enhancement.py",
-)
-stack_enh_mod = importlib.util.module_from_spec(stack_enh_spec)
-sys.modules["seestar.enhancement.stack_enhancement"] = stack_enh_mod
-stack_enh_spec.loader.exec_module(stack_enh_mod)
-
-cc_mod = types.ModuleType("seestar.enhancement.color_correction")
-class DummyCB:
-    def __init__(self, *a, **k):
-        pass
-def apply_scnr(image_rgb, target_channel='green', amount=1.0, preserve_luminosity=True):
-    return image_rgb
-cc_mod.ChromaticBalancer = DummyCB
-cc_mod.apply_scnr = apply_scnr
-sys.modules["seestar.enhancement.color_correction"] = cc_mod
-
-reproj_mod = types.ModuleType("seestar.enhancement.reproject_utils")
-def _missing(*_a, **_k):
-    raise ImportError("reproject not available")
-reproj_mod.reproject_and_coadd = _missing
-reproj_mod.reproject_interp = _missing
-sys.modules["seestar.enhancement.reproject_utils"] = reproj_mod
-
-sys.modules["seestar.enhancement"] = enhancement_pkg
-
-qm_spec = importlib.util.spec_from_file_location(
-    "seestar.queuep.queue_manager", ROOT / "seestar" / "queuep" / "queue_manager.py"
-)
-queue_manager = importlib.util.module_from_spec(qm_spec)
-sys.modules["seestar.queuep.queue_manager"] = queue_manager
-qm_spec.loader.exec_module(queue_manager)
+from seestar.queuep import queue_manager
 
 
 class Dummy:
     pass
+
 
 def test_preserve_linear_output(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_manager, "save_preview_image", lambda *a, **k: None)
@@ -116,6 +51,10 @@ def test_preserve_linear_output(tmp_path, monkeypatch):
     d.aligned_files_count = 1
     d.preserve_linear_output = True
     d.drizzle_output_wcs = None
+    # The production refactor replaced the old flag heuristics with a single
+    # explicit finalization mode.  Selecting MOSAIC is what makes the SCI/WHT
+    # data below the finalization source (mirrors test_save_final_stack.py).
+    d.finalization_mode = queue_manager.FINALIZATION_MODE_MOSAIC
 
     def update_progress(*args, **kwargs):
         pass

@@ -15,23 +15,6 @@ from astropy.io import fits
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-# minimal stubs for GUI modules
-if "seestar.gui" not in sys.modules:
-    seestar_pkg = types.ModuleType("seestar")
-    seestar_pkg.__path__ = [str(ROOT / "seestar")]
-    gui_pkg = types.ModuleType("seestar.gui")
-    gui_pkg.__path__ = []
-    settings_mod = types.ModuleType("seestar.gui.settings")
-
-    class DummySettingsManager:
-        pass
-
-    settings_mod.SettingsManager = DummySettingsManager
-    gui_pkg.settings = settings_mod
-    sys.modules["seestar.gui.settings"] = settings_mod
-    sys.modules["seestar"] = seestar_pkg
-    sys.modules["seestar.gui"] = gui_pkg
-
 from seestar.queuep.queue_manager import (  # noqa: E402
     SeestarQueuedStacker,
     _BATCH_BREAK_TOKEN,

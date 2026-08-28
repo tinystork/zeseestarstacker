@@ -116,25 +116,6 @@ if "drizzle" in _missing_optional:
     _drizzle.resample = _dr
     sys.modules.setdefault("drizzle", _drizzle)
     sys.modules.setdefault("drizzle.resample", _dr)
-if "seestar.gui" not in __import__("sys").modules:
-    import sys
-
-    _pkg = types.ModuleType("seestar")
-    _pkg.__path__ = [str(ROOT / "seestar")]
-    _gui = types.ModuleType("seestar.gui")
-    _gui.__path__ = []
-    _settings = types.ModuleType("seestar.gui.settings")
-
-    class DummySettingsManager:
-        pass
-
-    _settings.SettingsManager = DummySettingsManager
-    _gui.settings = _settings
-    _pkg.gui = _gui
-    sys.modules["seestar"] = _pkg
-    sys.modules["seestar.gui"] = _gui
-    sys.modules["seestar.gui.settings"] = _settings
-
 from seestar.core.stack_methods import (  # noqa: E402
     _stack_kappa_sigma,
     _stack_linear_fit_clip,

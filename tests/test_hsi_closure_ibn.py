@@ -58,23 +58,6 @@ if "drizzle" in _missing_optional:
     sys.modules.setdefault("drizzle", _drizzle)
     sys.modules.setdefault("drizzle.resample", _drizzle_resample)
 
-if "seestar.gui" not in sys.modules:
-    seestar_pkg = types.ModuleType("seestar")
-    seestar_pkg.__path__ = [str(ROOT / "seestar")]
-    gui_pkg = types.ModuleType("seestar.gui")
-    gui_pkg.__path__ = []
-    settings_mod = types.ModuleType("seestar.gui.settings")
-
-    class DummySettingsManager:
-        pass
-
-    settings_mod.SettingsManager = DummySettingsManager
-    gui_pkg.settings = settings_mod
-    seestar_pkg.gui = gui_pkg
-    sys.modules["seestar"] = seestar_pkg
-    sys.modules["seestar.gui"] = gui_pkg
-    sys.modules["seestar.gui.settings"] = settings_mod
-
 from seestar.queuep.queue_manager import SeestarQueuedStacker  # noqa: E402
 
 HEADER = fits.Header()

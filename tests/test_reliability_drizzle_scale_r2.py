@@ -23,7 +23,6 @@ These tests lock the contract:
 
 import importlib
 import sys
-import types
 from pathlib import Path
 
 import numpy as np
@@ -34,21 +33,6 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
-# Stub seestar.gui.settings so queue_manager imports without Tk (same pattern as
-# test_m3d_policy.py / test_reliability_source_immutability_r1.py).
-if "seestar.gui.settings" not in sys.modules:
-    settings_mod = types.ModuleType("seestar.gui.settings")
-
-    class DummySettingsManager:
-        pass
-
-    settings_mod.SettingsManager = DummySettingsManager
-    settings_mod.TILE_HEIGHT = 512
-    sys.modules["seestar.gui.settings"] = settings_mod
-    hist_mod = types.ModuleType("seestar.gui.histogram_widget")
-    hist_mod.HistogramWidget = object
-    sys.modules["seestar.gui.histogram_widget"] = hist_mod
 
 qm = importlib.import_module("seestar.queuep.queue_manager")
 

@@ -22,31 +22,10 @@ spawned.
 import importlib
 import inspect
 import sys
-import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
-# Stub GUI modules to avoid Tk / real settings during import (same pattern as
-# test_m3d_policy.py and test_boring_drizzle_boundary.py).
-if "seestar.gui" not in sys.modules:
-    seestar_pkg = types.ModuleType("seestar")
-    seestar_pkg.__path__ = [str(ROOT / "seestar")]
-    gui_pkg = types.ModuleType("seestar.gui")
-    gui_pkg.__path__ = []
-    settings_mod = types.ModuleType("seestar.gui.settings")
-    settings_mod.SettingsManager = object
-    settings_mod.TILE_HEIGHT = 512
-    hist_mod = types.ModuleType("seestar.gui.histogram_widget")
-    hist_mod.HistogramWidget = object
-    gui_pkg.settings = settings_mod
-    gui_pkg.histogram_widget = hist_mod
-    seestar_pkg.gui = gui_pkg
-    sys.modules["seestar"] = seestar_pkg
-    sys.modules["seestar.gui"] = gui_pkg
-    sys.modules["seestar.gui.settings"] = settings_mod
-    sys.modules["seestar.gui.histogram_widget"] = hist_mod
 
 qm = importlib.import_module("seestar.queuep.queue_manager")
 

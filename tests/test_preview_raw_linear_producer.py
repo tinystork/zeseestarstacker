@@ -19,7 +19,6 @@ Verifies the Option-A backend preview producers in
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 
 import numpy as np
@@ -28,29 +27,6 @@ from astropy.io import fits
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
-# Stub GUI modules to avoid Tk dependence during import (mirrors
-# tests/test_save_final_stack.py / tests/test_exposure_metadata_contract.py).
-if "seestar.gui" not in sys.modules:
-    seestar_pkg = types.ModuleType("seestar")
-    seestar_pkg.__path__ = [str(ROOT / "seestar")]
-    gui_pkg = types.ModuleType("seestar.gui")
-    gui_pkg.__path__ = []
-    settings_mod = types.ModuleType("seestar.gui.settings")
-
-    class DummySettingsManager:
-        pass
-
-    settings_mod.SettingsManager = DummySettingsManager
-    hist_mod = types.ModuleType("seestar.gui.histogram_widget")
-    hist_mod.HistogramWidget = object
-    gui_pkg.settings = settings_mod
-    gui_pkg.histogram_widget = hist_mod
-    seestar_pkg.gui = gui_pkg
-    sys.modules["seestar"] = seestar_pkg
-    sys.modules["seestar.gui"] = gui_pkg
-    sys.modules["seestar.gui.settings"] = settings_mod
-    sys.modules["seestar.gui.histogram_widget"] = hist_mod
 
 from seestar.queuep.queue_manager import SeestarQueuedStacker  # noqa: E402
 from seestar.core.drizzle_core import DrizzleAccumulator  # noqa: E402
