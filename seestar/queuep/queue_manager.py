@@ -2547,6 +2547,152 @@ class SeestarQueuedStacker:
             if self.enable_preview:
                 self._downsample_preview(reproj_data, _coverage_hw(reproj_wht))
 
+    # --- ZSSS-LIFECYCLE-01-R1: failed-start resource unwind -----------------
+
+    def _snapshot_existing_state(self):
+        """Record the pre-existing output-bound checkpoint state.
+
+        Returns a set of normalised absolute paths (files and the
+        ``memmap_accumulators`` directory) that already existed before this
+        start attempt.  Cleanup uses this snapshot to remove *only* artifacts
+        this attempt created, so a failed Fresh attempt never deletes
+        preexisting output contents and a Resume attempt never loses its
+        preexisting checkpoint files.
+        """
+        snapshot = set()
+        out = getattr(self, "output_folder", None)
+        if not out:
+            return snapshot
+        memdir = os.path.join(out, "memmap_accumulators")
+        if os.path.isdir(memdir):
+            snapshot.add(os.path.normcase(os.path.abspath(memdir)))
+            try:
+                for name in os.listdir(memdir):
+                    snapshot.add(
+                        os.path.normcase(os.path.abspath(os.path.join(memdir, name)))
+                    )
+            except OSError:
+                pass
+        batch_count = os.path.join(out, "batches_count.txt")
+        if os.path.isfile(batch_count):
+            snapshot.add(os.path.normcase(os.path.abspath(batch_count)))
+        return snapshot
+
+    def _remove_attempt_created_state(self):
+        """Remove only output-bound checkpoint artifacts this attempt created.
+
+        Called on a failed *fresh* start (never resume): it prunes the
+        ``memmap_accumulators`` files and ``batches_count.txt`` that were not
+        present before the attempt, so a second Fresh attempt is not falsely
+        refused by ``_resume_artifacts_present`` seeing its own failed start's
+        leftovers.  Preexisting bytes/directories are never touched.
+        """
+        snapshot = getattr(self, "_attempt_preexisting_state", None) or set()
+        out = getattr(self, "output_folder", None)
+        if not out:
+            return
+        memdir = os.path.join(out, "memmap_accumulators")
+        if os.path.isdir(memdir):
+            try:
+                names = os.listdir(memdir)
+            except OSError:
+                names = []
+            for name in names:
+                p = os.path.abspath(os.path.join(memdir, name))
+                if os.path.normcase(p) in snapshot:
+                    continue
+                try:
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                    else:
+                        os.remove(p)
+                except OSError:
+                    pass
+            # Remove the directory itself only if this attempt created it and
+            # it is now empty.
+            if os.path.normcase(os.path.abspath(memdir)) not in snapshot:
+                try:
+                    if not os.listdir(memdir):
+                        os.rmdir(memdir)
+                except OSError:
+                    pass
+        batch_count = os.path.join(out, "batches_count.txt")
+        if (
+            os.path.isfile(batch_count)
+            and os.path.normcase(os.path.abspath(batch_count)) not in snapshot
+        ):
+            try:
+                os.remove(batch_count)
+            except OSError:
+                pass
+
+    def _start_autotuner_for_attempt(self):
+        """Start the autotuner and record that this attempt owns it.
+
+        Never raises: a failing ``start()`` leaves the ownership flag clear so
+        cleanup will not try to stop a tuner that never started.
+        """
+        self._autotuner_started_this_attempt = False
+        tuner = getattr(self, "autotuner", None)
+        if tuner is None:
+            return
+        try:
+            tuner.start()
+            self._autotuner_started_this_attempt = True
+        except Exception:
+            self._autotuner_started_this_attempt = False
+
+    def _cleanup_failed_start(self):
+        """Idempotent, ownership-safe unwind of a failed start attempt.
+
+        Releases every resource this attempt may have opened before the worker
+        thread exists, and removes only the output-bound checkpoint artifacts
+        this attempt created.  It is callable regardless of
+        ``processing_active`` (unlike the public :meth:`stop`), never raises,
+        and never touches ``startup_refusal`` — the structured refusal carrier
+        is preserved verbatim for the caller.
+        """
+        # 1. Stop the autotuner only if this attempt started it.
+        if getattr(self, "_autotuner_started_this_attempt", False):
+            self._autotuner_started_this_attempt = False
+            tuner = getattr(self, "autotuner", None)
+            if tuner is not None:
+                try:
+                    tuner.stop()
+                except Exception:
+                    pass
+
+        # 2. Release the session-scoped normalization/reference memory
+        #    (idempotent).
+        try:
+            self._release_norm_reference()
+        except Exception:
+            pass
+
+        # 3. Close attempt-owned SUM/WHT memmaps and remove attempt-created
+        #    checkpoint artifacts.  Resume artifacts are preexisting and must
+        #    stay byte-identical, so this branch runs for fresh attempts only.
+        if not getattr(self, "_resume_active", False):
+            try:
+                self._close_memmaps()
+            except Exception:
+                pass
+            self._remove_attempt_created_state()
+
+        # 4. Clear every stale lifecycle flag without creating attributes a
+        #    bare/``__new__`` instance never had.
+        self.processing_active = False
+        self.stop_processing = False
+        self.user_requested_stop = False
+        if hasattr(self, "processing_thread"):
+            self.processing_thread = None
+        aligner = getattr(self, "aligner", None)
+        if aligner is not None and hasattr(aligner, "stop_processing"):
+            try:
+                aligner.stop_processing = False
+            except Exception:
+                pass
+
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _interbatch_start_session(self) -> None:
@@ -17859,8 +18005,13 @@ class SeestarQueuedStacker:
             self.processing_active = False
             return False
 
-        if self.autotuner:
-            self.autotuner.start()
+        # ZSSS-LIFECYCLE-01-R1: snapshot the pre-existing output-bound state and
+        # reset attempt ownership before any resource is started or any output
+        # is mutated.  The autotuner is intentionally started at the latest
+        # safe point (just before the worker thread), so no synchronous
+        # validation failure below can leak it.
+        self._autotuner_started_this_attempt = False
+        self._attempt_preexisting_state = self._snapshot_existing_state()
 
         # =========================================================================================
         # === ÉTAPE 1 : CONFIGURATION DES PARAMÈTRES DE SESSION SUR L'INSTANCE (AVANT TOUT LE RESTE) ===
@@ -17874,11 +18025,13 @@ class SeestarQueuedStacker:
                 f"❌ Dossier d'entrée principal '{input_dir}' invalide ou non défini.",
                 "ERROR",
             )
+            self._cleanup_failed_start()
             return False
         if not self.output_folder:
             self.update_progress(
                 f"❌ Dossier de sortie '{output_dir}' non défini.", "ERROR"
             )
+            self._cleanup_failed_start()
             return False
         try:
             os.makedirs(self.output_folder, exist_ok=True)
@@ -17887,6 +18040,7 @@ class SeestarQueuedStacker:
                 f"❌ Erreur création dossier de sortie '{self.output_folder}': {e_mkdir}",
                 "ERROR",
             )
+            self._cleanup_failed_start()
             return False
         self.temp_folder = (
             os.path.abspath(temp_folder) if temp_folder else self.output_folder
@@ -18227,19 +18381,11 @@ class SeestarQueuedStacker:
             # this run cannot resume).  All other early refusals stay generic.
             self.startup_refusal = self._build_startup_refusal(early_result)
             self.update_progress(f"❌ Reprise impossible: {early_result}", "ERROR")
-            self.processing_active = False
-            # Startup-side resource unwind: ``autotuner`` was started before this
-            # early refusal and ``stacker.stop()`` returns early while
-            # ``processing_active`` is False, so stop it here directly (smallest
-            # safe correction) to avoid leaking a started service.
-            # ZSSS-LIFECYCLE-01-C2: the cleanup itself must never raise — a
-            # failing ``autotuner.stop()`` must not replace the known structured
-            # refusal (fail-closed output state and no artifact writes).
-            if self.autotuner:
-                try:
-                    self.autotuner.stop()
-                except Exception:
-                    pass
+            # ZSSS-LIFECYCLE-01-R1: idempotent, ownership-safe resource unwind.
+            # The autotuner is never started this early (it starts only just
+            # before the worker thread), but the helper covers memmaps/flags and
+            # preserves the structured refusal carrier.
+            self._cleanup_failed_start()
             return False
         # Pin the verified resolved original reference (original path or its
         # verified moved-to-stacked counterpart) for reference preparation.
@@ -18342,6 +18488,7 @@ class SeestarQueuedStacker:
                         "session introuvable ou modifiée.",
                         "ERROR",
                     )
+                    self._cleanup_failed_start()
                     return False
                 self.aligner.reference_image_path = resolved_ref
                 reference_path_ui = resolved_ref
@@ -18420,6 +18567,7 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "❌ ERREUR CRITIQUE: AstrometrySolver non initialisé.", "ERROR"
                     )
+                    self._cleanup_failed_start()
                     return False
 
                 solver_settings_for_ref = {
@@ -18544,6 +18692,7 @@ class SeestarQueuedStacker:
                             "❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.",
                             "ERROR",
                         )
+                        self._cleanup_failed_start()
                         return False
             else:
                 logger.debug(
@@ -18578,6 +18727,7 @@ class SeestarQueuedStacker:
                 f"ERREUR QM (start_processing): Échec préparation référence/WCS : {e_ref_prep}"
             )
             traceback.print_exc(limit=2)
+            self._cleanup_failed_start()
             return False
 
         logger.debug(f"DEBUG QM (start_processing): AVANT APPEL initialize():")
@@ -18640,8 +18790,8 @@ class SeestarQueuedStacker:
             f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={init_shape_hwc}..."
         )
         if not self.initialize(output_dir, init_shape_hwc):
-            self.processing_active = False
             logger.debug("ERREUR QM (start_processing): Échec de self.initialize().")
+            self._cleanup_failed_start()
             return False
         logger.debug(
             "DEBUG QM (start_processing): self.initialize() terminé avec succès."
@@ -18862,6 +19012,7 @@ class SeestarQueuedStacker:
             except _ResumeCheckpointError as ckpt_err:
                 self.update_progress(f"❌ Reprise impossible: {ckpt_err}", "ERROR")
                 self.processing_error = str(ckpt_err)
+                self._cleanup_failed_start()
                 return False
             if skipped:
                 self.update_progress(
@@ -18873,12 +19024,13 @@ class SeestarQueuedStacker:
         # started.  On resume this proves the remaining queue is the exact
         # ordered suffix of the persisted plan; on a fresh run it binds the plan.
         if not self._checkpoint_preflight():
-            self.processing_active = False
+            self._cleanup_failed_start()
             return False
 
         if self.is_mosaic_run and self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
+                self._cleanup_failed_start()
                 return False
             self.fixed_output_wcs = self.reference_wcs_object
             self.fixed_output_shape = self.reference_shape
@@ -18895,6 +19047,7 @@ class SeestarQueuedStacker:
         ):
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
+                self._cleanup_failed_start()
                 return False
             self.fixed_output_wcs = self.reference_wcs_object
             self.fixed_output_shape = self.reference_shape
@@ -18912,6 +19065,11 @@ class SeestarQueuedStacker:
             self._interbatch_start_session()
         else:
             self.interbatch_norm_active = False
+
+        # ZSSS-LIFECYCLE-01-R1: start the autotuner at the latest safe point —
+        # after every synchronous validation step has passed — so no earlier
+        # false start can leak a running tuner thread.
+        self._start_autotuner_for_attempt()
 
         logger.debug(
             "DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker..."

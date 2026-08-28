@@ -40,6 +40,14 @@ _SUPPORTED_LANGUAGES = ("en", "fr")
 # so this module stays a pure, dependency-free stdlib model.
 _SUPPORTED_THEMES = ("system", "dark", "light")
 
+# Transient run-intent fields (Resume Contract v2).  They are carried in the
+# in-memory model so ``build_run_request`` can forward an explicit Fresh/Resume
+# intent to the engine, but they are *never* persisted and *never* restored:
+# run intent is strictly per-operation.  A stale/corrupt/user-edited settings
+# file that contains ``resume_intent="resume"`` / ``resume_source`` must not
+# make a past Resume operation silently survive an application restart.
+_TRANSIENT_FIELDS = frozenset({"resume_intent", "resume_source"})
+
 
 def _default_mosaic_settings() -> Dict[str, Any]:
     """Return a fresh copy of the default mosaic settings dict."""
@@ -304,10 +312,13 @@ class QtSettingsState:
         """Return a fresh dict of field name -> default value.
 
         Mutable defaults are rebuilt via their ``default_factory`` so callers
-        always get independent containers.
+        always get independent containers.  Transient run-intent fields are
+        excluded: they are not part of the persisted settings surface.
         """
         result: Dict[str, Any] = {}
         for f in dataclasses.fields(cls):
+            if f.name in _TRANSIENT_FIELDS:
+                continue
             if f.default is not dataclasses.MISSING:
                 result[f.name] = f.default
             elif f.default_factory is not dataclasses.MISSING:  # type: ignore[comparison-overlap]
@@ -332,6 +343,11 @@ class QtSettingsState:
         defaults = cls.defaults()
         for f in dataclasses.fields(cls):
             name = f.name
+            if name in _TRANSIENT_FIELDS:
+                # Never restore transient run intent from a settings file: a
+                # stale ``resume_intent="resume"`` / ``resume_source`` is
+                # ignored so the loaded state is always fresh + empty source.
+                continue
             if name in data:
                 setattr(state, name, _coerce_value(data[name], defaults[name]))
         # Normalise the UI language field: a supported code is kept, anything
@@ -345,5 +361,14 @@ class QtSettingsState:
         return state
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return a shallow snapshot of the current state as a dict."""
-        return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+        """Return a shallow snapshot of the current state as a dict.
+
+        Transient run-intent fields (``resume_intent`` / ``resume_source``) are
+        excluded so a persisted settings file can never carry a past Resume
+        operation across an application restart.
+        """
+        return {
+            f.name: getattr(self, f.name)
+            for f in dataclasses.fields(self)
+            if f.name not in _TRANSIENT_FIELDS
+        }
