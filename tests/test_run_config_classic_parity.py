@@ -172,3 +172,19 @@ def test_migrated_legacy_witness_computes_v1_hash():
     assert rc.classic_fingerprint(cfg) == engine_fp
     # A hash is a digest, never a reconstruction: it is 64 hex chars.
     assert len(rc.classic_fingerprint(cfg)) == 64
+
+
+def test_collect_from_backend_roundtrip_matches_engine_fingerprint():
+    """The backend collection seam reconstructs the canonical classic payload
+    from the *engine's* own attribute names/units (``_RESUME_FINGERPRINT_ATTRS``,
+    decimal crop / tuple winsor) and the recomputed classic fingerprint stays
+    byte-for-byte equal to ``SeestarQueuedStacker._scientific_fingerprint``."""
+    for sci in (CONFIG_A, CONFIG_B):
+        # Engine-attribute view (exactly what the queue manager holds after
+        # ``start_processing`` binds the backend kwargs).
+        engine = _engine_stack(_to_engine_attrs(sci))
+        cfg = rc.collect_from_backend(engine)
+        # The collection reverses the two documented representations.
+        assert cfg.scientific["master_tile_crop_percent"] == sci["master_tile_crop_percent"]
+        assert cfg.scientific["winsor_limits"] == list(sci["winsor_limits"])
+        assert rc.classic_fingerprint(cfg) == engine._scientific_fingerprint()

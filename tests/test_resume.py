@@ -20,6 +20,7 @@ from seestar.queuep.queue_manager import (  # noqa: E402
     _BATCH_BREAK_TOKEN,
     _ResumeCheckpointError,
 )
+import seestar.run_contract as rc  # noqa: E402
 
 
 def close_mm(mm):
@@ -2486,3 +2487,533 @@ def test_quality_weighted_continuation_parity(tmp_path):
         reopened.cumulative_wht_memmap,
     ):
         close_mm(mm)
+
+
+# ---------------------------------------------------------------------------
+# 26. Schema-v2 manifest content / digest / config payload
+# ---------------------------------------------------------------------------
+def _read_manifest(out_dir):
+    return json.loads(
+        (Path(out_dir) / "memmap_accumulators" / "resume_manifest.json").read_text()
+    )
+
+
+def _write_v2_checkpoint(out_dir, shape, count, ledger, session=None):
+    """Same as ``write_valid_checkpoint`` but asserts the v2 manifest shape."""
+    stack = write_valid_checkpoint(
+        out_dir, shape, count, ledger, session=session
+    )
+    manifest = _read_manifest(out_dir)
+    assert manifest["schema_version"] == 2
+    assert (Path(out_dir) / "run_config.cfg").is_file()
+    return stack, manifest
+
+
+def test_manifest_v2_content_digest_and_payload(tmp_path):
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=2)
+    stack, manifest = _write_v2_checkpoint(
+        out, shape, count=2, ledger=session["sources"], session=session
+    )
+
+    # Required v2 keys present with the right shape/types.
+    assert manifest["schema_version"] == 2
+    assert manifest["mode"] == "classic_sumw"
+    assert isinstance(manifest["scientific_config"], dict)
+    assert isinstance(manifest["fingerprint"], str) and len(manifest["fingerprint"]) == 64
+    assert isinstance(manifest["run_config_digest"], str) and len(manifest["run_config_digest"]) == 64
+
+    # fingerprint is the authoritative classic hash of the current engine state.
+    assert manifest["fingerprint"] == stack._scientific_fingerprint()
+
+    # scientific_config is the canonical classic payload (percent + list winsor).
+    sci = manifest["scientific_config"]
+    assert sci["master_tile_crop_percent"] == 18.0
+    assert sci["winsor_limits"] == [0.05, 0.05]
+
+    # run_config_digest matches the exact canonical run_config.cfg model on disk.
+    report = rc.read_cfg(str(Path(out) / "run_config.cfg"))
+    assert report.config.full_digest() == manifest["run_config_digest"]
+    assert report.config.scientific == sci
+    # recomputed fingerprint from the stored payload agrees with the stored hash.
+    assert rc.classic_fingerprint(
+        rc.RunConfig.from_sections(scientific=sci)
+    ) == manifest["fingerprint"]
+
+
+def test_manifest_v2_all_existing_hsi_fields_unchanged(tmp_path):
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=1)
+    _, manifest = _write_v2_checkpoint(
+        out, shape, count=1, ledger=session["sources"], session=session
+    )
+    for key in (
+        "state", "mode", "semantics", "shape", "dtype_sum", "dtype_wht",
+        "quality_reference_scale", "stacked_batches_count",
+        "images_in_cumulative_stack", "total_exposure_seconds",
+        "exposure_unknown_count", "exposure_min", "exposure_max",
+        "cumulative_header", "session", "completed_sources",
+    ):
+        assert key in manifest, key
+
+
+# ---------------------------------------------------------------------------
+# 27. V2 tamper matrix: fail closed before memmap open, no mutation
+# ---------------------------------------------------------------------------
+def _assert_refused_no_mutation(tmp_path, mutate, needle):
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=2)
+    write_valid_checkpoint(
+        out, shape, count=2, ledger=session["sources"], session=session
+    )
+    manifest_path = Path(out) / "memmap_accumulators" / "resume_manifest.json"
+    run_cfg_path = Path(out) / "run_config.cfg"
+    sum_path = Path(out) / "memmap_accumulators" / "cumulative_SUM.npy"
+    wht_path = Path(out) / "memmap_accumulators" / "cumulative_WHT.npy"
+
+    mutate(manifest_path, run_cfg_path)
+
+    # Post-tamper snapshot: the read-only validation must not modify any
+    # artifact further (SUM/WHT are never opened, manifest/run_config.cfg stay
+    # exactly as the tamper left them).
+    def _snapshot():
+        return {
+            "sum": sum_path.read_bytes(),
+            "wht": wht_path.read_bytes(),
+            "manifest": manifest_path.read_bytes(),
+            "run_cfg": run_cfg_path.read_bytes() if run_cfg_path.exists() else None,
+        }
+
+    snapshot = _snapshot()
+
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    ok, reason, _ = s._validate_resume_headless()
+    assert ok is False
+    assert needle in reason
+
+    assert _snapshot() == snapshot
+
+
+def test_v2_tamper_scientific_config_payload(tmp_path):
+    def mutate(mp, rp):
+        m = json.loads(mp.read_text())
+        m["scientific_config"]["kappa"] = 99.0
+        mp.write_text(json.dumps(m), encoding="utf-8")
+
+    _assert_refused_no_mutation(tmp_path, mutate, "does not match its fingerprint")
+
+
+def test_v2_tamper_fingerprint(tmp_path):
+    def mutate(mp, rp):
+        m = json.loads(mp.read_text())
+        m["fingerprint"] = "0" * 64
+        mp.write_text(json.dumps(m), encoding="utf-8")
+
+    _assert_refused_no_mutation(tmp_path, mutate, "configuration mismatch")
+
+
+def test_v2_tamper_run_config_cfg_content(tmp_path):
+    def mutate(mp, rp):
+        data = json.loads(rp.read_text())
+        data["scientific_config"]["kappa"] = 9.9
+        rp.write_text(
+            json.dumps(data, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    _assert_refused_no_mutation(tmp_path, mutate, "does not match its recorded digest")
+
+
+def test_v2_tamper_run_config_digest_field(tmp_path):
+    def mutate(mp, rp):
+        m = json.loads(mp.read_text())
+        m["run_config_digest"] = "f" * 64
+        mp.write_text(json.dumps(m), encoding="utf-8")
+
+    _assert_refused_no_mutation(tmp_path, mutate, "does not match its recorded digest")
+
+
+def test_v2_corrupt_run_config_cfg(tmp_path):
+    def mutate(mp, rp):
+        rp.write_text("{ not valid json", encoding="utf-8")
+
+    _assert_refused_no_mutation(tmp_path, mutate, "run_config.cfg invalid")
+
+
+def test_v2_missing_run_config_cfg(tmp_path):
+    def mutate(mp, rp):
+        rp.unlink()
+
+    _assert_refused_no_mutation(tmp_path, mutate, "run_config.cfg missing")
+
+
+# ---------------------------------------------------------------------------
+# 28. Schema-v1 compatible resume regression + mismatch refusal
+# ---------------------------------------------------------------------------
+def _write_v1_manifest(out_dir, fingerprint, session=None, shape=(2, 2, 3)):
+    memdir = Path(out_dir) / "memmap_accumulators"
+    memdir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": 1,
+        "state": "clean",
+        "mode": "classic_sumw",
+        "fingerprint": fingerprint,
+        "shape": list(shape),
+        "dtype_sum": "float32",
+        "dtype_wht": "float32",
+        "stacked_batches_count": 0,
+        "images_in_cumulative_stack": 0,
+        "total_exposure_seconds": 0.0,
+        "exposure_unknown_count": 0,
+        "exposure_min": None,
+        "exposure_max": None,
+        "cumulative_header": {},
+        "quality_reference_scale": None,
+        "completed_sources": [],
+        "session": {
+            "input_roots": session["roots"] if session else [],
+            "reference": session["reference"] if session else None,
+            "plan": session["plan"] if session else {"sources": [], "decomposition": []},
+        },
+    }
+    (memdir / "resume_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _write_v1_memmaps(out_dir, shape):
+    memdir = Path(out_dir) / "memmap_accumulators"
+    memdir.mkdir(parents=True, exist_ok=True)
+    sum_mm = np.lib.format.open_memmap(
+        memdir / "cumulative_SUM.npy", mode="w+", dtype=np.float32, shape=shape
+    )
+    wht_mm = np.lib.format.open_memmap(
+        memdir / "cumulative_WHT.npy", mode="w+", dtype=np.float32, shape=shape
+    )
+    sum_mm[:] = 1.0
+    wht_mm[:] = 1.0
+    sum_mm.flush()
+    wht_mm.flush()
+    close_mm(sum_mm)
+    close_mm(wht_mm)
+
+
+def test_v1_manifest_resume_compatible(tmp_path):
+    """A schema-v1 manifest resumes under its exact fingerprint contract when
+    the current effective fingerprint matches (no run_config.cfg required)."""
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=0)
+    s0 = make_resume_stack(out)
+    bind_session(s0, session)
+    _write_v1_memmaps(out, shape)
+    _write_v1_manifest(out, s0._scientific_fingerprint(), session=session, shape=shape)
+
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    ok, reason = s._validate_and_open_resume(shape)
+    assert ok is True, reason
+    close_mm(s.cumulative_sum_memmap)
+    close_mm(s.cumulative_wht_memmap)
+
+
+def test_v1_manifest_mismatch_refused(tmp_path):
+    """A schema-v1 manifest with a mismatching current fingerprint is refused
+    exactly like the legacy behavior; never reconstructed from the hash."""
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=0)
+    s0 = make_resume_stack(out)
+    bind_session(s0, session)
+    _write_v1_memmaps(out, shape)
+    _write_v1_manifest(out, s0._scientific_fingerprint(), session=session, shape=shape)
+
+    s = make_resume_stack(out, stacking_mode="mean")
+    bind_session(s, session)
+    ok, reason = s._validate_and_open_resume(shape)
+    assert ok is False
+    assert "configuration mismatch" in reason
+
+
+def test_v1_manifest_not_upgraded_on_disk(tmp_path):
+    """Reading/resuming a v1 manifest must never rewrite it to v2 on disk."""
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=0)
+    s0 = make_resume_stack(out)
+    bind_session(s0, session)
+    _write_v1_memmaps(out, shape)
+    _write_v1_manifest(out, s0._scientific_fingerprint(), session=session, shape=shape)
+    manifest_path = Path(out) / "memmap_accumulators" / "resume_manifest.json"
+    before = manifest_path.read_bytes()
+
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    ok, _ = s._validate_and_open_resume(shape)
+    assert ok is True
+    close_mm(s.cumulative_sum_memmap)
+    close_mm(s.cumulative_wht_memmap)
+    assert manifest_path.read_bytes() == before
+    assert not (Path(out) / "run_config.cfg").exists()
+
+
+# ---------------------------------------------------------------------------
+# 29. CFG-alone: run_config.cfg is configuration evidence, never a checkpoint
+# ---------------------------------------------------------------------------
+def test_cfg_alone_fresh_refuses(tmp_path):
+    """run_config.cfg alone is recognized prior-run state: a fresh run refuses."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "run_config.cfg").write_text("{}", encoding="utf-8")
+
+    s = make_resume_stack(str(out))
+    assert s._resume_artifacts_present(str(out)) is True
+    assert s._can_resume(Path(str(out))) is True
+
+
+def test_cfg_alone_resume_refuses_missing_checkpoint(tmp_path):
+    """run_config.cfg alone cannot authorize a resume: the manifest/accumulators
+    are required and their absence fails closed."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "run_config.cfg").write_text("{}", encoding="utf-8")
+
+    s = make_resume_stack(str(out))
+    s._resume_requested = True
+    ok, reason, _ = s._validate_resume_headless()
+    assert ok is False
+    assert "manifest" in reason
+
+
+# ---------------------------------------------------------------------------
+# 30. RSM2-02B1 R1 corrections
+# ---------------------------------------------------------------------------
+class _StartRefAligner:
+    """Returns a fixed HWC reference frame for ``start_processing`` shape prep."""
+
+    def __init__(self, shape=(4, 5, 3)):
+        self.stop_processing = False
+        self.reference_image_path = None
+        self._shape = shape
+
+    def _get_reference_image(self, folder, files, output_folder):
+        return (np.zeros(self._shape, dtype=np.float32), fits.Header())
+
+
+def _make_start_stack(out_dir, input_dir):
+    """Bare stacker with enough state to drive ``start_processing``'s fresh
+    classic path to a real manifest write (fake aligner + fake worker)."""
+    o = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    o.update_progress = lambda *a, **k: None
+    o.logger = types.SimpleNamespace(
+        warning=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
+        info=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+    )
+    o.processing_active = False
+    o.stop_processing = False
+    o.user_requested_stop = False
+    o.startup_refusal = None
+    o.aligner = _StartRefAligner()
+    o.autotuner = None
+    o.current_folder = str(input_dir)
+    o.output_folder = str(out_dir)
+    o.is_mosaic_run = False
+    o.drizzle_active_session = False
+    o.reproject_between_batches = False
+    o.reproject_coadd_final = False
+    o.freeze_reference_wcs = False
+    o.reproject_output_wcs = None
+    o.master_sum = None
+    o.master_coverage = None
+    o.reference_pixel_scale_arcsec = None
+    o.reference_wcs_object = None
+    o.fixed_output_wcs = None
+    o.fixed_output_shape = None
+    o.input_reference_shape_hw = None
+    o.keep_input_size_for_reproject = False
+    o._has_stack_plan = False
+    o.cumulative_sum_memmap = None
+    o.cumulative_wht_memmap = None
+    o.cumulative_wht_path = None
+    o.sum_memmap_path = None
+    o.wht_memmap_path = None
+    o.memmap_shape = None
+    o.memmap_dtype_sum = np.float32
+    o.memmap_dtype_wht = np.float32
+    o._resume_active = False
+    o._resume_completed_sources = []
+    o._checkpointing_enabled = False
+    o._norm_reference = None
+    o.additional_folders = []
+    o.folders_lock = threading.Lock()
+    o.processed_files = set()
+    o.queue = Queue()
+    o.files_in_queue = 0
+    o.queue_prepared = False
+    o._resume_requested = False
+    o.resume_source = None
+    o._autotuner_started_this_attempt = False
+    o._attempt_preexisting_state = None
+    o.batch_count_path = None
+    o.drizzle_mode = "Final"
+    o.use_drizzle = False
+    o.reference_shape = None
+    o._resume_resolved_reference = None
+    o._resume_input_roots = None
+    o._resume_reference_identity = None
+    o._resume_plan = None
+    o.images_in_cumulative_stack = 0
+    o.total_exposure_seconds = 0.0
+    o.current_stack_header = None
+    o.stacked_batches_count = 0
+    o._exposure_unknown_count = 0
+    o._exposure_min = None
+    o._exposure_max = None
+    return o
+
+
+def test_repeated_start_binds_fresh_canonical_config(tmp_path):
+    """A repeated Start with changed classic settings and a new output folder
+    writes a CFG + manifest reflecting the second session, never the stale
+    cached canonical config of the first (RSM2-02B1 R1 correction #1)."""
+    inp = tmp_path / "in"
+    inp.mkdir()
+    (inp / "frame.fits").write_bytes(b"\x00" * 16)
+    out1 = tmp_path / "out1"
+    out2 = tmp_path / "out2"
+
+    s = _make_start_stack(out1, inp)
+
+    def fake_initialize(self, output_dir, shape_hwc, enable_preview=False):
+        return self._initialize_classic_sumw_accumulators(tuple(shape_hwc))
+
+    s.initialize = types.MethodType(fake_initialize, s)
+    s._add_files_to_queue = lambda folder: 0
+    s._checkpoint_preflight = lambda: True
+    s._worker = lambda: None
+
+    # Session 1: kappa=2.5
+    assert s.start_processing(
+        input_dir=str(inp), output_dir=str(out1), kappa=2.5,
+        batch_size=10, resume_intent="fresh",
+    ) is True
+    rep1 = rc.read_cfg(str(out1 / "run_config.cfg"))
+    assert rep1.config.scientific["kappa"] == 2.5
+    assert _read_manifest(out1)["scientific_config"]["kappa"] == 2.5
+
+    # Session 2 (new Start): changed classic settings + new output folder.
+    s.processing_active = False
+    s.stop_processing = False
+    s.output_folder = str(out2)
+    assert s.start_processing(
+        input_dir=str(inp), output_dir=str(out2), kappa=3.0,
+        batch_size=10, resume_intent="fresh",
+    ) is True
+
+    rep2 = rc.read_cfg(str(out2 / "run_config.cfg"))
+    assert rep2.config.scientific["kappa"] == 3.0
+    manifest2 = _read_manifest(out2)
+    assert manifest2["scientific_config"]["kappa"] == 3.0
+
+
+def test_malformed_effective_field_refuses_persistence(tmp_path):
+    """A malformed/uncoercible effective classic field refuses checkpoint
+    persistence (fail closed) and never writes a self-inconsistent manifest/CFG
+    (RSM2-02B1 R1 correction #2)."""
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=2)
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    s.memmap_shape = shape
+    s.kappa = "not-a-float"
+
+    with pytest.raises(rc.ConfigError):
+        s._write_resume_manifest(
+            state="clean", completed_sources=[], stacked_batches_count=0
+        )
+
+    assert not (out / "memmap_accumulators" / "resume_manifest.json").exists()
+    assert not (out / "run_config.cfg").exists()
+
+
+def test_canonical_engine_fingerprint_divergence_refuses(tmp_path):
+    """A canonical/engine classic-fingerprint divergence (a coercible value that
+    changes the canonical representation) refuses persistence before any write
+    (RSM2-02B1 R1 correction #2 enforcement)."""
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=2)
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    s.memmap_shape = shape
+    # neighborhood_size is int-kind: 5.0 coerces to 5 canonically but hashes as
+    # 5.0 in the engine fingerprint, so the two fingerprints must diverge.
+    s.neighborhood_size = 5.0
+
+    with pytest.raises(_ResumeCheckpointError):
+        s._write_resume_manifest(
+            state="clean", completed_sources=[], stacked_batches_count=0
+        )
+
+    assert not (out / "memmap_accumulators" / "resume_manifest.json").exists()
+    assert not (out / "run_config.cfg").exists()
+
+
+def test_v1_opened_session_keeps_v1_writes_no_cfg(tmp_path):
+    """A session opened from a schema-v1 manifest keeps v1 write semantics on a
+    subsequent manifest write: schema stays 1 and no run_config.cfg appears
+    (RSM2-02B1 R1 correction #3)."""
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=0)
+    s0 = make_resume_stack(out)
+    bind_session(s0, session)
+    _write_v1_memmaps(out, shape)
+    _write_v1_manifest(out, s0._scientific_fingerprint(), session=session, shape=shape)
+
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    ok, _ = s._validate_and_open_resume(shape)
+    assert ok is True
+    close_mm(s.cumulative_sum_memmap)
+    close_mm(s.cumulative_wht_memmap)
+
+    # A subsequent dirty/clean manifest write must preserve v1 semantics.
+    s._write_resume_manifest(state="dirty")
+
+    manifest = _read_manifest(out)
+    assert manifest["schema_version"] == 1
+    assert "scientific_config" not in manifest
+    assert "run_config_digest" not in manifest
+    assert not (out / "run_config.cfg").exists()
+
+
+def test_preexisting_run_cfg_survives_failed_fresh_cleanup(tmp_path):
+    """A failed fresh persistence removes only attempt-created artifacts; a
+    pre-existing run_config.cfg (snapshot-captured) is left untouched
+    (RSM2-02B1 R1 correction #4)."""
+    out = tmp_path
+    pre_cfg = out / "run_config.cfg"
+    pre_cfg.write_text('{"schema_version":2}\n', encoding="utf-8")
+
+    s = make_resume_stack(out)
+    s._autotuner_started_this_attempt = False
+    s._attempt_preexisting_state = s._snapshot_existing_state()
+    s._resume_active = False
+
+    memdir = out / "memmap_accumulators"
+    memdir.mkdir()
+    (memdir / "resume_manifest.json").write_text("{}", encoding="utf-8")
+    (memdir / "resume_manifest.json.tmp").write_text("{}", encoding="utf-8")
+
+    s._remove_attempt_created_state()
+
+    assert not (memdir / "resume_manifest.json").exists()
+    assert not (memdir / "resume_manifest.json.tmp").exists()
+    assert pre_cfg.read_bytes() == b'{"schema_version":2}\n'
+    assert not memdir.exists()

@@ -875,3 +875,93 @@ def test_drizzle_domain_separated_from_classic():
         cfg.drizzle_fingerprint()
     assert _drizzle_complete(drizzle_scale_effective=5.0).classic_fingerprint() == \
         cfg.classic_fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# 11. Backend/engine collection seam (collect_from_backend)
+# ---------------------------------------------------------------------------
+def _backend_obj(**attrs):
+    b = types.SimpleNamespace()
+    for k, v in attrs.items():
+        setattr(b, k, v)
+    return b
+
+
+def test_collect_from_backend_percent_and_winsor_parity():
+    backend = _backend_obj(
+        stacking_mode="kappa-sigma",
+        kappa=2.5,
+        stack_kappa_low=2.5,
+        stack_kappa_high=2.5,
+        winsor_limits=(0.05, 0.05),
+        normalize_method="none",
+        weighting_method="none",
+        use_quality_weighting=False,
+        weight_by_snr=True,
+        weight_by_stars=True,
+        snr_exponent=1.0,
+        stars_exponent=0.5,
+        min_weight=0.1,
+        correct_hot_pixels=True,
+        hot_pixel_threshold=3.0,
+        neighborhood_size=5,
+        bayer_pattern="GRBG",
+        batch_size=10,
+        apply_batch_feathering=True,
+        apply_feathering=False,
+        feather_blur_px=256,
+        apply_master_tile_crop=False,
+        master_tile_crop_percent_decimal=0.18,
+        apply_low_wht_mask=False,
+        low_wht_percentile=5,
+        low_wht_soften_px=128,
+    )
+    cfg = rc.collect_from_backend(backend)
+    # engine decimal -> canonical percent
+    assert cfg.scientific["master_tile_crop_percent"] == 18.0
+    # winsor tuple -> canonical list
+    assert cfg.scientific["winsor_limits"] == [0.05, 0.05]
+    # a None-valued optional classic field is omitted from the payload
+    assert "chunk_size" not in cfg.scientific
+    assert cfg.product_version == ""
+
+
+def test_collect_from_backend_absent_fields_omitted():
+    backend = _backend_obj(stacking_mode="mean", kappa=2.5)
+    cfg = rc.collect_from_backend(backend)
+    assert set(cfg.scientific) == {"stacking_mode", "kappa"}
+
+
+def test_collect_from_backend_ignores_non_classic_fields():
+    # A backend that also carries drizzle/execution fields must not leak them
+    # into the classic payload (classic domain only).
+    backend = _backend_obj(
+        stacking_mode="kappa-sigma",
+        kappa=2.5,
+        drizzle_mode="Final",
+        drizzle_scale_effective=2.0,
+        output_folder="/tmp/out",
+    )
+    cfg = rc.collect_from_backend(backend)
+    assert set(cfg.scientific) == {"stacking_mode", "kappa"}
+
+
+def test_collect_from_backend_no_io(tmp_path):
+    os.chdir(tmp_path)
+    try:
+        backend = _backend_obj(stacking_mode="mean", kappa=2.5)
+        cfg = rc.collect_from_backend(backend)
+        cfg.classic_fingerprint()
+        cfg.full_digest()
+    finally:
+        os.chdir(str(ROOT))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_collect_from_backend_fails_closed_on_uncoercible():
+    """A present but uncoercible classic runtime value refuses collection
+    (fail closed), never a silently-omitted field that would diverge from the
+    engine's authoritative classic fingerprint."""
+    backend = _backend_obj(stacking_mode="kappa-sigma", kappa="not-a-float")
+    with pytest.raises(rc.ValidationError):
+        rc.collect_from_backend(backend)

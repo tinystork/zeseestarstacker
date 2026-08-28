@@ -60,6 +60,7 @@ from astropy.wcs import WCS
 from astropy.stats import sigma_clip
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
+from seestar import run_contract
 from seestar.utils.wcs_utils import (
     inject_sanitized_wcs,
     write_wcs_to_fits_inplace,
@@ -618,8 +619,14 @@ _RUN_INTENT_RESUME = "resume"
 # memmaps, so presenting resume artifacts for those modes fails closed.
 # ----------------------------------------------------------------------
 
-_RESUME_MANIFEST_VERSION = 1
+# Manifest schema currently *written* by fresh classic checkpoint initialization.
+# Schema v1 manifests (the legacy engine hash + HSI fields only) remain readable
+# and resumable under their exact fingerprint contract; they are never upgraded
+# in place.
+_RESUME_MANIFEST_VERSION = 2
+_RESUME_MANIFEST_VERSION_MIN = 1
 _RESUME_MANIFEST_FILENAME = "resume_manifest.json"
+_RUN_CONFIG_FILENAME = "run_config.cfg"
 _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
@@ -2590,6 +2597,9 @@ class SeestarQueuedStacker:
         batch_count = os.path.join(out, "batches_count.txt")
         if os.path.isfile(batch_count):
             snapshot.add(os.path.normcase(os.path.abspath(batch_count)))
+        run_cfg = os.path.join(out, _RUN_CONFIG_FILENAME)
+        if os.path.isfile(run_cfg):
+            snapshot.add(os.path.normcase(os.path.abspath(run_cfg)))
         return snapshot
 
     def _remove_attempt_created_state(self):
@@ -2648,6 +2658,15 @@ class SeestarQueuedStacker:
         ):
             try:
                 os.remove(batch_count)
+            except OSError:
+                pass
+        run_cfg = os.path.join(out, _RUN_CONFIG_FILENAME)
+        if (
+            os.path.isfile(run_cfg)
+            and os.path.normcase(os.path.abspath(run_cfg)) not in snapshot
+        ):
+            try:
+                os.remove(run_cfg)
             except OSError:
                 pass
 
@@ -3465,6 +3484,12 @@ class SeestarQueuedStacker:
         self._resume_completed_sources = []
         self._resume_pending_count = 0
         self._checkpointing_enabled = False
+        # RSM2-02B1: canonical classic run config cache (schema v2) and the
+        # effective manifest schema version this session writes.  A fresh run
+        # writes v2; a session opened from a v1 manifest keeps v1 write
+        # semantics (no run_config.cfg) until a later dedicated upgrade task.
+        self._run_config_canonical = None
+        self._resume_manifest_schema_version = _RESUME_MANIFEST_VERSION
         # HSI-2B C1: scientific-session binding (input roots, classic-alignment
         # reference identity, and the planned observation set/order/decomposition).
         # ``None`` means "not yet bound"; a manifest written without a full
@@ -12949,6 +12974,7 @@ class SeestarQueuedStacker:
             memdir / "cumulative_SUM.npy",
             memdir / "cumulative_WHT.npy",
             memdir / _RESUME_MANIFEST_FILENAME,
+            out / _RUN_CONFIG_FILENAME,
             out / "batches_count.txt",
         ]
         return any(p.exists() for p in candidates)
@@ -13388,13 +13414,56 @@ class SeestarQueuedStacker:
                 return False
         else:
             self._resume_plan = self._capture_plan_from_queue()
-            self._write_resume_manifest(state=_RESUME_STATE_CLEAN)
+            try:
+                self._write_resume_manifest(state=_RESUME_STATE_CLEAN)
+            except (_ResumeCheckpointError, run_contract.ConfigError) as exc:
+                self.update_progress(f"❌ Échec initialisation checkpoint: {exc}", "ERROR")
+                self.processing_error = f"Checkpoint init failed: {exc}"
+                return False
         return True
+
+    def _canonical_product_version(self) -> str:
+        """Best-effort product version for the canonical run config (no I/O)."""
+        try:
+            import seestar as _seestar
+            return str(getattr(_seestar, "__version__", "") or "").strip()
+        except Exception:
+            return ""
+
+    def _canonical_run_config(self):
+        """Build (and cache) the canonical classic run config for this run.
+
+        Derived from the configured engine state via
+        ``run_contract.collect_from_backend`` (FIELD_DEFS-driven; no parallel
+        field list).  Cached on the instance so every manifest write of the
+        same run carries an identical ``scientific_config`` /
+        ``run_config_digest``.  No I/O occurs here.
+        """
+        cached = getattr(self, "_run_config_canonical", None)
+        if cached is not None:
+            return cached
+        cfg = run_contract.collect_from_backend(
+            self, product_version=self._canonical_product_version()
+        )
+        self._run_config_canonical = cfg
+        return cfg
 
     def _write_resume_manifest(
         self, state, completed_sources=None, stacked_batches_count=None
     ):
-        """Atomically write the versioned resume manifest (temp + os.replace)."""
+        """Atomically write the versioned resume manifest (temp + os.replace).
+
+        A fresh classic checkpoint initializes schema v2 and persists the
+        canonical ``run_config.cfg`` (schema v2, UTF-8, atomic) plus the
+        explainable ``scientific_config``, the authoritative classic fingerprint
+        and the ``run_config_digest`` of exactly that canonical model.  A
+        session opened from a schema-v1 manifest keeps v1 write semantics
+        (legacy field set only, no ``run_config.cfg``) until a later dedicated
+        upgrade task; v1 manifests are never upgraded in place by this task.
+
+        ``run_config.cfg`` is configuration evidence only — never a scientific
+        checkpoint.
+        """
         # P5-FIX (HSI closure): a quality-weighted checkpoint must carry the
         # exact pinned finite-positive q_ref it was produced with.  Refuse to
         # write a manifest that a later resume would reject; never knowingly
@@ -13415,10 +13484,38 @@ class SeestarQueuedStacker:
                 getattr(self, "stacked_batches_count", 0) or 0
             )
         shape = tuple(getattr(self, "memmap_shape", None) or (0, 0, 3))
+
+        schema_version = getattr(
+            self, "_resume_manifest_schema_version", _RESUME_MANIFEST_VERSION
+        )
+        if schema_version not in (
+            _RESUME_MANIFEST_VERSION,
+            _RESUME_MANIFEST_VERSION_MIN,
+        ):
+            schema_version = _RESUME_MANIFEST_VERSION
+
+        fingerprint = self._scientific_fingerprint()
+
+        # Schema v2 only: build the canonical config, prove it is consistent
+        # with the engine's authoritative classic fingerprint, and persist the
+        # canonical run_config.cfg.  Fail closed *before any write*: a
+        # malformed/uncoercible effective field (or any canonical/engine
+        # divergence) must never produce a self-inconsistent manifest/CFG.
+        cfg = None
+        if schema_version == _RESUME_MANIFEST_VERSION:
+            cfg = self._canonical_run_config()
+            if run_contract.classic_fingerprint(cfg) != fingerprint:
+                raise _ResumeCheckpointError(
+                    "canonical classic fingerprint diverges from the engine "
+                    "scientific fingerprint; refusing to write a "
+                    "self-inconsistent checkpoint"
+                )
+
         manifest = {
-            "schema_version": _RESUME_MANIFEST_VERSION,
+            "schema_version": schema_version,
             "state": state,
             "mode": _RESUME_MODE_CLASSIC_SUMW,
+            "fingerprint": fingerprint,
             "semantics": {
                 "sum": "HWC numerator: sum over completed batches of V * W",
                 "wht": "HWC effective denominator: sum over completed batches of W",
@@ -13431,7 +13528,6 @@ class SeestarQueuedStacker:
             "dtype_wht": np.dtype(
                 getattr(self, "memmap_dtype_wht", np.float32)
             ).name,
-            "fingerprint": self._scientific_fingerprint(),
             # P5-FIX (HSI closure): the immutable session quality reference
             # scale.  ``None`` when quality weighting is disabled; otherwise a
             # positive finite float pinned once from the session reference and
@@ -13461,8 +13557,18 @@ class SeestarQueuedStacker:
             },
             "completed_sources": completed_sources,
         }
+        if cfg is not None:
+            manifest["scientific_config"] = cfg.scientific
+            manifest["run_config_digest"] = cfg.full_digest()
+
         memdir = Path(self.output_folder) / "memmap_accumulators"
         memdir.mkdir(parents=True, exist_ok=True)
+        if cfg is not None:
+            # Persist the canonical config first (atomic), so the manifest never
+            # references a run_config.cfg that failed to persist.
+            run_contract.write_cfg(
+                cfg, str(Path(self.output_folder) / _RUN_CONFIG_FILENAME)
+            )
         manifest_path = memdir / _RESUME_MANIFEST_FILENAME
         tmp_path = manifest_path.with_name(_RESUME_MANIFEST_FILENAME + ".tmp")
         tmp_path.write_text(
@@ -13478,6 +13584,50 @@ class SeestarQueuedStacker:
                 mmap_obj._mmap.close()
         except Exception:
             pass
+
+    def _validate_manifest_v2_config(self, manifest):
+        """Read-only validation of a schema-v2 manifest's canonical config.
+
+        Returns ``(True, None)`` or ``(False, reason)``.  Bounded, fail-closed,
+        and never opens SUM/WHT.  Checks the stored explainable
+        ``scientific_config`` structure, recomputes the classic fingerprint from
+        that payload and requires exact agreement with the stored authoritative
+        fingerprint (tamper detection), then verifies the on-disk
+        ``run_config.cfg`` is a valid schema-v2 config whose full digest matches
+        the recorded ``run_config_digest`` and whose scientific section equals
+        the manifest's ``scientific_config``.
+        """
+        sci = manifest.get("scientific_config")
+        if not isinstance(sci, dict):
+            return (False, "manifest scientific_config missing or not an object")
+        digest = manifest.get("run_config_digest")
+        if not isinstance(digest, str) or len(digest) != 64:
+            return (False, "manifest run_config_digest missing or malformed")
+
+        # Recompute the classic fingerprint from the stored canonical payload.
+        # Any secret/unsafe or non-JSON value, or any field that fails coercion,
+        # surfaces as a bounded ConfigError here.
+        try:
+            recomputed = run_contract.classic_fingerprint(
+                run_contract.RunConfig.from_sections(scientific=sci)
+            )
+        except run_contract.ConfigError as exc:
+            return (False, f"manifest scientific_config invalid: {exc}")
+        if recomputed != manifest.get("fingerprint"):
+            return (False, "manifest scientific_config does not match its fingerprint")
+
+        run_cfg_path = Path(self.output_folder) / _RUN_CONFIG_FILENAME
+        if not run_cfg_path.is_file():
+            return (False, "run_config.cfg missing")
+        try:
+            report = run_contract.read_cfg(str(run_cfg_path))
+        except run_contract.ConfigError as exc:
+            return (False, f"run_config.cfg invalid: {exc}")
+        if report.config.full_digest() != digest:
+            return (False, "run_config.cfg does not match its recorded digest")
+        if report.config.scientific != sci:
+            return (False, "manifest scientific_config differs from run_config.cfg")
+        return (True, None)
 
     def _validate_resume_headless(self):
         """Read-only, shape-independent resume validation.
@@ -13518,10 +13668,11 @@ class SeestarQueuedStacker:
         if not isinstance(manifest, dict):
             return (False, "corrupt resume manifest (not an object)", None)
 
-        if manifest.get("schema_version") != _RESUME_MANIFEST_VERSION:
+        schema_version = manifest.get("schema_version")
+        if schema_version not in (_RESUME_MANIFEST_VERSION, _RESUME_MANIFEST_VERSION_MIN):
             return (
                 False,
-                f"unsupported manifest version {manifest.get('schema_version')}",
+                f"unsupported manifest version {schema_version}",
                 None,
             )
         if manifest.get("state") != _RESUME_STATE_CLEAN:
@@ -13536,6 +13687,16 @@ class SeestarQueuedStacker:
         fp = manifest.get("fingerprint")
         if not fp or fp != self._scientific_fingerprint():
             return (False, "scientific configuration mismatch", None)
+
+        # --- schema v2 canonical config consistency (fail-closed, read-only) ---
+        # Schema v1 keeps its exact legacy behavior (fingerprint match above is
+        # the whole config contract).  Schema v2 additionally proves the stored
+        # explainable scientific_config and the on-disk run_config.cfg have not
+        # been tampered with, before any SUM/WHT memmap is opened.
+        if schema_version == 2:
+            ok, reason = self._validate_manifest_v2_config(manifest)
+            if not ok:
+                return (False, reason, None)
 
         # --- quality reference scale (fail-closed for quality-weighted) ---
         # P5-FIX: a quality-weighted checkpoint must carry the exact positive
@@ -14071,6 +14232,13 @@ class SeestarQueuedStacker:
                 self.stacked_batches_count = count
                 self._resume_active = True
                 self._checkpointing_enabled = True
+                # RSM2-02B1 R1: preserve the *opened* manifest's schema version
+                # for this session's subsequent writes, so a v1 resume keeps v1
+                # write semantics (no run_config.cfg) instead of silently
+                # upgrading on its next dirty/clean manifest write.
+                self._resume_manifest_schema_version = int(
+                    manifest.get("schema_version", _RESUME_MANIFEST_VERSION)
+                )
                 self._resume_input_roots = sorted(manifest_roots)
                 self._resume_reference_identity = ref_ident
                 self._resume_plan = plan
@@ -14172,11 +14340,26 @@ class SeestarQueuedStacker:
         self._resume_active = False
         self._resume_completed_sources = []
         self._checkpointing_enabled = True
-        self._write_resume_manifest(
-            state=_RESUME_STATE_CLEAN,
-            completed_sources=[],
-            stacked_batches_count=0,
-        )
+        self._resume_manifest_schema_version = _RESUME_MANIFEST_VERSION
+        try:
+            self._write_resume_manifest(
+                state=_RESUME_STATE_CLEAN,
+                completed_sources=[],
+                stacked_batches_count=0,
+            )
+        except (_ResumeCheckpointError, run_contract.ConfigError) as exc:
+            # Fail closed and clean: release the just-opened memmaps and report
+            # the refusal.  ``initialize`` -> ``start_processing`` will call
+            # ``_cleanup_failed_start``, which removes only the artifacts this
+            # attempt created (never any pre-existing state).
+            self._close_memmap_handle(self.cumulative_sum_memmap)
+            self._close_memmap_handle(self.cumulative_wht_memmap)
+            self.cumulative_sum_memmap = None
+            self.cumulative_wht_memmap = None
+            self._checkpointing_enabled = False
+            self.update_progress(f"❌ Échec initialisation checkpoint: {exc}", "ERROR")
+            self.processing_error = f"Checkpoint init failed: {exc}"
+            return False
         return True
 
     def _checkpoint_mark_dirty(self):
@@ -17972,6 +18155,12 @@ class SeestarQueuedStacker:
         # ZSSS-LIFECYCLE-01: reset any stale refusal from a previous start
         # attempt so a new attempt starts with a clean carrier.
         self.startup_refusal = None
+        # RSM2-02B1 R1: a new Start attempt must never reuse the previous
+        # session's cached canonical run config.  Invalidate it here, before any
+        # manifest / run_config.cfg write, so the first canonical build for this
+        # attempt (which happens lazily, after the arguments below are
+        # configured) reflects this session's classic settings.
+        self._run_config_canonical = None
         if hasattr(self, "aligner") and self.aligner is not None:
             self.aligner.stop_processing = False
         else:

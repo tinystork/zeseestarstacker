@@ -89,6 +89,7 @@ __all__ = [
     "UnsafeConfigError",
     "UnsafeLegacyError",
     "collect_from_settings",
+    "collect_from_backend",
     "apply_to_settings",
     "map_to_backend",
     "scientific_fingerprint",
@@ -1290,6 +1291,58 @@ def _backend_transform(fd: FieldDef, value: Any) -> Any:
     if fd.name == "master_tile_crop_percent":
         return float(value) / 100.0
     return value
+
+
+def _backend_to_canonical(fd: FieldDef, value: Any) -> Any:
+    """Reverse the documented backend/engine representation into canonical form.
+
+    ``winsor_limits`` arrives as a tuple/list and becomes the canonical list
+    (handled by :func:`_coerce`); ``master_tile_crop_percent`` arrives as the
+    engine's *decimal* form and is converted to the canonical *percent* unit.
+    """
+    value = _coerce(fd.kind, value)
+    if fd.name == "master_tile_crop_percent":
+        # Engine fingerprint attribute ``master_tile_crop_percent_decimal`` is
+        # ``percent / 100``; the canonical unit is percent.
+        return float(value) * 100.0
+    return value
+
+
+def collect_from_backend(
+    backend: Any,
+    *,
+    product_version: str = "",
+) -> RunConfig:
+    """Map a configured backend/engine state to a canonical classic RunConfig.
+
+    Reads the classic SUM/W fingerprint fields from the engine instance's
+    attributes, keyed by their exact engine attribute name
+    (``legacy_fingerprint_key`` where it differs from the canonical name), and
+    reverses the two documented engine representations:
+    ``master_tile_crop_percent_decimal`` (decimal) -> ``master_tile_crop_percent``
+    (percent) and ``winsor_limits`` (tuple) -> canonical list.  Absent/``None``
+    fields are omitted from the canonical payload (the authoritative fingerprint
+    still hashes them as ``None`` via :func:`classic_fingerprint`).  A present
+    but uncoercible runtime value fails closed (:class:`ValidationError`) rather
+    than being silently omitted, so the canonical payload can never diverge
+    from the engine's authoritative classic fingerprint.  Driven solely by
+    :data:`FIELD_DEFS` — there is no parallel hard-coded field list.  No I/O
+    occurs.
+    """
+    sci: Dict[str, Any] = {}
+    for fd in FIELD_DEFS:
+        if FingerprintDomain.CLASSIC_SUMW not in fd.fingerprint_domains:
+            continue
+        engine_key = fd.legacy_fingerprint_key or fd.name
+        raw = getattr(backend, engine_key, None)
+        if raw is None:
+            continue
+        value = _backend_to_canonical(fd, raw)
+        sci[fd.name] = _json_safe(value)
+    return RunConfig.from_sections(
+        product_version=product_version,
+        scientific=sci,
+    )
 
 
 # ---------------------------------------------------------------------------
