@@ -624,6 +624,20 @@ _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
 
+# Bounded, explicit allowlist of the checkpoint artifacts ZSSS itself writes
+# during *synchronous* startup (fresh initialize).  Failed-start cleanup may
+# remove only these names (when they were not present before the attempt);
+# anything else found under ``memmap_accumulators`` — preexisting sentinels or
+# unrelated/concurrently-created files — is never touched.  The ``.tmp`` entry
+# is the atomic temp counterpart written by ``_write_resume_manifest`` before
+# ``os.replace``.
+_ATTEMPT_CREATED_CHECKPOINT_ARTIFACTS = (
+    "cumulative_SUM.npy",
+    "cumulative_WHT.npy",
+    _RESUME_MANIFEST_FILENAME,
+    _RESUME_MANIFEST_FILENAME + ".tmp",
+)
+
 # ----------------------------------------------------------------------
 # Quality-weighting domain constants (HSI P5-FIX).
 #
@@ -2582,22 +2596,33 @@ class SeestarQueuedStacker:
         """Remove only output-bound checkpoint artifacts this attempt created.
 
         Called on a failed *fresh* start (never resume): it prunes the
-        ``memmap_accumulators`` files and ``batches_count.txt`` that were not
-        present before the attempt, so a second Fresh attempt is not falsely
-        refused by ``_resume_artifacts_present`` seeing its own failed start's
-        leftovers.  Preexisting bytes/directories are never touched.
+        explicit, bounded set of checkpoint artifact names ZSSS writes during
+        synchronous startup (``memmap_accumulators`` ``cumulative_SUM.npy`` /
+        ``cumulative_WHT.npy`` / ``resume_manifest.json`` and its atomic temp,
+        plus ``batches_count.txt``) that were not present before the attempt,
+        so a second Fresh attempt is not falsely refused by
+        ``_resume_artifacts_present`` seeing its own failed start's leftovers.
+
+        The destructive scope is deliberately bounded to that allowlist: an
+        arbitrary new file or directory found under ``memmap_accumulators``
+        (a preexisting sentinel or an unrelated/concurrently-created entry) is
+        never deleted merely because it was absent from the directory snapshot.
+        The directory itself is only removed when this attempt created it and
+        it is now empty.
         """
-        snapshot = getattr(self, "_attempt_preexisting_state", None) or set()
+        snapshot = getattr(self, "_attempt_preexisting_state", None)
+        if snapshot is None:
+            # No pre-existing state was snapshotted for this attempt (either it
+            # was never recorded, or a prior cleanup already consumed it), so
+            # there is nothing this attempt can be proven to have created.
+            # Returning here also keeps a second cleanup idempotent.
+            return
         out = getattr(self, "output_folder", None)
         if not out:
             return
         memdir = os.path.join(out, "memmap_accumulators")
         if os.path.isdir(memdir):
-            try:
-                names = os.listdir(memdir)
-            except OSError:
-                names = []
-            for name in names:
+            for name in _ATTEMPT_CREATED_CHECKPOINT_ARTIFACTS:
                 p = os.path.abspath(os.path.join(memdir, name))
                 if os.path.normcase(p) in snapshot:
                     continue
@@ -2669,14 +2694,18 @@ class SeestarQueuedStacker:
         except Exception:
             pass
 
-        # 3. Close attempt-owned SUM/WHT memmaps and remove attempt-created
-        #    checkpoint artifacts.  Resume artifacts are preexisting and must
-        #    stay byte-identical, so this branch runs for fresh attempts only.
+        # 3. Close/drop any SUM/WHT memmap handles this attempt opened or held.
+        #    This runs for *every* failed start — including a resume attempt —
+        #    because a resume false start still opened the preexisting SUM/WHT
+        #    memmaps ``r+`` and must release those handles without touching the
+        #    files.  Removing attempt-created checkpoint artifacts is
+        #    fresh-only: resume artifacts are preexisting and must stay
+        #    byte-identical.
+        try:
+            self._close_memmaps()
+        except Exception:
+            pass
         if not getattr(self, "_resume_active", False):
-            try:
-                self._close_memmaps()
-            except Exception:
-                pass
             self._remove_attempt_created_state()
 
         # 4. Clear every stale lifecycle flag without creating attributes a
@@ -2684,6 +2713,10 @@ class SeestarQueuedStacker:
         self.processing_active = False
         self.stop_processing = False
         self.user_requested_stop = False
+        # Resume state is attempt-scoped: a second Start must never inherit a
+        # stale ``_resume_active`` (or the snapshot/ownership it depended on).
+        self._resume_active = False
+        self._attempt_preexisting_state = None
         if hasattr(self, "processing_thread"):
             self.processing_thread = None
         aligner = getattr(self, "aligner", None)

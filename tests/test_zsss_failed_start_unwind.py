@@ -246,6 +246,167 @@ def test_cleanup_helper_is_idempotent(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# B2 (R2): resume false start closes attempt-opened handles but preserves the
+# preexisting checkpoint bytes verbatim.
+# --------------------------------------------------------------------------
+def test_resume_active_cleanup_closes_handles_preserves_checkpoint(tmp_path):
+    from seestar.queuep.queue_manager import StartupRefusal
+
+    out = tmp_path / "out"
+    out.mkdir()
+    memdir = out / "memmap_accumulators"
+    memdir.mkdir()
+    sum_path = memdir / "cumulative_SUM.npy"
+    wht_path = memdir / "cumulative_WHT.npy"
+    manifest_path = memdir / "resume_manifest.json"
+
+    s = _bare_stack(out, tmp_path / "in")
+    # Preexisting resume checkpoint: real SUM/WHT memmaps plus manifest and
+    # batch count, all written *before* the attempt.
+    s.cumulative_sum_memmap = np.lib.format.open_memmap(
+        str(sum_path), mode="w+", dtype=np.float32, shape=(2, 2, 3)
+    )
+    s.cumulative_wht_memmap = np.lib.format.open_memmap(
+        str(wht_path), mode="w+", dtype=np.float32, shape=(2, 2, 3)
+    )
+    s.cumulative_sum_memmap[:] = 1.0
+    s.cumulative_wht_memmap[:] = 2.0
+    s.cumulative_sum_memmap.flush()
+    s.cumulative_wht_memmap.flush()
+    manifest_path.write_text(
+        '{"schema_version":1,"state":"clean"}', encoding="utf-8"
+    )
+    (out / "batches_count.txt").write_text("3", encoding="utf-8")
+
+    sum_bytes = sum_path.read_bytes()
+    wht_bytes = wht_path.read_bytes()
+    manifest_bytes = manifest_path.read_bytes()
+    batch_bytes = (out / "batches_count.txt").read_bytes()
+    sum_ref = s.cumulative_sum_memmap
+    wht_ref = s.cumulative_wht_memmap
+    refusal = StartupRefusal(StartupRefusal.CODE_RESUME_STATE_MISSING, "x")
+    s.startup_refusal = refusal
+    s._autotuner_started_this_attempt = False
+    s._attempt_preexisting_state = s._snapshot_existing_state()
+    s._resume_active = True
+
+    # Pre-cleanup: the resume attempt holds open handles (the R1 defect).
+    assert sum_ref._mmap.closed is False
+    assert wht_ref._mmap.closed is False
+
+    s._cleanup_failed_start()
+
+    # Handles closed, references dropped, resume flag reset.
+    assert s.cumulative_sum_memmap is None
+    assert s.cumulative_wht_memmap is None
+    assert sum_ref._mmap.closed is True
+    assert wht_ref._mmap.closed is True
+    assert s._resume_active is False
+    # Preexisting checkpoint files still present and byte-identical.
+    assert sum_path.read_bytes() == sum_bytes
+    assert wht_path.read_bytes() == wht_bytes
+    assert manifest_path.read_bytes() == manifest_bytes
+    assert (out / "batches_count.txt").read_bytes() == batch_bytes
+    # The structured refusal carrier is preserved by object identity.
+    assert s.startup_refusal is refusal
+
+    # Idempotent: a second cleanup is a no-op (nothing else closed/removed).
+    s._cleanup_failed_start()
+    assert s._resume_active is False
+    assert sum_path.read_bytes() == sum_bytes
+    assert wht_path.read_bytes() == wht_bytes
+
+
+def test_unrelated_file_under_memdir_survives_failed_fresh_cleanup(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    s = _bare_stack(out, tmp_path / "in")
+    s._autotuner_started_this_attempt = False
+    s._attempt_preexisting_state = s._snapshot_existing_state()
+    s._resume_active = False
+
+    memdir = out / "memmap_accumulators"
+    memdir.mkdir()
+    # Attempt-created allowlisted artifacts.
+    s.cumulative_sum_memmap = np.lib.format.open_memmap(
+        str(memdir / "cumulative_SUM.npy"),
+        mode="w+",
+        dtype=np.float32,
+        shape=(2, 2, 3),
+    )
+    s.cumulative_wht_memmap = np.lib.format.open_memmap(
+        str(memdir / "cumulative_WHT.npy"),
+        mode="w+",
+        dtype=np.float32,
+        shape=(2, 2, 3),
+    )
+    (out / "batches_count.txt").write_text("0", encoding="utf-8")
+    # An unrelated file and directory created under memmap_accumulators after
+    # the snapshot (e.g. a concurrent process) must never be deleted.
+    unrelated_file = memdir / "unrelated.txt"
+    unrelated_file.write_bytes(b"UNRELATED")
+    unrelated_dir = memdir / "unrelated_dir"
+    unrelated_dir.mkdir()
+
+    s._cleanup_failed_start()
+
+    # Allowlisted attempt-created artifacts removed; handles released.
+    assert s.cumulative_sum_memmap is None
+    assert s.cumulative_wht_memmap is None
+    assert not (memdir / "cumulative_SUM.npy").exists()
+    assert not (memdir / "cumulative_WHT.npy").exists()
+    assert not (out / "batches_count.txt").exists()
+    # The unrelated file/directory survive, so memdir itself is not removed.
+    assert unrelated_file.read_bytes() == b"UNRELATED"
+    assert unrelated_dir.is_dir()
+    assert memdir.is_dir()
+
+
+def test_fresh_cleanup_removes_only_explicit_attempt_created_checkpoint_files(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    memdir = out / "memmap_accumulators"
+    memdir.mkdir()
+    # A preexisting sentinel *inside* memdir, captured by the snapshot.
+    sentinel = memdir / "sentinel.txt"
+    sentinel.write_bytes(b"SENTINEL")
+
+    s = _bare_stack(out, tmp_path / "in")
+    s._autotuner_started_this_attempt = False
+    s._attempt_preexisting_state = s._snapshot_existing_state()
+    s._resume_active = False
+
+    # Attempt-created allowlisted artifacts (SUM/WHT + manifest + atomic temp).
+    s.cumulative_sum_memmap = np.lib.format.open_memmap(
+        str(memdir / "cumulative_SUM.npy"),
+        mode="w+",
+        dtype=np.float32,
+        shape=(2, 2, 3),
+    )
+    s.cumulative_wht_memmap = np.lib.format.open_memmap(
+        str(memdir / "cumulative_WHT.npy"),
+        mode="w+",
+        dtype=np.float32,
+        shape=(2, 2, 3),
+    )
+    (memdir / "resume_manifest.json").write_text("{}", encoding="utf-8")
+    (memdir / "resume_manifest.json.tmp").write_text("{}", encoding="utf-8")
+    (out / "batches_count.txt").write_text("0", encoding="utf-8")
+
+    s._cleanup_failed_start()
+
+    # Only the explicit allowlisted attempt-created artifacts are removed.
+    assert not (memdir / "cumulative_SUM.npy").exists()
+    assert not (memdir / "cumulative_WHT.npy").exists()
+    assert not (memdir / "resume_manifest.json").exists()
+    assert not (memdir / "resume_manifest.json.tmp").exists()
+    assert not (out / "batches_count.txt").exists()
+    # The preexisting in-memdir sentinel survives, so memdir survives too.
+    assert sentinel.read_bytes() == b"SENTINEL"
+    assert memdir.is_dir()
+
+
+# --------------------------------------------------------------------------
 # B2 integration: real start_processing fails *after* initialize creates memmaps
 # --------------------------------------------------------------------------
 def test_post_initialize_startup_failure_cleans_attempt_artifacts(tmp_path):
