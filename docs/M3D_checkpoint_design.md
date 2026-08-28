@@ -196,27 +196,57 @@ Exemple de layout effectif (génération `00000003`) :
 
 ### 5.2 Protocole copy-on-write / commit (manifest-last)
 
+0. **Refus de redémarrage** (D1 write-only, Reprise désactivée) : un writer
+   fraîchement construit refuse **avant toute écriture** dès que
+   `<output>/.m3d_checkpoint` est non vide (manifest, artefact de génération
+   allowlisté, temp de manifest ou temp de writer).  Un répertoire existant
+   vide est autorisé.  Ce refus est appliqué à la construction **et**
+   défensivement au premier commit, et préserve chaque octet préexistant.
 1. Valider tout l'état **avant** toute écriture (échec fermé, jamais de
    génération partielle/mixte) : 3 accumulateurs de même shape/config/exptime,
-   buffers float32 finis, compteurs finis, liaison de session présente, ledger
-   sans doublon ni source non identifiable, config canonique bien formée.
-2. Écrire les six artefacts natifs sous des noms uniques de génération, via
-   fichier temporaire du même répertoire + `os.replace` (fsync avant replace).
-3. Calculer SHA-256 + taille exacte de chaque artefact final.
-4. Écrire `run_config.cfg` (atomique, contenu stable) **avant** le manifest.
-5. Écrire `checkpoint.json.tmp`, fsync/close, puis `os.replace` vers
-   `checkpoint.json` **en dernier** : `checkpoint.json` est le seul point de
-   commit.
+   buffers float32 finis, compteurs finis et cohérents (`exposure_min <=
+   exposure_max`, `exposure_unknown_count <= frame_count`), liaison de session
+   présente, identités de plan/ledger strictes (entiers non-bool, sans
+   doublon), config canonique bien formée.
+2. **Invariant manifest auto-cohérent** : `len(completed_sources) ==
+   frame_count`, `completed_sources == plan.sources[:frame_count]` exactement
+   (préfixe ordonné) et `frame_count <= len(plan.sources)` ;
+   `stacked_batches_count == frame_count` (incrémenté une fois par pose
+   acceptée dans le runtime Drizzle courant).
+3. Écrire les six artefacts natifs sous des noms uniques de génération,
+   **réclamés exclusivement** (`O_CREAT | O_EXCL`, jamais `os.replace` sur un
+   chemin préexistant), écrits en place + fsync.
+4. Calculer SHA-256 + taille exacte de chaque artefact final ; fsync du
+   répertoire de checkpoint après les créations.
+5. Écrire `run_config.cfg` (atomique, contenu stable) **avant** le manifest ;
+   fsync du répertoire de sortie après sa publication.
+6. Écrire un **temp de manifest possédé et unique par tentative**
+   `checkpoint.json.tmp.<pid>.<seq>.<nonce>` (réclamé exclusivement avec
+   `open(..., "x")`, fsync) puis `os.replace` vers `checkpoint.json` **en
+   dernier** ; fsync du répertoire de checkpoint après le replace.
+   `checkpoint.json` est le seul point de commit.
 
 Invariants de sûreté :
 
 - Un fichier référencé par le manifest actuellement commité n'est **jamais**
   écrasé avant que le nouveau manifest ne soit commité (les générations sont
-  uniques par nom).
+  uniques par nom et réclamées exclusivement ; `os.replace` sur un artefact de
+  génération existant est interdit).
+- Le manifest est sérialisé avec `json.dumps(..., allow_nan=False)` et
+  pré-validé (preflight) avant la création de tout artefact : NaN/Inf ou valeur
+  non-JSON sont refusés avant toute écriture.
+- Le temp de manifest est **possédé explicitement** : chaque tentative écrit
+  sous un nom unique (`checkpoint.json.tmp.<pid>.<seq>.<nonce>`) réclamé en
+  exclusif, et le nettoyage ne supprime **que** le temp créé par la tentative
+  courante — jamais le temp d'un autre writer/processus.  Cela élimine la
+  course concurrente où le nettoyage d'une tentative perdante supprimait le
+  temp de manifest du gagnant.
 - En cas d'échec avant le `os.replace` du manifest : le manifest précédent et
   tous ses fichiers restent **byte-identiques et utilisables** ; les
-  fichiers temporaires/générations non commitées de la tentative sont nettoyés
-  au mieux (jamais les fichiers non liés).
+  fichiers créés par la tentative courante sont nettoyés au mieux (jamais un
+  chemin préexistant ni un artefact d'un autre writer).  Le nettoyage est
+  structuré autour d'un drapeau explicite `manifest_committed` : un échec après
+  le replace ne peut pas « rollback » les fichiers nouvellement référencés.
 - Après un commit réussi, les générations précédentes peuvent être
   garbage-collectées au mieux **uniquement** depuis l'allowlist explicite
   `gen-*-ch[0-2]-out_(img|wht).npy` — jamais de suppression large du
@@ -232,6 +262,13 @@ Invariants de sûreté :
   sur Stop ordonné et sur finalisation réussie (via les hooks de fin sûrs
   existants) ; idempotent si aucun état n'a changé depuis le dernier commit.
 - Premier commit = au moins une pose acceptée (jamais de checkpoint vide).
+- **Pic mémoire réel** : le snapshot n'est pas limité à « six tableaux
+  possédés ».  `_snapshot_channels` possède six copies float32
+  (`6 × H × W × 4` octets) **en plus** des six buffers moteur vivants, et
+  `_npy_bytes` sérialise chaque artefact dans un objet `bytes` de la taille
+  d'un fichier `.npy` complet (`H × W × 4 + en-tête`).  Le pic est donc ≈
+  `13 × H × W × 4` octets (6 buffers moteur + 6 snapshots + 1 `bytes`), hors
+  marge interne de `np.save`.  Le flux mémoire n'est pas refondu en D1.
 - La **reprise** (lecture/restauration/activation de Resume) n'est **pas**
   implémentée en D1 : le writer ne lit jamais, ne finalise jamais, et
   `_build_startup_refusal`/`_validate_resume_headless`/Qt refusent toujours le
@@ -278,6 +315,10 @@ Invariants de sûreté :
   (écriture temp / replace d'array, écriture de la config, écriture temp /
   replace du manifest) : l'ancien `checkpoint.json` et chaque ancien artefact
   restent inchangés ; aucun manifest ne référence une génération partielle/mixte.
+  Inclut le refus de redémarrage (un second writer sur le même output refuse à
+  la construction, avant toute écriture d'array, et le manifest + les six
+  artefacts référencés restent byte-identiques) et le refus au premier commit
+  si le namespace se matérialise après la construction.
 - **C** — génération N→N+1 réussie : bascule atomique vers les seuls
   descripteurs N+1, génération courante jamais garbage-collectée.
 - **D** — témoin d'ordre aux frontières sûres : pas d'écriture après 0 pose ou
@@ -287,6 +328,17 @@ Invariants de sûreté :
 - **E** — échec fermé (mismatch config/empreinte, WCS/liaison de session absent,
   source dupliquée/non identifiable, buffers/compteurs non finis) sans nouveau
   manifest commité.
+- **F** — manifest auto-cohérent (ledger = préfixe ordonné du plan de longueur
+  `frame_count`, `stacked_batches_count == frame_count`, `frame_count <=
+  len(plan)`, identités strictes sans doublon), refus preflight NaN/non-JSON,
+  et propriété de nettoyage : un artefact préexistant en collision n'est jamais
+  supprimé par le nettoyage d'une tentative.
+- **G** — propriété de **possession du temp de manifest** : une tentative ne
+  supprime jamais un temp de manifest étranger (test direct), et un test de
+  concurrence déterministe (barrières/événements) prouve que lorsque deux
+  writers passent tous deux le refus initial du namespace vide, le gagnant
+  réclame/possède son temp, le perdant échoue sur la collision d'artefact et
+  nettoie, et le gagnant publie quand même — sans mutation d'octets étrangers.
 
 ### 7.2 Recommandés pour la mission de reprise (D2, non exécutés)
 

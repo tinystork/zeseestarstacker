@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 from queue import Queue
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from astropy.wcs import WCS
 from seestar.core.drizzle_checkpoint import (
     CHECKPOINT_DIRNAME,
     MANIFEST_FILENAME,
+    MANIFEST_TMP_PREFIX,
     MODE_TOKEN,
     RUN_CONFIG_FILENAME,
     SCHEMA_VERSION,
@@ -137,16 +139,30 @@ def make_wcs(shape_hw, crval=(10.0, 20.0), cdelt=(-0.001, 0.001)):
     return wcs
 
 
-def _reference_identity(tmp_path):
-    p = tmp_path / "reference.fit"
-    p.write_bytes(b"ref")
-    st = os.stat(p)
+def _file_identity(path):
+    st = os.stat(path)
     return {
-        "path": os.path.normcase(str(p)),
-        "name": "reference.fit",
+        "path": os.path.normcase(str(path)),
+        "name": os.path.basename(str(path)),
         "size": int(st.st_size),
         "mtime_ns": int(st.st_mtime_ns),
     }
+
+
+def _reference_identity(tmp_path):
+    p = tmp_path / "reference.fit"
+    p.write_bytes(b"ref")
+    return _file_identity(p)
+
+
+def _identities(tmp_path, n):
+    """Create ``n`` distinct source files and return their stat identities."""
+    idents = []
+    for i in range(n):
+        p = tmp_path / f"src_{i}.fit"
+        p.write_bytes(b"src-data-%d" % i)
+        idents.append(_file_identity(p))
+    return idents
 
 
 def _plan(sources):
@@ -242,18 +258,18 @@ def test_writer_roundtrip_inspection_bit_exact(tmp_path, kernel):
     # Owned source snapshots taken BEFORE commit (never aliased afterwards).
     snapshots = [(a._out_img.copy(), a._out_wht.copy()) for a in accs]
 
-    source_ident = _reference_identity(tmp_path)
-    plan = _plan([source_ident])
+    idents = _identities(tmp_path, 4)
+    plan = _plan(idents)
     binding = {
         "input_roots": [str(tmp_path)],
-        "reference": source_ident,
+        "reference": idents[0],
         "plan": plan,
     }
     gen = writer.commit(
         accs,
         session_binding=binding,
         counters=_counters(4),
-        completed_sources=[source_ident],
+        completed_sources=idents,
     )
     assert gen == 1
 
@@ -330,11 +346,11 @@ def _commit_gen1(tmp_path, kernel="square"):
     frames = build_frames()
     for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
         _add_frame_to_all(accs, data, weight, pixmap, in_grid, exptime)
-    source_ident = _reference_identity(tmp_path)
-    binding = _session_binding(tmp_path, _plan([source_ident]))
+    idents = _identities(tmp_path, 4)
+    binding = _session_binding(tmp_path, _plan(idents))
     gen = writer.commit(
         accs, session_binding=binding, counters=_counters(2),
-        completed_sources=[source_ident],
+        completed_sources=idents[:2],
     )
     assert gen == 1
     ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
@@ -343,7 +359,7 @@ def _commit_gen1(tmp_path, kernel="square"):
     for name in sorted(os.listdir(ckpt_dir)):
         if name.endswith(".npy"):
             artifacts[name] = (ckpt_dir / name).read_bytes()
-    return writer, accs, binding, source_ident, manifest_bytes, artifacts
+    return writer, accs, binding, idents, manifest_bytes, artifacts
 
 
 def _add_more(accs, n_more):
@@ -352,10 +368,10 @@ def _add_more(accs, n_more):
         _add_frame_to_all(accs, data, weight, pixmap, in_grid, exptime)
 
 
-def _attempt_gen2(writer, accs, binding, source_ident, n_total):
+def _attempt_gen2(writer, accs, binding, idents, n_total):
     return writer.commit(
         accs, session_binding=binding, counters=_counters(n_total),
-        completed_sources=[source_ident] * 1,
+        completed_sources=idents[:n_total],
     )
 
 
@@ -368,7 +384,7 @@ def _assert_gen1_intact(tmp_path, manifest_bytes, artifacts):
 
 
 def test_failure_at_array_stage_preserves_prior_generation(tmp_path, monkeypatch):
-    writer, accs, binding, src, mbytes, artifacts = _commit_gen1(tmp_path)
+    writer, accs, binding, idents, mbytes, artifacts = _commit_gen1(tmp_path)
     _add_more(accs, 2)
 
     calls = {"n": 0}
@@ -382,7 +398,7 @@ def test_failure_at_array_stage_preserves_prior_generation(tmp_path, monkeypatch
 
     monkeypatch.setattr(writer, "_write_array_artifact", failing)
     with pytest.raises(DrizzleCheckpointError):
-        _attempt_gen2(writer, accs, binding, src, 4)
+        _attempt_gen2(writer, accs, binding, idents, 4)
 
     _assert_gen1_intact(tmp_path, mbytes, artifacts)
     # No gen-2 files (attempt cleanup), no manifest referencing a mixed gen.
@@ -391,7 +407,7 @@ def test_failure_at_array_stage_preserves_prior_generation(tmp_path, monkeypatch
 
 
 def test_failure_at_cfg_stage_preserves_prior_generation(tmp_path, monkeypatch):
-    writer, accs, binding, src, mbytes, artifacts = _commit_gen1(tmp_path)
+    writer, accs, binding, idents, mbytes, artifacts = _commit_gen1(tmp_path)
     _add_more(accs, 2)
 
     def fail_cfg():
@@ -399,7 +415,7 @@ def test_failure_at_cfg_stage_preserves_prior_generation(tmp_path, monkeypatch):
 
     monkeypatch.setattr(run_contract, "write_cfg", fail_cfg)
     with pytest.raises(DrizzleCheckpointError):
-        _attempt_gen2(writer, accs, binding, src, 4)
+        _attempt_gen2(writer, accs, binding, idents, 4)
 
     _assert_gen1_intact(tmp_path, mbytes, artifacts)
     ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
@@ -407,7 +423,7 @@ def test_failure_at_cfg_stage_preserves_prior_generation(tmp_path, monkeypatch):
 
 
 def test_failure_at_manifest_tmp_write_preserves_prior_generation(tmp_path, monkeypatch):
-    writer, accs, binding, src, mbytes, artifacts = _commit_gen1(tmp_path)
+    writer, accs, binding, idents, mbytes, artifacts = _commit_gen1(tmp_path)
     _add_more(accs, 2)
 
     def fail_manifest(manifest):
@@ -415,7 +431,7 @@ def test_failure_at_manifest_tmp_write_preserves_prior_generation(tmp_path, monk
 
     monkeypatch.setattr(writer, "_write_manifest", fail_manifest)
     with pytest.raises(DrizzleCheckpointError):
-        _attempt_gen2(writer, accs, binding, src, 4)
+        _attempt_gen2(writer, accs, binding, idents, 4)
 
     _assert_gen1_intact(tmp_path, mbytes, artifacts)
     ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
@@ -423,7 +439,7 @@ def test_failure_at_manifest_tmp_write_preserves_prior_generation(tmp_path, monk
 
 
 def test_failure_at_manifest_replace_preserves_prior_generation(tmp_path, monkeypatch):
-    writer, accs, binding, src, mbytes, artifacts = _commit_gen1(tmp_path)
+    writer, accs, binding, idents, mbytes, artifacts = _commit_gen1(tmp_path)
     _add_more(accs, 2)
 
     real_replace = os.replace
@@ -435,7 +451,7 @@ def test_failure_at_manifest_replace_preserves_prior_generation(tmp_path, monkey
 
     monkeypatch.setattr(os, "replace", replace_raises_on_manifest)
     with pytest.raises(DrizzleCheckpointError):
-        _attempt_gen2(writer, accs, binding, src, 4)
+        _attempt_gen2(writer, accs, binding, idents, 4)
 
     _assert_gen1_intact(tmp_path, mbytes, artifacts)
     ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
@@ -443,7 +459,7 @@ def test_failure_at_manifest_replace_preserves_prior_generation(tmp_path, monkey
 
 
 def test_failure_at_array_fsync_preserves_prior_generation(tmp_path, monkeypatch):
-    writer, accs, binding, src, mbytes, artifacts = _commit_gen1(tmp_path)
+    writer, accs, binding, idents, mbytes, artifacts = _commit_gen1(tmp_path)
     _add_more(accs, 2)
 
     def fail_fsync(fd):
@@ -451,9 +467,70 @@ def test_failure_at_array_fsync_preserves_prior_generation(tmp_path, monkeypatch
 
     monkeypatch.setattr(os, "fsync", fail_fsync)
     with pytest.raises(DrizzleCheckpointError):
-        _attempt_gen2(writer, accs, binding, src, 4)
+        _attempt_gen2(writer, accs, binding, idents, 4)
 
     _assert_gen1_intact(tmp_path, mbytes, artifacts)
+
+
+# Restart / namespace safety: a second writer on the same output must refuse
+# before any write and must never reuse/overwrite/clean/GC a prior generation.
+
+def test_second_writer_refuses_existing_checkpoint(tmp_path):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    frames = build_frames()
+    for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
+        _add_frame_to_all(accs, data, weight, pixmap, in_grid, exptime)
+    idents = _identities(tmp_path, 2)
+    binding = _session_binding(tmp_path, _plan(idents))
+    assert writer.commit(
+        accs, session_binding=binding, counters=_counters(2),
+        completed_sources=idents,
+    ) == 1
+
+    ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
+    manifest_bytes = (ckpt_dir / MANIFEST_FILENAME).read_bytes()
+    artifacts = {
+        n: (ckpt_dir / n).read_bytes()
+        for n in sorted(os.listdir(ckpt_dir))
+        if n.endswith(".npy")
+    }
+    assert len(artifacts) == 6
+
+    # A second writer on the same output must refuse at construction, before
+    # any array write, leaving every prior byte identical.
+    with pytest.raises(DrizzleCheckpointError):
+        _writer(tmp_path)
+
+    assert (ckpt_dir / MANIFEST_FILENAME).read_bytes() == manifest_bytes
+    for n, data in artifacts.items():
+        assert (ckpt_dir / n).exists(), f"{n} missing after second writer"
+        assert (ckpt_dir / n).read_bytes() == data
+
+
+def test_first_commit_refuses_namespace_materialized_after_construction(tmp_path):
+    # Both writers construct while the namespace is still empty.
+    writer_b, _wcs_b, out_shape_b = _writer(tmp_path)
+    writer_a, _wcs_a, out_shape_a = _writer(tmp_path)
+
+    accs_a = _accs(out_shape_a)
+    frames = build_frames()
+    for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
+        _add_frame_to_all(accs_a, data, weight, pixmap, in_grid, exptime)
+    idents = _identities(tmp_path, 2)
+    binding = _session_binding(tmp_path, _plan(idents))
+    assert writer_a.commit(
+        accs_a, session_binding=binding, counters=_counters(2),
+        completed_sources=idents,
+    ) == 1
+
+    # writer_b's first commit must now refuse (namespace is no longer empty).
+    accs_b = _accs(out_shape_b)
+    with pytest.raises(DrizzleCheckpointError):
+        writer_b.commit(
+            accs_b, session_binding=binding, counters=_counters(2),
+            completed_sources=idents,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -465,14 +542,14 @@ def test_generation_n_to_n1_switches_atomically_and_keeps_current(tmp_path):
     writer, _wcs, out_shape_hw = _writer(tmp_path)
     accs = _accs(out_shape_hw)
     frames = build_frames()
-    src = _reference_identity(tmp_path)
-    binding = _session_binding(tmp_path, _plan([src]))
+    idents = _identities(tmp_path, 4)
+    binding = _session_binding(tmp_path, _plan(idents))
 
     for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
         _add_frame_to_all(accs, data, weight, pixmap, in_grid, exptime)
     g1 = writer.commit(
         accs, session_binding=binding, counters=_counters(2),
-        completed_sources=[src],
+        completed_sources=idents[:2],
     )
     assert g1 == 1
 
@@ -482,7 +559,7 @@ def test_generation_n_to_n1_switches_atomically_and_keeps_current(tmp_path):
     snap2 = [a._out_img.copy() for a in accs]
     g2 = writer.commit(
         accs, session_binding=binding, counters=_counters(4),
-        completed_sources=[src],
+        completed_sources=idents[:4],
     )
     assert g2 == 2
 
@@ -566,7 +643,7 @@ def _build_qm(tmp_path, group_size):
     return qm, out_shape
 
 
-def _init_qm_writer(qm):
+def _init_qm_writer(qm, source_paths=None):
     cfg = build_drizzle_canonical_config(
         qm, product_version=qm._canonical_product_version()
     )
@@ -577,7 +654,11 @@ def _init_qm_writer(qm):
         qm.drizzle_output_wcs,
         qm.drizzle_output_shape_hw,
     )
-    qm._drizzle_checkpoint_plan = _plan([_reference_identity(Path(qm.output_folder))])
+    if source_paths is None:
+        idents = [_reference_identity(Path(qm.output_folder))]
+    else:
+        idents = [_file_identity(Path(p)) for p in source_paths]
+    qm._drizzle_checkpoint_plan = _plan(idents)
 
 
 def test_init_drizzle_checkpoint_binds_plan_and_writer(tmp_path):
@@ -604,7 +685,8 @@ def _source_file(tmp_path, i):
 
 def test_cadence_and_trailing_flush_ordering(tmp_path):
     qm, _ = _build_qm(tmp_path, group_size=2)
-    _init_qm_writer(qm)
+    source_paths = [_source_file(tmp_path, i) for i in range(5)]
+    _init_qm_writer(qm, source_paths)
     ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
 
     # 0 frames: force flush must be a no-op (no checkpoint published).
@@ -612,7 +694,7 @@ def test_cadence_and_trailing_flush_ordering(tmp_path):
     assert not (ckpt_dir / MANIFEST_FILENAME).exists()
 
     for i in range(5):
-        src = _source_file(tmp_path, i)
+        src = source_paths[i]
         data, weight, pixmap, in_grid, exptime = build_frames()[i]
         data_hwc = np.stack([data, data, data], axis=-1).astype(np.float32)
         hdr = fits.Header()
@@ -669,9 +751,8 @@ def test_no_checkpoint_on_failed_add(tmp_path):
 
 def test_commit_failure_aborts_before_move(tmp_path, monkeypatch):
     qm, _ = _build_qm(tmp_path, group_size=1)
-    _init_qm_writer(qm)
-
     src = _source_file(tmp_path, 0)
+    _init_qm_writer(qm, [src])
 
     # Accept one frame and record the accepted counters/exposure.
     data, weight, pixmap, in_grid, exptime = build_frames()[0]
@@ -794,3 +875,475 @@ def test_bad_canonical_config_fails_closed(tmp_path):
             str(tmp_path), "8.2.0", cfg, out_wcs, out_shape_hw
         )
     assert not (Path(tmp_path) / CHECKPOINT_DIRNAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# F. manifest self-consistency (ledger == plan prefix, truthful counters)
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_consistency_invariants(tmp_path):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    frames = build_frames()
+    _add_frame_to_all(accs, *frames[0])
+    idents = _identities(tmp_path, 4)
+
+    # (a) completed ledger length != frame_count.
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, _plan(idents)),
+            counters=_counters(2), completed_sources=idents[:1],
+        )
+
+    # (b) ledger is not the exact ordered plan prefix (wrong order).
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, _plan(idents)),
+            counters=_counters(2), completed_sources=[idents[1], idents[0]],
+        )
+
+    # (c) stacked_batches_count != frame_count.
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, _plan(idents)),
+            counters={**_counters(2), "stacked_batches_count": 1},
+            completed_sources=idents[:2],
+        )
+
+    # (d) frame_count exceeds the plan length.
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, _plan(idents[:3])),
+            counters=_counters(4), completed_sources=idents,
+        )
+
+    # (e) duplicate source identity in the plan.
+    dup_plan = _plan([idents[0], idents[0]])
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, dup_plan),
+            counters=_counters(1), completed_sources=idents[:1],
+        )
+
+    # (f) exposure_min > exposure_max / unknown_count > frame_count.
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, _plan(idents)),
+            counters={**_counters(1), "exposure_min": 2.0, "exposure_max": 1.0},
+            completed_sources=idents[:1],
+        )
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=_session_binding(tmp_path, _plan(idents)),
+            counters={**_counters(1), "exposure_unknown_count": 2},
+            completed_sources=idents[:1],
+        )
+
+    # Nothing was ever published.
+    assert not (Path(tmp_path) / CHECKPOINT_DIRNAME / MANIFEST_FILENAME).exists()
+
+
+def test_preflight_refuses_non_json_and_nan_payload(tmp_path):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    frames = build_frames()
+    _add_frame_to_all(accs, *frames[0])
+    idents = _identities(tmp_path, 1)
+    binding = _session_binding(tmp_path, _plan(idents))
+
+    # NaN smuggled into the persisted scientific payload (direct-caller bypass).
+    writer.scientific_config = dict(writer.scientific_config)
+    writer.scientific_config["weighting_method"] = float("nan")
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(1),
+            completed_sources=idents,
+        )
+
+    # Non-JSON nested value.
+    writer.scientific_config["weighting_method"] = {1, 2}
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(1),
+            completed_sources=idents,
+        )
+
+    # Nothing was written.
+    ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
+    assert not ckpt_dir.exists() or not any(ckpt_dir.iterdir())
+
+
+def test_collision_cleanup_ownership_preserves_preexisting(tmp_path):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    frames = build_frames()
+    for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
+        _add_frame_to_all(accs, data, weight, pixmap, in_grid, exptime)
+    idents = _identities(tmp_path, 4)
+    binding = _session_binding(tmp_path, _plan(idents))
+    assert writer.commit(
+        accs, session_binding=binding, counters=_counters(2),
+        completed_sources=idents[:2],
+    ) == 1
+
+    ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
+    gen1 = {
+        n: (ckpt_dir / n).read_bytes()
+        for n in sorted(os.listdir(ckpt_dir))
+        if "gen-00000001" in n
+    }
+
+    # Plant a pre-existing gen-2 artifact that the next attempt would collide
+    # with (the 4th array written: ch1 out_wht).
+    fake = ckpt_dir / "gen-00000002-ch1-out_wht.npy"
+    fake.write_bytes(b"PRESERVED")
+    fake_bytes = fake.read_bytes()
+
+    _add_more(accs, 2)
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(4),
+            completed_sources=idents[:4],
+        )
+
+    # The pre-existing gen-2 artifact is untouched; no other gen-2 names remain
+    # (only this attempt's own partial files were cleaned).
+    assert fake.read_bytes() == fake_bytes
+    assert not any(
+        "gen-00000002" in n and n != fake.name for n in os.listdir(ckpt_dir)
+    )
+    # gen1 artifacts + manifest intact.
+    for n, data in gen1.items():
+        assert (ckpt_dir / n).read_bytes() == data
+
+
+# ---------------------------------------------------------------------------
+# G. manifest temp ownership (explicit per-attempt ownership)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_never_removes_foreign_manifest_temp(tmp_path, monkeypatch):
+    """An attempt's cleanup removes only its own manifest temp, never a foreign
+    one (explicit temp ownership; invariant #8)."""
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    idents = _identities(tmp_path, 4)
+    binding = _session_binding(tmp_path, _plan(idents))
+
+    frames = build_frames()
+    for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
+        _add_frame_to_all(accs, data, weight, pixmap, in_grid, exptime)
+    assert writer.commit(
+        accs, session_binding=binding, counters=_counters(2),
+        completed_sources=idents[:2],
+    ) == 1
+
+    ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
+    manifest_bytes = (ckpt_dir / MANIFEST_FILENAME).read_bytes()
+
+    # Plant a foreign manifest temp (as if another writer/attempt owned it).
+    foreign = ckpt_dir / f"{MANIFEST_TMP_PREFIX}1111.0.deadbeef"
+    foreign.write_bytes(b"FOREIGN-MANIFEST-TEMP")
+    foreign_bytes = foreign.read_bytes()
+
+    # Add more frames, then fail at the manifest *replace* stage so this
+    # attempt creates (and owns) its own unique temp before failing/cleaning up.
+    _add_more(accs, 2)
+    real_replace = os.replace
+
+    def replace_fail(src, dst):
+        if str(dst).endswith(MANIFEST_FILENAME):
+            raise RuntimeError("injected replace failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_fail)
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(4),
+            completed_sources=idents[:4],
+        )
+
+    # The foreign temp is byte-identical; this attempt's own temp is gone.
+    assert foreign.exists()
+    assert foreign.read_bytes() == foreign_bytes
+    own_temps = [
+        n for n in os.listdir(ckpt_dir)
+        if n.startswith(MANIFEST_TMP_PREFIX) and n != foreign.name
+    ]
+    assert own_temps == []
+
+    # Prior manifest still committed and byte-identical.
+    assert (ckpt_dir / MANIFEST_FILENAME).read_bytes() == manifest_bytes
+
+
+def test_concurrent_writers_winner_publishes_despite_loser_cleanup(tmp_path):
+    """Deterministic two-writer race: both pass the empty-namespace check, the
+    winner owns the manifest temp, the loser fails on artifact collision and
+    cleans up, yet the winner still publishes (invariant #7)."""
+    from seestar.core.drizzle_checkpoint import _fsync_dir
+
+    writer_winner, _wcs_w, shape = _writer(tmp_path)
+    writer_loser, _wcs_l, _ = _writer(tmp_path)
+
+    accs_winner = _accs(shape)
+    accs_loser = _accs(shape)
+    idents = _identities(tmp_path, 2)
+    binding = _session_binding(tmp_path, _plan(idents))
+    counters = _counters(2)
+
+    frames = build_frames()
+    for (data, weight, pixmap, in_grid, exptime) in frames[:2]:
+        _add_frame_to_all(accs_winner, data, weight, pixmap, in_grid, exptime)
+        _add_frame_to_all(accs_loser, data, weight, pixmap, in_grid, exptime)
+
+    # Coordination primitives.
+    check_barrier = threading.Barrier(2)
+    winner_temp_ready = threading.Event()
+    loser_failed = threading.Event()
+
+    # 1. Both writers must pass the first-commit namespace check while the
+    #    namespace is still empty (barrier synchronizes the two checks).
+    orig_refuse_w = writer_winner._refuse_existing_checkpoint
+    orig_refuse_l = writer_loser._refuse_existing_checkpoint
+
+    def refuse_w():
+        orig_refuse_w()
+        check_barrier.wait(timeout=30)
+
+    def refuse_l():
+        orig_refuse_l()
+        check_barrier.wait(timeout=30)
+
+    writer_winner._refuse_existing_checkpoint = refuse_w
+    writer_loser._refuse_existing_checkpoint = refuse_l
+
+    # 2. Winner: write its owned manifest temp, then pause before the replace
+    #    until the loser has failed and cleaned up.
+    def winner_write_manifest(manifest):
+        os.makedirs(writer_winner._dir, exist_ok=True)
+        payload = json.dumps(
+            manifest, sort_keys=True, indent=2, ensure_ascii=False,
+            allow_nan=False,
+        )
+        tmp = writer_winner._claim_manifest_temp(payload)
+        winner_temp_ready.set()
+        assert loser_failed.wait(timeout=30), "loser did not fail/clean up in time"
+        os.replace(tmp, os.path.join(writer_winner._dir, MANIFEST_FILENAME))
+        writer_winner._manifest_tmp_path = None
+        _fsync_dir(writer_winner._dir)
+        return True
+
+    writer_winner._write_manifest = winner_write_manifest
+
+    # 3. Loser: block before its first artifact write until the winner has
+    #    written its manifest temp, then collide on the O_EXCL artifact claim.
+    orig_loser_write = writer_loser._write_array_artifact
+
+    def loser_write_artifact(arr, final_name):
+        assert winner_temp_ready.wait(timeout=30), "winner temp not ready in time"
+        return orig_loser_write(arr, final_name)
+
+    writer_loser._write_array_artifact = loser_write_artifact
+
+    results = {}
+
+    def loser_run():
+        try:
+            writer_loser.commit(
+                accs_loser, session_binding=binding, counters=counters,
+                completed_sources=idents,
+            )
+            results["loser"] = "committed"
+        except DrizzleCheckpointError as exc:
+            results["loser"] = f"refused: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surface any surprise
+            results["loser"] = f"unexpected: {exc!r}"
+        finally:
+            loser_failed.set()
+
+    def winner_run():
+        try:
+            results["winner_gen"] = writer_winner.commit(
+                accs_winner, session_binding=binding, counters=counters,
+                completed_sources=idents,
+            )
+            results["winner"] = "committed"
+        except Exception as exc:  # noqa: BLE001 - capture any failure
+            results["winner"] = f"failed: {exc!r}"
+
+    loser_thread = threading.Thread(target=loser_run)
+    winner_thread = threading.Thread(target=winner_run)
+    loser_thread.start()
+    winner_thread.start()
+    loser_thread.join(timeout=60)
+    winner_thread.join(timeout=60)
+
+    assert not loser_thread.is_alive(), "loser thread hung"
+    assert not winner_thread.is_alive(), "winner thread hung"
+
+    # The loser must have failed (artifact collision) and cleaned up; the
+    # winner must have committed generation 1.
+    assert results["loser"].startswith("refused:"), results.get("loser")
+    # The loser failed specifically on the O_EXCL artifact collision, not on a
+    # namespace refusal (both had already passed the empty-namespace check).
+    assert "already exists" in results["loser"], results.get("loser")
+    assert results["winner"] == "committed", results.get("winner")
+    assert results["winner_gen"] == 1
+
+    # Winner's manifest + six artifacts are valid and byte-consistent.
+    manifest = _read_manifest(tmp_path)
+    assert manifest["generation"] == 1
+    ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
+    for ch in manifest["channels"]:
+        c = ch["channel"]
+        for kind in ("out_img", "out_wht"):
+            desc = ch[kind]
+            p = ckpt_dir / desc["file"]
+            assert p.is_file()
+            raw = p.read_bytes()
+            assert desc["size"] == len(raw)
+            assert desc["sha256"] == hashlib.sha256(raw).hexdigest()
+            expected = accs_winner[c]._out_img if kind == "out_img" else accs_winner[c]._out_wht
+            assert np.array_equal(np.load(p), expected)
+
+    # No stray owned manifest temp remains after the winner committed.
+    assert not any(
+        n.startswith(MANIFEST_TMP_PREFIX) for n in os.listdir(ckpt_dir)
+    )
+
+
+# ---------------------------------------------------------------------------
+# H. adversarial fail-closed validation (strict integer/float boundary)
+# ---------------------------------------------------------------------------
+
+
+def _assert_no_checkpoint_published(tmp_path):
+    """No checkpoint artifact, manifest, or run_config was ever written."""
+    ckpt_dir = Path(tmp_path) / CHECKPOINT_DIRNAME
+    assert not (ckpt_dir / MANIFEST_FILENAME).exists()
+    assert not ckpt_dir.exists() or not any(ckpt_dir.iterdir())
+    assert not (Path(tmp_path) / RUN_CONFIG_FILENAME).exists()
+
+
+@pytest.mark.parametrize("bad", [42, "abc", [1, 2], object()])
+def test_malformed_session_binding_type_fails_closed(tmp_path, bad):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    _add_frame_to_all(accs, *build_frames()[0])
+    src = _reference_identity(tmp_path)
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=bad, counters=_counters(1),
+            completed_sources=[src],
+        )
+    _assert_no_checkpoint_published(tmp_path)
+
+
+@pytest.mark.parametrize("bad", [42, "abc", {1, 2}, object()])
+def test_malformed_completed_sources_type_fails_closed(tmp_path, bad):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    _add_frame_to_all(accs, *build_frames()[0])
+    src = _reference_identity(tmp_path)
+    binding = _session_binding(tmp_path, _plan([src]))
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(1),
+            completed_sources=bad,
+        )
+    _assert_no_checkpoint_published(tmp_path)
+
+
+@pytest.mark.parametrize("bad_counters", [None, [], "abc", 42])
+def test_non_mapping_counters_fails_closed(tmp_path, bad_counters):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    _add_frame_to_all(accs, *build_frames()[0])
+    src = _reference_identity(tmp_path)
+    binding = _session_binding(tmp_path, _plan([src]))
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=bad_counters,
+            completed_sources=[src],
+        )
+    _assert_no_checkpoint_published(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("frame_count", 1.5),
+        ("frame_count", "1"),
+        ("frame_count", True),
+        ("frame_count", np.float64(1.0)),
+        ("frame_count", None),
+        ("stacked_batches_count", 1.5),
+        ("stacked_batches_count", "1"),
+        ("stacked_batches_count", True),
+        ("exposure_unknown_count", 0.5),
+        ("exposure_unknown_count", "0"),
+        ("exposure_unknown_count", True),
+        ("exposure_unknown_count", []),
+    ],
+)
+def test_non_integral_or_bool_counters_fail_closed(tmp_path, field, value):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    _add_frame_to_all(accs, *build_frames()[0])
+    src = _reference_identity(tmp_path)
+    binding = _session_binding(tmp_path, _plan([src]))
+    counters = _counters(1)
+    counters[field] = value
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=counters,
+            completed_sources=[src],
+        )
+    _assert_no_checkpoint_published(tmp_path)
+
+
+@pytest.mark.parametrize("bad", [1.5, "2", True, 0, -1])
+def test_malformed_decomposition_fails_closed(tmp_path, bad):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    _add_frame_to_all(accs, *build_frames()[0])
+    src = _reference_identity(tmp_path)
+    binding = _session_binding(tmp_path, {"sources": [src], "decomposition": [bad]})
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(1),
+            completed_sources=[src],
+        )
+    _assert_no_checkpoint_published(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "attr,value",
+    [
+        ("pixfrac", float("nan")),
+        ("pixfrac", float("inf")),
+        ("pixfrac", float("-inf")),
+        ("pixfrac", "not-a-number"),
+        ("pixfrac", None),
+        ("pixfrac", True),
+        ("_total_exptime", float("nan")),
+        ("_total_exptime", float("inf")),
+        ("_total_exptime", "abc"),
+        ("_total_exptime", None),
+        ("_total_exptime", -1.0),
+    ],
+)
+def test_malformed_accumulator_float_fails_closed(tmp_path, attr, value):
+    writer, _wcs, out_shape_hw = _writer(tmp_path)
+    accs = _accs(out_shape_hw)
+    _add_frame_to_all(accs, *build_frames()[0])
+    setattr(accs[0], attr, value)
+    src = _reference_identity(tmp_path)
+    binding = _session_binding(tmp_path, _plan([src]))
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(1),
+            completed_sources=[src],
+        )
+    _assert_no_checkpoint_published(tmp_path)
