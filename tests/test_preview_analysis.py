@@ -13,8 +13,8 @@ widgets, no ``QImage``, no scientific-engine imports):
   repeatability, valid ``bp < wp``, no min/max renormalization);
 * Auto WB true-background-band algorithm (correction direction, idempotence,
   zero-border / saturated-star / bright-emission exclusion, neutral fallbacks);
-* frozen-anchor successive-preview witness (a fixed raw pixel maps identically
-  when later-frame extrema change);
+* stable/adaptive-anchor successive-preview witnesses (small changes preserve
+  a fixed pixel while large drift avoids mass clipping);
 * deterministic sampling cap;
 * import / science-isolation hygiene (no forbidden imports, no eager numpy).
 """
@@ -32,11 +32,13 @@ import numpy as np
 import pytest
 
 from seestar.gui_qt.preview_analysis import (
+    ANCHOR_DRIFT_HYSTERESIS,
     ANCHOR_SEP,
     AUTO_STRETCH_DEFAULTS,
     HISTOGRAM_BINS,
     MAX_SAMPLE_PIXELS,
     NEUTRAL_WB,
+    adapt_anchors_for_drift,
     apply_wb_float,
     compute_anchors,
     compute_auto_stretch_float,
@@ -52,7 +54,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
-# §5.2 — payload extraction + frozen anchor mapping
+# §5.2 — payload extraction + stable/adaptive anchor mapping
 # ---------------------------------------------------------------------------
 
 def test_extract_raw_linear_tuple_and_legacy_fallback():
@@ -135,32 +137,123 @@ def test_map_raw_linear_frozen_mapping():
     assert raw[0, 0] == 0.0 and raw[0, 2] == 10.0  # input unchanged
 
 
-def test_fixed_anchor_successive_preview_witness():
-    """A fixed raw pixel maps identically when later-frame extrema change."""
+def test_unchanged_reference_pixel_stable_when_no_adaptation_warranted():
+    """§5.2 bounded stability: no drift -> frozen anchors -> fixed pixel maps
+    identically (the anti-pumping invariant, now conditioned on "no adaptation
+    is warranted")."""
     rng = np.random.default_rng(11)
     frame1 = rng.uniform(1.0, 10.0, size=(32, 32)).astype(np.float32)
     ref = (5, 7)
-    ref_val = 5.0
-    frame1[ref] = ref_val
+    frame1[ref] = 5.0
 
     lo, hi = compute_anchors(frame1)
     mapped1 = map_raw_linear(frame1, lo, hi)
     m1 = float(mapped1[ref])
 
-    # Frame 2: the stack evolved (everything brighter) but the reference
-    # pixel's linear value is unchanged.
-    frame2 = rng.uniform(5.0, 50.0, size=(32, 32)).astype(np.float32)
-    frame2[ref] = ref_val
-    m2 = float(map_raw_linear(frame2, lo, hi)[ref])  # frozen anchors
+    # Frame 2: a *small* evolution (within the hysteresis band) with the
+    # reference pixel unchanged -> the effective anchors stay frozen and the
+    # reference pixel maps identically.
+    frame2 = frame1 * 1.05
+    frame2[ref] = 5.0
+    nlo, nhi = adapt_anchors_for_drift(lo, hi, frame2)
+    assert (nlo, nhi) == (lo, hi)
+    m2 = float(map_raw_linear(frame2, nlo, nhi)[ref])
     assert m2 == m1
 
-    # Anchors are unchanged (frozen at first valid preview).
-    assert compute_anchors(frame1) == (lo, hi)
 
-    # A fresh per-preview anchor computation would remap the reference pixel.
-    lo2, hi2 = compute_anchors(frame2)
-    m2_fresh = float(map_raw_linear(frame2, lo2, hi2)[ref])
-    assert m2_fresh != m1
+def test_adapt_anchors_modest_evolution_stays_frozen():
+    """A modest +10% photometric evolution stays inside the hysteresis band and
+    leaves the frozen anchors bit-identical (no per-frame percentile pumping)."""
+    rng = np.random.default_rng(12)
+    frame1 = rng.uniform(100.0, 200.0, size=(64, 64, 3)).astype(np.float32)
+    lo, hi = compute_anchors(frame1)
+    span = hi - lo
+    assert span > 0.0
+
+    # +10% multiplicative: robust high tail moves ~0.20 * span, below the 0.25
+    # hysteresis band -> frozen.
+    frame2 = frame1 * 1.10
+    assert (adapt_anchors_for_drift(lo, hi, frame2)) == (lo, hi)
+
+
+def test_adapt_anchors_2x_3x_drift_no_whiteout():
+    """A legitimate 2x / 3x global evolution widens the high anchor so the bulk
+    of the image no longer maps to exactly 1.0 (no artificial saturation)."""
+    rng = np.random.default_rng(13)
+    frame1 = rng.uniform(100.0, 200.0, size=(64, 64, 3)).astype(np.float32)
+    lo, hi = compute_anchors(frame1)
+
+    for scale in (2.0, 3.0):
+        frame = frame1 * scale
+        nlo, nhi = adapt_anchors_for_drift(lo, hi, frame)
+        # Bright drift widens only the high side (low anchor stays frozen).
+        assert nlo == lo
+        assert nhi > hi
+        assert nhi > lo
+
+        mapped = map_raw_linear(frame, nlo, nhi)
+        in_dom = mapped[np.isfinite(mapped)]
+        frac1 = float((in_dom == 1.0).mean())
+        # Regression: before the fix the *entire* frame clipped to 1.0.
+        assert frac1 < 0.5, f"scale={scale}: majority still clipped (frac1={frac1})"
+        assert 0.0 < float(np.median(in_dom)) < 1.0
+        # Only the natural ~0.5% robust high tail is allowed to saturate.
+        assert frac1 < 0.05, f"scale={scale}: unexpected saturation frac1={frac1}"
+
+
+def test_adapt_anchors_dark_drift_widens_low_anchor():
+    """A dark drift widens only the low anchor (ratchet is symmetric outward)."""
+    rng = np.random.default_rng(14)
+    frame1 = rng.uniform(100.0, 200.0, size=(64, 64, 3)).astype(np.float32)
+    lo, hi = compute_anchors(frame1)
+
+    frame_dark = frame1 * 0.25  # strong dark drift
+    nlo, nhi = adapt_anchors_for_drift(lo, hi, frame_dark)
+    assert nlo < lo
+    assert nhi == hi
+    mapped = map_raw_linear(frame_dark, nlo, nhi)
+    frac0 = float((mapped == 0.0).mean())
+    assert frac0 < 0.05  # not majority-black either
+    assert 0.0 < float(np.median(mapped)) < 1.0
+
+
+def test_adapt_anchors_ratchet_never_shrinks():
+    """The ratchet only widens: a transient dimmer frame after a bright drift
+    never shrinks the mapping back (temporal anti-pumping)."""
+    rng = np.random.default_rng(15)
+    frame1 = rng.uniform(100.0, 200.0, size=(64, 64, 3)).astype(np.float32)
+    lo, hi = compute_anchors(frame1)
+
+    bright = frame1 * 3.0
+    lo2, hi2 = adapt_anchors_for_drift(lo, hi, bright)
+    assert hi2 > hi
+
+    # A subsequent frame identical to the original (dimmer than the widened
+    # anchors) must not shrink the range back.
+    lo3, hi3 = adapt_anchors_for_drift(lo2, hi2, frame1)
+    assert lo3 == lo2
+    assert hi3 == hi2
+
+
+def test_adapt_anchors_degenerate_and_invalid_inputs_safe():
+    """Degenerate / non-finite / empty inputs leave anchors unchanged (or fall
+    back to fresh anchors when the frozen pair is itself non-finite)."""
+    rng = np.random.default_rng(16)
+    frame1 = rng.uniform(1.0, 10.0, size=(16, 16)).astype(np.float32)
+    lo, hi = compute_anchors(frame1)
+
+    # All-NaN new frame -> no drift info -> unchanged.
+    assert adapt_anchors_for_drift(lo, hi, np.full((8, 8), np.nan)) == (lo, hi)
+    # Empty new frame -> unchanged.
+    assert adapt_anchors_for_drift(lo, hi, np.zeros((0, 0))) == (lo, hi)
+    # Non-finite frozen anchors -> fresh anchor computation.
+    nlo, nhi = adapt_anchors_for_drift(np.nan, np.inf, frame1)
+    assert np.isfinite(nlo) and np.isfinite(nhi) and nhi > nlo
+
+    # Constant new frame (finite-positive sample exists but degenerate) is
+    # handled without raising and stays non-degenerate.
+    clo, chi = adapt_anchors_for_drift(lo, hi, np.full((16, 16), 1000.0))
+    assert chi > clo
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +561,7 @@ def test_analysis_never_mutates_inputs():
     compute_robust_x_range(arr)
     compute_anchors(arr)
     map_raw_linear(arr, 0.1, 0.9)
+    adapt_anchors_for_drift(0.1, 0.9, arr)
     extract_raw_linear((arr, arr))
     assert np.array_equal(arr, before)
 

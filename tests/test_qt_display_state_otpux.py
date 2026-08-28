@@ -1,10 +1,10 @@
 """ZSSS-OTPUX-QT-DISPLAY-STATE-01 — Option-A display-state lifecycle tests.
 
-Focused offscreen Qt tests for the frozen-anchor raw-linear preview integration
+Focused offscreen Qt tests for the stable/adaptive raw-linear preview integration
 in :class:`seestar.gui_qt.MainWindow`:
 
-* frozen p0.5/p99.5 anchors across successive Option-A previews (a fixed raw
-  pixel maps identically when later-frame extrema change);
+* p0.5/p99.5 anchors stay frozen for modest changes (a fixed raw pixel maps
+  identically) and widen for large photometric drift;
 * production Qt derives the display from the *raw-linear* second element, never
   the deliberately misleading legacy-normalized first element;
 * manual BP/WP / WB / gamma / BCS survive a new backend preview (no silent
@@ -77,15 +77,17 @@ def _red_cast_raw(size: int = 32, seed: int = 1) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# (1) frozen anchors across successive previews
+# (1) stable/adaptive anchors across successive previews
 # ---------------------------------------------------------------------------
 def test_frozen_anchors_across_successive_previews(qapp):
+    """Modest evolution: anchors stay frozen, a fixed raw pixel maps identically
+    (bounded stability / anti-pumping across successive Option-A previews)."""
     win = MainWindow()
     try:
         rng = np.random.default_rng(11)
         frame1 = rng.uniform(1.0, 10.0, size=(32, 32, 3)).astype(np.float32)
         ref = (5, 7)
-        frame1[ref] = 5.0  # fixed raw pixel (all channels)
+        frame1[ref] = 5.0
         win._on_preview(
             BackendPreviewPayload(
                 data=(_legacy_normalize(frame1), frame1), stack_name="f1"
@@ -98,9 +100,9 @@ def test_frozen_anchors_across_successive_previews(qapp):
         mapped_ref1 = win._pristine_float[ref].copy()
         gen1 = win._analysis_generation
 
-        # Frame 2: the stack evolved (everything brighter) but the reference
-        # pixel's raw-linear value is unchanged.
-        frame2 = rng.uniform(5.0, 50.0, size=(32, 32, 3)).astype(np.float32)
+        # Frame 2: a *modest* evolution (within the hysteresis band) with the
+        # reference pixel's raw-linear value unchanged.
+        frame2 = frame1 * 1.05
         frame2[ref] = 5.0
         win._on_preview(
             BackendPreviewPayload(
@@ -108,11 +110,46 @@ def test_frozen_anchors_across_successive_previews(qapp):
             )
         )
 
-        # Anchors are frozen (immutable within one run/context) and the mapped
-        # reference pixel is identical.
+        # Anchors stay frozen (anti-pumping) and the mapped reference pixel is
+        # identical.
         assert (win._anchor_lo, win._anchor_hi) == (lo1, hi1)
         assert win._analysis_generation == gen1  # no reset on successive updates
         assert np.array_equal(win._pristine_float[ref], mapped_ref1)
+    finally:
+        win.shutdown()
+
+
+def test_2x_3x_drift_accommodated_no_whiteout(qapp):
+    """A legitimate 2x / 3x photometric drift widens the anchors so the pristine
+    float buffer no longer maps the majority of pixels to exactly 1.0."""
+    win = MainWindow()
+    try:
+        rng = np.random.default_rng(12)
+        frame1 = rng.uniform(100.0, 200.0, size=(32, 32, 3)).astype(np.float32)
+        win._on_preview(
+            BackendPreviewPayload(
+                data=(_legacy_normalize(frame1), frame1), stack_name="f1"
+            )
+        )
+        lo1, hi1 = win._anchor_lo, win._anchor_hi
+        gen1 = win._analysis_generation
+
+        for scale in (2.0, 3.0):
+            frame = frame1 * scale
+            win._on_preview(
+                BackendPreviewPayload(
+                    data=(_legacy_normalize(frame), frame), stack_name=f"f{scale}"
+                )
+            )
+            # High anchor widened; the context is preserved (no reset).
+            assert win._anchor_hi > hi1
+            assert win._anchor_lo == lo1  # bright drift: low anchor frozen
+            assert win._analysis_generation == gen1
+
+            pristine = win._pristine_float
+            frac1 = float((pristine == 1.0).mean())
+            assert frac1 < 0.05, f"scale={scale}: majority saturated (frac1={frac1})"
+            assert 0.0 < float(np.median(pristine)) < 1.0
     finally:
         win.shutdown()
 

@@ -147,6 +147,7 @@ from .preview_adjust import (
     normalize_bp_wp,
 )
 from .preview_analysis import (
+    adapt_anchors_for_drift,
     apply_wb_float,
     compute_anchors,
     compute_auto_stretch_float,
@@ -901,8 +902,8 @@ class MainWindow(QMainWindow):
         #   _raw_linear     - independent float64 copy of the raw-linear source
         #   _pristine_float - mapped pre-WB float buffer in [0, 1]
         #   _wb_only_float  - derived WB-only float buffer in [0, 1]
-        #   _anchor_lo/hi   - frozen p0.5/p99.5 anchors (immutable within a
-        #                     run/context; None until the first valid preview)
+        #   _anchor_lo/hi   - stable p0.5/p99.5 anchors (hysteretically widened
+        #                     for large drift; None until the first preview)
         #   _analysis_generation - explicit context/generation counter,
         #                     incremented on every analysis reset
         #   _wb_only_wb     - the WB gains used to derive _wb_only_float
@@ -2815,7 +2816,7 @@ class MainWindow(QMainWindow):
         self._live_auto_wb_count = 0
         self._live_bp = None
         self._live_wp = None
-        # A new run is a fresh frozen-anchor context: drop any anchors / float
+        # A new run is a fresh display-anchor context: drop any anchors / float
         # analysis buffers from a previous run (never reused across runs).
         self._reset_preview_analysis()
         # STABLE-B: a new run is also a fresh view-state context.  Reset the
@@ -2889,7 +2890,7 @@ class MainWindow(QMainWindow):
 
         option_a = _is_option_a_preview_payload(payload.data)
         if option_a:
-            # Option-A: derive the display source from the frozen-anchor mapped
+            # Option-A: derive the display source from the adaptive-anchor mapped
             # pristine pre-WB float buffer (never from legacy_normalized once
             # raw extraction succeeds).
             image = self._ingest_option_a_preview(payload.data)
@@ -2922,7 +2923,7 @@ class MainWindow(QMainWindow):
         else:
             self._preview_source = None
             self._preview_rotation = 0
-            # Invalid/missing data clears any stale frozen-anchor analysis so
+            # Invalid/missing data clears any stale display-anchor analysis so
             # the next valid preview re-establishes anchors from scratch (and
             # drops any identity instrumentation for the vanished preview).
             self._reset_preview_analysis()
@@ -3089,12 +3090,13 @@ class MainWindow(QMainWindow):
         return ran
 
     def _reset_preview_analysis(self) -> None:
-        """Clear frozen anchors and the display-only float analysis buffers.
+        """Clear display anchors and the display-only float analysis buffers.
 
         Called at run start, on a genuinely new initial-preview folder, on an
         explicit preview clear, and on an invalid payload — never on ordinary
-        successive backend preview updates (anchors are immutable within one
-        run/context).  Display-only: it never touches the backend, science
+        successive backend preview updates (anchors remain stable for small
+        changes and widen only for significant drift).  Display-only: it never
+        touches the backend, science
         accumulators, or the stored ``_preview_source`` QImage.
         """
         self._raw_linear = None
@@ -3148,16 +3150,23 @@ class MainWindow(QMainWindow):
         """Ingest an Option-A payload into frozen-anchor display state.
 
         Extracts an independent raw-linear copy via the accepted core, computes
-        p0.5/p99.5 anchors only on the first valid preview of the current
-        context, maps through the frozen anchors into the pristine pre-WB float
-        buffer, and returns that buffer as a copied ``QImage`` (or ``None`` when
-        the payload is unusable).  The input payload arrays are never mutated.
+        p0.5/p99.5 anchors on the first valid preview of the current context,
+        and on each successive preview accommodates legitimate photometric
+        drift via a hysteretic monotonic widening of those anchors
+        (:func:`preview_analysis.adapt_anchors_for_drift`), then maps through
+        the effective anchors into the pristine pre-WB float buffer and returns
+        that buffer as a copied ``QImage`` (or ``None`` when the payload is
+        unusable).  The input payload arrays are never mutated.
         """
         raw = extract_raw_linear(data)
         if raw is None:
             return None
         if self._anchor_lo is None or self._anchor_hi is None:
             self._anchor_lo, self._anchor_hi = compute_anchors(raw)
+        else:
+            self._anchor_lo, self._anchor_hi = adapt_anchors_for_drift(
+                self._anchor_lo, self._anchor_hi, raw
+            )
         mapped = map_raw_linear(raw, self._anchor_lo, self._anchor_hi)
         if mapped is None:
             return None
@@ -3203,7 +3212,7 @@ class MainWindow(QMainWindow):
         self._preview_detail = f"{self._tr('preview_loading')} {first}"
         self._render_preview_label()
 
-        # A genuinely new folder is a new frozen-anchor context: drop any
+        # A genuinely new folder is a new display-anchor context: drop any
         # anchors / float analysis buffers from a previous folder or run before
         # the (async) load lands.  Redundant reloads were already skipped above.
         self._reset_preview_analysis()
@@ -3525,7 +3534,7 @@ class MainWindow(QMainWindow):
         For an Option-A preview the gains come from the pristine *pre-WB*
         mapped float buffer via ``compute_auto_wb_float`` (never from the
         already-WB buffer, so repeated explicit calls are deterministic and
-        never move the frozen anchors).  Legacy single-array previews keep the
+        never move the display anchors).  Legacy single-array previews keep the
         existing ``compute_auto_wb`` QImage path.  Gains are written back to
         the WB controls atomically: when the gains actually change, all three
         slider/spin pairs and ``_wb`` update with a single preview refresh /
@@ -3629,7 +3638,7 @@ class MainWindow(QMainWindow):
         existing ``compute_auto_stretch`` QImage path.  Both write the points
         into the black/white slider+spin controls (atomically, so a stale
         in-between white point never clamps the new black point) and switch the
-        stretch method to ``asinh``.  The frozen anchors / raw / pristine
+        stretch method to ``asinh``.  The display anchors / raw / pristine
         buffers are never mutated.
         """
         points = self._compute_auto_stretch_points()

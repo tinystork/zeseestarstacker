@@ -4,8 +4,9 @@ Toolkit-free float-domain analysis for the Qt preview pipeline.  This module
 implements the ratified contracts in ``docs/output_truthfulness_preview_audit.md``:
 
 * §5.2 — Option A: backend carries ``(legacy_normalized, raw_linear)``; Qt owns
-  the *frozen* anchor mapping (p0.5 / p99.5, finite min/max fallback only when
-  degenerate), so a fixed raw pixel maps identically across successive previews;
+  the stable/adaptive anchor mapping (p0.5 / p99.5, finite min/max fallback only
+  when degenerate), so small changes preserve a fixed pixel's mapping while
+  genuine photometric drift can widen the display range;
 * §5.3 — 512-bin float histogram over ``[0, 1]`` (RGB overlay or L mono),
   ``log1p`` visualization counts, per-channel min/max/median/mean/std on the
   *exact same* deterministic sample, robust plotted X range + explicit full
@@ -47,6 +48,15 @@ HISTOGRAM_RANGE = (0.0, 1.0)
 
 # §5.2: anchor separation epsilon.
 ANCHOR_SEP = 1e-4
+
+# §5.2 (drift accommodation): hysteresis dead-band for the frozen-anchor
+# display mapping.  A new raw frame re-anchors (widens) only when its robust
+# percentile range (p0.5 / p99.5) has drifted beyond the frozen range by more
+# than this fraction of the frozen span.  This keeps small frame-to-frame
+# photometric evolution *stable* (anti-pumping) while a legitimate 2x-3x
+# global drift widens the mapping before the preview white-outs.  Display-only;
+# it never touches the scientific accumulators.
+ANCHOR_DRIFT_HYSTERESIS = 0.25
 
 # §5.2 / §5.3: deterministic sampling cap (documented).  At most this many
 # pixels are fed to the percentile/median/histogram computations; larger arrays
@@ -210,7 +220,7 @@ def _robust_x_range_from_samples(np: Any, channels) -> Tuple[float, float]:
 
 
 # --------------------------------------------------------------------------
-# §5.2 — Option A payload extraction + frozen anchor mapping
+# §5.2 — Option A payload extraction + stable/adaptive anchor mapping
 # --------------------------------------------------------------------------
 
 def extract_raw_linear(data: Any) -> Optional[Any]:
@@ -280,7 +290,9 @@ def map_raw_linear(raw_linear, anchor_lo: float, anchor_hi: float) -> Any:
 
     ``mapped = clip((raw - lo) / (hi - lo), 0, 1)`` using the same anchors
     across successive previews (§5.2 regression: a fixed raw pixel maps
-    identically when later-frame extrema change).  Non-mutating.
+    identically when later-frame extrema change).  Non-mutating.  For drift
+    accommodation, callers re-anchor via :func:`adapt_anchors_for_drift` before
+    calling this mapping.
     """
     np = _load_numpy()
     if np is None:
@@ -294,6 +306,79 @@ def map_raw_linear(raw_linear, anchor_lo: float, anchor_hi: float) -> Any:
     with np.errstate(invalid="ignore", divide="ignore"):
         mapped = (arr - lo) / denom
     return np.clip(mapped, 0.0, 1.0)
+
+
+def adapt_anchors_for_drift(
+    anchor_lo: float,
+    anchor_hi: float,
+    raw_linear,
+    hysteresis: float = ANCHOR_DRIFT_HYSTERESIS,
+    sep: float = ANCHOR_SEP,
+) -> Tuple[float, float]:
+    """Return the effective frozen anchors for a new raw-linear frame.
+
+    §5.2 drift accommodation (display-only).  The frozen anchors are kept
+    bit-identical while the new frame's robust percentile range (p0.5 / p99.5)
+    stays within a hysteresis band around them — so a fixed raw pixel keeps
+    mapping identically across small (frame-to-frame) evolution, preserving the
+    anti-pumping intent.  When the new frame's robust range has drifted beyond
+    that band, the anchors are widened **monotonically outward** (a ratchet:
+    ``lo`` only decreases, ``hi`` only increases) to cover the new robust
+    range, so a legitimate 2x-3x photometric drift no longer maps the bulk of
+    the image to exactly ``1.0`` (artificial saturation / white-out).
+
+    Monotonicity means the mapping can only "zoom out" across a context, never
+    oscillate: once widened for a brighter stack, a transient dimmer frame does
+    not shrink the range back (strong temporal anti-pumping).  The expansion is
+    *bounded* — it is driven by the new frame's robust p0.5/p99.5 (never by a
+    single outlier pixel) and never overshoots the data.  Returns a fresh
+    ``(lo, hi)`` pair with ``hi > lo``; the input array is never mutated.
+
+    A degenerate new frame (no finite-positive sample) carries no drift
+    information and leaves the anchors unchanged.
+    """
+    np = _load_numpy()
+    if np is None:
+        return (float(anchor_lo), float(anchor_hi))
+    arr = np.asarray(raw_linear, dtype=np.float64)
+    if arr.size == 0:
+        return (float(anchor_lo), float(anchor_hi))
+
+    lo = float(anchor_lo)
+    hi = float(anchor_hi)
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        # No usable frozen anchors: fall back to a fresh anchor computation.
+        return compute_anchors(arr, sep=sep)
+
+    sample = _finite_positive_sample(np, arr)
+    if sample is None or sample.size == 0:
+        return (lo, hi)
+    cur_lo = float(np.percentile(sample, 0.5))
+    cur_hi = float(np.percentile(sample, 99.5))
+    if not (np.isfinite(cur_lo) and np.isfinite(cur_hi)):
+        return (lo, hi)
+
+    span = hi - lo
+    if span <= 0.0:
+        span = sep
+    band = float(hysteresis) * span
+
+    new_lo = lo
+    new_hi = hi
+    # Bright drift: the robust high tail escapes the frozen range -> widen up.
+    if cur_hi > hi + band:
+        new_hi = cur_hi
+    # Dark drift: the robust low tail escapes the frozen range -> widen down.
+    if cur_lo < lo - band:
+        new_lo = cur_lo
+
+    # Never return a degenerate pair; symmetric widening is a last-resort guard
+    # and only triggers when the frozen anchors were already degenerate.
+    if new_hi - new_lo <= sep:
+        mid = 0.5 * (new_lo + new_hi)
+        new_lo = mid - sep
+        new_hi = mid + sep
+    return (new_lo, new_hi)
 
 
 # --------------------------------------------------------------------------
