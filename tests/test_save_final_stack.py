@@ -392,7 +392,82 @@ def _make_m3_obj(tmp_path, threshold=0.0, shape=(8, 8)):
         acc._out_img[:] = 1.0
         acc._out_wht[:] = 1.0
     obj.current_stack_header = obj.drizzle_output_wcs.to_header()
+    # ZSSS-OPTIONAL-WHT-01: the companion WHT export is opt-in (default False
+    # on a real queue manager).  The M3 companion tests below explicitly opt in.
+    obj.save_drizzle_wht = True
     return obj
+
+
+def test_companion_wht_off_by_default(tmp_path):
+    """Default (flag absent) writes NO companion WHT, only the primary SCI."""
+    obj = _make_m3_obj(tmp_path, threshold=0.5)
+    del obj.save_drizzle_wht  # simulate a fresh queue manager default
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj, output_filename_suffix="_m3_off_default", preserve_linear_output=True
+    )
+    assert obj._companion_wht_path is None
+    assert not list(tmp_path.glob("*_wht.fit"))
+    # primary SCI output still written
+    assert obj.final_stacked_path is not None
+    assert Path(obj.final_stacked_path).exists()
+    assert fits.getdata(obj.final_stacked_path).shape == (3, 8, 8)
+
+
+def test_companion_wht_false_no_write(tmp_path):
+    """Explicit False keeps the companion OFF while the primary is written."""
+    obj = _make_m3_obj(tmp_path, threshold=0.5)
+    obj.save_drizzle_wht = False
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj, output_filename_suffix="_m3_off", preserve_linear_output=True
+    )
+    assert obj._companion_wht_path is None
+    assert not list(tmp_path.glob("*_wht.fit"))
+    assert obj.final_stacked_path is not None
+    assert Path(obj.final_stacked_path).exists()
+
+
+def test_companion_wht_true_write(tmp_path):
+    """Opt-in True writes the companion with the existing metadata contract."""
+    obj = _make_m3_obj(tmp_path, threshold=0.5)
+    assert obj.save_drizzle_wht is True
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj, output_filename_suffix="_m3_on", preserve_linear_output=True
+    )
+    assert obj._companion_wht_path is not None
+    assert Path(obj._companion_wht_path).exists()
+    wht_data = fits.getdata(obj._companion_wht_path)
+    wht_header = fits.getheader(obj._companion_wht_path)
+    primary_data = fits.getdata(obj.final_stacked_path)
+    assert wht_data.shape == primary_data.shape
+    assert wht_header["EXTNAME"] == "WHT"
+    for key in ("WHTMIN", "WHTMAX", "WHTMEAN", "COVFRAC"):
+        assert key in wht_header
+
+
+def test_companion_wht_flag_primary_sci_and_png_unchanged(tmp_path):
+    """False vs True produce identical primary FITS science and preview PNG."""
+
+    def run(enable):
+        obj = _make_m3_obj(tmp_path, threshold=0.5)
+        obj.save_drizzle_wht = enable
+        qm.SeestarQueuedStacker._save_final_stack(
+            obj, output_filename_suffix="_m3_cmp", preserve_linear_output=True
+        )
+        primary = fits.getdata(obj.final_stacked_path)
+        png_path = Path(str(obj.final_stacked_path)).with_suffix(".png")
+        png_bytes = png_path.read_bytes() if png_path.exists() else None
+        return primary, png_bytes, obj._companion_wht_path
+
+    off_sci, off_png, off_comp = run(False)
+    on_sci, on_png, on_comp = run(True)
+
+    # primary science (and preview PNG) are byte-for-byte identical
+    assert np.array_equal(off_sci, on_sci)
+    assert off_png is not None and on_png is not None
+    assert off_png == on_png
+    # companion only exists in the opt-in run
+    assert off_comp is None
+    assert on_comp is not None
 
 
 def test_wht_threshold_m3_sets_relative_policy(tmp_path):

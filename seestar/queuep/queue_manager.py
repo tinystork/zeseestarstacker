@@ -3202,6 +3202,12 @@ class SeestarQueuedStacker:
         logger.debug(
             f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}"
         )
+        # ZSSS-OPTIONAL-WHT-01: the final Drizzle companion WHT FITS export is
+        # optional and OFF by default.  The native signed WHT scientific
+        # machinery (accumulators, signed weights, finalization) is unchanged;
+        # this flag only gates the separate ``_wht.fit`` companion product
+        # written by ``_write_companion_wht_fits``.
+        self.save_drizzle_wht = False
         self.preserve_linear_output = False
         logger.debug(
             f"  -> Attribut self.preserve_linear_output initialisé à: {self.preserve_linear_output}"
@@ -16972,14 +16978,16 @@ class SeestarQueuedStacker:
         )
 
         # M3 DPIC-01 (R1.5): companion WHT FITS product (fail-open).  Written
-        # ONLY after the primary FITS write succeeded, for the actual M3
-        # Drizzle finalization, aligned/cropped exactly with the final
-        # scientific output.  On primary failure no companion is created and
-        # ``_companion_wht_path`` stays ``None``.
+        # ONLY when ``save_drizzle_wht`` is explicitly enabled (ZSSS-OPTIONAL-
+        # WHT-01; default False) AND after the primary FITS write succeeded,
+        # for the actual M3 Drizzle finalization, aligned/cropped exactly with
+        # the final scientific output.  On primary failure or when the flag is
+        # off no companion is created and ``_companion_wht_path`` stays ``None``.
         if (
             is_drizzle_standard_from_accumulators
             and final_wht_hwc is not None
             and fits_write_success
+            and getattr(self, "save_drizzle_wht", False)
         ):
             _write_companion_wht_fits(self, final_wht_hwc, final_header, fits_path)
 
