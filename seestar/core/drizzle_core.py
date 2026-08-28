@@ -15,12 +15,17 @@ Only ``numpy``, ``astropy.wcs`` and ``drizzle.resample`` are used (no
 ``cv2``, no ``scipy``, no ``cupy``).
 
 .. note::
-    ``drizzle`` 2.2.0 stores the *weighted mean* in ``out_img`` and the total
-    weight in ``out_wht`` (the weighted flux is ``out_img * out_wht``).  To
-    expose the standard drizzle semantics (weighted flux in ``sci``, exposure
-    scaled weight in ``wht``), :class:`DrizzleAccumulator` reports
-    ``sci = out_img * out_wht`` and passes ``wht_scale = expscale`` so that
-    ``sci / wht`` yields the exposure-weighted mean of the count rate.
+    ``drizzle`` 2.2.0 stores the *weighted mean* in ``out_img`` (the native
+    intermediate image users consume) and the accumulated kernel *weight /
+    count* map in ``out_wht`` (which may be **signed** for the Lanczos
+    kernels).  :class:`DrizzleAccumulator` therefore reports the native
+    ``out_img`` directly as the final science (``finalize("divide")``) and
+    keeps the weighted flux ``out_img * out_wht`` only as *derived
+    bookkeeping* in the ``sci`` property (exposure-scaled weight is folded in
+    via ``wht_scale = expscale``).  A sample is valid only where its native
+    science and native WHT are finite AND the WHT is strictly above
+    :data:`WEIGHT_EPSILON`; invalid samples become ``0.0`` — never
+    ``abs(wht)``, never a huge-value clip, never percentile hiding.
 """
 
 from __future__ import annotations
@@ -36,7 +41,65 @@ __all__ = [
     "pixmap_from_alignment",
     "DrizzleAccumulator",
     "drizzle_stream",
+    "support_integrity_violations",
+    "VALID_DRIZZLE_KERNELS",
+    "validate_drizzle_kernel",
+    "validate_drizzle_pixfrac",
+    "WEIGHT_EPSILON",
+    "LANCZOS_KERNELS",
+    "WhtThresholdResult",
+    "wht_relative_threshold",
 ]
+
+# Small positive weight floor below which a Drizzle output sample is considered
+# *unsupported*.  Continuity-friendly (matches the historical ``drizzle_finalize``
+# clip) and strictly greater than any signed-Lanczos near-zero/negative weight
+# that must never be treated as physical coverage.  A sample is valid only when
+# its native WHT is finite AND strictly above this epsilon.
+WEIGHT_EPSILON = 1e-9
+
+# Kernels accepted by the underlying ``drizzle.resample.Drizzle`` engine
+# (drizzle 2.2.0).  ``square`` is the flux-conserving default.
+VALID_DRIZZLE_KERNELS = frozenset(
+    {"square", "gaussian", "point", "turbo", "lanczos2", "lanczos3"}
+)
+
+# Lanczos kernels: upstream drizzle 2.2.0 ignores ``pixfrac`` (assumed 1.0)
+# and produces a *signed* native WHT (negative lobes near coverage edges).
+LANCZOS_KERNELS = frozenset({"lanczos2", "lanczos3"})
+
+
+def validate_drizzle_kernel(kernel):
+    """Normalize a drizzle kernel name to a safe value (deterministic).
+
+    Returns ``(kernel, reason)`` where ``kernel`` is a member of
+    :data:`VALID_DRIZZLE_KERNELS` and ``reason`` is ``None`` on success or a
+    short human-readable explanation of the fallback.  Unknown / non-string
+    kernels fall back to ``"square"`` (the flux-conserving default) rather than
+    failing the run, consistent with the existing settings-coercion conventions
+    (a *well-logged* deterministic fallback, never a silent scientific change).
+    """
+    k = str(kernel or "square").strip().lower()
+    if k in VALID_DRIZZLE_KERNELS:
+        return k, None
+    return "square", f"unknown drizzle kernel {kernel!r} -> 'square'"
+
+
+def validate_drizzle_pixfrac(pixfrac):
+    """Normalize a drizzle ``pixfrac`` to a safe value in ``(0, 1]``.
+
+    Returns ``(pixfrac, reason)``.  NaN/Inf, non-numeric, non-positive or
+    ``> 1`` values fall back to ``1.0`` (the flux-conserving point-pixel
+    default) with a short explanation, matching the existing settings
+    conventions (deterministic well-logged fallback).
+    """
+    try:
+        p = float(pixfrac)
+    except (TypeError, ValueError):
+        return 1.0, f"non-numeric drizzle pixfrac {pixfrac!r} -> 1.0"
+    if not np.isfinite(p) or p <= 0.0 or p > 1.0:
+        return 1.0, f"drizzle pixfrac {pixfrac!r} outside (0, 1] -> 1.0"
+    return p, None
 
 
 def build_output_grid(reference_wcs, reference_shape_hw, scale):
@@ -176,16 +239,24 @@ class DrizzleAccumulator:
 
     @property
     def sci(self):
-        """Accumulated science image (weighted flux ``sum(w * f)``).
+        """Accumulated *weighted flux* ``out_img * out_wht`` (derived bookkeeping).
 
-        ``drizzle`` 2.2.0 keeps the weighted *mean* in ``out_img`` and the
-        total weight in ``out_wht``; their product is the weighted flux.
+        This is **not** the native final science.  ``drizzle`` 2.2.0 keeps the
+        weighted *mean* in ``out_img`` and the total weight in ``out_wht``; their
+        product is the weighted flux.  ``finalize("divide")`` returns the native
+        ``out_img`` directly (see :meth:`finalize`), not this derived quantity.
+        Retained for compatibility / bookkeeping only.
         """
         return (self._out_img * self._out_wht).astype(np.float32)
 
     @property
     def wht(self):
-        """Accumulated weight image (exposure-scaled weight), as a copy."""
+        """Native accumulated weight/count map (exposure-scaled), as a copy.
+
+        This is the **native signed** mathematical Drizzle WHT.  For the Lanczos
+        kernels it may contain negative values near coverage edges; callers must
+        not treat it as a positive physical coverage map.  No clipping is applied.
+        """
         return self._out_wht.copy()
 
     def add(self, data, weight_map, pixmap, exptime=1.0, in_units="counts",
@@ -222,28 +293,39 @@ class DrizzleAccumulator:
 
         Mirrors ``seestar.core.drizzle_utils.drizzle_finalize`` (no GPU):
 
-        * ``"divide"``   -> ``sci / max(wht, 1e-9)``
-        * ``"none"``     -> ``sci``
-        * ``"max"``      -> ``sci / wht_safe * max(wht_safe)``
-        * ``"n_images"`` -> ``sci / wht_safe * mean(wht_safe)``
+        * ``"divide"``   -> native ``out_img`` on valid support, ``0`` elsewhere
+        * ``"none"``     -> weighted flux ``out_img * out_wht`` on valid support
+        * ``"max"``      -> native ``out_img * max(valid wht)``
+        * ``"n_images"`` -> native ``out_img * mean(valid wht)``
 
-        Invalid values are replaced by ``0`` and the result is ``float32``.
+        A sample is *valid* only when its native science AND native WHT are
+        finite AND the WHT is strictly above :data:`WEIGHT_EPSILON`.  Invalid
+        samples become ``0.0`` (the established final-FITS contract) — never
+        ``abs(wht)``, never a huge-value clip, never percentile hiding.  The
+        result is a *private* finite ``float32`` copy: the engine accumulation
+        buffers are never mutated.
         """
-        sci = self.sci
-        wht = self._out_wht.astype(np.float32)
-
         if mode not in {"divide", "none", "max", "n_images"}:
             mode = "divide"
 
+        # Private float32 copies — never mutate the engine's accumulation buffers.
+        native = np.array(self._out_img, dtype=np.float32, copy=True)
+        wht = np.array(self._out_wht, dtype=np.float32, copy=False)
+
+        finite_native = np.isfinite(native)
+        finite_wht = np.isfinite(wht)
+        valid = finite_native & finite_wht & (wht > WEIGHT_EPSILON)
+
         if mode == "none":
-            result = sci
+            # Derived bookkeeping (weighted flux), gated by the same support.
+            result = np.where(valid, native * wht, 0.0).astype(np.float32)
         else:
-            wht_safe = np.maximum(wht, 1e-9)
-            result = sci / wht_safe
+            # Native weighted-mean science preserved directly on valid support.
+            result = np.where(valid, native, 0.0).astype(np.float32)
             if mode == "max":
-                result *= float(np.max(wht_safe))
+                result *= float(np.max(wht[valid])) if np.any(valid) else 0.0
             elif mode == "n_images":
-                result *= float(np.mean(wht_safe))
+                result *= float(np.mean(wht[valid])) if np.any(valid) else 0.0
 
         return np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
@@ -263,6 +345,48 @@ def _resolve_pixmap(pixmap_or_tf, data_shape_hw, reference_wcs, output_wcs):
             )
         return pixmap_from_alignment(data_shape_hw, arr, reference_wcs, output_wcs)
     return arr, None
+
+
+def support_integrity_violations(sci_hwc, wht_hwc, epsilon=WEIGHT_EPSILON):
+    """Report samples whose science is nonzero on *invalid* native WHT support.
+
+    M3 contract: a sample invalid by native WHT (not finite, or ``<= epsilon``)
+    MUST map to a ``0.0`` science value — never a nonzero finite value, never
+    NaN/Inf.  This is the automatic support-integrity gate (finite/support
+    logic, *not* an arbitrary ADU limit).  It returns a bounded list of
+    ``(channel, n_violations, max_abs_violation)`` tuples for channels that
+    violate the invariant; an empty list means the invariant holds.
+
+    Parameters
+    ----------
+    sci_hwc : ndarray
+        Final science ``(H, W)`` or ``(H, W, C)`` (``finalize("divide")`` output).
+    wht_hwc : ndarray
+        Native signed WHT ``(H, W)`` or ``(H, W, C)`` (same shape as ``sci_hwc``).
+    epsilon : float
+        Support floor (:data:`WEIGHT_EPSILON`).
+    """
+    sci = np.asarray(sci_hwc, dtype=np.float32)
+    wht = np.asarray(wht_hwc, dtype=np.float32)
+    if sci.ndim == 2:
+        sci = sci[..., None]
+    if wht.ndim == 2:
+        wht = wht[..., None]
+    if sci.shape != wht.shape:
+        raise ValueError("science and WHT shapes must match")
+
+    violations = []
+    n_channels = sci.shape[-1]
+    for c in range(n_channels):
+        w = wht[..., c]
+        s = sci[..., c]
+        invalid = ~(np.isfinite(w) & (w > epsilon))
+        bad = invalid & (~np.isfinite(s) | (s != 0.0))
+        n_bad = int(np.count_nonzero(bad))
+        if n_bad:
+            max_abs = float(np.max(np.abs(s[bad]))) if np.any(bad) else 0.0
+            violations.append((c, n_bad, max_abs))
+    return violations
 
 
 def drizzle_stream(accumulators, frame_iter, group_size=1,
@@ -333,3 +457,260 @@ def drizzle_stream(accumulators, frame_iter, group_size=1,
     final_sci = np.stack([acc.finalize() for acc in accumulators], axis=-1)
     final_wht = np.stack([acc.wht for acc in accumulators], axis=-1)
     return final_sci.astype(np.float32), final_wht.astype(np.float32)
+
+
+class WhtThresholdResult:
+    """Result of applying the *relative* WHT threshold policy.
+
+    The public ``WHT Threshold %`` (``0..1``) is a **coverage/support policy**,
+    not a raw absolute weight: it is interpreted as a fraction of a robust
+    high-support reference.  This small value object carries the reference
+    support, the absolute cutoff, the resulting validity mask and bounded
+    diagnostics for logging/observability.  It is deliberately *not* the
+    photometric fix (background matching is).
+
+    Attributes
+    ----------
+    fraction : float
+        The requested relative threshold (``0..1``), clamped to ``[0, 1]``.
+    tile_size : int
+        Edge length (pixels) of the fixed-size square tile used to establish
+        *spatial* support for the reference level.
+    tile_support_min : int
+        Minimum number of positive pixels a tile must contain before it can
+        define a supported level (the ``tile_support_min``-th largest positive
+        value within that tile).
+    n_phase_offsets : int
+        Number of deterministic half-tile phase positions *per axis* used to
+        avoid tile-boundary sensitivity (``n_phase_offsets ** 2`` tile grids).
+    reference_support : float
+        Spatially supported robust maximum coverage level (block-supported
+        upper reference), in the same units as the WHT map.
+    cutoff : float
+        Absolute cutoff ``= fraction * reference_support``.
+    mask : ndarray (bool)
+        ``True`` where the policy declares a pixel *valid* (positive weight
+        AND ``>= cutoff``).  Zero-weight pixels are always invalid.
+    masked_fraction : float
+        Fraction of positive-weight pixels that are masked out (``0..1``).
+    n_positive : int
+        Number of positive finite WHT pixels.
+    n_valid : int
+        Number of pixels kept by the policy.
+    reason : str
+        ``"applied"``, ``"no_supported_tile"`` (degenerate) or
+        ``"no_positive_weight"``.
+    """
+
+    __slots__ = (
+        "fraction",
+        "tile_size",
+        "tile_support_min",
+        "n_phase_offsets",
+        "reference_support",
+        "cutoff",
+        "mask",
+        "masked_fraction",
+        "n_positive",
+        "n_valid",
+        "reason",
+    )
+
+    def __init__(self, **kwargs):
+        for k in self.__slots__:
+            setattr(self, k, kwargs.get(k))
+
+    def to_dict(self):
+        """JSON-safe, bounded summary (mask excluded)."""
+        return {
+            "fraction": float(self.fraction),
+            "tile_size": int(self.tile_size),
+            "tile_support_min": int(self.tile_support_min),
+            "n_phase_offsets": int(self.n_phase_offsets),
+            "reference_support": float(self.reference_support),
+            "cutoff": float(self.cutoff),
+            "masked_fraction": float(self.masked_fraction),
+            "n_positive": int(self.n_positive),
+            "n_valid": int(self.n_valid),
+            "reason": self.reason,
+        }
+
+
+def _block_supported_reference(arr, positive, tile_size, tile_support_min,
+                               n_phase_offsets):
+    """Spatially supported (block) robust maximum of a positive WHT footprint.
+
+    Partition the 2-D positive footprint into fixed-size ``tile_size`` squares
+    under ``n_phase_offsets`` deterministic half-tile phase positions per axis
+    (``n_phase_offsets ** 2`` grids).  A tile *supports* a level only when it
+    contains at least ``tile_support_min`` positive pixels; its supported level
+    is the ``tile_support_min``-th largest positive value within the tile.  The
+    reference is the maximum supported level across all tiles and all phase
+    grids.
+
+    This is a genuine *spatial* support requirement — a level can only define
+    the reference if ``tile_support_min`` positive pixels co-occur inside a
+    compact ``tile_size`` square — unlike a global order statistic, which a
+    spatially scattered population of outliers could otherwise satisfy.
+    Sparse-positive kernels/pixfrac are handled by counting positive pixels
+    within a tile (geometric neighbours are never required to be positive).
+
+    Returns ``None`` when no tile reaches the minimum supported population.
+    """
+    h, w = arr.shape
+    best = None
+    phase_steps = [
+        round(tile_size * i / n_phase_offsets) for i in range(n_phase_offsets)
+    ]
+    seen = set()
+    for oy in phase_steps:
+        for ox in phase_steps:
+            if (oy, ox) in seen:
+                continue
+            seen.add((oy, ox))
+            for ty in range(oy, h, tile_size):
+                y1 = min(ty + tile_size, h)
+                for tx in range(ox, w, tile_size):
+                    x1 = min(tx + tile_size, w)
+                    block_pos = positive[ty:y1, tx:x1]
+                    n = int(np.count_nonzero(block_pos))
+                    if n < tile_support_min:
+                        continue
+                    vals = arr[ty:y1, tx:x1][block_pos]
+                    k = n - tile_support_min
+                    level = float(np.partition(vals, k)[k])
+                    if best is None or level > best:
+                        best = level
+    return best
+
+
+def wht_relative_threshold(
+    wht,
+    fraction,
+    *,
+    tile_size=8,
+    tile_support_min=4,
+    n_phase_offsets=2,
+):
+    """Apply the relative WHT threshold policy to a final coverage map.
+
+    The public ``WHT Threshold %`` (float ``0..1``) is interpreted as a
+    **fraction of a documented per-finalization reference support**, not as a
+    raw absolute weight.
+
+    Reference support — *spatially supported robust maximum*
+    ---------------------------------------------------------
+    The reference support is the highest coverage level that is *spatially
+    supported* by a compact block of the positive footprint (see
+    :func:`_block_supported_reference`): the positive footprint is partitioned
+    into fixed-size ``tile_size`` squares under ``n_phase_offsets``
+    deterministic half-tile phase positions per axis, a tile contributes its
+    ``tile_support_min``-th largest positive value when it holds at least
+    ``tile_support_min`` positive pixels, and the reference is the maximum
+    contributed level.
+
+    This is a **robust spatial maximum**: an isolated pathological maximum
+    (e.g. one hot/over-weighted pixel) can never define the reference, because
+    no tile contains ``tile_support_min`` such pixels; a compact full-support
+    plateau (e.g. ``2%`` of the footprint) *is* recovered because it populates
+    at least one whole tile.  A spatially *scattered* population of outliers
+    (``> 0.5%`` globally but fewer than ``tile_support_min`` in every tile) does
+    **not** define the reference — the reference stays at the surrounding
+    supported background level.  The phase offsets remove base-tile boundary
+    sensitivity (a compact cluster straddling a base boundary is still found).
+    The algorithm is **scale-invariant** under exposure scaling
+    (``wht -> k * wht`` leaves the mask unchanged and scales the reference by
+    ``k``), and it operates only on *positive* values within tiles, so
+    sparse-positive kernels/pixfrac need no positive geometric neighbours.
+
+    Degenerate edge behaviour: when no tile anywhere reaches
+    ``tile_support_min`` positive pixels (a footprint smaller than the minimum
+    supported population, or a purely isolated-pixel layout), the reference
+    collapses to the *minimum* positive value (a deterministic
+    keep-everything choice for a tiny footprint) with reason
+    ``"no_supported_tile"``.
+
+    Parameters
+    ----------
+    wht : ndarray
+        Final coverage map, ``(H, W)`` float.  A 3-D ``(H, W, C)`` array is
+        reduced to ``(H, W)`` with the per-pixel channel **mean** (the same
+        reduction used by the finalizer for display/post-processing).
+    fraction : float
+        Relative threshold in ``[0, 1]``.  ``0`` keeps every positive-weight
+        pixel; ``1`` keeps only pixels at/above the reference support.
+    tile_size : int
+        Fixed-size square tile edge in pixels (default ``8``).
+    tile_support_min : int
+        Minimum positive pixels per tile (default ``4``).
+    n_phase_offsets : int
+        Phase positions per axis (default ``2`` -> ``{0, tile_size // 2}``,
+        i.e. ``4`` tile grids).
+
+    Returns
+    -------
+    WhtThresholdResult
+    """
+    arr = np.asarray(wht, dtype=np.float32)
+    if arr.ndim == 3:
+        # Channel reduction semantics: per-pixel mean over the channel axis.
+        arr = np.mean(arr, axis=-1, dtype=np.float32)
+    elif arr.ndim != 2:
+        raise ValueError("wht must be 2-D or 3-D")
+
+    fraction = float(fraction)
+    if not np.isfinite(fraction):
+        fraction = 0.0
+    fraction = min(1.0, max(0.0, fraction))
+
+    tile_size = max(2, int(tile_size))
+    tile_support_min = max(1, int(tile_support_min))
+    n_phase_offsets = max(1, int(n_phase_offsets))
+
+    finite = np.isfinite(arr)
+    positive = finite & (arr > 0.0)
+    n_positive = int(np.count_nonzero(positive))
+
+    result = WhtThresholdResult(
+        fraction=fraction,
+        tile_size=tile_size,
+        tile_support_min=tile_support_min,
+        n_phase_offsets=n_phase_offsets,
+        reference_support=0.0,
+        cutoff=0.0,
+        mask=np.zeros(arr.shape, dtype=bool),
+        masked_fraction=0.0,
+        n_positive=n_positive,
+        n_valid=0,
+        reason="applied",
+    )
+
+    if n_positive == 0:
+        result.reason = "no_positive_weight"
+        return result
+
+    reference_support = _block_supported_reference(
+        arr, positive, tile_size, tile_support_min, n_phase_offsets
+    )
+
+    if (
+        reference_support is None
+        or not np.isfinite(reference_support)
+        or reference_support <= 0.0
+    ):
+        # Degenerate: no tile reaches the minimum supported population.
+        # Reference collapses to the minimum positive value (keep-everything),
+        # a deterministic choice for a tiny / isolated-pixel footprint.
+        reference_support = float(np.min(arr[positive]))
+        result.reason = "no_supported_tile"
+
+    cutoff = fraction * reference_support
+    mask = positive & (arr >= cutoff)
+    n_valid = int(np.count_nonzero(mask))
+
+    result.reference_support = float(reference_support)
+    result.cutoff = cutoff
+    result.mask = mask
+    result.n_valid = n_valid
+    result.masked_fraction = 1.0 - (n_valid / n_positive)
+    return result

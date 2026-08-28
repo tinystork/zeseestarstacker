@@ -264,8 +264,22 @@ from ..core.background import (
 from ..core.drizzle_utils import drizzle_finalize
 from ..core.drizzle_core import (
     DrizzleAccumulator,
+    LANCZOS_KERNELS,
+    WEIGHT_EPSILON,
     build_output_grid,
     pixmap_from_alignment,
+    support_integrity_violations,
+    validate_drizzle_kernel,
+    validate_drizzle_pixfrac,
+    wht_relative_threshold,
+)
+from ..core.drizzle_background import (
+    ANCHOR_VERSION,
+    BackgroundAnchor,
+    apply_background_offsets,
+    apply_wb_basique,
+    estimate_background_offsets,
+    rescale_01_to_adu,
 )
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
@@ -410,6 +424,145 @@ def _save_final_preview_png(obj, data_after_postproc, preview_path) -> None:
         path=os.path.basename(preview_path),
         error=error,
     )
+
+
+def _write_companion_wht_fits(obj, final_wht_hwc, final_header, fits_path) -> None:
+    """Write the M3 Drizzle companion WHT FITS product (fail-open).
+
+    M3 DPIC-01: the companion product is a *separate* FITS file (same basename
+    with a ``_wht`` suffix) carrying the per-channel **native signed** Drizzle
+    WHT (kernel weight/count map), aligned and cropped exactly with the final
+    scientific output and sharing its WCS/header.  It never changes the primary
+    HDU shape/extension layout (compatibility-safe).
+
+    The write is fail-open: any failure is logged as an explicit diagnostic and
+    the primary scientific output is never corrupted.  The header records the
+    *signed* min/max/mean, the negative/zero/positive sample counts, and the
+    relative threshold reference/cutoff/masked-fraction when a (positive-kernel)
+    threshold policy was applied.  This product is the native mathematical WHT,
+    NOT a positive physical coverage map (a future independent coverage map is
+    explicitly out of scope).
+    """
+    if final_wht_hwc is None:
+        return
+    try:
+        wht_hwc = np.asarray(final_wht_hwc, dtype=np.float32)
+        # Native *signed* per-channel WHT (Lanczos kernels produce negative
+        # lobes near coverage edges).  Stats are computed over the whole array,
+        # never over an abs()/clipped positive reduction.
+        flat = wht_hwc.ravel()
+        finite = np.isfinite(flat)
+        w_min = float(np.min(flat[finite])) if np.any(finite) else 0.0
+        w_max = float(np.max(flat[finite])) if np.any(finite) else 0.0
+        w_mean = float(np.mean(flat[finite])) if np.any(finite) else 0.0
+        n_negative = int(np.count_nonzero(flat < 0.0))
+        n_zero = int(np.count_nonzero(flat == 0.0))
+        n_positive = int(np.count_nonzero(finite & (flat > 0.0)))
+        total = int(flat.size)
+        positive_fraction = (n_positive / total) if total else 0.0
+
+        wht_header = final_header.copy() if final_header is not None else fits.Header()
+        # The companion is ALWAYS a float32 native WHT product.  Strip any
+        # integer-primary pseudo-unsigned scaling (BITPIX/BSCALE/BZERO) that a
+        # uint16/int16 primary would otherwise leave behind, so the companion
+        # never inherits false unsigned-int semantics or a bogus scale/zero.
+        wht_header["BITPIX"] = -32
+        for _scaled_key in ("BSCALE", "BZERO"):
+            if _scaled_key in wht_header:
+                del wht_header[_scaled_key]
+        wht_header["EXTNAME"] = "WHT"
+        wht_header["WHTTYPE"] = (
+            "NATIVE",
+            "native Drizzle WHT product (not coverage)",
+        )
+        wht_header["WHTMIN"] = (w_min, "native signed WHT min")
+        wht_header["WHTMAX"] = (w_max, "native signed WHT max")
+        wht_header["WHTMEAN"] = (w_mean, "native signed WHT mean")
+        wht_header["WHTNEG"] = (n_negative, "negative-weight samples")
+        wht_header["WHTZERO"] = (n_zero, "zero-weight samples")
+        wht_header["WHTPOS"] = (n_positive, "positive-weight samples")
+        wht_header["COVFRAC"] = (
+            positive_fraction,
+            "fraction of positive-weight samples",
+        )
+        wht_header["HISTORY"] = (
+            "M3 Drizzle companion: native signed mathematical WHT "
+            "(kernel weight/count map, not positive coverage)"
+        )
+        wht_header["COMMENT"] = (
+            "Native mathematical Drizzle WHT; a future independent positive "
+            "coverage map is out of scope for this product."
+        )
+
+        policy = getattr(obj, "_drizzle_wht_policy_result", None)
+        # R2.1: the fallback threshold provenance must source the *effective*
+        # threshold, never the requested one.  A Lanczos run (requested > 0,
+        # effective 0.0) has no policy; emitting WHTFRAC there would lie about
+        # a policy that never ran.  Fall back to the legacy attribute only when
+        # the effective attribute is genuinely absent (legacy test doubles).
+        if hasattr(obj, "drizzle_wht_threshold_effective"):
+            fraction = float(
+                getattr(obj, "drizzle_wht_threshold_effective", 0.0) or 0.0
+            )
+        else:
+            fraction = float(getattr(obj, "drizzle_wht_threshold", 0.0) or 0.0)
+        if policy is not None:
+            wht_header["WHTFRAC"] = (
+                policy.fraction,
+                "relative WHT threshold fraction",
+            )
+            wht_header["WHTREF"] = (
+                policy.reference_support,
+                "robust reference support",
+            )
+            wht_header["WHTCUT"] = (policy.cutoff, "absolute WHT cutoff")
+            wht_header["WHTMASK"] = (
+                policy.masked_fraction,
+                "fraction of positive pixels masked",
+            )
+            wht_header["WHTTILE"] = (
+                policy.tile_size,
+                "spatial reference tile size (px)",
+            )
+            wht_header["WHTSUPP"] = (
+                policy.tile_support_min,
+                "min positive pixels per reference tile",
+            )
+            wht_header["WHTNPH"] = (
+                policy.n_phase_offsets,
+                "tile phase offsets per axis",
+            )
+        elif fraction > 0:
+            wht_header["WHTFRAC"] = (fraction, "relative WHT threshold fraction")
+
+        wht_path = os.path.splitext(fits_path)[0] + "_wht.fit"
+        # CHW layout to mirror the primary colour HDU.
+        data_cxhxw = np.moveaxis(wht_hwc, -1, 0) if wht_hwc.ndim == 3 else wht_hwc
+        fits.PrimaryHDU(data=data_cxhxw, header=wht_header).writeto(
+            wht_path, overwrite=True, checksum=True, output_verify="ignore"
+        )
+        obj._companion_wht_path = wht_path
+        logger.info(
+            "M3 companion WHT saved: %s (shape=%s min=%.4g max=%.4g neg=%d zero=%d pos=%d)",
+            os.path.basename(wht_path),
+            wht_hwc.shape,
+            w_min,
+            w_max,
+            n_negative,
+            n_zero,
+            n_positive,
+        )
+    except Exception as e_wht:
+        logger.warning(
+            "M3 companion WHT save failed (primary output untouched): %s", e_wht
+        )
+        try:
+            obj.update_progress(
+                f"   ⚠️ Écriture WHT compagnon échouée (sortie scientifique intacte): {e_wht}",
+                "WARN",
+            )
+        except Exception:
+            pass
 
 
 class StartupRefusal:
@@ -3275,6 +3428,19 @@ class SeestarQueuedStacker:
         # M3: accumulateur drizzle unique par canal (le mode Final/Incremental
         # historique est désormais sans effet — un seul chemin scientifique).
         self.drizzle_accumulators = None
+        # M3 DPIC-01: immutable run-level per-channel background anchor for the
+        # additive background match applied before each Drizzle deposition.
+        # Captured once from the immutable registration reference (returned by
+        # ``aligner._get_reference_image`` in ``_worker``) and never mutated.
+        self._drizzle_bg_anchor = None
+        # M3 DPIC-01: last per-frame background-match diagnostics (observability).
+        self._drizzle_bg_last_diag = None
+        # M3 DPIC-01: companion WHT FITS product path (None until a successful
+        # M3 finalization writes it).  Reset per finalization/run.
+        self._companion_wht_path = None
+        # M3 DPIC-01: last relative WHT threshold policy result (M3 only).
+        # Reset per finalization so stale policy can never leak across runs.
+        self._drizzle_wht_policy_result = None
         # Mode de finalisation explicite: décidé à l'initialisation de
         # l'accumulation (``initialize``) puis transmis à ``_save_final_stack``.
         # ``None`` tant que ``initialize`` n'a pas statué.
@@ -3790,18 +3956,73 @@ class SeestarQueuedStacker:
                         self.drizzle_output_wcs = self.reference_wcs_object
                         self.drizzle_output_shape_hw = ref_shape_hw_for_grid
                 out_shape_hw = tuple(int(v) for v in self.drizzle_output_shape_hw)
-                # M3: kernel/pixfrac ne sont PAS exposés — défauts du core
-                # (square, 1.0). Les attributs self.drizzle_kernel/self.drizzle_pixfrac
-                # restent présents mais ne sont plus câblés au flux.
-                logger.info("M3: kernel/pixfrac non exposés, défauts utilisés (square, 1.0).")
+                # M3 DPIC-01: kernel/pixfrac are wired into the real
+                # accumulator.  Values are normalized at this boundary
+                # (deterministic well-logged fallback to square/1.0, consistent
+                # with existing settings coercion) so invalid runtime values can
+                # never reach the Drizzle engine.
+                kernel_eff, kernel_reason = validate_drizzle_kernel(
+                    getattr(self, "drizzle_kernel", "square")
+                )
+                pixfrac_requested, pixfrac_reason = validate_drizzle_pixfrac(
+                    getattr(self, "drizzle_pixfrac", 1.0)
+                )
+                if kernel_reason:
+                    logger.warning("M3: %s", kernel_reason)
+                if pixfrac_reason:
+                    logger.warning("M3: %s", pixfrac_reason)
+
+                # M3 DPIC-01 (R1): Lanczos policy.  Upstream drizzle 2.2.0
+                # ignores ``pixfrac`` for the Lanczos kernels (assumed 1.0) and
+                # produces a *signed* native WHT (negative lobes near coverage
+                # edges) that must never be treated as positive physical
+                # coverage.  Effective runtime values are therefore forced:
+                #   - pixfrac  -> 1.0 (what the engine actually uses)
+                #   - relative WHT threshold -> 0.0 (signed WHT must not be
+                #     relative-thresholded)
+                # Positive kernels keep the requested values unchanged.
+                is_lanczos = kernel_eff in LANCZOS_KERNELS
+                pixfrac_eff = 1.0 if is_lanczos else pixfrac_requested
+                wht_threshold_requested = float(
+                    getattr(self, "drizzle_wht_threshold", 0.0) or 0.0
+                )
+                wht_threshold_eff = 0.0 if is_lanczos else wht_threshold_requested
+
+                self.drizzle_kernel = kernel_eff
+                self.drizzle_pixfrac = pixfrac_eff
+                self.drizzle_pixfrac_requested = pixfrac_requested
+                self.drizzle_wht_threshold_requested = wht_threshold_requested
+                self.drizzle_wht_threshold_effective = wht_threshold_eff
                 self.drizzle_accumulators = [
-                    DrizzleAccumulator(out_shape_hw) for _ in range(3)
+                    DrizzleAccumulator(
+                        out_shape_hw, kernel=kernel_eff, pixfrac=pixfrac_eff
+                    )
+                    for _ in range(3)
                 ]
                 # Attribut legacy conservé (plus utilisé) : le mode
                 # Incrémental/Final historique est désormais sans effet.
                 self.incremental_drizzle_objects = []
                 self._drizzle_frame_count = 0
                 self._drizzle_group_index = 0
+                # Persistent effective-runtime configuration line (Qt durable
+                # run log + logger): one concise line, never requested/effective
+                # confusion.
+                scale_eff = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
+                config_line = (
+                    "DRIZZLE_CONFIG kernel=%s pixfrac=%s scale=%s wht_threshold=%s"
+                    % (kernel_eff, pixfrac_eff, scale_eff, wht_threshold_eff)
+                )
+                self.update_progress(config_line)
+                logger.info("M3: %s", config_line)
+                if is_lanczos:
+                    lanczos_note = (
+                        "DRIZZLE_CONFIG Lanczos policy: requested pixfrac=%.4f -> "
+                        "effective 1.0 (upstream ignores pixfrac for Lanczos); "
+                        "requested wht_threshold=%.4f -> effective 0.0 (signed "
+                        "Lanczos WHT is never relative-thresholded)."
+                    ) % (pixfrac_requested, wht_threshold_requested)
+                    self.update_progress(lanczos_note)
+                    logger.info("M3: %s", lanczos_note)
                 policy = getattr(self, "drizzle_processing_policy", "standard")
                 if policy == "incremental":
                     logger.info(
@@ -5823,6 +6044,18 @@ class SeestarQueuedStacker:
             self._registration_target_provenance_id = reference_header_for_global_alignment.get(
                 "HIERARCH SEESTAR REF SRCFILE"
             )
+
+            # M3 DPIC-01 (R1.3): capture the immutable drizzle background
+            # anchor from the ACTUAL registration reference here, before any
+            # frame deposition.  The anchor is the debayered/hot-pixel-corrected
+            # reference image rescaled into the same ADU domain as the Drizzle
+            # input (identity geometry, provenance from HIERARCH SEESTAR REF
+            # SRCFILE).  It is never derived from a frame's arrival order.
+            if self.drizzle_active_session and not self.is_mosaic_run:
+                self._capture_reference_drizzle_bg_anchor(
+                    reference_image_data_for_global_alignment,
+                    self._registration_target_provenance_id,
+                )
 
             # La clé '_SOURCE_PATH' dans reference_header_for_global_alignment vient de
             # la logique interne de _get_reference_image. Si cette clé contient un chemin complet,
@@ -8790,23 +9023,15 @@ class SeestarQueuedStacker:
 
             if is_color_after_preprocessing:
                 try:
-                    r_ch, g_ch, b_ch = (
-                        prepared_img_after_initial_proc[..., 0],
-                        prepared_img_after_initial_proc[..., 1],
-                        prepared_img_after_initial_proc[..., 2],
+                    # Shared "WB basique" helper (exact extraction of the
+                    # previous inline block): the Drizzle anchor capture uses
+                    # the *same* gains so anchor and frames stay in the same
+                    # RGB photometric domain.  Numerically identical output.
+                    prepared_img_after_initial_proc, wb_info = apply_wb_basique(
+                        prepared_img_after_initial_proc
                     )
-                    med_r, med_g, med_b = (
-                        np.median(r_ch),
-                        np.median(g_ch),
-                        np.median(b_ch),
-                    )
-                    if med_g > 1e-6:
-                        gain_r = np.clip(med_g / max(med_r, 1e-6), 0.5, 2.0)
-                        gain_b = np.clip(med_g / max(med_b, 1e-6), 0.5, 2.0)
-                        prepared_img_after_initial_proc[..., 0] *= gain_r
-                        prepared_img_after_initial_proc[..., 2] *= gain_b
                     logger.debug(
-                        f"     - (c) WB basique appliquée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]"
+                        f"     - (c) WB basique appliquée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}] gains_r={wb_info['gain_r']:.4f} gains_b={wb_info['gain_b']:.4f} (applied={wb_info['applied']})"
                     )
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
@@ -8853,15 +9078,18 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"       - (g) DRIZZLE/MOSAIQUE: Détection plage [0,1] (max_val={current_max_val:.4g}). Rescale vers ADU 0-65535."
                     )
-                    image_for_alignment_or_drizzle_input = (
-                        image_for_alignment_or_drizzle_input * 65535.0
+                    image_for_alignment_or_drizzle_input = rescale_01_to_adu(
+                        image_for_alignment_or_drizzle_input
                     )
                     logger.debug(
                         f"         Nouveau range image_for_alignment_or_drizzle_input: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]"
                     )
-                image_for_alignment_or_drizzle_input = np.clip(
-                    image_for_alignment_or_drizzle_input, 0.0, None
-                )
+                else:
+                    # Not a [0,1] range: only clip to >= 0 (``rescale_01_to_adu``
+                    # applies the same shared clip semantics; no scale applied).
+                    image_for_alignment_or_drizzle_input = rescale_01_to_adu(
+                        image_for_alignment_or_drizzle_input
+                    )
                 logger.debug(
                     f"     - (h) Pré-traitement final POUR DRIZZLE/MOSAIQUE: image_for_alignment_or_drizzle_input - Range: [{np.min(image_for_alignment_or_drizzle_input):.4g}, {np.max(image_for_alignment_or_drizzle_input):.4g}]"
                 )
@@ -15864,7 +16092,14 @@ class SeestarQueuedStacker:
         final_wht_map_for_postproc = (
             None  # Carte de poids 2D pour certains post-traitements
         )
+        # M3 DPIC-01: per-channel coverage (H, W, C) captured for the companion
+        # WHT FITS product; cropped in lockstep with the final science below.
+        final_wht_hwc = None
         background_model_photutils = None  # Modèle de fond si Photutils BN est appliqué
+        # M3 DPIC-01: reset per-finalization state so a stale relative WHT
+        # policy or companion path can never leak into a later run.
+        self._drizzle_wht_policy_result = None
+        self._companion_wht_path = None
 
         self.raw_adu_data_for_ui_histogram = (
             None  # Sera les données ADU-like pour l'histogramme de l'UI
@@ -15917,14 +16152,42 @@ class SeestarQueuedStacker:
 
                 logger.info("DRIZZLE FINALIZE: single accumulator (policy-independent)")
 
-                wht_channels = []
-                sci_channels = []
-                for acc in accs:
-                    wht_ch = np.maximum(acc.wht.astype(np.float32), 0.0)
-                    wht_channels.append(wht_ch)
-                    sci_channels.append(acc.finalize("divide").astype(np.float32))
+                out_h, out_w = accs[0].out_shape_hw
+                # Preallocate the HWC outputs once and fill one channel at a
+                # time, so each per-channel temporary (finalize/wht) dies each
+                # iteration.  No full-frame clipped-positive HWC cube (or list
+                # of clipped-positive channels) is ever materialised: the
+                # display/post-processing map is a 2-D positive-support
+                # reduction built with one reusable 2-D scratch.
+                final_image_initial_raw = np.empty(
+                    (out_h, out_w, 3), dtype=np.float32
+                )
+                final_wht_hwc = np.empty((out_h, out_w, 3), dtype=np.float32)
+                final_wht_map_for_postproc = np.zeros(
+                    (out_h, out_w), dtype=np.float32
+                )
+                _pos_scratch = np.empty((out_h, out_w), dtype=np.float32)
 
-                if not any(np.any(w != 0) for w in wht_channels):
+                # No-support check MUST be based on finite positive WHT > epsilon,
+                # never abs() or clipped negative weights (signed Lanczos WHT).
+                has_support = False
+                for c, acc in enumerate(accs):
+                    wht_native = acc.wht
+                    if not has_support and np.any(
+                        np.isfinite(wht_native) & (wht_native > WEIGHT_EPSILON)
+                    ):
+                        has_support = True
+                    # Companion WHT product: native *signed* per-channel WHT
+                    # (never clipped).  Aligned/cropped with the final science
+                    # below.
+                    final_wht_hwc[..., c] = wht_native
+                    final_image_initial_raw[..., c] = acc.finalize("divide")
+                    # Positive-support accumulation into the 2-D display map
+                    # (exact channel-mean(max(native_wht, 0)) semantics).
+                    np.maximum(wht_native, np.float32(0.0), out=_pos_scratch)
+                    final_wht_map_for_postproc += _pos_scratch
+
+                if not has_support:
                     self.update_progress(
                         "❌ Drizzle Standard: all weight maps are zero. Aborting final stack.",
                         "ERROR",
@@ -15938,15 +16201,27 @@ class SeestarQueuedStacker:
                     self.final_stacked_path = None
                     return
 
-                final_image_initial_raw = np.stack(sci_channels, axis=-1).astype(
-                    np.float32
+                final_wht_map_for_postproc *= np.float32(1.0 / 3.0)
+
+                # Automatic support-integrity gate (finite/support logic, not
+                # arbitrary ADU limits): a sample invalid by native WHT cannot
+                # carry nonzero science.  Fail closed at the M3 seam.
+                support_violations = support_integrity_violations(
+                    final_image_initial_raw, final_wht_hwc, WEIGHT_EPSILON
                 )
-                final_wht_map_for_postproc = np.mean(
-                    np.stack(wht_channels, axis=-1), axis=2
-                ).astype(np.float32)
-                final_wht_map_for_postproc = np.maximum(
-                    final_wht_map_for_postproc, 0.0
-                )
+                if support_violations:
+                    _emit_lifecycle_failopen(
+                        self, "DRIZZLE_FINALIZATION_RETURNED", success=False
+                    )
+                    detail = ", ".join(
+                        "ch%d: %d samples (max|sci|=%.6g)" % (c, n, m)
+                        for c, n, m in support_violations
+                    )
+                    raise RuntimeError(
+                        "M3 support-integrity violation: nonzero science on "
+                        "invalid native WHT support (%s). Final stack aborted."
+                        % detail
+                    )
 
                 # M3: VALIDATION SCIENCE AVANT toute conversion de sauvegarde
                 # (fond/max par canal, WCS final, structure). Les stats sont
@@ -16150,6 +16425,10 @@ class SeestarQueuedStacker:
                 else:
                     final_image_initial_raw = final_image_initial_raw[y0:y1, x0:x1]
                 final_wht_map_for_postproc = final_wht_map_for_postproc[y0:y1, x0:x1]
+                # Companion WHT product must stay aligned with the cropped
+                # final science output (M3 DPIC-01).
+                if final_wht_hwc is not None:
+                    final_wht_hwc = final_wht_hwc[y0:y1, x0:x1, :]
                 if self.current_stack_header:
                     if "CRPIX1" in self.current_stack_header:
                         self.current_stack_header["CRPIX1"] -= x0
@@ -16179,15 +16458,52 @@ class SeestarQueuedStacker:
             f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
         )
 
-        # Appliquer le seuil WHT (si activé) aux données "ADU-like"
-        if self.drizzle_wht_threshold > 0 and final_wht_map_for_postproc is not None:
-            self.update_progress(
-                f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw."
+        # M3 DPIC-01 (R1.1): the *relative* WHT threshold policy applies ONLY
+        # to the M3 Drizzle finalization.  Classic / Mosaic / Reproject keep
+        # the legacy raw-absolute threshold semantics byte-for-byte (Classic is
+        # the control; non-M3 behaviour is out of scope).
+        # The *effective* threshold is 0.0 for the Lanczos kernels (signed WHT
+        # must never be relative-thresholded); positive kernels keep the
+        # requested value unchanged.
+        wht_threshold_effective = float(
+            getattr(
+                self,
+                "drizzle_wht_threshold_effective",
+                getattr(self, "drizzle_wht_threshold", 0.0) or 0.0,
             )
-            logger.debug(
-                f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw."
-            )
-            invalid_wht_pixels = final_wht_map_for_postproc < self.drizzle_wht_threshold
+            or 0.0
+        )
+        if wht_threshold_effective > 0 and final_wht_map_for_postproc is not None:
+            if is_drizzle_standard_from_accumulators:
+                wht_policy = wht_relative_threshold(
+                    final_wht_map_for_postproc, wht_threshold_effective
+                )
+                self._drizzle_wht_policy_result = wht_policy
+                logger.info(
+                    "M3 WHT threshold (relative): fraction=%.4f reference_support=%.4g cutoff=%.4g masked_fraction=%.4f n_valid=%d n_positive=%d tile_size=%d tile_support_min=%d n_phase_offsets=%d reason=%s",
+                    wht_policy.fraction,
+                    wht_policy.reference_support,
+                    wht_policy.cutoff,
+                    wht_policy.masked_fraction,
+                    wht_policy.n_valid,
+                    wht_policy.n_positive,
+                    wht_policy.tile_size,
+                    wht_policy.tile_support_min,
+                    wht_policy.n_phase_offsets,
+                    wht_policy.reason,
+                )
+                invalid_wht_pixels = ~wht_policy.mask
+            else:
+                # Legacy raw-absolute threshold (unchanged baseline block).
+                self.update_progress(
+                    f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw."
+                )
+                logger.debug(
+                    f"  DEBUG QM [SaveFinalStack] Application du seuil WHT ({self.drizzle_wht_threshold}) sur final_wht_map_for_postproc à final_image_initial_raw."
+                )
+                invalid_wht_pixels = (
+                    final_wht_map_for_postproc < self.drizzle_wht_threshold
+                )
             if final_image_initial_raw.ndim == 3:
                 final_image_initial_raw = np.where(
                     invalid_wht_pixels[..., np.newaxis], np.nan, final_image_initial_raw
@@ -16440,6 +16756,55 @@ class SeestarQueuedStacker:
                     ),
                 )
 
+        # M3 DPIC-01 (R1): truthful effective Drizzle provenance on every M3
+        # final primary FITS (the companion inherits it).  Requested values are
+        # recorded *separately* only when they differ from effective (Lanczos),
+        # so requested and effective are never confused.
+        if is_drizzle_standard_from_accumulators:
+            kernel_eff = str(getattr(self, "drizzle_kernel", "square") or "square")
+            pixfrac_eff = float(getattr(self, "drizzle_pixfrac", 1.0) or 1.0)
+            scale_eff = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
+            wht_thr_eff = float(
+                getattr(
+                    self,
+                    "drizzle_wht_threshold_effective",
+                    getattr(self, "drizzle_wht_threshold", 0.0) or 0.0,
+                )
+                or 0.0
+            )
+            final_header["DRZKERNEL"] = (kernel_eff, "Effective drizzle kernel")
+            final_header["DRZPIXFR"] = (
+                pixfrac_eff,
+                "Effective drizzle pixfrac (1.0 for Lanczos)",
+            )
+            final_header["DRZSCALE"] = (scale_eff, "Effective drizzle scale factor")
+            final_header["DRZMODE"] = (
+                "M3",
+                "Single-accumulator drizzle finalization",
+            )
+            final_header["DRZWTHT"] = (wht_thr_eff, "Effective WHT threshold")
+            pixfrac_req = float(
+                getattr(self, "drizzle_pixfrac_requested", pixfrac_eff) or pixfrac_eff
+            )
+            wht_thr_req = float(
+                getattr(
+                    self,
+                    "drizzle_wht_threshold_requested",
+                    getattr(self, "drizzle_wht_threshold", wht_thr_eff) or wht_thr_eff,
+                )
+                or wht_thr_eff
+            )
+            if abs(pixfrac_req - pixfrac_eff) > 1e-12:
+                final_header["DRZPFREQ"] = (
+                    pixfrac_req,
+                    "Requested drizzle pixfrac",
+                )
+            if abs(wht_thr_req - wht_thr_eff) > 1e-12:
+                final_header["DRZWTHRQ"] = (
+                    wht_thr_req,
+                    "Requested WHT threshold",
+                )
+
         final_header["HISTORY"] = f"Final stack type: {current_operation_mode_log_fits}"
         if getattr(self, "output_filename", ""):
             base_name = self.output_filename.strip()
@@ -16605,6 +16970,18 @@ class SeestarQueuedStacker:
             success=fits_write_success,
             path=os.path.basename(fits_path),
         )
+
+        # M3 DPIC-01 (R1.5): companion WHT FITS product (fail-open).  Written
+        # ONLY after the primary FITS write succeeded, for the actual M3
+        # Drizzle finalization, aligned/cropped exactly with the final
+        # scientific output.  On primary failure no companion is created and
+        # ``_companion_wht_path`` stays ``None``.
+        if (
+            is_drizzle_standard_from_accumulators
+            and final_wht_hwc is not None
+            and fits_write_success
+        ):
+            _write_companion_wht_fits(self, final_wht_hwc, final_header, fits_path)
 
         # --- ÉTAPE 7: Sauvegarde preview PNG ---
         # Utiliser data_after_postproc (qui est l'image [0,1] après tous les post-traitements)
@@ -18532,6 +18909,75 @@ class SeestarQueuedStacker:
             weight = np.asarray(weight_map, dtype=np.float32)
             if weight.shape != shape_hw:
                 weight = np.broadcast_to(weight, shape_hw)
+
+            # M3 DPIC-01: immutable additive background match BEFORE the one and
+            # only Drizzle deposition.  The correction is a constant per-channel
+            # offset estimated from geometrically corresponding sky/overlap
+            # samples against the run-level anchor (captured once from the
+            # immutable registration reference in ``_worker``).  The deposited
+            # science is never resampled.
+            anchor = getattr(self, "_drizzle_bg_anchor", None)
+            n_ch = data_hwc.shape[2]
+            if anchor is None:
+                # Deterministic neutral fallback: no run-level anchor was
+                # established (an impossible/malformed path).  Never create an
+                # arrival-dependent anchor here.
+                offsets = np.zeros(n_ch, dtype=np.float64)
+                self._drizzle_bg_last_diag = {
+                    "version": ANCHOR_VERSION,
+                    "provenance": "no-anchor",
+                    "reason": "no_anchor",
+                    "offsets": [0.0] * n_ch,
+                    "n_candidate": 0,
+                    "stride": 1,
+                    "max_samples": 0,
+                    "n_overlap": 0,
+                    "n_used": 0,
+                    "confidence": 0.0,
+                    "anchor_background": [0.0] * n_ch,
+                    "frame_background": [0.0] * n_ch,
+                    "robust_scale": [0.0] * n_ch,
+                }
+                logger.info(
+                    "M3 background match: no run-level anchor established — neutral fallback (provenance=no-anchor)"
+                )
+            else:
+                if tf is not None:
+                    match_tf = np.asarray(tf, dtype=np.float64)
+                    native_wcs_arg = None
+                else:
+                    match_tf = None
+                    native_wcs_arg = native_wcs
+                offsets, bg_diag = estimate_background_offsets(
+                    data_hwc,
+                    weight,
+                    match_tf,
+                    anchor,
+                    native_wcs=native_wcs_arg,
+                    reference_wcs=self.reference_wcs_object,
+                )
+                self._drizzle_bg_last_diag = bg_diag
+                if bg_diag["reason"] == "accepted":
+                    logger.debug(
+                        "M3 background match: dR=%.4f dG=%.4f dB=%.4f overlap=%d used=%d cand=%d conf=%.3f provenance=%s",
+                        bg_diag["offsets"][0],
+                        bg_diag["offsets"][1],
+                        bg_diag["offsets"][2],
+                        bg_diag["n_overlap"],
+                        bg_diag["n_used"],
+                        bg_diag["n_candidate"],
+                        bg_diag["confidence"],
+                        anchor.provenance,
+                    )
+                else:
+                    logger.info(
+                        "M3 background match: neutral fallback reason=%s overlap=%d provenance=%s",
+                        bg_diag["reason"],
+                        bg_diag["n_overlap"],
+                        anchor.provenance,
+                    )
+            data_hwc = apply_background_offsets(data_hwc, offsets)
+
             exptime = 1.0
             if header is not None:
                 try:
@@ -18558,6 +19004,68 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.warning("M3: échec ajout frame au Drizzle: %s", e)
             return False
+
+    def _capture_reference_drizzle_bg_anchor(self, reference_data_01, provenance_id):
+        """Build the immutable M3 background anchor from the registration reference.
+
+        M3 DPIC-01 (R1.3/R2.1): the anchor is the per-channel target against
+        which every accepted frame's additive background is matched *before*
+        deposition.  It is built once from the ACTUAL immutable registration
+        reference returned by ``aligner._get_reference_image`` (a debayered,
+        hot-pixel-corrected RGB image in ``[0, 1]``), put into the **same RGB
+        photometric domain** as the Drizzle deposition path, then rescaled into
+        ADU:
+
+        1. the exact shared "WB basique" R/B gains toward G (``apply_wb_basique``)
+           — the same helper used by ``_process_file`` after debayering, which
+           ``_get_reference_image`` does *not* apply;
+        2. ``rescale_01_to_adu`` (``* 65535`` when the max is in ``[0,1]``).
+
+        A 2-D (grayscale) reference skips the WB step (no R/B channels) but is
+        still rescaled.  Geometry is identity (the reference *is* the reference
+        grid) and the provenance is the exact ``HIERARCH SEESTAR REF SRCFILE``
+        identifier, so the anchor never depends on frame arrival/admission
+        order.
+        """
+        if reference_data_01 is None:
+            logger.warning(
+                "M3 background anchor: registration reference data unavailable — no anchor established."
+            )
+            self._drizzle_bg_anchor = None
+            return None
+
+        ref_arr = np.asarray(reference_data_01)
+        wb_info = None
+        if ref_arr.ndim == 3 and ref_arr.shape[2] == 3:
+            ref_arr, wb_info = apply_wb_basique(ref_arr)
+
+        data_adu = rescale_01_to_adu(ref_arr)
+        ref_shape = tuple(int(v) for v in data_adu.shape[:2])
+        prov = (
+            f"reference:{provenance_id}"
+            if provenance_id
+            else "reference:unknown"
+        )
+        anchor = BackgroundAnchor(
+            data_adu,
+            tf=None,
+            reference_shape_hw=ref_shape,
+            provenance=prov,
+        )
+        self._drizzle_bg_anchor = anchor
+        logger.info(
+            "M3 background anchor captured: provenance=%s version=%d shape=%s background=[%.4f, %.4f, %.4f] wb_applied=%s gains_r=%.4f gains_b=%.4f",
+            anchor.provenance,
+            anchor.version,
+            list(anchor.shape),
+            anchor.background[0],
+            anchor.background[1],
+            anchor.background[2],
+            (wb_info is not None and wb_info["applied"]),
+            (wb_info["gain_r"] if wb_info else 1.0),
+            (wb_info["gain_b"] if wb_info else 1.0),
+        )
+        return anchor
 
     def _derive_drizzle_processing_policy(self):
         """Map the legacy ``drizzle_mode`` to the M3 processing policy.
