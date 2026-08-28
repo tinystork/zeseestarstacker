@@ -2,6 +2,16 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.2.0] — Phoenix consedit
+
+- hardened Drizzle photometric normalization across changing frame coverage
+- native Drizzle science finalization with safe signed-weight handling
+- qualified Lanczos2 and Lanczos3 signed-WHT behavior
+- truthful requested/effective Drizzle kernel, pixfrac and WHT provenance
+- optional Drizzle WHT companion export, disabled by default
+- clarified WHT threshold policy: zero default and N/A for signed Lanczos kernels
+- hardened full pytest-suite import isolation
+
 ## [8.1.0] — Phoenix consedit
 - hierarchical stacking integrity and effective SUM/WHT semantics
 - immutable registration reference and registration diagnostics
