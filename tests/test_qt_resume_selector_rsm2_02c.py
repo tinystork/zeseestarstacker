@@ -436,3 +436,132 @@ def test_no_file_mutation_during_discovery_and_refusal(tmp_path):
     state = QtSettingsState()
     resume_locator.restore_to_settings(result.config, state)
     assert _snapshot(run_dir) == before
+
+
+# --------------------------------------------------------------------------
+# RSM2-02C R1 — stale Resume invalidation on user-originated path changes
+# --------------------------------------------------------------------------
+def _arm_resume(window, tmp_path) -> Path:
+    """Arm an explicit Resume against a ready v2 run dir and return the run dir."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_contract.write_cfg(_distinctive_config(), str(run_dir / "run_config.cfg"))
+    _write_manifest(run_dir)
+    window.last_stack_edit.setText(str(run_dir / "final.fits"))
+    window.resume_mode_combo.setCurrentIndex(1)  # Resume
+    assert window.resume_mode_combo.currentData() == "resume"
+    assert window.collect_settings_state().resume_intent == "resume"
+    return run_dir
+
+
+def _assert_fresh_invalidated(window, *, last_stack=None, output=None):
+    """Assert the selector/intent/source reverted to Fresh and paths kept."""
+    assert window.resume_mode_combo.currentData() == "fresh"
+    state = window.collect_settings_state()
+    assert state.resume_intent == "fresh"
+    assert state.resume_source == ""
+    if last_stack is not None:
+        assert window.last_stack_edit.text() == last_stack
+        assert state.last_stack_path == last_stack
+    if output is not None:
+        assert window.output_edit.text() == output
+        assert state.output_folder == output
+    request = _build_request(window)
+    assert request.resume_intent == "fresh"
+    assert request.resume_source is None
+
+
+def test_manual_edit_last_stack_while_armed_invalidates(tmp_path, window):
+    from PySide6.QtTest import QTest
+
+    run_dir = _arm_resume(window, tmp_path)
+    # Simulate a real user edit (QTest key input emits ``textEdited``, which a
+    # programmatic ``setText`` never does) so the user-only wiring is proven.
+    window.last_stack_edit.clear()
+    QTest.keyClicks(window.last_stack_edit, "/user/edited/stack.fit")
+    assert window.last_stack_edit.text() == "/user/edited/stack.fit"
+    _assert_fresh_invalidated(window, last_stack="/user/edited/stack.fit")
+    # output (owning run dir) is untouched by the last-stack invalidation
+    assert window.output_edit.text() == str(run_dir)
+
+
+def test_manual_edit_output_while_armed_invalidates(tmp_path, window):
+    from PySide6.QtTest import QTest
+
+    _arm_resume(window, tmp_path)
+    window.output_edit.clear()
+    QTest.keyClicks(window.output_edit, "/user/edited/output")
+    assert window.output_edit.text() == "/user/edited/output"
+    _assert_fresh_invalidated(window, output="/user/edited/output")
+
+
+def test_browse_last_stack_while_armed_invalidates(tmp_path, window, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    _arm_resume(window, tmp_path)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: ("/picked/new.fits", "")),
+    )
+    window._browse_last_stack()
+    assert window.last_stack_edit.text() == "/picked/new.fits"
+    _assert_fresh_invalidated(window, last_stack="/picked/new.fits")
+
+
+def test_browse_output_while_armed_invalidates(tmp_path, window, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    _arm_resume(window, tmp_path)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        staticmethod(lambda *a, **k: "/picked/output"),
+    )
+    window._browse_output()
+    assert window.output_edit.text() == "/picked/output"
+    _assert_fresh_invalidated(window, output="/picked/output")
+
+
+def test_apply_resume_result_programmatic_output_update_does_not_invalidate(
+    tmp_path, window
+):
+    """Regression: the programmatic output write inside _apply_resume_result
+    must not invalidate the just-prepared Resume."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_contract.write_cfg(_distinctive_config(), str(run_dir / "run_config.cfg"))
+    _write_manifest(run_dir)
+    result = resume_locator.discover_resume(str(run_dir / "final.fits"))
+    assert result.status == resume_locator.STATUS_READY
+
+    # In the real flow the selector is already on Resume when
+    # ``_apply_resume_result`` runs (combo change -> _activate_resume ->
+    # _apply_resume_result); set it without re-firing the handler.
+    window._set_resume_mode_combo("resume")
+    window._apply_resume_result(result)
+
+    assert window.resume_mode_combo.currentData() == "resume"
+    state = window.collect_settings_state()
+    assert state.resume_intent == "resume"
+    assert state.resume_source == str(run_dir)
+    assert state.output_folder == str(run_dir)
+    assert window.output_edit.text() == str(run_dir)
+    request = _build_request(window)
+    assert request.resume_intent == "resume"
+    assert request.resume_source == str(run_dir)
+
+
+def test_programmatic_settext_while_armed_does_not_invalidate(tmp_path, window):
+    """Pin the user-only wiring: ``setText`` emits ``textChanged`` (not
+    ``textEdited``), so a programmatic last-stack write must never be mistaken
+    for a user edit and must not invalidate an armed Resume."""
+    run_dir = _arm_resume(window, tmp_path)
+    window.last_stack_edit.setText("/programmatic/stack.fit")
+    # selector + intent unchanged (only the guarded _apply_resume_result path
+    # performs programmatic writes while armed, and it re-asserts Resume).
+    assert window.resume_mode_combo.currentData() == "resume"
+    state = window.collect_settings_state()
+    assert state.resume_intent == "resume"
+    assert state.resume_source == str(run_dir)
+    assert window.last_stack_edit.text() == "/programmatic/stack.fit"

@@ -1028,6 +1028,11 @@ class MainWindow(QMainWindow):
         # Re-entrancy guards for atomic BP/WP and WB control application.
         self._bp_wp_sync_guard: bool = False
         self._wb_sync_guard: bool = False
+        # Re-entrancy guard for the Resume apply flow: while a discovered
+        # config is being pushed into the controls, the programmatic widget
+        # writes must not be mistaken for user-originated path changes that
+        # would invalidate the just-prepared Resume (RSM2-02C R1).
+        self._applying_resume_result: bool = False
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
 
@@ -2057,11 +2062,13 @@ class MainWindow(QMainWindow):
         """Mirror every settings widget into ``self.settings_state`` on change."""
         self.input_edit.textChanged.connect(self._sync_state_from_controls)
         self.output_edit.textChanged.connect(self._sync_state_from_controls)
+        self.output_edit.textEdited.connect(self._invalidate_resume_on_user_path_change)
         self.temp_edit.textChanged.connect(self._sync_state_from_controls)
         self.output_filename_edit.textChanged.connect(self._sync_state_from_controls)
         self.reference_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._on_last_stack_changed)
+        self.last_stack_edit.textEdited.connect(self._invalidate_resume_on_user_path_change)
         self.resume_mode_combo.currentIndexChanged.connect(self._on_resume_mode_changed)
         self.browse_input_button.clicked.connect(self._browse_input)
         self.browse_output_button.clicked.connect(self._browse_output)
@@ -2649,6 +2656,9 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.output_edit.setText(os.path.abspath(folder))
+            # ``setText`` never emits ``textEdited``, so invalidate an armed
+            # Resume explicitly (a freshly browsed output is a new target).
+            self._invalidate_resume_on_user_path_change()
 
     def _browse_temp(self) -> None:
         """Select the temporary folder via a directory dialog (Tk parity)."""
@@ -2693,6 +2703,9 @@ class MainWindow(QMainWindow):
         if filepath:
             abs_path = os.path.abspath(filepath)
             self.last_stack_edit.setText(abs_path)
+            # ``setText`` never emits ``textEdited``, so invalidate an armed
+            # Resume explicitly (a freshly browsed stack is a new target).
+            self._invalidate_resume_on_user_path_change()
 
     def _on_last_stack_changed(self, *_ignored) -> None:
         """Pre-fill the output folder from the last-stack path when empty.
@@ -2728,6 +2741,26 @@ class MainWindow(QMainWindow):
         """Clear the transient resume intent/source (keep last-stack history)."""
         self.settings_state.resume_intent = RUN_INTENT_FRESH
         self.settings_state.resume_source = ""
+
+    def _invalidate_resume_on_user_path_change(self, *_ignored) -> None:
+        """Invalidate an armed Resume on a user-originated path change.
+
+        Editing or browsing Last Stack / Output after a Resume has been
+        prepared would otherwise leave ``resume_intent`` / ``resume_source``
+        pointing at the old run while the request carries the new path — an
+        incoherent source/target pairing.  Any such user-originated change
+        reverts the selector to New and clears the transient intent/source,
+        while keeping the newly entered/browsed path and history; the user may
+        explicitly select Resume again to re-run discovery.  Programmatic
+        updates during ``_apply_resume_result`` are guarded, and a fresh
+        (never-armed) window is a no-op.
+        """
+        if self._applying_resume_result:
+            return
+        if self.settings_state.resume_intent != RUN_INTENT_RESUME:
+            return
+        self._set_resume_mode_combo("fresh")
+        self._clear_resume_intent()
 
     def _set_resume_mode_combo(self, mode: str) -> None:
         """Set the selector to ``mode`` without re-firing the handler."""
@@ -2765,7 +2798,11 @@ class MainWindow(QMainWindow):
         state.output_folder = result.run_dir
         state.resume_intent = RUN_INTENT_RESUME
         state.resume_source = result.run_dir
-        self._apply_state_to_controls(state)
+        self._applying_resume_result = True
+        try:
+            self._apply_state_to_controls(state)
+        finally:
+            self._applying_resume_result = False
         # The trailing control sync never touches resume_intent/resume_source,
         # but re-assert them defensively so the model stays coherent.
         self.settings_state.resume_intent = RUN_INTENT_RESUME
