@@ -77,14 +77,17 @@ def test_resume_artifacts_with_drizzle_refused_readonly(tmp_path):
     SeestarQueuedStacker, o = _bare_stacker(out_dir, drizzle=True)
 
     # Structured refusal carrier is available (stable code + semantic key/data).
+    # A resume in a non-plain (Drizzle) mode is the differentiated
+    # RESUME_MODE_UNSUPPORTED code (Resume Contract v2), not the generic
+    # output-state-incompatible code.
     from seestar.queuep.queue_manager import StartupRefusal
 
     assert o._is_plain_classic() is False
     assert o._session_mode_label() == "drizzle"
     refusal = o._build_startup_refusal("resume limited to plain classic SUM/W …")
     assert refusal is not None
-    assert refusal.code == StartupRefusal.CODE_OUTPUT_STATE_INCOMPATIBLE
-    assert refusal.semantic_key == "output_state_incompatible"
+    assert refusal.code == StartupRefusal.CODE_RESUME_MODE_UNSUPPORTED
+    assert refusal.semantic_key == "resume_mode_unsupported"
     assert refusal.semantic_data["mode"] == "drizzle"
 
     # The early preflight itself refuses (read-only) with the same reason.

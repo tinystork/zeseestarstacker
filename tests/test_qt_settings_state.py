@@ -89,7 +89,10 @@ def test_defaults_aligned_with_settings_manager():
         # equivalent — the Tk ``SettingsManager`` has no theme, so there is no
         # default to align against.  Exclude it from the backend-default
         # alignment invariant (it is never read by the engine or Tk).
-        if key == "theme":
+        # ``resume_intent`` / ``resume_source`` are the explicit run-intent
+        # carrier (Resume Contract v2): Qt-side per-run fields with no Tk
+        # equivalent (the Tk flow defaults to fresh and never carries them).
+        if key in ("theme", "resume_intent", "resume_source"):
             continue
         assert key in sm_defaults, f"QtSettingsState.{key} missing from SettingsManager"
         assert value == sm_defaults[key], (

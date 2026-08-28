@@ -18,16 +18,22 @@ from __future__ import annotations
 
 from seestar.gui.run_config import (
     RunRequest,
+    RUN_INTENT_FRESH,
+    RUN_INTENT_RESUME,
     build_backend_kwargs,
     build_run_request,
     compute_align_on_disk,
+    normalize_run_intent,
     split_backend_kwargs,
 )
 
 __all__ = [
     "RunRequest",
+    "RUN_INTENT_FRESH",
+    "RUN_INTENT_RESUME",
     "build_run_request",
     "build_backend_kwargs",
     "compute_align_on_disk",
+    "normalize_run_intent",
     "split_backend_kwargs",
 ]

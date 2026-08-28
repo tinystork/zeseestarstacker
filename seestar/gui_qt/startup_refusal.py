@@ -25,6 +25,15 @@ from typing import Any, Dict, Optional
 # invalid quality reference scale, etc.).
 CODE_OUTPUT_STATE_INCOMPATIBLE = "OUTPUT_STATE_INCOMPATIBLE"
 
+# Resume Contract v2 differentiated startup-refusal codes.  These are stable
+# machine codes produced by the engine at the explicit-intent gate and mapped
+# by the Qt shell through the same localization architecture as
+# ``OUTPUT_STATE_INCOMPATIBLE``.  The precise reason stays in
+# ``technical_detail`` and is never parsed downstream.
+CODE_FRESH_OUTPUT_HAS_STATE = "FRESH_OUTPUT_HAS_STATE"
+CODE_RESUME_STATE_MISSING = "RESUME_STATE_MISSING"
+CODE_RESUME_MODE_UNSUPPORTED = "RESUME_MODE_UNSUPPORTED"
+
 
 @dataclass(frozen=True)
 class StartupRefusalPayload:

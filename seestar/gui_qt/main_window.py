@@ -4131,17 +4131,22 @@ class MainWindow(QMainWindow):
     def _format_refusal(self, payload) -> tuple:
         """Map a structured refusal payload to a localized (title, body) pair.
 
-        The known ``OUTPUT_STATE_INCOMPATIBLE`` code is mapped through the
-        existing localization architecture; any unknown code falls back to a
-        generic (English) refusal so generic false starts stay generic.  The
-        wording is mode-independent: it distinguishes resuming the previous
-        run from starting a new stack and never promises a specific mode is
-        resumable.
+        The known startup-refusal codes are mapped through the existing
+        localization architecture; any unknown code falls back to a generic
+        (English) refusal so generic false starts stay generic.  The technical
+        detail is never used as the primary presentation text.
         """
         code = getattr(payload, "code", None)
-        if code == "OUTPUT_STATE_INCOMPATIBLE":
-            title = self._tr("startup_refusal_output_state_incompatible_title")
-            body = self._tr("startup_refusal_output_state_incompatible_body")
+        key_by_code = {
+            "OUTPUT_STATE_INCOMPATIBLE": "startup_refusal_output_state_incompatible",
+            "FRESH_OUTPUT_HAS_STATE": "startup_refusal_fresh_output_has_state",
+            "RESUME_STATE_MISSING": "startup_refusal_resume_state_missing",
+            "RESUME_MODE_UNSUPPORTED": "startup_refusal_resume_mode_unsupported",
+        }
+        key = key_by_code.get(code)
+        if key:
+            title = self._tr(f"{key}_title")
+            body = self._tr(f"{key}_body")
             return title, body
         detail = getattr(payload, "technical_detail", "") or str(code)
         return "Cannot start run", f"Cannot start run: {detail}"

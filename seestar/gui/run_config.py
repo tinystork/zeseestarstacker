@@ -29,6 +29,28 @@ from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional
 
 
+# Stable run-intent vocabulary (Resume Contract v2).  These two values are the
+# *explicit* fresh/resume contract carried end-to-end: QtSettingsState ->
+# RunRequest -> Qt backend adapter -> SeestarQueuedStacker.start_processing.
+# The engine never derives intent from artifacts; this is the only source of
+# truth for whether a run is a fresh stack or a resume.
+RUN_INTENT_FRESH = "fresh"
+RUN_INTENT_RESUME = "resume"
+
+
+def normalize_run_intent(value: Any) -> str:
+    """Coerce a run-intent value to ``"fresh"`` or ``"resume"``.
+
+    Anything that is not exactly ``RUN_INTENT_RESUME`` (including ``None``,
+    unknown/legacy spellings and non-strings) degrades to ``RUN_INTENT_FRESH``
+    so a corrupt or absent intent can never silently turn a fresh start into a
+    resume (fail-closed toward "do not touch existing state").
+    """
+    if value == RUN_INTENT_RESUME:
+        return RUN_INTENT_RESUME
+    return RUN_INTENT_FRESH
+
+
 @dataclass(frozen=True)
 class RunRequest:
     """Immutable snapshot handed from the GUI thread to the backend starter.
@@ -51,11 +73,20 @@ class RunRequest:
         ``True`` when the batch_size==1 CSV single-batch mode was prepared by
         ``SeestarStackerGUI._prepare_single_batch_if_needed``.  Used by the GUI
         finish callback to re-sync UI variables.
+    resume_intent:
+        Explicit run intent: ``RUN_INTENT_FRESH`` or ``RUN_INTENT_RESUME``.
+        Defaults to fresh; never derived from artifacts.
+    resume_source:
+        Optional explicit resume source path (``None`` for fresh; a resolvable
+        output/run directory or Last Stack parent for resume).  Carried to the
+        engine but not yet used for CFG discovery/restoration in this slice.
     """
 
     backend_kwargs: Mapping[str, Any]
     align_on_disk: bool
     special_single: bool = False
+    resume_intent: str = RUN_INTENT_FRESH
+    resume_source: Optional[str] = None
 
 
 def compute_align_on_disk(batch_size: Any) -> bool:
@@ -239,6 +270,8 @@ def build_run_request(
     initial_additional_folders: Optional[List[str]] = None,
     auto_chunk_size: Optional[int] = None,
     special_single: bool = False,
+    resume_intent: Optional[str] = None,
+    resume_source: Optional[str] = None,
 ) -> RunRequest:
     """Build the full immutable run snapshot from validated settings.
 
@@ -257,6 +290,13 @@ def build_run_request(
         Whether the batch_size==1 CSV single-batch mode was already prepared.
         When ``False`` and ``batch_size == 1``, ``chunk_size`` is added to the
         backend kwargs exactly as before.
+    resume_intent:
+        Explicit run intent.  When ``None``, read from
+        ``settings.resume_intent`` (falling back to fresh).  Normalised via
+        :func:`normalize_run_intent`.
+    resume_source:
+        Explicit resume source path.  When ``None``, read from
+        ``settings.resume_source`` (falling back to ``None``).
     """
     backend_kwargs = build_backend_kwargs(
         settings, initial_additional_folders=initial_additional_folders
@@ -266,8 +306,15 @@ def build_run_request(
     if batch_size == 1 and not special_single:
         backend_kwargs["chunk_size"] = auto_chunk_size
 
+    if resume_intent is None:
+        resume_intent = getattr(settings, "resume_intent", RUN_INTENT_FRESH)
+    if resume_source is None:
+        resume_source = getattr(settings, "resume_source", None) or None
+
     return RunRequest(
         backend_kwargs=MappingProxyType(backend_kwargs),
         align_on_disk=compute_align_on_disk(batch_size),
         special_single=special_single,
+        resume_intent=normalize_run_intent(resume_intent),
+        resume_source=resume_source,
     )

@@ -425,6 +425,61 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "un nouveau dossier de sortie ou un dossier vide."
         ),
     },
+    # Resume Contract v2 differentiated startup refusals (mapped by stable
+    # code, never by parsing progress/log strings).  Each carries only the
+    # actionable user guidance; the engine's precise technical reason stays in
+    # ``technical_detail`` and is logged separately, never the primary text.
+    "startup_refusal_fresh_output_has_state_title": {
+        "en": "Output folder already has data",
+        "fr": "Le dossier de sortie contient déjà des données",
+    },
+    "startup_refusal_fresh_output_has_state_body": {
+        "en": (
+            "The selected output folder already contains data from a previous "
+            "processing run.\n\n"
+            "To start a new stack, select a new or empty output folder. "
+            "Your existing data was not modified."
+        ),
+        "fr": (
+            "Le dossier de sortie sélectionné contient déjà les données d’un "
+            "traitement précédent.\n\n"
+            "Pour démarrer un nouveau stack, sélectionnez un nouveau dossier "
+            "de sortie ou un dossier vide. Vos données existantes n’ont pas "
+            "été modifiées."
+        ),
+    },
+    "startup_refusal_resume_state_missing_title": {
+        "en": "Nothing to resume",
+        "fr": "Rien à reprendre",
+    },
+    "startup_refusal_resume_state_missing_body": {
+        "en": (
+            "No previous processing state was found in the selected output "
+            "folder, so there is nothing to resume.\n\n"
+            "Start a new stack instead."
+        ),
+        "fr": (
+            "Aucun état de traitement précédent n’a été trouvé dans le dossier "
+            "de sortie sélectionné : il n’y a rien à reprendre.\n\n"
+            "Démarrez plutôt un nouveau stack."
+        ),
+    },
+    "startup_refusal_resume_mode_unsupported_title": {
+        "en": "Resume not supported for this mode",
+        "fr": "Reprise non prise en charge pour ce mode",
+    },
+    "startup_refusal_resume_mode_unsupported_body": {
+        "en": (
+            "The selected processing mode does not support resume.\n\n"
+            "Start a new stack with a new or empty output folder instead."
+        ),
+        "fr": (
+            "Le mode de traitement sélectionné ne prend pas en charge la "
+            "reprise.\n\n"
+            "Démarrez plutôt un nouveau stack avec un nouveau dossier de "
+            "sortie ou un dossier vide."
+        ),
+    },
     # Terminal-failure QMessageBox titles (ZSSS-OTPUX-STABLE-C).  The dialog is
     # additive to the truthful status-bar/log text; the title is the only new
     # visible chrome, so it localizes like every other visible string.  The

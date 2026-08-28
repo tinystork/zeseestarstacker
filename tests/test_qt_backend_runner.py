@@ -322,6 +322,9 @@ def test_seestar_backend_maps_request_to_stackers():
     assert "stack_final_combine" not in stacker.start_kwargs
     expected_start_kwargs = dict(request.backend_kwargs)
     expected_start_kwargs.pop("stack_final_combine")
+    # Resume Contract v2: the explicit intent fields are forwarded verbatim.
+    expected_start_kwargs["resume_intent"] = request.resume_intent
+    expected_start_kwargs["resume_source"] = request.resume_source
     assert stacker.start_kwargs == expected_start_kwargs
     assert stacker.stack_final_combine == request.backend_kwargs["stack_final_combine"]
     assert stacker.start_count == 1

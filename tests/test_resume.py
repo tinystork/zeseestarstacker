@@ -1459,7 +1459,8 @@ def _make_invalid_resume_scenario(tmp_path, scenario):
         out, shape, count=2, ledger=session["sources"], session=session
     )
     start_kwargs = dict(
-        input_dir=session["input_dir"], output_dir=str(out), batch_size=10
+        input_dir=session["input_dir"], output_dir=str(out), batch_size=10,
+        resume_intent="resume",
     )
     if scenario == "dirty":
         stack = make_resume_stack(out)
@@ -1608,7 +1609,8 @@ def test_start_processing_valid_resume_pins_reference_and_queue(tmp_path):
     s._worker = lambda: None
 
     result = s.start_processing(
-        input_dir=session["input_dir"], output_dir=str(out), batch_size=2
+        input_dir=session["input_dir"], output_dir=str(out), batch_size=2,
+        resume_intent="resume",
     )
 
     assert result is True
@@ -1776,7 +1778,8 @@ def _run_seam_assert_refused(tmp_path, mutate=None, out=None, session=None,
     aligner = _SpyReferenceAligner()
     s = _make_start_processing_stack(out, Path(session["input_dir"]), aligner=aligner)
     result = s.start_processing(
-        input_dir=session["input_dir"], output_dir=str(out), batch_size=10
+        input_dir=session["input_dir"], output_dir=str(out), batch_size=10,
+        resume_intent="resume",
     )
 
     assert result is False
@@ -2371,6 +2374,7 @@ def test_start_processing_quality_weighted_resume_skips_recomputation(tmp_path):
         output_dir=str(out),
         batch_size=10,
         use_weighting=True,
+        resume_intent="resume",
     )
 
     assert result is True

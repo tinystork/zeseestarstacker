@@ -151,9 +151,18 @@ class QtSettingsState:
     temp_folder: str = ""
     output_filename: str = ""
     reference_image_path: str = ""
-    # Last completed stack path (GUI parity only; the backend does not read it
-    # yet — full resume semantics are a later milestone).
+    # Last completed stack path.  GUI parity only: it pre-fills the output
+    # folder and is displayed, but it never sets resume intent — resume is an
+    # explicit run intent carried via ``resume_intent`` (Resume Contract v2).
     last_stack_path: str = ""
+    # Explicit run intent for the next Start: "fresh" (default) or "resume".
+    # Never derived from ``last_stack_path`` or from output-folder artifacts;
+    # a test (or the future New/Resume selector) sets it explicitly.
+    resume_intent: str = "fresh"
+    # Explicit resume source path (optional; empty for fresh).  For resume it
+    # may resolve to an output/run directory or a Last Stack parent.  Carried
+    # to the engine but not used for CFG discovery/restoration yet.
+    resume_source: str = ""
 
     # --- Stacking method ---
     stacking_mode: str = "kappa-sigma"

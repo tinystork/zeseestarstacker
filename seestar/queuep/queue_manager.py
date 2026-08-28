@@ -586,12 +586,28 @@ class StartupRefusal:
     """
 
     CODE_OUTPUT_STATE_INCOMPATIBLE = "OUTPUT_STATE_INCOMPATIBLE"
+    # Resume Contract v2 differentiated startup-refusal codes.  Emitted at the
+    # explicit-intent gate in ``start_processing`` (or its early preflight).
+    # The precise reason stays in ``technical_detail`` and is never parsed.
+    CODE_FRESH_OUTPUT_HAS_STATE = "FRESH_OUTPUT_HAS_STATE"
+    CODE_RESUME_STATE_MISSING = "RESUME_STATE_MISSING"
+    CODE_RESUME_MODE_UNSUPPORTED = "RESUME_MODE_UNSUPPORTED"
 
     def __init__(self, code, technical_detail="", semantic_key=None, semantic_data=None):
         self.code = code
         self.technical_detail = technical_detail
         self.semantic_key = semantic_key
         self.semantic_data = dict(semantic_data or {})
+
+
+# Resume Contract v2 explicit run-intent vocabulary.  These string values are
+# the single source of truth shared with ``seestar.gui.run_config`` (kept local
+# so the heavy engine never imports the GUI request builder).  The intent is
+# carried explicitly through ``start_processing``; it is never derived from
+# artifacts (``_resume_artifacts_present``/``_can_resume`` are only
+# state-presence helpers).
+_RUN_INTENT_FRESH = "fresh"
+_RUN_INTENT_RESUME = "resume"
 
 
 # ----------------------------------------------------------------------
@@ -3262,6 +3278,10 @@ class SeestarQueuedStacker:
         self._current_batch_paths = []
         self.batch_count_path = None
         self._resume_requested = False
+        # Resume Contract v2: explicit resume source path (None for fresh;
+        # a resolvable output/run directory or Last Stack parent for resume).
+        # Carried end-to-end but not used for CFG discovery/restoration yet.
+        self.resume_source = None
         self._resume_active = False
         self._resume_completed_sources = []
         self._resume_pending_count = 0
@@ -3351,17 +3371,16 @@ class SeestarQueuedStacker:
         except Exception:
             self.preview_downsample_factor = 2
 
-        # Cumulative weight map across all batches
-        from numpy.lib.format import open_memmap
-
-        seestar_root = Path(__file__).resolve().parents[1]
-        self.cumulative_wht_path = str(seestar_root / "cumulative_wht.dat")
-        H, W = 1, 1
-        self.cumulative_wht_memmap = open_memmap(
-            self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
-        )
-        self.cumulative_wht_path = self.cumulative_wht_memmap.filename
-        self.cumulative_wht_memmap[:] = 0.0
+        # Resume Contract v2: no mutable run state may ever be created inside
+        # the package directory.  The obsolete constructor-created package-local
+        # ``<package>/seestar/cumulative_wht.dat`` memmap is gone: the modern
+        # output-bound scientific state lives under
+        # ``<output>/memmap_accumulators/cumulative_SUM.npy`` +
+        # ``cumulative_WHT.npy`` (allocated by ``_initialize_classic_sumw_accumulators``).
+        # ``cumulative_wht_path``/``cumulative_wht_memmap`` stay inert (``None``)
+        # until a real output-bound allocation opens them.
+        self.cumulative_wht_path = None
+        self.cumulative_wht_memmap = None
 
         # Options pour déplacement et sauvegarde partiels
         self.partial_save_interval = 1
@@ -12791,17 +12810,28 @@ class SeestarQueuedStacker:
     def _build_startup_refusal(self, early_result) -> "StartupRefusal":
         """Build the structured startup refusal for a *known* early refusal.
 
-        Every early refusal of a session that requested resume carries the
-        stable ``OUTPUT_STATE_INCOMPATIBLE`` code: the refusal means the
-        selected output folder already holds processing/resume state that this
-        run cannot resume (non-plain Drizzle/mosaic/reproject mode, missing/
-        corrupt/legacy manifest, scientific fingerprint or dtype mismatch,
-        incompatible reference shape, invalid quality reference scale, etc.).
+        Resume Contract v2 differentiated codes:
+
+        * a resume in a non-plain (Drizzle/mosaic/reproject) mode carries the
+          stable ``RESUME_MODE_UNSUPPORTED`` code (the mode itself is not
+          resumable);
+        * any other resume-requested early refusal (missing/corrupt/legacy
+          manifest, scientific fingerprint or dtype mismatch, incompatible
+          reference shape, invalid quality reference scale, etc.) carries
+          ``OUTPUT_STATE_INCOMPATIBLE``.
+
         The precise reason stays in ``technical_detail`` and is never parsed
-        downstream.  Early refusals of sessions without resume artifacts (a
-        genuinely unknown false start) return ``None`` so they stay generic.
+        downstream.  Early refusals of sessions that did not request resume
+        return ``None`` so they stay generic.
         """
         if getattr(self, "_resume_requested", False):
+            if not self._is_plain_classic():
+                return StartupRefusal(
+                    StartupRefusal.CODE_RESUME_MODE_UNSUPPORTED,
+                    early_result,
+                    semantic_key="resume_mode_unsupported",
+                    semantic_data={"mode": self._session_mode_label()},
+                )
             return StartupRefusal(
                 StartupRefusal.CODE_OUTPUT_STATE_INCOMPATIBLE,
                 early_result,
@@ -17705,6 +17735,8 @@ class SeestarQueuedStacker:
         reproject_coadd_final=None,
         match_background_for_final=None,
         chunk_size=None,
+        resume_intent=_RUN_INTENT_FRESH,
+        resume_source=None,
     ):
         logger.debug(
             f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!"
@@ -17780,6 +17812,53 @@ class SeestarQueuedStacker:
         )
         self._has_stack_plan = bool(plan_candidate and os.path.isfile(plan_candidate))
 
+        # =====================================================================
+        # Resume Contract v2: explicit-intent gating, *before* any resource is
+        # started and *before* any output mutation.  Intent is carried in
+        # explicitly (``resume_intent``) and never derived from artifacts;
+        # ``_resume_artifacts_present`` is only a state-presence helper here.
+        # =====================================================================
+        self._resume_requested = resume_intent == _RUN_INTENT_RESUME
+        self.resume_source = resume_source if resume_source else None
+
+        if not self._resume_requested and self.output_folder:
+            if self._resume_artifacts_present(self.output_folder):
+                # Fresh run over a recognized prior state: refuse read-only.
+                # Never delete/overwrite the existing state.
+                self.startup_refusal = StartupRefusal(
+                    StartupRefusal.CODE_FRESH_OUTPUT_HAS_STATE,
+                    "output folder already holds processing/resume state; "
+                    "refusing to overwrite (resume intent not requested)",
+                    semantic_key="fresh_output_has_state",
+                )
+                self.update_progress(
+                    "❌ Démarrage annulé: le dossier de sortie contient déjà "
+                    "l'état d'un traitement précédent. Choisissez un dossier "
+                    "vide ou demandez une reprise.",
+                    "ERROR",
+                )
+                self.processing_active = False
+                return False
+
+        if self._resume_requested and (
+            not self.output_folder
+            or not self._resume_artifacts_present(self.output_folder)
+        ):
+            # Resume requested but no recognized run state is present.
+            self.startup_refusal = StartupRefusal(
+                StartupRefusal.CODE_RESUME_STATE_MISSING,
+                "resume requested but no recognized run state found in the "
+                "output folder",
+                semantic_key="resume_state_missing",
+            )
+            self.update_progress(
+                "❌ Reprise impossible: aucun état de traitement reconnu dans "
+                "le dossier de sortie.",
+                "ERROR",
+            )
+            self.processing_active = False
+            return False
+
         if self.autotuner:
             self.autotuner.start()
 
@@ -17820,7 +17899,6 @@ class SeestarQueuedStacker:
         self.master_sum = None
         self.master_coverage = None
         self.reproject_output_wcs = None
-        self._resume_requested = self._can_resume(Path(self.output_folder))
         logger.debug(
             f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'"
         )
@@ -19667,16 +19745,6 @@ class SeestarQueuedStacker:
         # Close memmaps to release the underlying file handles
         if hasattr(self, "_close_memmaps"):
             self._close_memmaps()
-
-        # Remove the temporary cumulative weight file
-        if getattr(self, "cumulative_wht_path", None):
-            try:
-                if os.path.isfile(self.cumulative_wht_path):
-                    os.remove(self.cumulative_wht_path)
-            except Exception as e:
-                logger.debug(
-                    f"WARN QM [finish]: Failed to remove cumulative weight file: {e}"
-                )
 
 
 ######################################################################################################################################################

@@ -53,4 +53,6 @@ def attach_run_settings(
         backend_kwargs=MappingProxyType(merged),
         align_on_disk=request.align_on_disk,
         special_single=request.special_single,
+        resume_intent=request.resume_intent,
+        resume_source=request.resume_source,
     )
