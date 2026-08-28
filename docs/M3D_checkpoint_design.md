@@ -1,9 +1,12 @@
-# M3-D — Design de checkpoint / reprise (étude, sans implémentation)
+# M3-D — Design de checkpoint / reprise (D1 writer implémenté, reprise NON implémentée)
 
-Statut : **DESIGN ONLY**. Aucun code de checkpoint n'est implémenté dans cette
-mission M3-D-3. Ce document fige l'état mathématique à préserver et les
-contraintes de reprise, afin qu'une éventuelle mission ultérieure puisse
-implémenter un checkpoint **sans changer la science** du drizzle M3.
+Statut : **D1 (writer) IMPLÉMENTÉ** — écriture atomique du checkpoint natif
+Drizzle (RSM2-D1).  La **reprise** (reader / restore / activation de Resume)
+reste **NON implémentée** et n'est pas autorisée à démarrer automatiquement
+(voir §7).  Ce document fige l'état mathématique à préserver, le protocole
+d'écriture copy-on-write effectivement livré en D1, et les contraintes que
+devra respecter une éventuelle mission de reprise **sans changer la science**
+du drizzle M3.
 
 ## 1. Objectif
 
@@ -154,30 +157,85 @@ devinés.
 
 ## 5. Format recommandé
 
-- **Conteneur :** `.npz` (tableaux `_out_img`/`_out_wht` par canal) **ou** FITS
-  multi-extension (2 HDU image par canal : OUTIMG/OUTWHT). `.npz` est plus simple
-  et suffisant (pas de WCS à stocker dans le tableau lui-même, le WCS est dans le
-  JSON).
-- **Métadonnées :** `JSON` (manifest, géométrie, paramètres, compteurs,
-  `schema_version`, `drizzle_lib_version`, checksums).
-- **Écriture atomique :** écrire `checkpoint.tmp` puis `os.replace()` vers le
-  nom final ; jamais d'écriture partielle visible.
-- **Checksum :** sha256 sur le payload binaire (et éventuellement sur le JSON),
-  vérifié à la reprise avant toute réinjection.
-- **Compat versionnée :** refuser `schema_version` inconnue avec un message
-  actionnable ; conserver `drizzle_lib_version` pour diagnostiquer une dérive de
-  bibliothèque.
+### 5.1 Format effectivement livré (D1)
 
-Exemple de layout :
+Implémenté par `seestar/core/drizzle_checkpoint.py`
+(`DrizzleCheckpointWriter`), intégré dans `queue_manager` aux frontières de pose
+acceptées.  Namespace **dédié** — jamais les artefacts classiques
+`memmap_accumulators/resume_manifest.json` (qui restent réservés au SUM/W
+classique et ne sont ni surchargés ni affaiblis).
+
+- **Conteneur :** six fichiers `.npy` float32 (pas d'archive `.npz`, pas de
+  FITS) : un `out_img` et un `out_wht` par canal, sous des noms **uniques par
+  génération**.  Le WCS n'est pas dans les tableaux (il est dans le manifest).
+- **Métadonnées :** `checkpoint.json` (manifest déterministe JSON,
+  `sort_keys=True`) : géométrie, WCS sérialisé, paramètres effectifs, compteurs,
+  empreinte scientifique, `scientific_config`/`run_config_digest`, ledger.
+- **Checksum :** SHA-256 **sur les octets exacts de chaque fichier `.npy`**
+  (et taille exacte), vérifiables à la reprise avant toute réinjection.
+- **Config canonique :** `run_config.cfg` (schéma v2, atomique) écrit avant le
+  manifest ; `run_config_digest` + `scientific_config` + empreinte
+  `run_contract.drizzle_fingerprint` sont embarqués dans le manifest.
+- **Compat versionnée :** `schema_version` / `mode` (`drizzle_native_v1`)
+  refusés s'ils sont inconnus à la reprise ; `drizzle_lib_version` et
+  `numpy_version` consignés pour diagnostiquer une dérive de bibliothèque.
+
+Exemple de layout effectif (génération `00000003`) :
 
 ```
 {output_folder}/.m3d_checkpoint/
-    checkpoint.json          # métadonnées + manifest + compteurs + checksums
-    accum_ch0_outimg.npy     # ou une seule archive accumulators.npz
-    accum_ch0_outwht.npy
-    accum_ch1_*.npy
-    accum_ch2_*.npy
+    checkpoint.json                        # SEUL point de commit
+    gen-00000003-ch0-out_img.npy
+    gen-00000003-ch0-out_wht.npy
+    gen-00000003-ch1-out_img.npy
+    gen-00000003-ch1-out_wht.npy
+    gen-00000003-ch2-out_img.npy
+    gen-00000003-ch2-out_wht.npy
+{output_folder}/run_config.cfg             # config canonique (stable)
 ```
+
+### 5.2 Protocole copy-on-write / commit (manifest-last)
+
+1. Valider tout l'état **avant** toute écriture (échec fermé, jamais de
+   génération partielle/mixte) : 3 accumulateurs de même shape/config/exptime,
+   buffers float32 finis, compteurs finis, liaison de session présente, ledger
+   sans doublon ni source non identifiable, config canonique bien formée.
+2. Écrire les six artefacts natifs sous des noms uniques de génération, via
+   fichier temporaire du même répertoire + `os.replace` (fsync avant replace).
+3. Calculer SHA-256 + taille exacte de chaque artefact final.
+4. Écrire `run_config.cfg` (atomique, contenu stable) **avant** le manifest.
+5. Écrire `checkpoint.json.tmp`, fsync/close, puis `os.replace` vers
+   `checkpoint.json` **en dernier** : `checkpoint.json` est le seul point de
+   commit.
+
+Invariants de sûreté :
+
+- Un fichier référencé par le manifest actuellement commité n'est **jamais**
+  écrasé avant que le nouveau manifest ne soit commité (les générations sont
+  uniques par nom).
+- En cas d'échec avant le `os.replace` du manifest : le manifest précédent et
+  tous ses fichiers restent **byte-identiques et utilisables** ; les
+  fichiers temporaires/générations non commitées de la tentative sont nettoyés
+  au mieux (jamais les fichiers non liés).
+- Après un commit réussi, les générations précédentes peuvent être
+  garbage-collectées au mieux **uniquement** depuis l'allowlist explicite
+  `gen-*-ch[0-2]-out_(img|wht).npy` — jamais de suppression large du
+  répertoire, jamais la génération courante.
+
+### 5.3 Cadence et limitations
+
+- Cadence : un snapshot **tous les `drizzle_group_size` poses acceptées**,
+  indépendamment de la politique de preview Standard/Incremental ; pas de
+  snapshot par pose (I/O borné), pas de checkpoint entre les 3 adds de canal,
+  pas de checkpoint sur un add échoué.
+- **Force finale** : un snapshot propre du groupe partiel traînant est forcé
+  sur Stop ordonné et sur finalisation réussie (via les hooks de fin sûrs
+  existants) ; idempotent si aucun état n'a changé depuis le dernier commit.
+- Premier commit = au moins une pose acceptée (jamais de checkpoint vide).
+- La **reprise** (lecture/restauration/activation de Resume) n'est **pas**
+  implémentée en D1 : le writer ne lit jamais, ne finalise jamais, et
+  `_build_startup_refusal`/`_validate_resume_headless`/Qt refusent toujours le
+  Resume Drizzle comme aujourd'hui.
 
 ## 6. Risques techniques
 
@@ -206,7 +264,31 @@ Exemple de layout :
    (paramètres runtime effectifs) et les restaurer via `from_native_state`
    (voir §3.1).
 
-## 7. Tests futurs recommandés (non exécutés en M3-D-3)
+## 7. Tests
+
+### 7.1 Exécutés en D1 (writer)
+
+`tests/test_drizzle_checkpoint_writer.py` couvre :
+
+- **A** — roundtrip d'inspection du writer (sans reader de production) :
+  parse du manifest, vérification des six descripteurs (fichier, dtype, shape,
+  taille, SHA-256), `np.load` et comparaison **bit-exacte** aux snapshots
+  possédés, y compris WHT Lanczos **signé**.
+- **B** — atomicité de génération / injection de panne à chaque étape matérielle
+  (écriture temp / replace d'array, écriture de la config, écriture temp /
+  replace du manifest) : l'ancien `checkpoint.json` et chaque ancien artefact
+  restent inchangés ; aucun manifest ne référence une génération partielle/mixte.
+- **C** — génération N→N+1 réussie : bascule atomique vers les seuls
+  descripteurs N+1, génération courante jamais garbage-collectée.
+- **D** — témoin d'ordre aux frontières sûres : pas d'écriture après 0 pose ou
+  add échoué, pas de checkpoint entre canaux, cadence à `group_size`, force
+  finale sur Stop/succès, idempotence, ledger/compteurs cohérents, échec = abort
+  avant le déplacement de la source.
+- **E** — échec fermé (mismatch config/empreinte, WCS/liaison de session absent,
+  source dupliquée/non identifiable, buffers/compteurs non finis) sans nouveau
+  manifest commité.
+
+### 7.2 Recommandés pour la mission de reprise (D2, non exécutés)
 
 - **Continuous vs checkpoint/resume** : même `source_manifest`, même WCS, même
   SCI/WHT à la tolérance définie (run continu complet vs run coupé à `k` poses
@@ -222,3 +304,20 @@ Exemple de layout :
 - **Partial-group preview non scientifique** : après reprise, l'aperçu du groupe
   partiel est dérivé de l'accumulateur (display-only) et n'affecte pas le SCI
   final.
+
+## 8. Inventaire de la mission de reprise (D2) — NON implémentée
+
+La fin de D1 **ne complète pas** RSM2 et **n'autorise pas** le démarrage
+automatique de D2.  La reprise devra (au minimum) :
+
+- lire/valider `checkpoint.json` (schema/mode/empreinte/config/WCS/ledger) et
+  vérifier SHA-256/taille de chaque artefact avant réinjection ;
+- reconstruire les trois accumulateurs via `DrizzleAccumulator.from_native_state`
+  (ordre des poses préservé, `total_exptime` restauré) ;
+- revalider la liaison de session (racines d'entrée / référence / plan) et le
+  ledger (préfixe ordonné du plan), refuser tout fichier modifié/renommé ;
+- réaffirmer `FINALIZATION_MODE_DRIZZLE` et reprendre strictement après
+  `last_processed_index` ;
+- activer le chemin Resume Drizzle dans `_build_startup_refusal` /
+  `_validate_resume_headless` / `_validate_and_open_resume` / Qt readiness —
+  chemins **volontairement non touchés** par D1.

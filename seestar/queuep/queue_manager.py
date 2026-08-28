@@ -282,6 +282,11 @@ from ..core.drizzle_background import (
     estimate_background_offsets,
     rescale_01_to_adu,
 )
+from ..core.drizzle_checkpoint import (
+    DrizzleCheckpointError,
+    DrizzleCheckpointWriter,
+    build_drizzle_canonical_config,
+)
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
     reproject_and_combine,
@@ -3484,6 +3489,15 @@ class SeestarQueuedStacker:
         self._resume_completed_sources = []
         self._resume_pending_count = 0
         self._checkpointing_enabled = False
+        # RSM2-D1: native Drizzle checkpoint (write-only, no resume/reader).
+        # Dedicated state — never sets the classic ``_checkpointing_enabled``
+        # and never makes ``_is_plain_classic`` lie.  ``_drizzle_checkpoint_enabled``
+        # is armed only for a standard (non-mosaic) Drizzle run in ``initialize``.
+        self._drizzle_checkpoint_enabled = False
+        self._drizzle_checkpoint_writer = None
+        self._drizzle_checkpoint_plan = None
+        self._drizzle_completed_sources = []
+        self._drizzle_checkpoint_last_committed_frames = 0
         # RSM2-02B1: canonical classic run config cache (schema v2) and the
         # effective manifest schema version this session writes.  A fresh run
         # writes v2; a session opened from a v1 manifest keeps v1 write
@@ -4233,6 +4247,16 @@ class SeestarQueuedStacker:
                 self.incremental_drizzle_objects = []
                 self._drizzle_frame_count = 0
                 self._drizzle_group_index = 0
+                # RSM2-D1: arm the native Drizzle checkpoint for this standard
+                # (non-mosaic) Drizzle run.  The writer itself is created later
+                # in ``_init_drizzle_checkpoint`` (after the queue/plan and the
+                # effective config are known); no empty scientific checkpoint is
+                # ever published from this flag alone.
+                self._drizzle_checkpoint_enabled = True
+                self._drizzle_checkpoint_writer = None
+                self._drizzle_checkpoint_plan = None
+                self._drizzle_completed_sources = []
+                self._drizzle_checkpoint_last_committed_frames = 0
                 # Persistent effective-runtime configuration line (Qt durable
                 # run log + logger): one concise line, never requested/effective
                 # confusion.
@@ -7151,6 +7175,17 @@ class SeestarQueuedStacker:
                                         # non-scientific side effects run only
                                         # after the accepted bookkeeping above.
                                         self.stacked_batches_count += 1
+                                        # RSM2-D1: record the accepted source and
+                                        # commit the native checkpoint at the
+                                        # group cadence.  Runs after all three
+                                        # channel adds and the accepted
+                                        # counters/exposure advanced, and BEFORE
+                                        # the source is moved; a persistence
+                                        # failure raises (mandatory-abort) and
+                                        # never warns-and-continues.
+                                        self._drizzle_checkpoint_after_frame(
+                                            file_path
+                                        )
                                         self._send_eta_update()
                                         self._move_to_stacked(self._current_batch_paths)
                                         self._save_partial_stack()
@@ -7441,6 +7476,9 @@ class SeestarQueuedStacker:
                         "   Sauvegarde du stack Drizzle partiel (accumulateur unique)..."
                     )
                     self._drizzle_flush_partial_group()
+                    # RSM2-D1: force a final clean checkpoint snapshot for the
+                    # trailing partial group on orderly Stop (idempotent).
+                    self._drizzle_checkpoint_force_flush()
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_stopped",
                         stopped_early=True,
@@ -7517,6 +7555,10 @@ class SeestarQueuedStacker:
                         "🏁 Finalisation Drizzle (accumulateur unique)..."
                     )
                     self._drizzle_flush_partial_group()
+                    # RSM2-D1: force a final clean checkpoint snapshot for the
+                    # trailing partial group on successful finalization
+                    # (idempotent).
+                    self._drizzle_checkpoint_force_flush()
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_final"
                     )
@@ -19249,6 +19291,13 @@ class SeestarQueuedStacker:
             self._cleanup_failed_start()
             return False
 
+        # RSM2-D1: bind the native Drizzle checkpoint (plan + writer) after the
+        # queue is filled and the effective config/output grid are known, and
+        # before the worker thread starts.  Fails closed on any error.
+        if not self._init_drizzle_checkpoint():
+            self._cleanup_failed_start()
+            return False
+
         if self.is_mosaic_run and self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
@@ -19607,6 +19656,141 @@ class SeestarQueuedStacker:
                 self._drizzle_group_index,
                 frame_count,
             )
+
+    # ------------------------------------------------------------------
+    # RSM2-D1: native Drizzle checkpoint (write-only) — safe-boundary hooks
+    # ------------------------------------------------------------------
+
+    def _drizzle_checkpoint_counters(self):
+        """Snapshot the accepted-exposure truthfulness counters for the manifest."""
+        return {
+            "frame_count": int(getattr(self, "_drizzle_frame_count", 0) or 0),
+            "stacked_batches_count": int(
+                getattr(self, "stacked_batches_count", 0) or 0
+            ),
+            "total_exposure_seconds": float(
+                getattr(self, "total_exposure_seconds", 0.0) or 0.0
+            ),
+            "exposure_unknown_count": int(
+                getattr(self, "_exposure_unknown_count", 0) or 0
+            ),
+            "exposure_min": getattr(self, "_exposure_min", None),
+            "exposure_max": getattr(self, "_exposure_max", None),
+        }
+
+    def _drizzle_checkpoint_session_binding(self):
+        """Return the scientific-session binding (input roots/reference/plan)."""
+        return {
+            "input_roots": list(getattr(self, "_resume_input_roots", None) or []),
+            "reference": getattr(self, "_resume_reference_identity", None),
+            "plan": getattr(self, "_drizzle_checkpoint_plan", None),
+        }
+
+    def _init_drizzle_checkpoint(self):
+        """Bind the Drizzle observation plan and create the writer (fail closed).
+
+        Called once from ``start_processing`` after the queue is filled and the
+        effective Drizzle config/output grid are known, and before the worker
+        thread starts.  Returns ``False`` to abort the run cleanly on any
+        failure (never a partial writer, never a silent disable).
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return True
+        try:
+            self._drizzle_checkpoint_plan = self._capture_plan_from_queue()
+            cfg = build_drizzle_canonical_config(
+                self, product_version=self._canonical_product_version()
+            )
+            self._drizzle_checkpoint_writer = DrizzleCheckpointWriter(
+                output_dir=self.output_folder,
+                product_version=self._canonical_product_version(),
+                canonical_cfg=cfg,
+                output_wcs=self.drizzle_output_wcs,
+                output_shape_hw=self.drizzle_output_shape_hw,
+            )
+            return True
+        except Exception as exc:
+            self.update_progress(
+                f"❌ Échec initialisation checkpoint Drizzle: {exc}", "ERROR"
+            )
+            self.processing_error = f"Drizzle checkpoint init failed: {exc}"
+            return False
+
+    def _drizzle_checkpoint_commit(self):
+        """Persist one generation from the current accumulator/ledger state.
+
+        Raises :class:`DrizzleCheckpointError` on any failure (mandatory-abort);
+        the prior committed checkpoint stays byte-identical and usable.
+        """
+        writer = getattr(self, "_drizzle_checkpoint_writer", None)
+        if writer is None:
+            raise DrizzleCheckpointError("drizzle checkpoint writer not initialized")
+        generation = writer.commit(
+            self.drizzle_accumulators,
+            session_binding=self._drizzle_checkpoint_session_binding(),
+            counters=self._drizzle_checkpoint_counters(),
+            completed_sources=list(
+                getattr(self, "_drizzle_completed_sources", []) or []
+            ),
+        )
+        self._drizzle_checkpoint_last_committed_frames = int(
+            getattr(self, "_drizzle_frame_count", 0) or 0
+        )
+        logger.info(
+            "DRIZZLE CHECKPOINT: generation %d committed (frames=%d)",
+            generation,
+            self._drizzle_checkpoint_last_committed_frames,
+        )
+
+    def _drizzle_checkpoint_after_frame(self, source_path):
+        """Record an accepted source identity and commit at the group cadence.
+
+        Called ONLY after ``_add_frame_to_drizzle_accumulators`` returned True
+        and the accepted counters/exposure have advanced, but BEFORE the source
+        is moved.  Never runs between channel adds, never on a failed add, and
+        never publishes an empty checkpoint (``frame_count`` is already >= 1).
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return
+        # Fail closed: an unstat'able source must not become a ledger entry
+        # with size=None / mtime_ns=None.
+        ident = self._source_identity(source_path)
+        ledger = list(getattr(self, "_drizzle_completed_sources", []) or [])
+        ledger.append(ident)
+        keys = set()
+        for e in ledger:
+            key = (e.get("path"), e.get("size"), e.get("mtime_ns"))
+            if key in keys:
+                raise DrizzleCheckpointError(
+                    f"duplicate source identity in drizzle ledger: {e.get('name')}"
+                )
+            keys.add(key)
+        self._drizzle_completed_sources = ledger
+
+        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        frame_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+        if frame_count % group_size == 0:
+            self._drizzle_checkpoint_commit()
+
+    def _drizzle_checkpoint_force_flush(self):
+        """Force a final clean snapshot for a trailing partial group.
+
+        Idempotent: no-op when disabled, when no pose was accepted, or when the
+        frame count has not advanced since the last commit.
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return
+        writer = getattr(self, "_drizzle_checkpoint_writer", None)
+        if writer is None:
+            return
+        frame_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+        if frame_count <= 0:
+            return
+        if frame_count == int(
+            getattr(self, "_drizzle_checkpoint_last_committed_frames", 0) or 0
+        ):
+            return
+        self._drizzle_checkpoint_commit()
 
     def _update_preview_drizzle_accumulator(self):
         """Derive a DISPLAY-ONLY preview from ``self.drizzle_accumulators``.
