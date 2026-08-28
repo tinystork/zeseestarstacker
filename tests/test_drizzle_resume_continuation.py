@@ -359,6 +359,18 @@ def test_restore_rejects_inconsistent_total_exptime():
         DrizzleAccumulator.from_native_state(OUT_SHAPE, img, wht, total_exptime=-1.0)
 
 
+def test_restore_rejects_nonfinite_total_exptime():
+    """NaN / ±Inf total_exptime is non-physical and must fail closed before any
+    upstream Drizzle is constructed (which would otherwise propagate NaN/Inf
+    into the engine's exposure bookkeeping)."""
+    img, wht = _valid_snapshot()
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            DrizzleAccumulator.from_native_state(
+                OUT_SHAPE, img, wht, total_exptime=bad
+            )
+
+
 # --------------------------------------------------------------------------
 # 5. restored accumulator retains kernel / pixfrac / fillval / add contract
 # --------------------------------------------------------------------------
@@ -442,3 +454,64 @@ def test_reconstructed_final_science_support_invariant(kernel):
     assert support_integrity_violations(sci, wht) == []
     # No artificial huge values anywhere.
     assert float(np.max(np.abs(sci))) <= float(np.max(np.abs(cont._out_img))) + 1e-3
+
+
+# --------------------------------------------------------------------------
+# 8. a rejected add fails closed: exposure counters and buffers stay coherent
+# --------------------------------------------------------------------------
+
+
+def test_rejected_add_leaves_exposure_counters_and_buffers_unchanged():
+    """A deterministic Python-level validation failure must not advance either
+    exposure counter nor the native buffers, and the accumulator must remain
+    bit-identical to a fresh valid-only accumulator after a later valid add.
+
+    Upstream ``drizzle`` 2.2.0 increments its internal exposure counter
+    (``_texptime`` / ``total_exptime``) *before* the pixmap shape check, so a
+    naive wrapper would leave the engine desynchronised.  The wrapper snapshots
+    and restores that counter on failure, and only advances its own persistable
+    counter after a successful deposition.
+    """
+    frames = build_frames()
+    data, weight_map, pixmap, in_grid, exptime = frames[0]
+
+    acc = DrizzleAccumulator(OUT_SHAPE, kernel="square", pixfrac=1.0)
+    img_before = acc._out_img.copy()
+    wht_before = acc._out_wht.copy()
+
+    # Deterministic Python-level validation failure: pixmap shape mismatch.
+    bad_pixmap = np.zeros((_IH - 1, _IW, 2), dtype=np.float64)
+    with pytest.raises(ValueError):
+        acc.add(
+            data,
+            weight_map,
+            bad_pixmap,
+            exptime=exptime,
+            in_units="counts",
+            in_grid_mask=in_grid,
+        )
+
+    # Both the persistable wrapper counter and the engine counter are unchanged.
+    assert acc._total_exptime == 0.0
+    assert acc._drizzle.total_exptime == 0.0
+    # Native buffers were never mutated by the rejected add.
+    assert np.array_equal(acc._out_img, img_before)
+    assert np.array_equal(acc._out_wht, wht_before)
+
+    # The accumulator remains usable: a subsequent valid add reproduces, bit for
+    # bit, the native buffers and exposure accounting of a fresh valid-only
+    # accumulator that never saw the rejected frame.
+    fresh = DrizzleAccumulator(OUT_SHAPE, kernel="square", pixfrac=1.0)
+    fresh.add(
+        data, weight_map, pixmap, exptime=exptime, in_units="counts",
+        in_grid_mask=in_grid,
+    )
+    acc.add(
+        data, weight_map, pixmap, exptime=exptime, in_units="counts",
+        in_grid_mask=in_grid,
+    )
+
+    assert np.array_equal(acc._out_img, fresh._out_img)
+    assert np.array_equal(acc._out_wht, fresh._out_wht)
+    assert acc._total_exptime == fresh._total_exptime == exptime
+    assert acc._drizzle.total_exptime == fresh._drizzle.total_exptime == exptime

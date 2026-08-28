@@ -51,20 +51,49 @@ condition de reprise exacte : `Drizzle.add_image` mute `out_img`/`out_wht` en
 place, donc restaurer ces deux tableaux et y ré-attacher un `Drizzle` reconstruit
 donne une continuation identique (ordre d'accumulation préservé).
 
-Reconstruction attendue :
+**Contrat de reconstruction vérifié** (implémenté par
+`DrizzleAccumulator.from_native_state`, prouvé par
+`tests/test_drizzle_resume_continuation.py`). L'état de reprise d'un canal est
+exactement :
+
+* les deux tableaux natifs `float32 (H,W)` **finis** `out_img` / `out_wht`
+  (le WHT peut être **signé** pour les noyaux Lanczos) ;
+* le `total_exptime` accumulé (somme des `exptime` acceptés), **fini et non
+  négatif** ;
+* les paramètres runtime effectifs `kernel` / `pixfrac` / `fillval`.
+
+La reconstruction passe par la méthode dédiée (jamais par une ré-affectation
+directe de l'objet interne) :
 
 ```python
-acc = DrizzleAccumulator(out_shape_hw)
-acc._out_img[...] = restored_out_img   # weighted mean
-acc._out_wht[...] = restored_out_wht   # total weight
-acc._drizzle = Drizzle(out_img=acc._out_img, out_wht=acc._out_wht,
-                       kernel=kernel, fillval=fillval)
+acc = DrizzleAccumulator.from_native_state(
+    out_shape_hw,
+    restored_out_img,          # float32, fini
+    restored_out_wht,          # float32, fini (signé OK pour Lanczos)
+    kernel=kernel,             # valeur runtime effective
+    pixfrac=pixfrac,           # valeur runtime effective (1.0 pour Lanczos)
+    fillval=fillval,           # valeur runtime effective
+    total_exptime=total_exptime,  # fini, >= 0
+)
 ```
 
-> ⚠️ `DrizzleAccumulator.__init__` accepte `fillval` mais ne le stocke **pas**
-> comme attribut (`self.fillval` n'existe pas). Le checkpoint doit donc
-> persister `fillval` séparément, ou une mission ultérieure doit ajouter
-> `self.fillval` à l'accumulateur (changement trivial, hors périmètre M3-D-3).
+Deux contraintes `drizzle` 2.2.0 rendent ce chemin nécessaire et suffisant
+(vérifiées contre la bibliothèque installée) :
+
+* un `out_wht` pré-rempli avec `exptime == 0` lève une erreur (« Exposure time
+  cannot be 0 when context and/or weight arrays are non-zero ») → le
+  `total_exptime` accumulé doit être restauré avec les tableaux ;
+* un `out_wht` pré-rempli sans `out_ctx` assorti lève une erreur (« Pixels with
+  non-zero context values must have positive weights and vice-versa ») → le
+  bitmap de contexte (bookkeeping uniquement, jamais partie de l'invariant
+  science) n'est pas persisté et la reconstruction désactive son suivi
+  (`disable_ctx=True`), ce qui ne change **aucune** science (`out_img`/`out_wht`
+  restent bit-identiques).
+
+`DrizzleAccumulator` **retient** `fillval` (`self.fillval`), ainsi que
+`kernel` / `pixfrac` ; ces trois paramètres sont donc persistés puis restaurés
+comme paramètres runtime (via `from_native_state`), pas comme attributs internes
+devinés.
 
 ### 3.2 Géométrie et paramètres Drizzle (partagés par les 3 canaux)
 
@@ -172,8 +201,10 @@ Exemple de layout :
    pour re-vérifier à la reprise.
 6. **Interruption au milieu d'une pose.** Écrire le checkpoint uniquement entre
    poses (frontière de pose) ; voir §4.5.
-7. **`fillval` non stocké sur l'accumulateur.** À persister séparément (voir
-   §3.1) ou à corriger dans une mission future.
+7. **`fillval` / paramètres runtime.** `fillval` est retenu par l'accumulateur
+   (`self.fillval`) ; le checkpoint doit le persister avec `kernel` / `pixfrac`
+   (paramètres runtime effectifs) et les restaurer via `from_native_state`
+   (voir §3.1).
 
 ## 7. Tests futurs recommandés (non exécutés en M3-D-3)
 

@@ -435,8 +435,8 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        doc="Coverage-threshold policy token (e.g. 'relative_coverage_v1')."),
     _f("drizzle_fillval", Section.SCIENTIFIC, KIND_STR, presence=PRESENCE_CHECKPOINT,
        fp=_FP_DRIZZLE,
-       doc="Drizzle fillval; not retained by DrizzleAccumulator, so persisted "
-           "separately at checkpoint."),
+       doc="Drizzle fillval; runtime-effective value retained by "
+           "DrizzleAccumulator and restored on resume."),
     _f("drizzle_double_norm_fix", Section.SCIENTIFIC, KIND_BOOL,
        qt="drizzle_double_norm_fix", legacy=("drizzle_double_norm_fix",),
        fp=_FP_DRIZZLE),
