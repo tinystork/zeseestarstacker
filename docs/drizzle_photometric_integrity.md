@@ -6,7 +6,7 @@ This document is the focused architecture reference for the M3 Drizzle
 *original-sample photometric integrity* and *coverage* contract.  It describes
 the design implemented by task ZSSS-DPIC-01, its exact terminology, its
 scientific justification, and its explicit boundaries (in particular what is
-**not** implemented: full persistent Drizzle SCI/WHT checkpoint/resume).
+**not** implemented: full persistent Drizzle SCI/WHT checkpoint/resume — later superseded by RSM2).
 
 ---
 

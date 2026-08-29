@@ -401,12 +401,12 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
 
     # --- scientific: drizzle contract (M3) ---
     _f("use_drizzle", Section.SCIENTIFIC, KIND_BOOL, qt="use_drizzle"),
-    _f("drizzle_mode", Section.SCIENTIFIC, KIND_STR, qt="drizzle_mode",
+    _f("drizzle_mode", Section.EXECUTION, KIND_STR, qt="drizzle_mode",
        legacy=("drizzle_mode",), doc="'Final'/'Incremental' policy source."),
     _f("drizzle_processing_policy", Section.SCIENTIFIC, KIND_STR,
        derived="drizzle_mode",
        doc="Derived: Final->'standard', Incremental->'incremental'."),
-    _f("drizzle_group_size", Section.SCIENTIFIC, KIND_INT,
+    _f("drizzle_group_size", Section.EXECUTION, KIND_INT,
        qt="drizzle_group_size", legacy=("drizzle_group_size",),
        doc="Preview/progression policy, not science."),
     _f("drizzle_scale_requested", Section.SCIENTIFIC, KIND_FLOAT,
@@ -1357,8 +1357,10 @@ def write_cfg(cfg: RunConfig, path: str) -> None:
     in the destination directory.  Rejects non-JSON/NaN/Inf values.  Never
     writes anywhere else and never writes at import/construction time.
     """
+    canonical = cfg.to_canonical_dict()
+    _scan_unsafe(canonical)
     payload = json.dumps(
-        cfg.to_canonical_dict(),
+        canonical,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),

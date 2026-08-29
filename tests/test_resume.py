@@ -238,6 +238,7 @@ def write_valid_checkpoint(
     images_in=0,
     total_exposure=0.0,
     header=None,
+    schema_version=2,
 ):
     """Create a valid versioned clean checkpoint (nonzero SUM/WHT + manifest)."""
     memdir = Path(out_dir) / "memmap_accumulators"
@@ -270,6 +271,7 @@ def write_valid_checkpoint(
             "sources": list(ledger),
             "decomposition": [len(ledger)] if ledger else [],
         }
+    stack._resume_manifest_schema_version = schema_version
     stack._write_resume_manifest(
         state="clean", completed_sources=list(ledger), stacked_batches_count=count
     )
@@ -363,6 +365,48 @@ def test_scientific_config_mismatch_refused(tmp_path):
 
     s = make_resume_stack(out, snr_exponent=2.0)
     ok, reason = s._validate_and_open_resume((2, 2, 3))
+    assert ok is False
+    assert "configuration mismatch" in reason
+
+
+# ---------------------------------------------------------------------------
+# 3b. Schema-v1 fingerprint-only checkpoint (no run_config.cfg) — the classic
+#     8.2.0 payload.  The fingerprint is the whole config contract: a match
+#     resumes against the *current* effective settings, a mismatch fails closed.
+# ---------------------------------------------------------------------------
+def test_v1_checkpoint_no_cfg_fingerprint_match_resumes(tmp_path):
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=2)
+    ledger = session["sources"]
+    write_valid_checkpoint(
+        out, shape, count=2, ledger=ledger, session=session, schema_version=1
+    )
+    # A v1 checkpoint carries only the scientific fingerprint — never a CFG.
+    assert not (Path(out) / "run_config.cfg").exists()
+
+    s = make_resume_stack(out)
+    bind_session(s, session)
+    ok, reason = s._validate_and_open_resume(shape)
+    assert ok is True, reason
+    assert s._resume_active is True
+    close_mm(s.cumulative_sum_memmap)
+    close_mm(s.cumulative_wht_memmap)
+
+
+def test_v1_checkpoint_no_cfg_fingerprint_mismatch_refused(tmp_path):
+    out = tmp_path
+    shape = (2, 2, 3)
+    session = build_session(out, n_sources=2)
+    ledger = session["sources"]
+    write_valid_checkpoint(
+        out, shape, count=2, ledger=ledger, session=session, schema_version=1
+    )
+    assert not (Path(out) / "run_config.cfg").exists()
+
+    s = make_resume_stack(out, stacking_mode="mean")  # different fingerprint
+    bind_session(s, session)
+    ok, reason = s._validate_and_open_resume(shape)
     assert ok is False
     assert "configuration mismatch" in reason
 
@@ -3017,3 +3061,63 @@ def test_preexisting_run_cfg_survives_failed_fresh_cleanup(tmp_path):
     assert not (memdir / "resume_manifest.json.tmp").exists()
     assert pre_cfg.read_bytes() == b'{"schema_version":2}\n'
     assert not memdir.exists()
+
+
+def test_start_processing_resume_source_mismatch_refused(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    session = build_session(out, n_sources=2)
+    shape = (2, 2, 3)
+    write_valid_checkpoint(
+        out, shape, count=2, ledger=session["sources"], session=session
+    )
+    other = tmp_path / "other_run"
+    other.mkdir()
+    s = _make_start_processing_stack(out, Path(session["input_dir"]))
+    result = s.start_processing(
+        input_dir=session["input_dir"],
+        output_dir=str(out),
+        batch_size=10,
+        resume_intent="resume",
+        resume_source=str(other),
+    )
+    assert result is False
+    assert s.startup_refusal.code == "RESUME_SOURCE_MISMATCH"
+    assert s.processing_active is False
+
+
+def test_failed_first_drizzle_checkpoint_cleanup_removes_empty_dir(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    s = make_resume_stack(out)
+    s._attempt_preexisting_state = s._snapshot_existing_state()
+    dckpt = out / ".m3d_checkpoint"
+    dckpt.mkdir()  # simulated failed first Drizzle checkpoint attempt
+    s._remove_attempt_created_state()
+    assert not dckpt.exists()
+
+
+def test_failed_first_drizzle_checkpoint_cleanup_preserves_preexisting(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    dckpt = out / ".m3d_checkpoint"
+    dckpt.mkdir()
+    (dckpt / "checkpoint.json").write_text("{}", encoding="utf-8")
+    s = make_resume_stack(out)
+    s._attempt_preexisting_state = s._snapshot_existing_state()
+    s._remove_attempt_created_state()
+    assert dckpt.exists()
+    assert (dckpt / "checkpoint.json").exists()
+
+
+def test_canonical_run_config_captures_execution_context(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    s = make_resume_stack(out)
+    s.current_folder = "/tmp/in"
+    s.output_folder = str(out)
+    s.output_filename = "final.fit"
+    cfg = s._canonical_run_config()
+    assert cfg.execution.get("input_folder") == "/tmp/in"
+    assert cfg.execution.get("output_folder") == str(out)
+    assert cfg.execution.get("output_filename") == "final.fit"

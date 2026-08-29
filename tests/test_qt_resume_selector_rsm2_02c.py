@@ -85,7 +85,7 @@ def _write_legacy_cfg(run_dir: Path, data: dict, name="_stack_legacy.cfg") -> Pa
     return p
 
 
-def _drizzle_config(*, scale=2.0, kernel="square", pixfrac=0.8, wht=0.2):
+def _drizzle_config(*, scale=2.0, kernel="square", pixfrac=0.8, wht=0.2, mode="Final", group_size=50):
     class Qm:
         weighting_method = "none"
         use_quality_weighting = False
@@ -103,6 +103,8 @@ def _drizzle_config(*, scale=2.0, kernel="square", pixfrac=0.8, wht=0.2):
         drizzle_pixfrac = pixfrac
         drizzle_wht_threshold_effective = wht
         drizzle_fillval = "0.0"
+        drizzle_mode = mode
+        drizzle_group_size = group_size
 
     return build_drizzle_canonical_config(Qm(), product_version="8.2.0")
 
@@ -322,10 +324,21 @@ def test_discover_cfg_only_without_checkpoint_refuses(tmp_path):
     assert result.reason_key == "resume_refuse_no_checkpoint"
 
 
-def test_discover_no_cfg_with_v1_checkpoint_refuses_config_unavailable(tmp_path):
+def test_discover_no_cfg_with_v1_checkpoint_ready_current_settings(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_manifest(run_dir, schema_version=1)  # hash-only v1: no run_config.cfg
+    result = resume_locator.discover_resume(str(run_dir / "final.fits"))
+    assert result.status == resume_locator.STATUS_READY
+    assert result.config is None
+    assert result.config_source is None
+    assert result.checkpoint_kind == resume_locator.CHECKPOINT_KIND_CLASSIC
+
+
+def test_discover_no_cfg_with_v2_checkpoint_still_config_unavailable(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_manifest(run_dir, schema_version=2)  # v2 without run_config.cfg
     result = resume_locator.discover_resume(str(run_dir / "final.fits"))
     assert result.status == resume_locator.STATUS_CONFIG_UNAVAILABLE
     assert result.config is None
@@ -427,6 +440,18 @@ def test_restore_to_settings_normalizes_winsor_and_restores(tmp_path):
     assert state.output_filename == "resumed.fit"
 
 
+def test_restore_to_settings_none_keeps_current_settings(tmp_path):
+    state = QtSettingsState()
+    state.stacking_mode = "median"
+    state.kappa = 9.9
+    report = resume_locator.restore_to_settings(None, state)
+    assert report.applied == {}
+    assert report.skipped == []
+    # v1 fingerprint-only resume never invents a config: current settings stay.
+    assert state.stacking_mode == "median"
+    assert state.kappa == 9.9
+
+
 # --------------------------------------------------------------------------
 # Window-level integration (offscreen Qt)
 # --------------------------------------------------------------------------
@@ -513,6 +538,24 @@ def test_explicit_resume_v2_restores_and_builds_request(tmp_path, window):
     assert state.kappa == 3.5
     assert window.stacking_mode_combo.currentText() == "median"
 
+    request = _build_request(window)
+    assert request.resume_intent == "resume"
+    assert request.resume_source == str(run_dir)
+
+
+def test_explicit_resume_v1_no_cfg_arms_current_settings(tmp_path, window):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_manifest(run_dir, schema_version=1)  # fingerprint-only v1, no CFG
+
+    window.last_stack_edit.setText(str(run_dir / "final.fits"))
+    window.resume_mode_combo.setCurrentIndex(1)  # Resume
+
+    assert window.resume_mode_combo.currentData() == "resume"
+    state = window.collect_settings_state()
+    assert state.resume_intent == "resume"
+    assert state.resume_source == str(run_dir)
+    assert state.output_folder == str(run_dir)
     request = _build_request(window)
     assert request.resume_intent == "resume"
     assert request.resume_source == str(run_dir)
@@ -804,3 +847,22 @@ def test_programmatic_settext_while_armed_does_not_invalidate(tmp_path, window):
     assert state.resume_intent == "resume"
     assert state.resume_source == str(run_dir)
     assert window.last_stack_edit.text() == "/programmatic/stack.fit"
+
+
+def test_production_drizzle_config_roundtrips_incremental_policy(tmp_path):
+    # Production path: the real builder persists the policy; no manual injection.
+    cfg = _drizzle_config(mode="Incremental", group_size=7)
+    assert cfg.execution.get("drizzle_mode") == "Incremental"
+    assert cfg.execution.get("drizzle_group_size") == 7
+    state = QtSettingsState()
+    resume_locator.restore_to_settings(
+        cfg, state, checkpoint_kind=resume_locator.CHECKPOINT_KIND_DRIZZLE
+    )
+    assert state.drizzle_mode == "Incremental"
+    assert state.drizzle_group_size == 7
+
+
+def test_drizzle_policy_does_not_alter_scientific_fingerprint():
+    standard = _drizzle_config(mode="Final", group_size=50)
+    incremental = _drizzle_config(mode="Incremental", group_size=7)
+    assert standard.drizzle_fingerprint() == incremental.drizzle_fingerprint()

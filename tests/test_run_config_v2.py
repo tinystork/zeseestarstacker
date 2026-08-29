@@ -140,7 +140,7 @@ def test_classic_fingerprint_coverage():
 def test_scientific_allowlist_covers_drizzle_contract():
     sci_names = {fd.name for fd in rc.FIELD_DEFS if fd.section == rc.Section.SCIENTIFIC}
     required = {
-        "use_drizzle", "drizzle_mode", "drizzle_processing_policy",
+        "use_drizzle", "drizzle_processing_policy",
         "drizzle_scale_requested", "drizzle_scale_effective",
         "drizzle_kernel_requested", "drizzle_kernel_effective",
         "drizzle_pixfrac_requested", "drizzle_pixfrac_effective",
@@ -227,9 +227,9 @@ def test_no_io_during_construction(tmp_path):
 
 
 def test_derived_processing_policy():
-    cfg = _config(scientific={"drizzle_mode": "Incremental"})
+    cfg = _config(execution={"drizzle_mode": "Incremental"})
     assert cfg.scientific["drizzle_processing_policy"] == "incremental"
-    cfg2 = _config(scientific={"drizzle_mode": "Final"})
+    cfg2 = _config(execution={"drizzle_mode": "Final"})
     assert cfg2.scientific["drizzle_processing_policy"] == "standard"
 
 
@@ -965,3 +965,37 @@ def test_collect_from_backend_fails_closed_on_uncoercible():
     backend = _backend_obj(stacking_mode="kappa-sigma", kappa="not-a-float")
     with pytest.raises(rc.ValidationError):
         rc.collect_from_backend(backend)
+
+
+def test_write_cfg_nested_secret_fails_closed_without_value(tmp_path):
+    secret = "NESTED…_XYZ"
+    cfg = _config(
+        product_version="8.2.0",
+        scientific={"stacking_mode": "kappa-sigma", "kappa": 2.5},
+        execution={"input_folder": "/tmp/in"},
+    )
+    cfg.execution["mosaic_settings"] = {"api_token": secret}
+    target = tmp_path / "run_config.cfg"
+    with pytest.raises(rc.UnsafeConfigError) as excinfo:
+        rc.write_cfg(cfg, str(target))
+    assert "api_token" in str(excinfo.value)
+    assert secret not in str(excinfo.value)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".runcfg-*.tmp"))
+
+
+def test_write_cfg_flat_secret_fails_closed_without_value(tmp_path):
+    secret = "FLAT_S…_ABC"
+    cfg = _config(
+        product_version="8.2.0",
+        scientific={"stacking_mode": "kappa-sigma"},
+        execution={"input_folder": "/tmp/in"},
+    )
+    cfg.scientific["password"] = secret
+    target = tmp_path / "run_config.cfg"
+    with pytest.raises(rc.UnsafeConfigError) as excinfo:
+        rc.write_cfg(cfg, str(target))
+    assert "password" in str(excinfo.value)
+    assert secret not in str(excinfo.value)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".runcfg-*.tmp"))

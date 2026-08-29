@@ -600,6 +600,7 @@ class StartupRefusal:
     CODE_FRESH_OUTPUT_HAS_STATE = "FRESH_OUTPUT_HAS_STATE"
     CODE_RESUME_STATE_MISSING = "RESUME_STATE_MISSING"
     CODE_RESUME_MODE_UNSUPPORTED = "RESUME_MODE_UNSUPPORTED"
+    CODE_RESUME_SOURCE_MISMATCH = "RESUME_SOURCE_MISMATCH"
 
     def __init__(self, code, technical_detail="", semantic_key=None, semantic_data=None):
         self.code = code
@@ -2607,6 +2608,9 @@ class SeestarQueuedStacker:
         run_cfg = os.path.join(out, _RUN_CONFIG_FILENAME)
         if os.path.isfile(run_cfg):
             snapshot.add(os.path.normcase(os.path.abspath(run_cfg)))
+        dckpt = os.path.join(out, ".m3d_checkpoint")
+        if os.path.isdir(dckpt):
+            snapshot.add(os.path.normcase(os.path.abspath(dckpt)))
         return snapshot
 
     def _remove_attempt_created_state(self):
@@ -2674,6 +2678,15 @@ class SeestarQueuedStacker:
         ):
             try:
                 os.remove(run_cfg)
+            except OSError:
+                pass
+        dckpt = os.path.join(out, ".m3d_checkpoint")
+        if (
+            os.path.isdir(dckpt)
+            and os.path.normcase(os.path.abspath(dckpt)) not in snapshot
+        ):
+            try:
+                shutil.rmtree(dckpt)
             except OSError:
                 pass
 
@@ -13575,6 +13588,19 @@ class SeestarQueuedStacker:
         cfg = run_contract.collect_from_backend(
             self, product_version=self._canonical_product_version()
         )
+        # Item B (bounded): the run CFG should describe the *run* (execution
+        # context), not only the scientific fingerprint.  Populate the
+        # non-fingerprinted execution section with the engine's own I/O context
+        # so the CFG is a faithful run recipe.  The scientific fingerprint
+        # remains sourced solely from collect_from_backend (no divergence).
+        execution = {
+            "input_folder": getattr(self, "current_folder", None),
+            "output_folder": getattr(self, "output_folder", None),
+            "output_filename": getattr(self, "output_filename", None),
+        }
+        for name, value in execution.items():
+            if value is not None and value != "":
+                cfg.execution[name] = str(value)
         self._run_config_canonical = cfg
         return cfg
 
@@ -18425,6 +18451,26 @@ class SeestarQueuedStacker:
         # =====================================================================
         self._resume_requested = resume_intent == _RUN_INTENT_RESUME
         self.resume_source = resume_source if resume_source else None
+
+        if self._resume_requested and self.resume_source and self.output_folder:
+            # Resume source must resolve to the same run the output folder opens.
+            # Normalize paths (platform-safe) before comparing; a mismatch means
+            # the caller is trying to resume one run while opening another, which
+            # must never mutate the wrong checkpoint.
+            rs = os.path.normcase(os.path.abspath(os.fspath(self.resume_source)))
+            of = os.path.normcase(os.path.abspath(os.fspath(self.output_folder)))
+            if rs != of:
+                self.startup_refusal = StartupRefusal(
+                    StartupRefusal.CODE_RESUME_SOURCE_MISMATCH,
+                    "resume source does not match the selected output folder",
+                    semantic_key="resume_source_mismatch",
+                )
+                self.update_progress(
+                    "❌ Reprise impossible: la source de reprise ne correspond pas au dossier de sortie.",
+                    "ERROR",
+                )
+                self.processing_active = False
+                return False
 
         if not self._resume_requested and self.output_folder:
             if self._resume_artifacts_present(self.output_folder):

@@ -350,6 +350,10 @@ function names are the stable reference). All paths below are the
 
 ## 6. Resume contract and exact supported scope
 
+> **Superseded by RSM2 for persistent Drizzle Standard/Incremental resume**
+> (see docs/resume_contract_v2.md); the classic-only scope below reflects the
+> HSI closure at its time.
+
 Resume is supported **only** for the plain classic non-drizzle, non-mosaic,
 non-reproject `SUM / WHT` path. That state is exactly two HWC float32
 accumulators — numerator `SUM = Σ(V·W)` and effective denominator `WHT = ΣW`,

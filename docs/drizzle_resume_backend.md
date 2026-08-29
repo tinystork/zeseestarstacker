@@ -1,6 +1,6 @@
 # Native Drizzle resume (backend/headless)
 
-Standard non-mosaic Drizzle runs can resume only from the dedicated
+Standard and Incremental non-mosaic Drizzle runs can resume from the dedicated
 `.m3d_checkpoint` state and only when Resume intent is explicit. Mosaic and
 reprojection modes remain unsupported.
 
@@ -22,7 +22,7 @@ SUM/WHT behavior are unchanged.
 
 ## Explicit Qt readiness
 
-The Qt **Resume** selector recognizes standard non-mosaic Drizzle runs through
+The Qt **Resume** selector recognizes non-mosaic Drizzle runs (Standard or Incremental) through
 the pair `<run>/.m3d_checkpoint/checkpoint.json` and `<run>/run_config.cfg`.
 This is only a read-only readiness layer: it verifies the checkpoint identity
 and the canonical config digest/fingerprint, while the backend still performs

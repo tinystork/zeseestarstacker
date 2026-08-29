@@ -94,11 +94,11 @@ This namespace is **dedicated** to Drizzle and never reuses the classic
 ``memmap_accumulators/resume_manifest.json`` SUM/W artifacts (which remain
 plain-classic only and are never overloaded or weakened).
 
-Restart safety (write-only, no Resume)
+Restart safety (fresh writer refuses; Resume re-arms)
 --------------------------------------
 
-Drizzle Resume is disabled in D1, so a checkpoint namespace can never be
-continued.  A freshly constructed writer therefore **refuses** (fail closed,
+Resume is enabled via the re-armed writer (from_validated_result); a freshly
+constructed writer never continues an existing namespace and therefore **refuses** (fail closed,
 preserving every pre-existing byte) whenever ``<output>/.m3d_checkpoint`` is
 non-empty — i.e. it already contains a manifest, an allowlisted generation
 artifact, a manifest temp or a writer temp.  An empty existing directory is
@@ -511,10 +511,15 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         "registration_contract": _REGISTRATION_CONTRACT,
         "registration_contract_version": _REGISTRATION_CONTRACT_VERSION,
     }
+    execution = {
+        "drizzle_mode": str(getattr(qm, "drizzle_mode", "Final") or "Final"),
+        "drizzle_group_size": int(getattr(qm, "drizzle_group_size", 50) or 50),
+    }
     provenance = {"drizzle_lib_version": _drizzle_lib_version()}
     return run_contract.RunConfig.from_sections(
         product_version=product_version,
         scientific=scientific,
+        execution=execution,
         provenance=provenance,
     )
 
@@ -760,7 +765,7 @@ class DrizzleCheckpointWriter:
     def _refuse_existing_checkpoint(self):
         """Refuse a non-empty existing checkpoint namespace (fail closed).
 
-        Drizzle Resume is disabled in D1: any prior manifest, allowlisted
+        A fresh writer must not collide with a prior run: any prior manifest, allowlisted
         generation artifact, manifest temp or writer temp means a fresh writer
         would collide with / could destroy a prior run's state.  An empty
         existing directory is allowed; every pre-existing byte is preserved.
@@ -794,9 +799,9 @@ class DrizzleCheckpointWriter:
                 found.append(f"unexpected entry {name!r}")
         raise DrizzleCheckpointError(
             "refusing to reuse a non-empty Drizzle checkpoint namespace "
-            f"{self._dir!r} (found {', '.join(sorted(set(found)))}); Drizzle "
-            "resume is disabled — a fresh run must use an empty or absent "
-            "checkpoint directory"
+            f"{self._dir!r} (found {', '.join(sorted(set(found)))}); use "
+            "explicit Resume to continue this run, or use an empty output "
+            "folder for a Fresh run"
         )
 
     # -------------------------------------------------------------- validation

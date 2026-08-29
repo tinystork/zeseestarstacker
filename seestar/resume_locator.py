@@ -20,9 +20,12 @@ Contract (Resume Contract v2 — GUI convenience / first protection layer):
 * The preferred configuration source is the schema-v2 ``run_config.cfg``
   (read via :func:`run_contract.read_cfg`).  A legacy 5.x ``.cfg`` is a
   fallback *restoration object* only, never checkpoint evidence.
-* Resume may proceed (status :data:`STATUS_READY`) only when BOTH a recognized
-  checkpoint manifest exists AND a restorable config is available.  Classic
-  may use v2 or migrated legacy config; Drizzle requires a coherent v2 config.
+* Resume may proceed (status :data:`STATUS_READY`) when a recognized checkpoint
+  manifest exists and either a restorable config is available (Classic v2 or
+  migrated legacy; Drizzle requires a coherent v2 config) or the checkpoint is
+  a Classic schema-v1 manifest that stores only the authoritative scientific
+  fingerprint — in that case the *current* effective settings stay in place and
+  the backend recomputes the fingerprint (match resumes, mismatch fails closed).
 * Every other case fails closed with a stable status + bounded reason; no file
   is written, no setting is invented, and no hidden resume intent is produced.
 
@@ -376,6 +379,26 @@ def find_legacy_cfg(run_dir: Any) -> Optional[str]:
     return sorted(pool)[0]
 
 
+def _classic_manifest_schema_version(run_dir: Any) -> Optional[int]:
+    """Return the Classic resume manifest schema version, or ``None``.
+
+    Read-only and bounded.  Returns ``1`` or ``2`` for a well-formed
+    versioned manifest, and ``None`` when the manifest is absent, unreadable,
+    not a JSON object, or carries a non-integer/unknown ``schema_version``.
+    A missing or unknown version is never treated as version 1 (fail closed).
+    """
+    try:
+        manifest = _strict_json(manifest_path(run_dir))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    version = manifest.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    return version
+
+
 def _bounded(text: Any) -> str:
     """Return ``text`` as a bounded string (data only, no secrets)."""
     s = str(text or "")
@@ -393,8 +416,12 @@ def discover_resume(locator: Any, max_depth: int = MAX_SEARCH_DEPTH) -> Discover
     * recognized run dir, but no checkpoint manifest -> :data:`STATUS_NO_CHECKPOINT`
       (a FIT or a CFG alone is never checkpoint evidence);
     * checkpoint manifest present but config absent/unrecoverable ->
-      :data:`STATUS_CONFIG_UNAVAILABLE` (e.g. a manifest-v1 hash-only checkpoint
-      with no ``run_config.cfg`` and no legacy ``.cfg``);
+      :data:`STATUS_CONFIG_UNAVAILABLE` (Drizzle, or a Classic manifest-v2
+      checkpoint with no ``run_config.cfg`` and no legacy ``.cfg``); a
+      Classic manifest-v1 checkpoint with no recoverable config is instead
+      :data:`STATUS_READY` with ``config=None`` (the current effective
+      settings stay authoritative; the backend fingerprint check decides
+      match/mismatch);
     * corrupt / unsafe / ambiguous config -> the matching fail-closed status;
     * checkpoint present + restorable config -> :data:`STATUS_READY`.
     """
@@ -488,6 +515,24 @@ def discover_resume(locator: Any, max_depth: int = MAX_SEARCH_DEPTH) -> Discover
             reason_key=STATUS_REASON_KEYS[STATUS_NO_CHECKPOINT],
         )
     if config is None:
+        # A Classic schema-v1 manifest stores only the authoritative scientific
+        # fingerprint (it never carried run_config.cfg).  Nothing was persisted
+        # to restore, so the *current* effective settings stay authoritative and
+        # the backend recomputes the fingerprint from them (match -> Resume,
+        # mismatch -> clean refusal).  We never invent, reverse, or weaken the
+        # stored fingerprint.  Drizzle and Classic v2 without config still fail
+        # closed here.
+        if (
+            checkpoint_kind == CHECKPOINT_KIND_CLASSIC
+            and _classic_manifest_schema_version(run_dir) == 1
+        ):
+            return DiscoveryResult(
+                status=STATUS_READY,
+                run_dir=run_dir,
+                config=None,
+                config_source=None,
+                checkpoint_kind=checkpoint_kind,
+            )
         return DiscoveryResult(
             status=STATUS_CONFIG_UNAVAILABLE,
             run_dir=run_dir,
@@ -520,23 +565,28 @@ def discover_resume(locator: Any, max_depth: int = MAX_SEARCH_DEPTH) -> Discover
 
 
 def restore_to_settings(
-    config: run_contract.RunConfig,
+    config: Optional[run_contract.RunConfig],
     settings: Any,
     *,
     checkpoint_kind: str = CHECKPOINT_KIND_CLASSIC,
 ) -> run_contract.ApplyReport:
     """Restore ``config``'s allowlisted, restore-eligible fields onto ``settings``.
 
-    Uses :func:`run_contract.apply_to_settings` (the single field-spec source),
-    then normalises the one canonical/Qt representation mismatch (the winsor
-    limits list -> the ``stack_winsor_limits`` comma string).  Returns the
+    ``config=None`` is the valid Classic schema-v1 fingerprint-only resume:
+    nothing was persisted to restore, so the current effective settings are kept
+    and an empty :class:`run_contract.ApplyReport` is returned (the backend
+    fingerprint check is authoritative).  Otherwise uses
+    :func:`run_contract.apply_to_settings` (the single field-spec source), then
+    normalises the one canonical/Qt representation mismatch (the winsor limits
+    list -> the ``stack_winsor_limits`` comma string).  Returns the
     :class:`run_contract.ApplyReport`.
     """
+    if config is None:
+        return run_contract.ApplyReport()
     report = run_contract.apply_to_settings(config, settings)
     if checkpoint_kind == CHECKPOINT_KIND_DRIZZLE:
         scientific = config.scientific
         settings.use_drizzle = True
-        settings.drizzle_mode = "Final"
         settings.drizzle_scale = int(scientific["drizzle_scale_effective"])
         settings.drizzle_kernel = scientific["drizzle_kernel_effective"]
         settings.drizzle_pixfrac = float(scientific["drizzle_pixfrac_effective"])

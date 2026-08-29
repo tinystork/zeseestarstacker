@@ -555,6 +555,14 @@ M25; it was a pre-existing M4 delta).
 
 ## 20. Last-stack display / resume parity (M23)
 
+> **Superseded by RSM2 (Resume Contract v2).** This section records the M23
+> historical behavior: last-stack -> output pre-fill, engine auto-resume via
+> _can_resume, and no dedicated resume UI. RSM2 replaced it with an explicit
+> Fresh/Resume architecture - Last Stack is now a run *locator* (not output
+> pre-fill, not implicit resume intent), a dedicated Qt Resume selector exists,
+> and Resume supports Classic + Drizzle Standard/Incremental. See
+> docs/resume_contract_v2.md for the authoritative current contract.
+
 Closes checklist 10.1 across three sub-items, all without touching the Tk GUI or
 the engine.
 
