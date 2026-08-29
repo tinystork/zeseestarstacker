@@ -1,4 +1,4 @@
-# M3-D — Design de checkpoint / reprise (D1 writer + D2A reader + D2B1 continuation-writer + D2B2A source-resolution seam ; reprise lifecycle NON implémentée)
+# M3-D — Design de checkpoint / reprise (D1 + D2A + D2B1 + D2B2A + D2B2B backend/headless)
 
 Statut : **D1 (writer) IMPLÉMENTÉ** — écriture atomique du checkpoint natif
 Drizzle (RSM2-D1) — et **D2A (reader) IMPLÉMENTÉ** — lecteur/validateur
@@ -14,9 +14,13 @@ retournant un objet de ré-arm dédié `DrizzleContinuation` (RSM2-D2B1).
 immutable `SafeStackedSourceResolver` (original-ou-`stacked/` déterministe),
 portée comme provenance `resolution_policy` et ré-appliquée par la factory de
 continuation (RSM2-D2B2A).
-L'**activation de Resume** (wiring lifecycle D2B dans `queue_manager` / GUI /
-startup) reste **NON implémentée** et n'est pas autorisée à démarrer
-automatiquement (voir §7/§8).
+**D2B2B (backend/headless) IMPLÉMENTÉ** — un intent Resume explicite active le
+chemin standard Drizzle non-mosaïque dans `queue_manager.start_processing` :
+préflight read-only avant préparation de référence, restauration SCI/WHT et
+compteurs dans `initialize`, filtrage exact du ledger, validation du suffixe
+sources **et décomposition**, ré-arm monotone à N+1, puis lancement worker.
+L'activation automatique reste interdite et l'intégration Qt dédiée reste hors
+périmètre de D2B2B (voir §5.6/§8).
 Ce document fige l'état mathématique à préserver, le protocole d'écriture
 copy-on-write effectivement livré en D1, le contrat du lecteur D2A, et les
 contraintes que devra respecter l'activation de reprise **sans changer la
@@ -288,10 +292,9 @@ Invariants de sûreté :
   d'un fichier `.npy` complet (`H × W × 4 + en-tête`).  Le pic est donc ≈
   `13 × H × W × 4` octets (6 buffers moteur + 6 snapshots + 1 `bytes`), hors
   marge interne de `np.save`.  Le flux mémoire n'est pas refondu en D1.
-- La **reprise** (lecture/restauration/activation de Resume) n'est **pas**
-  implémentée en D1 : le writer ne lit jamais, ne finalise jamais, et
-  `_build_startup_refusal`/`_validate_resume_headless`/Qt refusent toujours le
-  Resume Drizzle comme aujourd'hui.
+- Limite historique D1 : le writer seul ne lit ni n'active une reprise. Cette
+  activation est désormais fournie, de façon bornée, par D2B2B (§5.6) ; le
+  constructeur public du writer demeure fresh-only.
 
 ### 5.4 Seam de continuation-writer (D2B1)
 
@@ -424,6 +427,30 @@ explicite et opt-in** sans changer le comportement par défaut :
   arbitraire mutable est honoré pour la lecture immédiate mais **non porté**
   (le ré-arm retombe alors en strict, échec fermé).
 
+### 5.6 Activation backend/headless (D2B2B)
+
+`SeestarQueuedStacker.start_processing(..., resume_intent="resume")` active la
+reprise uniquement pour **Drizzle standard non-mosaïque**, sans reprojection
+inter-batch ni coadd reproject final. Le chemin production est ordonné ainsi :
+
+1. validation read-only du checkpoint, de la config effective, des versions,
+   racines d'entrée, référence et sources avant toute préparation de référence ;
+2. utilisation obligatoire de la référence persistée (originale ou
+   `stacked/` selon l'opt-in `move_stacked`) et de la grille WCS persistée ;
+3. `initialize` reconstruit les trois accumulateurs natifs et restaure les
+   compteurs/ledger sans les remettre à zéro ;
+4. remplissage réel de la queue puis filtrage du préfixe complété ;
+5. validation du suffixe exact : identités/ordre **et décomposition de lots**.
+   Si `next_source_index` tombe dans un lot persisté, le premier lot attendu est
+   exactement son reliquat, suivi des frontières persistées inchangées ;
+6. relecture fraîche par `from_validated_result`, ré-arm N+1, réaffirmation de
+   `FINALIZATION_MODE_DRIZZLE`, puis seulement lancement du worker.
+
+Tout écart refuse avant writer/worker et laisse `checkpoint.json` byte-identique.
+La reprise n'est jamais inférée depuis les artefacts : l'intent explicite reste
+obligatoire. Limites D2B2B : pas de Qt dédié, pas de mosaïque, pas de
+reprojection, pas de migration de version, pas de Classic via ce chemin.
+
 ## 6. Risques techniques
 
 1. **État interne de `drizzle.resample.Drizzle`.** `Drizzle` maintient
@@ -493,7 +520,7 @@ explicite et opt-in** sans changer le comportement par défaut :
   réclame/possède son temp, le perdant échoue sur la collision d'artefact et
   nettoie, et le gagnant publie quand même — sans mutation d'octets étrangers.
 
-### 7.2 Recommandés pour la mission de reprise (D2, non exécutés)
+### 7.2 Matrice de reprise (historique/recommandations)
 
 - **Continuous vs checkpoint/resume** : même `source_manifest`, même WCS, même
   SCI/WHT à la tolérance définie (run continu complet vs run coupé à `k` poses
@@ -667,14 +694,25 @@ explicite et opt-in** sans changer le comportement par défaut :
   refuse un `stacked_subdir_name` invalide, et ne devine jamais un basename
   `_dup_`.
 
-## 8. Inventaire de la mission de reprise (D2) — reader + continuation-writer + source-resolution seam faits, activation lifecycle NON implémentée
+### 7.7 Exécutés en D2B2B (backend/headless)
 
-La fin de D1 ne complète pas RSM2 ; D2A livre le lecteur/validateur read-only
-et D2B1 livre le seam de continuation-writer (ré-arm monotone depuis un résultat
-validé), et D2B2A livre le seam de résolution de source opt-in (politique
-original-ou-`stacked/` déterministe, immuable, portée comme provenance).  Il
-reste à **activer la reprise** dans le lifecycle (D2B2,
-**volontairement non touchée par D1/D2A/D2B1/D2B2A**) :
+`tests/test_drizzle_resume_backend.py` couvre notamment :
+
+- le témoin natif coupure/reprise bit-identique `square` + `lanczos2`, puis
+  commit monotone N+1 ;
+- un vrai appel `start_processing(resume_intent="resume")` qui traverse la
+  préparation de référence, `initialize`, queue fill/filter, préflight,
+  ré-arm et lancement d'un worker borné ; il observe la référence persistée,
+  SCI/WHT non nuls, compteurs restaurés, suffixe exact et finalisation Drizzle ;
+- acceptation de la décomposition suffixe exacte et refus d'un regroupement de
+  la même liste de sources avant continuation ;
+- refus production sans lancement worker et avec manifeste byte-identique.
+
+## 8. État de la mission de reprise (D2)
+
+D2A livre le lecteur/validateur read-only, D2B1 le ré-arm monotone, D2B2A la
+résolution opt-in original-ou-`stacked/`, et D2B2B active leur composition dans
+le lifecycle backend/headless borné :
 
 - ✅ lire/valider `checkpoint.json` et vérifier SHA-256/taille de chaque
   artefact avant réinjection (fait en D2A) ;
@@ -692,11 +730,10 @@ reste à **activer la reprise** dans le lifecycle (D2B2,
   identités canoniques distinctes résolvant vers un même chemin restent
   refusées) tout en acceptant la **répétition légitime de la même identité**
   (référence d'alignement également présente dans le plan) (fait en D2B2A) ;
-- réaffirmer `FINALIZATION_MODE_DRIZZLE` et reprendre strictement après
-  `last_processed_index` ;
-- activer le chemin Resume Drizzle dans `_build_startup_refusal` /
-  `_validate_resume_headless` / `_validate_and_open_resume` / Qt readiness —
-  chemins **volontairement non touchés** par D1, D2A, D2B1 et D2B2A ;
-- coordonner la politique *source move / re-stat* du lifecycle avec la reprise
-  (le **seam** de résolution est livré en D2B2A ; le **wiring** lifecycle reste
-  reporté à D2B2 et non modifié).
+- ✅ réaffirmer `FINALIZATION_MODE_DRIZZLE`, restaurer compteurs/SCI/WHT et
+  reprendre strictement après `next_source_index` (fait en D2B2B) ;
+- ✅ coordonner queue réelle, ledger, décomposition et politique
+  *source move / re-stat* avant le lancement worker (fait en D2B2B) ;
+- ⏳ intégration Qt dédiée / readiness utilisateur : hors périmètre D2B2B ;
+- ⏳ mosaïque/reprojection et migrations de versions : explicitement non
+  supportées, à traiter uniquement par missions séparées.

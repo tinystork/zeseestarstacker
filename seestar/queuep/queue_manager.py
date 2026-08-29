@@ -285,7 +285,9 @@ from ..core.drizzle_background import (
 from ..core.drizzle_checkpoint import (
     DrizzleCheckpointError,
     DrizzleCheckpointWriter,
+    SafeStackedSourceResolver,
     build_drizzle_canonical_config,
+    read_drizzle_checkpoint,
 )
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
@@ -3498,6 +3500,12 @@ class SeestarQueuedStacker:
         self._drizzle_checkpoint_plan = None
         self._drizzle_completed_sources = []
         self._drizzle_checkpoint_last_committed_frames = 0
+        # RSM2-D2B2B: read-only validated Drizzle resume token.  It is created
+        # during the pre-reference startup preflight and consumed only by the
+        # continuation factory's mandatory fresh disk re-read before worker
+        # launch.  Fresh Drizzle runs leave both fields ``None``.
+        self._drizzle_resume_result = None
+        self._drizzle_resume_continuation = None
         # RSM2-02B1: canonical classic run config cache (schema v2) and the
         # effective manifest schema version this session writes.  A fresh run
         # writes v2; a session opened from a v1 manifest keeps v1 write
@@ -4236,17 +4244,39 @@ class SeestarQueuedStacker:
                 self.drizzle_pixfrac_requested = pixfrac_requested
                 self.drizzle_wht_threshold_requested = wht_threshold_requested
                 self.drizzle_wht_threshold_effective = wht_threshold_eff
-                self.drizzle_accumulators = [
-                    DrizzleAccumulator(
-                        out_shape_hw, kernel=kernel_eff, pixfrac=pixfrac_eff
+                resume_result = getattr(self, "_drizzle_resume_result", None)
+                if resume_result is not None:
+                    if tuple(resume_result.output_shape_hw) != out_shape_hw:
+                        raise DrizzleCheckpointError(
+                            "restored Drizzle output shape differs from the "
+                            "checkpoint grid"
+                        )
+                    current_cfg = build_drizzle_canonical_config(
+                        self, product_version=self._canonical_product_version()
                     )
-                    for _ in range(3)
-                ]
+                    if current_cfg.full_digest() != resume_result.config.full_digest():
+                        raise DrizzleCheckpointError(
+                            "restored Drizzle configuration differs from the "
+                            "validated checkpoint"
+                        )
+                    # Native SCI/WHT state only: never reconstruct a derived
+                    # science image or reinterpret signed Lanczos weights.
+                    self.drizzle_accumulators = resume_result.accumulators
+                else:
+                    self.drizzle_accumulators = [
+                        DrizzleAccumulator(
+                            out_shape_hw, kernel=kernel_eff, pixfrac=pixfrac_eff
+                        )
+                        for _ in range(3)
+                    ]
                 # Attribut legacy conservé (plus utilisé) : le mode
                 # Incrémental/Final historique est désormais sans effet.
                 self.incremental_drizzle_objects = []
-                self._drizzle_frame_count = 0
-                self._drizzle_group_index = 0
+                if resume_result is not None:
+                    self._restore_drizzle_checkpoint_runtime(resume_result)
+                else:
+                    self._drizzle_frame_count = 0
+                    self._drizzle_group_index = 0
                 # RSM2-D1: arm the native Drizzle checkpoint for this standard
                 # (non-mosaic) Drizzle run.  The writer itself is created later
                 # in ``_init_drizzle_checkpoint`` (after the queue/plan and the
@@ -4254,9 +4284,18 @@ class SeestarQueuedStacker:
                 # ever published from this flag alone.
                 self._drizzle_checkpoint_enabled = True
                 self._drizzle_checkpoint_writer = None
-                self._drizzle_checkpoint_plan = None
-                self._drizzle_completed_sources = []
-                self._drizzle_checkpoint_last_committed_frames = 0
+                self._drizzle_checkpoint_plan = (
+                    resume_result.session["plan"]
+                    if resume_result is not None
+                    else None
+                )
+                if resume_result is None:
+                    self._drizzle_completed_sources = []
+                    self._drizzle_checkpoint_last_committed_frames = 0
+                else:
+                    self._drizzle_checkpoint_last_committed_frames = int(
+                        resume_result.counters["frame_count"]
+                    )
                 # Persistent effective-runtime configuration line (Qt durable
                 # run log + logger): one concise line, never requested/effective
                 # confusion.
@@ -4406,23 +4445,27 @@ class SeestarQueuedStacker:
         # count (and keep the completed-source ledger) when a valid checkpoint
         # was reopened above.
         if getattr(self, "_resume_active", False):
-            self.stacked_batches_count = int(
-                getattr(self, "_resume_pending_count", 0) or 0
-            )
-            self.images_in_cumulative_stack = int(
-                getattr(self, "_resume_images_in_cumulative_stack", 0) or 0
-            )
-            self.total_exposure_seconds = float(
-                getattr(self, "_resume_total_exposure_seconds", 0.0) or 0.0
-            )
-            self._exposure_unknown_count = int(
-                getattr(self, "_resume_exposure_unknown_count", 0) or 0
-            )
-            self._exposure_min = getattr(self, "_resume_exposure_min", None)
-            self._exposure_max = getattr(self, "_resume_exposure_max", None)
-            self.current_stack_header = self._header_from_serialized(
-                getattr(self, "_resume_cumulative_header", None)
-            )
+            drizzle_resume = getattr(self, "_drizzle_resume_result", None)
+            if drizzle_resume is not None:
+                self._restore_drizzle_checkpoint_runtime(drizzle_resume)
+            else:
+                self.stacked_batches_count = int(
+                    getattr(self, "_resume_pending_count", 0) or 0
+                )
+                self.images_in_cumulative_stack = int(
+                    getattr(self, "_resume_images_in_cumulative_stack", 0) or 0
+                )
+                self.total_exposure_seconds = float(
+                    getattr(self, "_resume_total_exposure_seconds", 0.0) or 0.0
+                )
+                self._exposure_unknown_count = int(
+                    getattr(self, "_resume_exposure_unknown_count", 0) or 0
+                )
+                self._exposure_min = getattr(self, "_resume_exposure_min", None)
+                self._exposure_max = getattr(self, "_resume_exposure_max", None)
+                self.current_stack_header = self._header_from_serialized(
+                    getattr(self, "_resume_cumulative_header", None)
+                )
         logger.debug(
             "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Initialisation terminée avec succès."
         )
@@ -13013,6 +13056,11 @@ class SeestarQueuedStacker:
         out = Path(out_dir)
         memdir = out / "memmap_accumulators"
         candidates = [
+            # Native standard-Drizzle state is a first-class Resume Contract
+            # artifact.  Include the namespace itself (not only its manifest)
+            # so a partial/corrupt checkpoint is routed through strict
+            # validation instead of being mistaken for an empty output.
+            out / ".m3d_checkpoint",
             memdir / "cumulative_SUM.npy",
             memdir / "cumulative_WHT.npy",
             memdir / _RESUME_MANIFEST_FILENAME,
@@ -13072,7 +13120,7 @@ class SeestarQueuedStacker:
         return ``None`` so they stay generic.
         """
         if getattr(self, "_resume_requested", False):
-            if not self._is_plain_classic():
+            if not self._is_plain_classic() and not self._is_drizzle_resume_mode():
                 return StartupRefusal(
                     StartupRefusal.CODE_RESUME_MODE_UNSUPPORTED,
                     early_result,
@@ -13385,6 +13433,46 @@ class SeestarQueuedStacker:
         sources, decomposition, _has_breaks = self._scan_queue_decomposition()
         return {"sources": sources, "decomposition": decomposition}
 
+    @staticmethod
+    def _decomposition_suffix_at_index(decomposition, next_source_index):
+        """Return the exact remaining batch decomposition at a source boundary.
+
+        Native Drizzle checkpoints may be committed after an accepted frame,
+        including inside a queue batch.  In that case the first remaining
+        batch is the unconsumed tail of the persisted batch; all later batch
+        boundaries remain unchanged.  Invalid decompositions/indexes fail
+        closed instead of being normalized or guessed.
+        """
+        try:
+            index = int(next_source_index)
+            parts = [int(value) for value in decomposition]
+        except (TypeError, ValueError):
+            raise DrizzleCheckpointError(
+                "invalid persisted Drizzle batch decomposition"
+            )
+        if index < 0 or any(value <= 0 for value in parts):
+            raise DrizzleCheckpointError(
+                "invalid persisted Drizzle batch decomposition"
+            )
+        total = sum(parts)
+        if index > total:
+            raise DrizzleCheckpointError(
+                "Drizzle next source index exceeds persisted decomposition"
+            )
+        if index == total:
+            return []
+
+        consumed = 0
+        for batch_index, batch_size in enumerate(parts):
+            batch_end = consumed + batch_size
+            if index < batch_end:
+                first_remaining = batch_end - index
+                return [first_remaining, *parts[batch_index + 1 :]]
+            consumed = batch_end
+        raise DrizzleCheckpointError(
+            "Drizzle next source index is outside persisted decomposition"
+        )
+
     def _validate_plan_against_manifest(self):
         """Validate the persisted plan against the current (post-filter) queue.
 
@@ -13670,6 +13758,103 @@ class SeestarQueuedStacker:
         if report.config.scientific != sci:
             return (False, "manifest scientific_config differs from run_config.cfg")
         return (True, None)
+
+    def _is_drizzle_resume_mode(self):
+        """True only for the supported standard, non-mosaic Drizzle resume."""
+        return (
+            bool(getattr(self, "drizzle_active_session", False))
+            and not bool(getattr(self, "is_mosaic_run", False))
+            and not bool(getattr(self, "reproject_between_batches", False))
+            and not bool(getattr(self, "reproject_coadd_final", False))
+        )
+
+    def _normalize_effective_drizzle_config(self):
+        """Apply the same deterministic effective Drizzle policy as initialize.
+
+        This is in-memory only and is intentionally called by the read-only
+        startup preflight so configuration incompatibility is rejected before
+        reference preparation or any output write.
+        """
+        kernel_eff, _kernel_reason = validate_drizzle_kernel(
+            getattr(self, "drizzle_kernel", "square")
+        )
+        pixfrac_requested, _pixfrac_reason = validate_drizzle_pixfrac(
+            getattr(self, "drizzle_pixfrac", 1.0)
+        )
+        is_lanczos = kernel_eff in LANCZOS_KERNELS
+        self.drizzle_kernel = kernel_eff
+        self.drizzle_pixfrac_requested = pixfrac_requested
+        self.drizzle_pixfrac = 1.0 if is_lanczos else pixfrac_requested
+        requested_wht = float(
+            getattr(self, "drizzle_wht_threshold", 0.0) or 0.0
+        )
+        self.drizzle_wht_threshold_requested = requested_wht
+        self.drizzle_wht_threshold_effective = (
+            0.0 if is_lanczos else requested_wht
+        )
+
+    def _restore_drizzle_checkpoint_runtime(self, restored):
+        """Restore the exact native Drizzle lifecycle state from disk truth.
+
+        ``restored`` may be the validated read result used during initialize or
+        the freshly re-read continuation returned by the writer factory.  This
+        single seam prevents the common initialize reset from silently zeroing
+        counters that belong to the already accumulated native SCI/WHT state.
+        """
+        counters = restored.counters
+        self.drizzle_accumulators = restored.accumulators
+        self._drizzle_frame_count = int(counters["frame_count"])
+        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        self._drizzle_group_index = self._drizzle_frame_count // group_size
+        self.stacked_batches_count = int(counters["stacked_batches_count"])
+        self.total_exposure_seconds = float(counters["total_exposure_seconds"])
+        self._exposure_unknown_count = int(counters["exposure_unknown_count"])
+        self._exposure_min = counters["exposure_min"]
+        self._exposure_max = counters["exposure_max"]
+        self._drizzle_completed_sources = list(restored.completed_sources)
+        self._resume_completed_sources = list(restored.completed_sources)
+        self._resume_plan = restored.session["plan"]
+        self._resume_input_roots = list(restored.session["input_roots"])
+        self._resume_reference_identity = restored.session["reference"]
+        self._resume_active = True
+
+    def _validate_drizzle_resume_headless(self):
+        """Validate a native Drizzle checkpoint without mutating disk/runtime.
+
+        The reader is strict by default.  The immutable original-or-stacked
+        resolver is opted into only when this lifecycle is configured to move
+        successfully consumed sources into ``stacked/``.
+        """
+        if not self._is_drizzle_resume_mode():
+            return (False, "Drizzle resume requires standard non-mosaic mode", None)
+        try:
+            self._normalize_effective_drizzle_config()
+            resolver = None
+            if getattr(self, "move_stacked", False):
+                resolver = SafeStackedSourceResolver(
+                    getattr(self, "stacked_subdir_name", "stacked")
+                )
+            result = read_drizzle_checkpoint(
+                self.output_folder,
+                require_exact_versions=True,
+                resolver=resolver,
+            )
+            current_cfg = build_drizzle_canonical_config(
+                self, product_version=self._canonical_product_version()
+            )
+            if current_cfg.full_digest() != result.config.full_digest():
+                return (False, "Drizzle scientific configuration mismatch", None)
+            current_roots = sorted(
+                list(getattr(self, "_resume_input_roots", None) or [])
+            )
+            persisted_roots = sorted(
+                list((result.session or {}).get("input_roots") or [])
+            )
+            if current_roots != persisted_roots:
+                return (False, "Drizzle session input roots mismatch", None)
+            return (True, result, result.resolved_reference)
+        except Exception as exc:
+            return (False, f"invalid Drizzle checkpoint: {exc}", None)
 
     def _validate_resume_headless(self):
         """Read-only, shape-independent resume validation.
@@ -14128,8 +14313,18 @@ class SeestarQueuedStacker:
         self._resume_preflight_passed = False
         self._resume_preflight_manifest = None
         self._resume_preflight_resolved_ref = None
+        self._drizzle_resume_result = None
+        self._drizzle_resume_continuation = None
         if not getattr(self, "_resume_requested", False):
             return (True, None)
+        if self._is_drizzle_resume_mode():
+            ok, result, resolved_ref = self._validate_drizzle_resume_headless()
+            if not ok:
+                return (False, result)
+            self._drizzle_resume_result = result
+            self._resume_preflight_passed = True
+            self._resume_preflight_resolved_ref = resolved_ref
+            return (True, resolved_ref)
         ok, manifest, resolved_ref = self._validate_resume_headless()
         if not ok:
             return (False, manifest)
@@ -18799,6 +18994,14 @@ class SeestarQueuedStacker:
                 files_in_folder_for_shape,
                 reference_header_for_shape_determination,
             )
+            drizzle_resume_result = getattr(self, "_drizzle_resume_result", None)
+            if drizzle_resume_result is not None and not _identities_equivalent(
+                drizzle_resume_result.session.get("reference"),
+                self._resume_reference_identity,
+            ):
+                raise DrizzleCheckpointError(
+                    "session reference identity differs from the Drizzle checkpoint"
+                )
             logger.debug(
                 f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}"
             )
@@ -19037,6 +19240,20 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"WARN start_processing: erreur creation grille fixe: {e_fix}"
                 )
+
+        # RSM2-D2B2B: the persisted output grid is authoritative on resume.
+        # Reference preparation still supplies the immutable input reference
+        # used by registration, but must never silently recompute/change the
+        # Drizzle deposition grid across Stop -> Resume.
+        drizzle_resume_result = getattr(self, "_drizzle_resume_result", None)
+        if drizzle_resume_result is not None:
+            self.drizzle_output_wcs = drizzle_resume_result.wcs
+            self.drizzle_output_shape_hw = tuple(
+                drizzle_resume_result.output_shape_hw
+            )
+            self.fixed_output_wcs = drizzle_resume_result.wcs
+            self.fixed_output_shape = tuple(drizzle_resume_result.output_shape_hw)
+            self.reference_shape = tuple(drizzle_resume_result.output_shape_hw)
 
         init_shape_hwc = ref_shape_hwc
         if (
@@ -19697,6 +19914,44 @@ class SeestarQueuedStacker:
         if not getattr(self, "_drizzle_checkpoint_enabled", False):
             return True
         try:
+            resume_result = getattr(self, "_drizzle_resume_result", None)
+            if resume_result is not None:
+                (
+                    current_remaining,
+                    current_decomposition,
+                    _has_breaks,
+                ) = self._scan_queue_decomposition()
+                persisted_plan = resume_result.session["plan"]
+                persisted_sources = persisted_plan["sources"]
+                next_index = int(resume_result.next_source_index)
+                if current_remaining != persisted_sources[next_index:]:
+                    raise DrizzleCheckpointError(
+                        "remaining Drizzle observation set/order differs from "
+                        "the validated checkpoint plan"
+                    )
+                expected_decomposition = self._decomposition_suffix_at_index(
+                    persisted_plan["decomposition"], next_index
+                )
+                if current_decomposition != expected_decomposition:
+                    raise DrizzleCheckpointError(
+                        "remaining Drizzle batch decomposition differs from "
+                        "the validated checkpoint plan"
+                    )
+                continuation = DrizzleCheckpointWriter.from_validated_result(
+                    resume_result
+                )
+                # The continuation object is the only authoritative runtime
+                # state: it comes from the factory's fresh full disk re-read.
+                self._drizzle_resume_continuation = continuation
+                self._drizzle_checkpoint_writer = continuation.writer
+                self._drizzle_checkpoint_plan = continuation.session["plan"]
+                self._restore_drizzle_checkpoint_runtime(continuation)
+                self.finalization_mode = FINALIZATION_MODE_DRIZZLE
+                self._drizzle_checkpoint_last_committed_frames = int(
+                    continuation.counters["frame_count"]
+                )
+                return True
+
             self._drizzle_checkpoint_plan = self._capture_plan_from_queue()
             cfg = build_drizzle_canonical_config(
                 self, product_version=self._canonical_product_version()
