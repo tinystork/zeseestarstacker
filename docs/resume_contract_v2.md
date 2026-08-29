@@ -85,4 +85,3 @@ load. Secret values are never echoed in exceptions or logs.
 - Mosaic resume — unsupported.
 - Reprojection resume — unsupported.
 - Arbitrary FIT-as-checkpoint recovery — unsupported.
-
