@@ -33,6 +33,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from seestar import run_contract, resume_locator
+from seestar.core.drizzle_checkpoint import build_drizzle_canonical_config
 from seestar.gui_qt import MainWindow, create_application
 from seestar.gui_qt.settings_state import QtSettingsState
 
@@ -82,6 +83,68 @@ def _write_legacy_cfg(run_dir: Path, data: dict, name="_stack_legacy.cfg") -> Pa
     p = run_dir / name
     p.write_text(json.dumps(data), encoding="utf-8")
     return p
+
+
+def _drizzle_config(*, scale=2.0, kernel="square", pixfrac=0.8, wht=0.2):
+    class Qm:
+        weighting_method = "none"
+        use_quality_weighting = False
+        weight_by_snr = True
+        weight_by_stars = True
+        snr_exponent = 1.0
+        stars_exponent = 0.5
+        min_weight = 0.01
+        correct_hot_pixels = True
+        hot_pixel_threshold = 3.0
+        neighborhood_size = 5
+        bayer_pattern = "GRBG"
+        drizzle_scale = scale
+        drizzle_kernel = kernel
+        drizzle_pixfrac = pixfrac
+        drizzle_wht_threshold_effective = wht
+        drizzle_fillval = "0.0"
+
+    return build_drizzle_canonical_config(Qm(), product_version="8.2.0")
+
+
+def _write_drizzle_checkpoint(run_dir: Path, cfg) -> Path:
+    ckpt = run_dir / ".m3d_checkpoint"
+    ckpt.mkdir(parents=True, exist_ok=True)
+    channels = []
+    for channel in range(3):
+        artifacts = {}
+        for kind in ("img", "wht"):
+            filename = f"gen-00000001-ch{channel}-out_{kind}.npy"
+            (ckpt / filename).write_bytes(b"test-array")
+            artifacts[f"out_{kind}"] = {"file": filename}
+        channels.append({"channel": channel, **artifacts})
+    manifest = {
+        "schema_version": 1,
+        "mode": "drizzle_native_v1",
+        "state": "clean",
+        "generation": 1,
+        "product_version": cfg.product_version,
+        "producer": "zeseestarstacker",
+        "drizzle_lib_version": "test",
+        "numpy_version": "test",
+        "output_shape_hw": [8, 8],
+        "wcs": {"CTYPE1": "RA---TAN"},
+        "scientific_fingerprint": cfg.drizzle_fingerprint(),
+        "scientific_config": cfg.scientific,
+        "run_config_digest": cfg.full_digest(),
+        "frame_count": 1,
+        "stacked_batches_count": 1,
+        "total_exposure_seconds": 10.0,
+        "exposure_unknown_count": 0,
+        "exposure_min": 10.0,
+        "exposure_max": 10.0,
+        "session": {},
+        "completed_sources": [],
+        "channels": channels,
+    }
+    path = ckpt / "checkpoint.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
 
 
 def _snapshot(path: Path) -> dict:
@@ -161,6 +224,92 @@ def test_discover_v2_cfg_with_manifest_ready(tmp_path):
     assert result.run_dir == str(run_dir)
     assert result.config_source == "v2"
     assert result.config.scientific["stacking_mode"] == "median"
+    assert result.checkpoint_kind == resume_locator.CHECKPOINT_KIND_CLASSIC
+
+
+def test_discover_drizzle_v2_cfg_ready_from_nested_locator(tmp_path):
+    run_dir = tmp_path / "run"
+    nested = run_dir / "preview" / "deep"
+    nested.mkdir(parents=True)
+    cfg = _drizzle_config(scale=3.0, kernel="gaussian", pixfrac=0.7, wht=0.25)
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    _write_drizzle_checkpoint(run_dir, cfg)
+
+    result = resume_locator.discover_resume(str(nested / "final.fits"))
+
+    assert result.status == resume_locator.STATUS_READY
+    assert result.run_dir == str(run_dir)
+    assert result.config_source == "v2"
+    assert result.checkpoint_kind == resume_locator.CHECKPOINT_KIND_DRIZZLE
+
+
+@pytest.mark.parametrize("payload", ["{", "{}"])
+def test_discover_drizzle_corrupt_or_incomplete_manifest_refuses(tmp_path, payload):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config()
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    path = run_dir / ".m3d_checkpoint" / "checkpoint.json"
+    path.parent.mkdir()
+    path.write_text(payload, encoding="utf-8")
+
+    result = resume_locator.discover_resume(str(run_dir))
+
+    assert result.status == resume_locator.STATUS_CORRUPT_CHECKPOINT
+
+
+def test_discover_drizzle_requires_v2_and_never_migrates_legacy(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config()
+    _write_drizzle_checkpoint(run_dir, cfg)
+    _write_legacy_cfg(run_dir, {"version": "5.6.0", "use_drizzle": True})
+
+    result = resume_locator.discover_resume(str(run_dir))
+
+    assert result.status == resume_locator.STATUS_CONFIG_UNAVAILABLE
+    assert result.config is None
+    assert result.checkpoint_kind == resume_locator.CHECKPOINT_KIND_DRIZZLE
+
+
+def test_discover_both_checkpoint_kinds_refuses_ambiguity(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config()
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    _write_manifest(run_dir)
+    _write_drizzle_checkpoint(run_dir, cfg)
+
+    result = resume_locator.discover_resume(str(run_dir))
+
+    assert result.status == resume_locator.STATUS_AMBIGUOUS_CHECKPOINT
+    assert result.config is None
+
+
+def test_discover_drizzle_missing_artifact_refuses_incomplete_checkpoint(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config()
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    _write_drizzle_checkpoint(run_dir, cfg)
+    (run_dir / ".m3d_checkpoint" / "gen-00000001-ch2-out_wht.npy").unlink()
+
+    result = resume_locator.discover_resume(str(run_dir))
+
+    assert result.status == resume_locator.STATUS_CORRUPT_CHECKPOINT
+
+
+def test_discover_drizzle_cfg_manifest_mismatch_refuses(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    original = _drizzle_config(kernel="square", pixfrac=0.8)
+    mismatched = _drizzle_config(kernel="lanczos2", pixfrac=1.0)
+    run_contract.write_cfg(mismatched, str(run_dir / "run_config.cfg"))
+    _write_drizzle_checkpoint(run_dir, original)
+
+    result = resume_locator.discover_resume(str(run_dir))
+
+    assert result.status == resume_locator.STATUS_CORRUPT_CHECKPOINT
 
 
 def test_discover_cfg_only_without_checkpoint_refuses(tmp_path):
@@ -384,6 +533,96 @@ def test_explicit_resume_from_nested_fit(tmp_path, window):
     state = window.collect_settings_state()
     assert state.resume_source == str(run_dir)
     assert state.output_folder == str(run_dir)
+
+
+@pytest.mark.parametrize(
+    "scale,kernel,pixfrac,wht",
+    [
+        (3.0, "gaussian", 0.65, 0.3),
+        # Requested pixfrac is intentionally unavailable in a canonical D1
+        # checkpoint; Lanczos restores the persisted effective value honestly.
+        (1.0, "lanczos3", 1.0, 0.0),
+    ],
+)
+def test_explicit_resume_drizzle_restores_effective_request(
+    tmp_path, window, scale, kernel, pixfrac, wht
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config(scale=scale, kernel=kernel, pixfrac=pixfrac, wht=wht)
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    _write_drizzle_checkpoint(run_dir, cfg)
+    # Start from deliberately incompatible visible state; restore must not
+    # accidentally leave Classic, mosaic, or reproject armed.
+    window.drizzle_check.setChecked(False)
+    window.mosaic_active_check.setChecked(True)
+    window.final_combine_combo.setCurrentText("Reproject + coadd")
+    window.last_stack_edit.setText(str(run_dir / "final.fits"))
+
+    window.resume_mode_combo.setCurrentIndex(1)
+
+    state = window.collect_settings_state()
+    request = window.build_run_request()
+    kw = request.backend_kwargs
+    assert state.resume_intent == "resume"
+    assert state.resume_source == str(run_dir)
+    assert state.use_drizzle is True
+    assert state.drizzle_mode == "Final"
+    assert state.drizzle_scale == int(scale)
+    assert state.drizzle_kernel == kernel
+    assert state.drizzle_pixfrac == pytest.approx(pixfrac)
+    assert state.drizzle_wht_threshold == pytest.approx(wht)
+    assert state.mosaic_mode_active is False
+    assert state.reproject_between_batches is False
+    assert state.reproject_coadd_final is False
+    assert request.resume_intent == "resume"
+    assert request.resume_source == str(run_dir)
+    assert kw["output_dir"] == str(run_dir)
+    assert kw["use_drizzle"] is True
+    assert kw["drizzle_mode"] == "Final"
+    assert kw["drizzle_scale"] == pytest.approx(scale)
+    assert kw["drizzle_kernel"] == kernel
+    assert kw["drizzle_pixfrac"] == pytest.approx(pixfrac)
+    assert kw["drizzle_wht_threshold"] == pytest.approx(wht)
+    assert kw["is_mosaic_run"] is False
+    assert kw["reproject_between_batches"] is False
+    assert kw["reproject_coadd_final"] is False
+
+
+def test_explicit_resume_drizzle_refusal_never_arms(tmp_path, window):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config()
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    path = _write_drizzle_checkpoint(run_dir, cfg)
+    path.write_text("{}", encoding="utf-8")
+    window.last_stack_edit.setText(str(run_dir / "final.fits"))
+
+    window.resume_mode_combo.setCurrentIndex(1)
+
+    state = window.collect_settings_state()
+    assert window.resume_mode_combo.currentData() == "fresh"
+    assert state.resume_intent == "fresh"
+    assert state.resume_source == ""
+    assert window.build_run_request().resume_intent == "fresh"
+
+
+def test_drizzle_resume_then_new_clears_transient_intent(tmp_path, window):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cfg = _drizzle_config()
+    run_contract.write_cfg(cfg, str(run_dir / "run_config.cfg"))
+    _write_drizzle_checkpoint(run_dir, cfg)
+    window.last_stack_edit.setText(str(run_dir / "final.fits"))
+    window.resume_mode_combo.setCurrentIndex(1)
+    assert window.collect_settings_state().resume_intent == "resume"
+
+    window.resume_mode_combo.setCurrentIndex(0)
+
+    state = window.collect_settings_state()
+    assert state.resume_intent == "fresh"
+    assert state.resume_source == ""
+    assert window.build_run_request().resume_intent == "fresh"
 
 
 def test_resume_then_new_clears_only_transient_intent(tmp_path, window):

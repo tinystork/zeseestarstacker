@@ -249,6 +249,22 @@ Exemple de layout effectif (génération `00000003`) :
    dernier** ; fsync du répertoire de checkpoint après le replace.
    `checkpoint.json` est le seul point de commit.
 
+### 5.3 Préparation explicite de la reprise Qt
+
+Le sélecteur Qt `Reprendre` reconnaît ce checkpoint séparément du manifest
+Classic `memmap_accumulators/resume_manifest.json`. La readiness GUI exige le
+couple `checkpoint.json` + `run_config.cfg` v2 cohérent ; aucun CFG legacy n'est
+migré pour Drizzle. La présence simultanée des deux types de manifest est
+refusée sans arbitrage implicite.
+
+La restauration Qt active explicitement Drizzle standard non-mosaïque,
+désactive les deux chemins reproject, puis projette les valeurs canoniques
+`drizzle_scale_effective`, `drizzle_kernel_effective`,
+`drizzle_pixfrac_effective` et `drizzle_wht_threshold_effective` vers la requête
+backend. Une valeur requested absente n'est jamais reconstruite. Cette couche
+reste une prévalidation en lecture seule ; le backend conserve l'autorité de
+validation complète du checkpoint et des sources.
+
 Invariants de sûreté :
 
 - Un fichier référencé par le manifest actuellement commité n'est **jamais**

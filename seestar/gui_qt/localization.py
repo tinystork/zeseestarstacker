@@ -558,6 +558,26 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "restaurée de façon sûre."
         ),
     },
+    "resume_refuse_ambiguous_checkpoint": {
+        "en": (
+            "Both Classic and Drizzle checkpoints were found in this run. "
+            "Resume was not armed."
+        ),
+        "fr": (
+            "Des points de reprise Classic et Drizzle ont été trouvés dans "
+            "cette exécution. La reprise n’a pas été activée."
+        ),
+    },
+    "resume_refuse_corrupt_checkpoint": {
+        "en": (
+            "The Drizzle checkpoint is incomplete or inconsistent and was "
+            "not armed."
+        ),
+        "fr": (
+            "Le point de reprise Drizzle est incomplet ou incohérent et n’a "
+            "pas été activé."
+        ),
+    },
 }
 
 

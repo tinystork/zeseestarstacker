@@ -1240,7 +1240,10 @@ class MainWindow(QMainWindow):
         # in the exact Tk "Options Drizzle" order, before local solver.
         # Same widget specs as the former Expert fields.
         self.drizzle_scale_spin = QSpinBox()
-        self.drizzle_scale_spin.setRange(2, 4)
+        # x1 is a valid runtime-effective value and must remain representable
+        # when restoring a headless standard-Drizzle checkpoint.  The normal
+        # new-run default remains x2.
+        self.drizzle_scale_spin.setRange(1, 4)
         self.drizzle_scale_spin.setSingleStep(1)
         self.drizzle_scale_spin.setValue(int(self.settings_state.drizzle_scale))
 
@@ -2793,7 +2796,9 @@ class MainWindow(QMainWindow):
     def _apply_resume_result(self, result) -> None:
         """Restore the discovered config and arm an explicit Resume run intent."""
         state = self.settings_state
-        resume_locator.restore_to_settings(result.config, state)
+        resume_locator.restore_to_settings(
+            result.config, state, checkpoint_kind=result.checkpoint_kind
+        )
         # Coherent output folder: the resolved owning run directory.
         state.output_folder = result.run_dir
         state.resume_intent = RUN_INTENT_RESUME

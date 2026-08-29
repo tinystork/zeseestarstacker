@@ -111,7 +111,7 @@ def test_stacking_drizzle_and_scnr_controls_have_tk_defaults(window):
     # gate and keep the exact former Expert widget specs.
     assert isinstance(window.drizzle_scale_spin, QSpinBox)
     assert window.drizzle_scale_spin.value() == defaults["drizzle_scale"]  # 2
-    assert window.drizzle_scale_spin.minimum() == 2
+    assert window.drizzle_scale_spin.minimum() == 1
     assert window.drizzle_scale_spin.maximum() == 4
     assert window.drizzle_scale_spin.singleStep() == 1
 
@@ -149,7 +149,7 @@ def test_stacking_drizzle_and_scnr_controls_have_tk_defaults(window):
 
 
 # --------------------------------------------------------------------------
-# R3b: drizzle mode labels (Standard / Large dataset) + scale x2/x3/x4
+# R3b: drizzle mode labels (Standard / Large dataset) + scale x1/x2/x3/x4
 # --------------------------------------------------------------------------
 def test_drizzle_mode_combo_shows_labels_not_backend_values(window):
     """The combo displays user-facing labels; itemData keeps the backend value."""
@@ -174,17 +174,17 @@ def test_drizzle_mode_label_switches_value_to_state(window):
     assert state.drizzle_mode == "Final"
 
 
-def test_drizzle_scale_restricted_to_x2_x3_x4(window):
-    """drizzle_scale cannot be x1 (widget range 2-4) and defaults to 2."""
+def test_drizzle_scale_supports_runtime_effective_x1_through_x4(window):
+    """x1 is representable for checkpoint restore; new-run default remains x2."""
     scale = window.drizzle_scale_spin
     assert isinstance(scale, QSpinBox)
-    assert scale.minimum() == 2 and scale.maximum() == 4
+    assert scale.minimum() == 1 and scale.maximum() == 4
     assert scale.value() == 2
-    # x1 is not representable: setting 1 clamps to the minimum (2).
+    # x1 is a valid runtime-effective value for restored headless checkpoints.
     scale.setValue(1)
-    assert scale.value() == 2
+    assert scale.value() == 1
     state = window.collect_settings_state()
-    assert state.drizzle_scale == 2
+    assert state.drizzle_scale == 1
     # x3 round-trips through the model and the backend kwargs as a float.
     scale.setValue(3)
     state = window.collect_settings_state()

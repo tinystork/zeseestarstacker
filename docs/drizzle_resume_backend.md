@@ -19,3 +19,22 @@ Continuation always performs a fresh disk re-read and restores the three native
 SCI/WHT accumulators. It re-arms the writer at generation N+1, preserving signed
 Lanczos weights and cumulative exposure/counter truth. Fresh Drizzle and classic
 SUM/WHT behavior are unchanged.
+
+## Explicit Qt readiness
+
+The Qt **Resume** selector recognizes standard non-mosaic Drizzle runs through
+the pair `<run>/.m3d_checkpoint/checkpoint.json` and `<run>/run_config.cfg`.
+This is only a read-only readiness layer: it verifies the checkpoint identity
+and the canonical config digest/fingerprint, while the backend still performs
+the complete authoritative validation described above.
+
+On readiness, Qt builds an explicit Drizzle request with `resume_intent=resume`,
+`resume_source=<run>`, `use_drizzle=True`, and mosaic/reprojection disabled.
+Because the checkpoint CFG stores the runtime-effective deposition contract,
+the scale, kernel, pixfrac, and WHT threshold controls are restored from the
+`*_effective` fields. This includes restoring Lanczos pixfrac as `1.0`; the UI
+does not invent or claim an unavailable original requested value.
+
+Drizzle never falls back to a legacy CFG. A missing/corrupt/mismatched CFG or
+manifest leaves the selector Fresh. If Classic and Drizzle manifests coexist in
+one run directory, Qt refuses the ambiguous run rather than choosing one.
