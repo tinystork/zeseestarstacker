@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import locale
 import sys
 from typing import Callable, Optional, Sequence
 
@@ -22,6 +23,12 @@ def create_application(argv: Optional[Sequence[str]] = None) -> QApplication:
     if app is None:
         args = list(argv) if argv is not None else list(sys.argv)
         app = QApplication(args)
+        # QApplication's constructor calls setlocale(LC_NUMERIC, ""), which
+        # picks up the host locale (e.g. fr_FR -> comma decimal separator) and
+        # would break C extensions that parse "0.0" (cdrizzle.tdriz).  ZSSS
+        # scientific processing requires LC_NUMERIC == "C"; UI language stays
+        # in Qt, independent of the libc numeric locale.
+        locale.setlocale(locale.LC_NUMERIC, "C")
     return app
 
 
