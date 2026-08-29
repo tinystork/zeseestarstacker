@@ -33,6 +33,8 @@ import pytest
 
 from seestar.gui_qt.preview_analysis import (
     ANCHOR_DRIFT_HYSTERESIS,
+    ANCHOR_HI_PCT,
+    ANCHOR_LO_PCT,
     ANCHOR_SEP,
     AUTO_STRETCH_DEFAULTS,
     HISTOGRAM_BINS,
@@ -113,8 +115,8 @@ def test_anchors_percentile_and_degenerate_fallbacks():
     raw = rng.uniform(1.0, 100.0, size=(64, 64)).astype(np.float32)
     lo, hi = compute_anchors(raw)
     finite_pos = raw[(np.isfinite(raw)) & (raw > 0.0)]
-    assert lo == pytest.approx(np.percentile(finite_pos, 0.5))
-    assert hi == pytest.approx(np.percentile(finite_pos, 99.5))
+    assert lo == pytest.approx(np.percentile(finite_pos, ANCHOR_LO_PCT))
+    assert hi == pytest.approx(np.percentile(finite_pos, ANCHOR_HI_PCT))
     assert hi > lo + ANCHOR_SEP
 
     # Constant image -> finite min/max degenerate -> symmetric widening, valid.
@@ -197,8 +199,9 @@ def test_adapt_anchors_2x_3x_drift_no_whiteout():
         # Regression: before the fix the *entire* frame clipped to 1.0.
         assert frac1 < 0.5, f"scale={scale}: majority still clipped (frac1={frac1})"
         assert 0.0 < float(np.median(in_dom)) < 1.0
-        # Only the natural ~0.5% robust high tail is allowed to saturate.
-        assert frac1 < 0.05, f"scale={scale}: unexpected saturation frac1={frac1}"
+        # Only the top (100 - ANCHOR_HI_PCT)% ~ 5% of pixels (bright stars)
+        # are allowed to saturate.
+        assert frac1 < 0.10, f"scale={scale}: unexpected saturation frac1={frac1}"
 
 
 def test_adapt_anchors_dark_drift_widens_low_anchor():
@@ -254,6 +257,53 @@ def test_adapt_anchors_degenerate_and_invalid_inputs_safe():
     # handled without raising and stays non-degenerate.
     clo, chi = adapt_anchors_for_drift(lo, hi, np.full((16, 16), 1000.0))
     assert chi > clo
+
+
+def test_scene_top_anchor_prevents_long_run_collapse():
+    """PREVIEW-DRIFT-02 regression: a stable scene + a monotonically growing
+    bright star tail must NOT compress the scene toward 0 over a long run.
+
+    The previous p99.5 high anchor tracked the star tail, so the monotonic
+    drift ratchet widened the span permanently and collapsed the stable
+    scene's mapped value (and Auto Stretch's black point) toward 0.  The
+    scene-top anchor (ANCHOR_HI_PCT = 95) keeps the scene mapping stable; only
+    the stars above p95 saturate.
+    """
+    n = 400 * 400
+    q = np.linspace(0.0, 1.0, n, endpoint=True)
+    star_frac = 0.02
+    thr = 1.0 - star_frac
+
+    def build(k, drift_rate=0.03):
+        v = np.empty(n)
+        low = q < thr
+        v[low] = 1000.0 + 5000.0 * (q[low] / thr) ** 1.5
+        tq = (q[~low] - thr) / star_frac
+        v[~low] = (8000.0 + 12000.0 * tq) * (1.0 + drift_rate * k)
+        return v.reshape(400, 400)
+
+    rep_raw = float(np.median(build(0)))
+    anchors = None
+    mapped_first = mapped_last = None
+    span_first = span_last = None
+    for k in range(61):
+        raw = build(k)
+        if anchors is None:
+            anchors = compute_anchors(raw)
+            span_first = anchors[1] - anchors[0]
+        else:
+            anchors = adapt_anchors_for_drift(*anchors, raw)
+        mapped = float(np.clip((rep_raw - anchors[0]) / (anchors[1] - anchors[0]), 0.0, 1.0))
+        if k == 0:
+            mapped_first = mapped
+        mapped_last = mapped
+        span_last = anchors[1] - anchors[0]
+
+    # The stable scene pixel must not collapse toward 0 across the run.
+    assert mapped_last == pytest.approx(mapped_first, abs=1e-9)
+    # The high anchor tracks the scene (p95), not the drifting star tail:
+    # the span stays bounded instead of growing with the star tail.
+    assert span_last <= 1.05 * span_first
 
 
 # ---------------------------------------------------------------------------

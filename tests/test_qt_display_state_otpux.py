@@ -148,7 +148,9 @@ def test_2x_3x_drift_accommodated_no_whiteout(qapp):
 
             pristine = win._pristine_float
             frac1 = float((pristine == 1.0).mean())
-            assert frac1 < 0.05, f"scale={scale}: majority saturated (frac1={frac1})"
+            # Only the top (100 - ANCHOR_HI_PCT)% ~ 5% (bright stars)
+            # saturate; the scene must not mass-clip.
+            assert frac1 < 0.10, f"scale={scale}: majority saturated (frac1={frac1})"
             assert 0.0 < float(np.median(pristine)) < 1.0
     finally:
         win.shutdown()

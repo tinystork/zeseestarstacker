@@ -4,7 +4,7 @@ Toolkit-free float-domain analysis for the Qt preview pipeline.  This module
 implements the ratified contracts in ``docs/output_truthfulness_preview_audit.md``:
 
 * §5.2 — Option A: backend carries ``(legacy_normalized, raw_linear)``; Qt owns
-  the stable/adaptive anchor mapping (p0.5 / p99.5, finite min/max fallback only
+  the stable/adaptive anchor mapping (p0.5 / p95, finite min/max fallback only
   when degenerate), so small changes preserve a fixed pixel's mapping while
   genuine photometric drift can widen the display range;
 * §5.3 — 512-bin float histogram over ``[0, 1]`` (RGB overlay or L mono),
@@ -49,9 +49,23 @@ HISTOGRAM_RANGE = (0.0, 1.0)
 # §5.2: anchor separation epsilon.
 ANCHOR_SEP = 1e-4
 
+# §5.2 anchor percentiles.  The low anchor is the robust dark floor
+# (p0.5); the high anchor is the *scene* top (p95), not the bright star
+# tail (p99.5).  Anchoring the high end to the star tail makes the display
+# mapping track the brightest pixels, which drift independently of the
+# stable scene on deep stacks (S/N improvement, transient bright frames,
+# exposure changes).  The monotonic drift ratchet then widens the span
+# permanently, compressing the scene toward 0 in mapped space and driving
+# Auto Stretch's black point to 0 on long runs (progressive darkening).
+# Anchoring to the scene top keeps the mapping stable while the top
+# (100 - ANCHOR_HI_PCT)% of pixels (stars) are allowed to saturate - normal
+# and desirable for astro display.  Display-only.
+ANCHOR_LO_PCT = 0.5
+ANCHOR_HI_PCT = 95.0
+
 # §5.2 (drift accommodation): hysteresis dead-band for the frozen-anchor
 # display mapping.  A new raw frame re-anchors (widens) only when its robust
-# percentile range (p0.5 / p99.5) has drifted beyond the frozen range by more
+# percentile range (p0.5 / p95) has drifted beyond the frozen range by more
 # than this fraction of the frozen span.  This keeps small frame-to-frame
 # photometric evolution *stable* (anti-pumping) while a legitimate 2x-3x
 # global drift widens the mapping before the preview white-outs.  Display-only;
@@ -253,7 +267,7 @@ def compute_anchors(raw_linear, sep: float = ANCHOR_SEP) -> Tuple[float, float]:
     """Compute fixed normalization anchors ``(lo, hi)`` from a raw-linear array.
 
     §5.2 Option A: anchors come from a deterministic finite-positive sample
-    (``percentile(sample, 0.5)`` / ``percentile(sample, 99.5)``), falling back
+    (``percentile(sample, ANCHOR_LO_PCT)`` / ``percentile(sample, ANCHOR_HI_PCT)``), falling back
     to the finite min/max *only* when that sample is degenerate (empty,
     non-finite, or ``hi <= lo + sep``).  Always returns ``(lo, hi)`` with
     ``hi > lo`` so the mapping is non-degenerate.
@@ -267,8 +281,8 @@ def compute_anchors(raw_linear, sep: float = ANCHOR_SEP) -> Tuple[float, float]:
 
     sample = _finite_positive_sample(np, arr)
     if sample is not None and sample.size > 0:
-        lo = float(np.percentile(sample, 0.5))
-        hi = float(np.percentile(sample, 99.5))
+        lo = float(np.percentile(sample, ANCHOR_LO_PCT))
+        hi = float(np.percentile(sample, ANCHOR_HI_PCT))
         if np.isfinite(lo) and np.isfinite(hi) and hi > lo + sep:
             return (lo, hi)
 
@@ -318,7 +332,7 @@ def adapt_anchors_for_drift(
     """Return the effective frozen anchors for a new raw-linear frame.
 
     §5.2 drift accommodation (display-only).  The frozen anchors are kept
-    bit-identical while the new frame's robust percentile range (p0.5 / p99.5)
+    bit-identical while the new frame's robust percentile range (p0.5 / p95)
     stays within a hysteresis band around them — so a fixed raw pixel keeps
     mapping identically across small (frame-to-frame) evolution, preserving the
     anti-pumping intent.  When the new frame's robust range has drifted beyond
@@ -353,8 +367,8 @@ def adapt_anchors_for_drift(
     sample = _finite_positive_sample(np, arr)
     if sample is None or sample.size == 0:
         return (lo, hi)
-    cur_lo = float(np.percentile(sample, 0.5))
-    cur_hi = float(np.percentile(sample, 99.5))
+    cur_lo = float(np.percentile(sample, ANCHOR_LO_PCT))
+    cur_hi = float(np.percentile(sample, ANCHOR_HI_PCT))
     if not (np.isfinite(cur_lo) and np.isfinite(cur_hi)):
         return (lo, hi)
 
