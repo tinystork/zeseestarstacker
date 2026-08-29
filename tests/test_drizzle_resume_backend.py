@@ -413,3 +413,69 @@ def test_runtime_restore_keeps_native_counters_and_ledger(tmp_path):
     assert qm.total_exposure_seconds == 2.0
     assert qm._resume_completed_sources == idents[:2]
     assert qm._resume_plan["sources"] == idents
+
+
+@pytest.mark.parametrize(
+    "decomposition, completed, batch_size, expected_suffix",
+    [
+        ([4, 4, 2], 3, 4, [1, 4, 2]),  # mid-batch: residual of the first 4
+        ([4, 4, 2], 4, 4, [4, 2]),     # aligned boundary
+    ],
+)
+def test_mid_batch_resume_uses_authoritative_suffix(
+    tmp_path, decomposition, completed, batch_size, expected_suffix
+):
+    n = sum(decomposition)
+    output = tmp_path / "out"
+    inputs = tmp_path / "inputs"
+    output.mkdir()
+    inputs.mkdir()
+    paths = []
+    for i in range(n):
+        p = inputs / ("src_%d.fit" % i)
+        hdu = fits.PrimaryHDU(np.full(SHAPE, i + 1, dtype=np.uint16))
+        hdu.header["EXPTIME"] = 1.0
+        hdu.writeto(p)
+        paths.append(p)
+    idents = [_identity(p) for p in paths]
+
+    qm = object.__new__(SeestarQueuedStacker)
+    _configure(qm, output, inputs, "square")
+    cfg = build_drizzle_canonical_config(
+        qm, product_version=qm._canonical_product_version()
+    )
+    writer = DrizzleCheckpointWriter(
+        output, qm._canonical_product_version(), cfg, _wcs(), SHAPE
+    )
+    accs = [DrizzleAccumulator(SHAPE, kernel="square", pixfrac=1.0) for _ in range(3)]
+    for i in range(completed):
+        _add(accs, _frame(i))
+    writer.commit(
+        accs,
+        session_binding={
+            "input_roots": [str(inputs)],
+            "reference": idents[0],
+            "plan": {"sources": idents, "decomposition": list(decomposition)},
+        },
+        counters={
+            "frame_count": completed,
+            "stacked_batches_count": completed,
+            "total_exposure_seconds": float(completed),
+            "exposure_unknown_count": 0,
+            "exposure_min": 1.0,
+            "exposure_max": 1.0,
+        },
+        completed_sources=idents[:completed],
+    )
+
+    ok, _ = qm._early_resume_preflight()
+    assert ok is True
+    qm.batch_size = batch_size
+    qm.queue = Queue()
+    for path in paths[completed:]:
+        qm.queue.put(str(path))
+
+    assert qm._init_drizzle_checkpoint() is True
+    assert qm._drizzle_resume_continuation is not None
+    _, decomp, _ = qm._scan_queue_decomposition()
+    assert decomp == expected_suffix

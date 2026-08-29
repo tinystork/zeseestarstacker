@@ -13486,6 +13486,31 @@ class SeestarQueuedStacker:
             "Drizzle next source index is outside persisted decomposition"
         )
 
+    def _install_resume_decomposition(self, decomposition):
+        """Rebuild the queue with batch-break tokens matching the decomposition.
+
+        The queue currently holds the exact remaining source suffix, but it was
+        re-batched from zero (losing the original mid-batch phase).  Rebuild it
+        with BATCH_BREAK_TOKEN boundaries so scan_queue_decomposition and the
+        worker both observe the authoritative remaining batch plan.
+        """
+        remaining = [
+            item for item in list(self.queue.queue) if item != _BATCH_BREAK_TOKEN
+        ]
+        new_queue = Queue()
+        idx = 0
+        n = len(decomposition)
+        for bi, batch_size in enumerate(decomposition):
+            for _ in range(int(batch_size)):
+                if idx >= len(remaining):
+                    break
+                new_queue.put(remaining[idx])
+                idx += 1
+            if bi < n - 1 and idx < len(remaining):
+                new_queue.put(_BATCH_BREAK_TOKEN)
+        self.queue = new_queue
+        self.use_batch_plan = True
+
     def _validate_plan_against_manifest(self):
         """Validate the persisted plan against the current (post-filter) queue.
 
@@ -19979,10 +20004,17 @@ class SeestarQueuedStacker:
                     persisted_plan["decomposition"], next_index
                 )
                 if current_decomposition != expected_decomposition:
-                    raise DrizzleCheckpointError(
-                        "remaining Drizzle batch decomposition differs from "
-                        "the validated checkpoint plan"
-                    )
+                    self._install_resume_decomposition(expected_decomposition)
+                    (
+                        _,
+                        current_decomposition,
+                        _has_breaks,
+                    ) = self._scan_queue_decomposition()
+                    if current_decomposition != expected_decomposition:
+                        raise DrizzleCheckpointError(
+                            "remaining Drizzle batch decomposition differs from "
+                            "the validated checkpoint plan"
+                        )
                 continuation = DrizzleCheckpointWriter.from_validated_result(
                     resume_result
                 )
