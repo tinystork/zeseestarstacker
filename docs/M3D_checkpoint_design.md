@@ -1,12 +1,15 @@
 # M3-D — Design de checkpoint / reprise (D1 writer implémenté, reprise NON implémentée)
 
 Statut : **D1 (writer) IMPLÉMENTÉ** — écriture atomique du checkpoint natif
-Drizzle (RSM2-D1).  La **reprise** (reader / restore / activation de Resume)
-reste **NON implémentée** et n'est pas autorisée à démarrer automatiquement
-(voir §7).  Ce document fige l'état mathématique à préserver, le protocole
-d'écriture copy-on-write effectivement livré en D1, et les contraintes que
-devra respecter une éventuelle mission de reprise **sans changer la science**
-du drizzle M3.
+Drizzle (RSM2-D1) — et **D2A (reader) IMPLÉMENTÉ** — lecteur/validateur
+*lecture seule* `read_drizzle_checkpoint` qui reconstruit les trois
+accumulateurs après validation complète (RSM2-D2A).  L'**activation de Resume**
+(wiring lifecycle D2B dans `queue_manager` / GUI / startup) reste **NON
+implémentée** et n'est pas autorisée à démarrer automatiquement (voir §7/§8).
+Ce document fige l'état mathématique à préserver, le protocole d'écriture
+copy-on-write effectivement livré en D1, le contrat du lecteur D2A, et les
+contraintes que devra respecter l'activation de reprise **sans changer la
+science** du drizzle M3.
 
 ## 1. Objectif
 
@@ -207,7 +210,12 @@ Exemple de layout effectif (génération `00000003`) :
    buffers float32 finis, compteurs finis et cohérents (`exposure_min <=
    exposure_max`, `exposure_unknown_count <= frame_count`), liaison de session
    présente, identités de plan/ledger strictes (entiers non-bool, sans
-   doublon), config canonique bien formée.
+   doublon), config canonique bien formée, et **paramètres de dépôt runtime**
+   (`kernel` / `pixfrac` / `fillval` des accumulateurs) **en accord avec les
+   champs scientifiques canoniques** (`drizzle_kernel_effective` /
+   `drizzle_pixfrac_effective` / `drizzle_fillval`) — préflight writer
+   (durcissement de validation, pas de refonte du protocole) qui empêche D1 de
+   publier des paramètres runtime en désaccord avec `run_config.cfg`.
 2. **Invariant manifest auto-cohérent** : `len(completed_sources) ==
    frame_count`, `completed_sources == plan.sources[:frame_count]` exactement
    (préfixe ordonné) et `frame_count <= len(plan.sources)` ;
@@ -327,7 +335,10 @@ Invariants de sûreté :
   avant le déplacement de la source.
 - **E** — échec fermé (mismatch config/empreinte, WCS/liaison de session absent,
   source dupliquée/non identifiable, buffers/compteurs non finis) sans nouveau
-  manifest commité.
+  manifest commité.  Inclut le **préflight de cohérence dépôt** : des
+  accumulateurs dont `kernel` / `pixfrac` / `fillval` divergent des champs
+  scientifiques canoniques sont refusés **avant** toute création du répertoire
+  de checkpoint / de `run_config.cfg`.
 - **F** — manifest auto-cohérent (ledger = préfixe ordonné du plan de longueur
   `frame_count`, `stacked_batches_count == frame_count`, `frame_count <=
   len(plan)`, identités strictes sans doublon), refus preflight NaN/non-JSON,
@@ -357,19 +368,88 @@ Invariants de sûreté :
   partiel est dérivé de l'accumulateur (display-only) et n'affecte pas le SCI
   final.
 
-## 8. Inventaire de la mission de reprise (D2) — NON implémentée
+### 7.3 Exécutés en D2A (lecteur read-only)
 
-La fin de D1 **ne complète pas** RSM2 et **n'autorise pas** le démarrage
-automatique de D2.  La reprise devra (au minimum) :
+`tests/test_drizzle_checkpoint_reader.py` couvre :
 
-- lire/valider `checkpoint.json` (schema/mode/empreinte/config/WCS/ledger) et
-  vérifier SHA-256/taille de chaque artefact avant réinjection ;
-- reconstruire les trois accumulateurs via `DrizzleAccumulator.from_native_state`
-  (ordre des poses préservé, `total_exptime` restauré) ;
-- revalider la liaison de session (racines d'entrée / référence / plan) et le
-  ledger (préfixe ordonné du plan), refuser tout fichier modifié/renommé ;
+- **A** — roundtrip d'inspection writer → reader (square et WHT Lanczos signé) :
+  reconstruction bit-exacte des trois accumulateurs, validation
+  config/digest/empreinte/WCS, `next_source_index` exact, et lecture **sans
+  mutation** de l'arbre de checkpoint.  Inclut un test **non carré**
+  writer → reader qui fixe la convention d'axes (`array_shape == (H,W)`,
+  `pixel_shape == (W,H)`, artefacts `(H,W)`) avec contrôle de continuation
+  bit-identique, et un test d'équivalence `fillval` numérique `0.0` vs chaîne
+  canonique `"0.0"`.
+- **B** — **continu == write/read/reconstruct/continue** bit-identique (SCI et
+  WHT natifs) pour `square` / `gaussian` / `lanczos2` aux splits 2 (frontière
+  de groupe), 3 (groupe partiel) et 5 (groupe partiel).
+- **C** — ordre des sources / `next_source_index` exact.
+- **D** — **matrice de corruption** (35 cas) : chaque classe échoue fermé avec
+  `DrizzleCheckpointError` *avant* tout état restauré, et l'arbre de checkpoint
+  reste **byte-identique** (snapshot avant/après) : troncature manifest, NaN,
+  schéma inconnu, mauvais mode/état, génération invalide, mismatch
+  config/empreinte/digest/version (drizzle et numpy), WCS vide/carte manquante,
+  shape de sortie incohérent, traversée de chemin/symlink, artefact
+  manquant/supplémentaire/génération mixte, taille/hash/dtype/shape falsifiés,
+  tableau non fini, **divergence manifest-only des paramètres de dépôt de canal
+  (`kernel` / `pixfrac` / `fillval`) vs config canonique**, source
+  manquante/renommée/taille ou mtime modifiée, ledger dupliqué/désaligné,
+  compteurs désalignés.
+
+### 7.4 Contrat du lecteur D2A (`read_drizzle_checkpoint`)
+
+- **Lecture seule, échec fermé** : ne mute jamais les octets du checkpoint, les
+  sources, le répertoire de sortie ni l'état runtime vivant ; charge les
+  tableaux avec `np.load(..., allow_pickle=False)` et retourne des copies
+  float32 privées.
+- **Politique de version documentée (continuation exacte)** : `schema_version`
+  / `mode` / `state` doivent correspondre exactement ; `drizzle_lib_version`
+  et `numpy_version` persistés doivent égaler les versions runtime, sinon
+  refus (arrondi bit-identique).  Un relâchement éventuel vers un WARN est une
+  décision D2B séparée.
+- **Re-stat des sources** : la référence, chaque source du plan et chaque
+  source du ledger complété sont re-statées (path/size/mtime_ns doivent
+  correspondre) ; fichier manquant/renommé/modifié → refus.  Le ledger complété
+  doit rester le préfixe ordonné exact du plan.
+- **Reconstruction WCS/grid** : le WCS sérialisé est reconstruit, `array_shape`
+  est rattaché, et le WCS doit **round-triper exactement** vers le dict de
+  cartes persisté (contrat de grille de sortie exact).  Convention d'axes
+  Astropy fixée : `array_shape == (H, W)` (ordre numpy) et
+  `pixel_shape == (W, H)` (ordre FITS/NAXIS) ; `output_shape_hw` est `(H, W)`.
+  Les artefacts natifs restent `(H, W)`.
+- **Cross-check dépôt vs config canonique (échec fermé)** : après validation
+  séparée de la config canonique / empreinte / digest et des entrées de canal,
+  le lecteur exige que `kernel` / `pixfrac` / `fillval` de **chaque** canal
+  égalent les champs scientifiques canoniques `drizzle_kernel_effective` /
+  `drizzle_pixfrac_effective` / `drizzle_fillval`.  Une édition manifest-only
+  des paramètres de dépôt (empreinte toujours valide) est donc refusée **avant**
+  reconstruction, et non reconstruite avec de mauvais paramètres.
+- **Règle d'équivalence `fillval` (documentée)** : `fillval` est comparé par
+  équivalence scientifique/sérialisation — un `fillval` numérique et une chaîne
+  qui parse vers le **même float fini** sont équivalents (ex. `0.0` == `"0.0"`
+  == `"0.00"`) ; une chaîne non littéral-float (ex. `"INDEF"`) est comparée par
+  identité de chaîne exacte et n'est jamais coercée en nombre.
+- **Reconstruction des accumulateurs en dernier** : uniquement après validation
+  complète, via `DrizzleAccumulator.from_native_state` et les paramètres
+  runtime effectifs par canal (`kernel`/`pixfrac`/`fillval`/`total_exptime`) —
+  aucun état restauré partiel visible.
+- **Objet résultat explicite** : `DrizzleCheckpointResult` (manifest, session,
+  compteurs, ledger complété, config, WCS, `output_shape_hw`, accumulateurs,
+  `next_source_index`, génération) prêt pour le wiring lifecycle D2B.
+
+## 8. Inventaire de la mission de reprise (D2) — reader fait, activation NON implémentée
+
+La fin de D1 ne complète pas RSM2 ; D2A livre le lecteur/validateur read-only.
+Il reste à activer la reprise (D2B, **volontairement non touchée par D1/D2A**) :
+
+- ✅ lire/valider `checkpoint.json` et vérifier SHA-256/taille de chaque
+  artefact avant réinjection (fait en D2A) ;
+- ✅ reconstruire les trois accumulateurs via
+  `DrizzleAccumulator.from_native_state` (fait en D2A) ;
+- ✅ revalider la liaison de session et le ledger, refuser tout fichier
+  modifié/renommé (fait en D2A) ;
 - réaffirmer `FINALIZATION_MODE_DRIZZLE` et reprendre strictement après
   `last_processed_index` ;
 - activer le chemin Resume Drizzle dans `_build_startup_refusal` /
   `_validate_resume_headless` / `_validate_and_open_resume` / Qt readiness —
-  chemins **volontairement non touchés** par D1.
+  chemins **volontairement non touchés** par D1 et D2A.

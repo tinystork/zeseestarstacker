@@ -877,6 +877,39 @@ def test_bad_canonical_config_fails_closed(tmp_path):
     assert not (Path(tmp_path) / CHECKPOINT_DIRNAME).exists()
 
 
+@pytest.mark.parametrize(
+    "kernel,pixfrac,fillval",
+    [
+        ("gaussian", 1.0, "0.0"),
+        ("square", 0.5, "0.0"),
+        ("square", 1.0, "1.0"),
+    ],
+)
+def test_accumulator_deposition_mismatch_canonical_rejected(
+    tmp_path, kernel, pixfrac, fillval
+):
+    """Writer-side preflight: D1 must never publish accumulator runtime
+    deposition parameters (kernel / pixfrac / fillval) that disagree with the
+    canonical ``run_config.cfg`` scientific fields.  Rejected before any
+    checkpoint dir / run_config creation."""
+    writer, _wcs, out_shape_hw = _writer(tmp_path)  # canonical square/1.0/"0.0"
+    accs = [
+        DrizzleAccumulator(
+            out_shape_hw, kernel=kernel, pixfrac=pixfrac, fillval=fillval
+        )
+        for _ in range(3)
+    ]
+    _add_frame_to_all(accs, *build_frames()[0])
+    src = _reference_identity(tmp_path)
+    binding = _session_binding(tmp_path, _plan([src]))
+    with pytest.raises(DrizzleCheckpointError):
+        writer.commit(
+            accs, session_binding=binding, counters=_counters(1),
+            completed_sources=[src],
+        )
+    _assert_no_checkpoint_published(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # F. manifest self-consistency (ledger == plan prefix, truthful counters)
 # ---------------------------------------------------------------------------

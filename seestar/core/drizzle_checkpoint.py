@@ -6,13 +6,18 @@ buffers (``out_img`` weighted-mean science and ``out_wht`` total signed weight),
 plus the runtime-effective scientific configuration, the output WCS/grid and the
 session/source ledger, at safe accepted-pose boundaries.
 
-It is **write-only**: there is deliberately no reader, no ``open``/``resume``
-path and no ``finalize``/preview/derived-SCI persistence in this module.  The
-native float32 buffers are persisted bit-exactly (the signed Lanczos WHT is
-never abs'ed / clipped / thresholded), so a future reader can reconstruct the
-accumulators with :meth:`DrizzleAccumulator.from_native_state` and continue
-deposition bit-identically (proved by
-``tests/test_drizzle_resume_continuation.py``).
+The D1 writer is **write-only**: no ``open``/``resume``/``finalize``/preview/
+derived-SCI persistence.  RSM2-D2A adds a strictly **read-only** loader /
+validator (:func:`read_drizzle_checkpoint`) that never mutates checkpoint
+bytes, source files, the output directory or any live runtime state, and that
+reconstructs the three accumulators with
+:meth:`DrizzleAccumulator.from_native_state` only after the *entire* checkpoint
+validates.  It does **not** activate Resume in queue_manager / GUI / lifecycle.
+The native float32 buffers are persisted bit-exactly (the signed Lanczos WHT is
+never abs'ed / clipped / thresholded), so the reader can reconstruct the
+accumulators and continue deposition bit-identically (proved by
+``tests/test_drizzle_resume_continuation.py`` and
+``tests/test_drizzle_checkpoint_reader.py``).
 
 Layout
 ------
@@ -79,14 +84,20 @@ import json
 import os
 import re
 import secrets
+from dataclasses import dataclass
 
 import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
 
 from seestar import run_contract
+from seestar.core.drizzle_core import DrizzleAccumulator, VALID_DRIZZLE_KERNELS
 
 __all__ = [
     "DrizzleCheckpointError",
     "DrizzleCheckpointWriter",
+    "DrizzleCheckpointResult",
+    "read_drizzle_checkpoint",
     "build_drizzle_canonical_config",
     "serialize_wcs_header",
     "CHECKPOINT_DIRNAME",
@@ -257,6 +268,75 @@ def _validate_identity(entry, where):
         "size": int(size),
         "mtime_ns": int(mtime),
     }
+
+
+def _normalize_fillval(value, where="fillval"):
+    """Normalize a fillval to a comparable canonical form.
+
+    Scientific/serialization equivalence rule (documented contract): a numeric
+    fillval and a string that parses to the *same finite float* are equivalent
+    (``0.0`` == ``"0.0"`` == ``"0.00"``).  A string that is not a finite-float
+    literal (e.g. ``"INDEF"``) is compared by exact string identity and is
+    never coerced to a number.  Bools, non-finite numbers and any other type
+    are rejected (they are never a valid serialized fillval).
+    """
+    if isinstance(value, bool):
+        raise DrizzleCheckpointError(f"{where} must not be a bool")
+    if isinstance(value, str):
+        text = value
+        try:
+            f = float(text)
+        except ValueError:
+            return ("str", text)
+        if not np.isfinite(f):
+            return ("str", text)
+        return ("num", f)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        f = float(value)
+        if not np.isfinite(f):
+            raise DrizzleCheckpointError(f"{where} must be finite")
+        return ("num", f)
+    raise DrizzleCheckpointError(
+        f"{where} must be a string or finite number, got "
+        f"{type(value).__name__}"
+    )
+
+
+def _check_deposition_matches_canonical(kernel, pixfrac, fillval, scientific,
+                                        where):
+    """Fail closed when runtime deposition params disagree with canonical config.
+
+    ``kernel`` / ``pixfrac`` / ``fillval`` are the runtime-effective per-channel
+    deposition parameters; ``scientific`` is the canonical scientific mapping
+    whose ``drizzle_kernel_effective`` / ``drizzle_pixfrac_effective`` /
+    ``drizzle_fillval`` fields are the single source of truth.  ``fillval`` is
+    compared with scientific/serialization equivalence via
+    :func:`_normalize_fillval` (a numeric ``0.0`` equals the canonical string
+    ``"0.0"``).
+    """
+    canon_kernel = scientific.get("drizzle_kernel_effective")
+    if not isinstance(canon_kernel, str) or canon_kernel != kernel:
+        raise DrizzleCheckpointError(
+            f"{where} kernel {kernel!r} != canonical "
+            f"drizzle_kernel_effective {canon_kernel!r}"
+        )
+    canon_pixfrac = _strict_float(
+        scientific.get("drizzle_pixfrac_effective"),
+        "canonical drizzle_pixfrac_effective",
+    )
+    if canon_pixfrac != float(pixfrac):
+        raise DrizzleCheckpointError(
+            f"{where} pixfrac {pixfrac!r} != canonical "
+            f"drizzle_pixfrac_effective {canon_pixfrac!r}"
+        )
+    canon_fillval = scientific.get("drizzle_fillval")
+    if _normalize_fillval(fillval, f"{where} fillval") != _normalize_fillval(
+        canon_fillval, "canonical drizzle_fillval"
+    ):
+        raise DrizzleCheckpointError(
+            f"{where} fillval {fillval!r} != canonical drizzle_fillval "
+            f"{canon_fillval!r}"
+        )
 
 
 def _fsync_dir(path):
@@ -561,6 +641,14 @@ class DrizzleCheckpointWriter:
                     "out_wht": wht,
                 }
             )
+        # Writer-side preflight (validation hardening, not a protocol redesign):
+        # D1 must never publish accumulator runtime deposition parameters that
+        # disagree with the canonical run_config.cfg scientific fields.  Runs
+        # before any artifact / checkpoint dir / run_config creation.
+        _check_deposition_matches_canonical(
+            ref_kernel, ref_pixfrac, ref_fillval, self.scientific_config,
+            "accumulator",
+        )
         return snapshots
 
     @staticmethod
@@ -1129,3 +1217,810 @@ class DrizzleCheckpointWriter:
         self._next_generation = generation + 1
         self._gc_stale_generations(generation)
         return generation
+
+
+# ---------------------------------------------------------------------------
+# RSM2-D2A: read-only loader / validator (no Resume activation yet)
+# ---------------------------------------------------------------------------
+#
+# Documented exact-continuation version policy: bit-identical native
+# continuation requires the *same* drizzle and numpy rounding behaviour, so
+# :func:`read_drizzle_checkpoint` refuses (fail closed) when the persisted
+# ``drizzle_lib_version`` / ``numpy_version`` differ from the runtime library
+# versions.  This is an intentional strict policy.  D2B may later relax it to
+# an explicit WARN under a separately reviewed decision, but the D2A reader
+# never silently continues across a library version boundary.
+
+
+@dataclass
+class DrizzleCheckpointResult:
+    """Validated read-only reconstruction of a native Drizzle checkpoint.
+
+    Produced only after the *entire* checkpoint has validated (fail closed, no
+    partial externally visible restore).  ``accumulators`` is a list of three
+    :class:`~seestar.core.drizzle_core.DrizzleAccumulator` instances
+    reconstructed via :meth:`DrizzleAccumulator.from_native_state`; ``wcs`` is
+    the reconstructed :class:`astropy.wcs.WCS` with ``array_shape`` attached;
+    ``next_source_index`` is the 0-based index of the first source not yet
+    accumulated (== ``frame_count``, because ``completed_sources`` is the exact
+    ordered prefix of the session plan).  Suitable for later D2B lifecycle
+    wiring (which is *not* performed here).
+    """
+
+    manifest: dict
+    session: dict
+    counters: dict
+    completed_sources: list
+    config: object          # run_contract.RunConfig
+    wcs: object             # astropy.wcs.WCS (array_shape attached)
+    output_shape_hw: tuple
+    accumulators: list      # [DrizzleAccumulator x3]
+    next_source_index: int
+    generation: int
+
+
+def _reject_json_constant(value: str):
+    """Reject non-standard JSON constants (``NaN``/``Infinity``/``-Infinity``)."""
+    raise DrizzleCheckpointError(f"non-finite JSON number {value!r}")
+
+
+def _require_regular_file(path, what):
+    """Require ``path`` to be an existing regular file, not a symlink."""
+    if os.path.islink(path):
+        raise DrizzleCheckpointError(f"{what} {path!r} is a symlink")
+    if not os.path.isfile(path):
+        raise DrizzleCheckpointError(
+            f"{what} {path!r} is missing or not a regular file"
+        )
+
+
+def _validate_fillval(value, where):
+    """Validate a per-channel ``fillval`` (string or finite number)."""
+    if isinstance(value, bool):
+        raise DrizzleCheckpointError(
+            f"{where} must be a string or finite number, not bool"
+        )
+    if isinstance(value, str):
+        if not value:
+            raise DrizzleCheckpointError(f"{where} must be a non-empty string")
+        return value
+    if isinstance(value, (int, float)):
+        f = float(value)
+        if not np.isfinite(f):
+            raise DrizzleCheckpointError(f"{where} must be finite")
+        return f
+    raise DrizzleCheckpointError(
+        f"{where} must be a string or finite number, got "
+        f"{type(value).__name__}"
+    )
+
+
+def _restat_identity(ident, where):
+    """Re-stat one persisted source identity; path/size/mtime_ns must match.
+
+    A renamed / missing / modified source fails closed (never a silent
+    fallback), matching the documented "same poses, same bytes" continuation
+    contract.
+    """
+    path = ident["path"]
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        raise DrizzleCheckpointError(
+            f"{where} source {path!r} is missing/unreadable: {exc}"
+        ) from exc
+    if st.st_size != ident["size"]:
+        raise DrizzleCheckpointError(
+            f"{where} source {path!r} size changed: checkpoint "
+            f"{ident['size']} vs disk {st.st_size}"
+        )
+    if st.st_mtime_ns != ident["mtime_ns"]:
+        raise DrizzleCheckpointError(
+            f"{where} source {path!r} mtime changed: checkpoint "
+            f"{ident['mtime_ns']} vs disk {st.st_mtime_ns}"
+        )
+
+
+def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
+    """Read, validate and reconstruct a native Drizzle checkpoint (read-only).
+
+    Locates ``<output_dir>/.m3d_checkpoint/checkpoint.json`` and
+    ``<output_dir>/run_config.cfg``.  Fails closed as
+    :class:`DrizzleCheckpointError` on any of: missing / malformed / non-strict
+    JSON, unknown schema, wrong mode / state, invalid generation, product /
+    config / fingerprint / digest mismatch, invalid output shape / WCS, library
+    version mismatch (exact-continuation policy), malformed session / plan /
+    ledger / counters, unsafe artifact names / path traversal / symlinks /
+    descriptors, missing / extra / mixed-generation channel artifacts, and any
+    artifact whose exact size / SHA-256 / dtype / shape / finiteness does not
+    match.  Never mutates checkpoint bytes, source files, the output directory
+    or live runtime state; arrays are loaded with ``allow_pickle=False`` and
+    returned as private float32 copies.
+
+    Every persisted source (the reference, every plan source and every
+    completed-ledger source) is re-stat'ed: path / size / mtime_ns must match
+    exactly.  The completed ledger must remain the exact ordered prefix of the
+    session plan.  The three accumulators are reconstructed only after the
+    entire checkpoint validates (no partial externally visible restore).
+
+    Parameters
+    ----------
+    output_dir :
+        Explicit output / run directory containing the checkpoint namespace.
+    require_exact_versions :
+        When ``True`` (default) a persisted ``drizzle_lib_version`` /
+        ``numpy_version`` different from the runtime library is refused
+        (documented exact-continuation policy).
+
+    Returns
+    -------
+    DrizzleCheckpointResult
+    """
+    output_dir = os.fspath(output_dir)
+    ckpt_dir = os.path.join(output_dir, CHECKPOINT_DIRNAME)
+    manifest_path = os.path.join(ckpt_dir, MANIFEST_FILENAME)
+    cfg_path = os.path.join(output_dir, RUN_CONFIG_FILENAME)
+
+    if os.path.islink(ckpt_dir):
+        raise DrizzleCheckpointError(
+            f"checkpoint directory {ckpt_dir!r} is a symlink"
+        )
+    if not os.path.isdir(ckpt_dir):
+        raise DrizzleCheckpointError(
+            f"checkpoint directory {ckpt_dir!r} is missing"
+        )
+
+    manifest = _read_manifest_strict(manifest_path)
+    generation = _validate_top_level(manifest)
+    config = _validate_config(manifest, cfg_path)
+    output_shape_hw = _validate_output_shape(manifest)
+    wcs = _reconstruct_wcs(manifest, output_shape_hw)
+    counters = _validate_counters(manifest)
+    session = _validate_session(manifest)
+    ledger = _validate_ledger(manifest, session, counters)
+    channels = _validate_channels(manifest, generation, ckpt_dir, output_shape_hw)
+    _validate_channel_vs_canonical(config, channels)
+    _validate_versions(manifest, require_exact_versions)
+
+    # Reconstruct only after the entire checkpoint validated.
+    accumulators = _reconstruct_accumulators(channels, output_shape_hw)
+
+    return DrizzleCheckpointResult(
+        manifest=manifest,
+        session=session,
+        counters=counters,
+        completed_sources=ledger,
+        config=config,
+        wcs=wcs,
+        output_shape_hw=output_shape_hw,
+        accumulators=accumulators,
+        next_source_index=counters["frame_count"],
+        generation=generation,
+    )
+
+
+def _read_manifest_strict(manifest_path):
+    """Read and strictly parse ``checkpoint.json`` (no symlink, no NaN/Inf)."""
+    _require_regular_file(manifest_path, "checkpoint manifest")
+    try:
+        with open(manifest_path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise DrizzleCheckpointError(
+            f"cannot read checkpoint manifest {manifest_path!r}: {exc}"
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DrizzleCheckpointError(
+            f"checkpoint manifest is not valid UTF-8: {exc}"
+        ) from exc
+    try:
+        data = json.loads(text, parse_constant=_reject_json_constant)
+    except DrizzleCheckpointError:
+        raise
+    except ValueError as exc:
+        raise DrizzleCheckpointError(
+            f"checkpoint manifest is not strict JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise DrizzleCheckpointError(
+            "checkpoint manifest top-level is not a JSON object"
+        )
+    return data
+
+
+def _validate_top_level(manifest):
+    """Validate schema / mode / state / generation / product / producer."""
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise DrizzleCheckpointError(
+            f"unknown schema_version {manifest.get('schema_version')!r} "
+            f"(expected {SCHEMA_VERSION})"
+        )
+    if manifest.get("mode") != MODE_TOKEN:
+        raise DrizzleCheckpointError(
+            f"wrong mode {manifest.get('mode')!r} (expected {MODE_TOKEN!r})"
+        )
+    if manifest.get("state") != STATE_CLEAN:
+        raise DrizzleCheckpointError(
+            f"wrong state {manifest.get('state')!r} (expected {STATE_CLEAN!r})"
+        )
+    generation = _strict_int(manifest.get("generation"), "generation")
+    if generation < 1:
+        raise DrizzleCheckpointError(f"invalid generation {generation}")
+    product_version = manifest.get("product_version")
+    if not isinstance(product_version, str):
+        raise DrizzleCheckpointError("product_version must be a string")
+    producer = manifest.get("producer")
+    if producer is not None and producer != "zeseestarstacker":
+        raise DrizzleCheckpointError(f"unknown producer {producer!r}")
+    return generation
+
+
+def _validate_output_shape(manifest):
+    """Validate ``output_shape_hw`` into a positive ``(H, W)`` tuple."""
+    raw = manifest.get("output_shape_hw")
+    if not isinstance(raw, list) or len(raw) != 2:
+        raise DrizzleCheckpointError(
+            "output_shape_hw must be a 2-element list"
+        )
+    h = _strict_int(raw[0], "output_shape_hw[0]")
+    w = _strict_int(raw[1], "output_shape_hw[1]")
+    if h <= 0 or w <= 0:
+        raise DrizzleCheckpointError(f"invalid output_shape_hw {(h, w)}")
+    return (h, w)
+
+
+def _validate_config(manifest, cfg_path):
+    """Read ``run_config.cfg`` and cross-check digest / fingerprint / product /
+    embedded scientific_config (fail closed on any mismatch)."""
+    if os.path.islink(cfg_path):
+        raise DrizzleCheckpointError("run_config.cfg is a symlink")
+    try:
+        report = run_contract.read_cfg(cfg_path)
+    except run_contract.ConfigError as exc:
+        raise DrizzleCheckpointError(f"invalid run_config.cfg: {exc}") from exc
+    except OSError as exc:
+        raise DrizzleCheckpointError(f"cannot read run_config.cfg: {exc}") from exc
+    config = report.config
+
+    if config.product_version != manifest.get("product_version"):
+        raise DrizzleCheckpointError(
+            "run_config.cfg product_version does not match the manifest"
+        )
+
+    expected_digest = manifest.get("run_config_digest")
+    if (
+        not isinstance(expected_digest, str)
+        or len(expected_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in expected_digest)
+    ):
+        raise DrizzleCheckpointError(
+            "manifest run_config_digest is not a SHA-256 hex string"
+        )
+    if config.full_digest() != expected_digest:
+        raise DrizzleCheckpointError("run_config.cfg digest mismatch")
+
+    expected_fp = manifest.get("scientific_fingerprint")
+    if (
+        not isinstance(expected_fp, str)
+        or len(expected_fp) != 64
+        or any(ch not in "0123456789abcdef" for ch in expected_fp)
+    ):
+        raise DrizzleCheckpointError(
+            "manifest scientific_fingerprint is not a SHA-256 hex string"
+        )
+    if config.drizzle_fingerprint() != expected_fp:
+        raise DrizzleCheckpointError("drizzle scientific fingerprint mismatch")
+
+    embedded_sci = manifest.get("scientific_config")
+    if not isinstance(embedded_sci, dict):
+        raise DrizzleCheckpointError(
+            "manifest scientific_config is missing or malformed"
+        )
+    if config.scientific != embedded_sci:
+        raise DrizzleCheckpointError("manifest scientific_config mismatch")
+    return config
+
+
+def _reconstruct_wcs(manifest, output_shape_hw):
+    """Reconstruct and validate the output WCS; attach ``array_shape``."""
+    wcs_dict = manifest.get("wcs")
+    if not isinstance(wcs_dict, dict) or not wcs_dict:
+        raise DrizzleCheckpointError("manifest wcs is missing or malformed")
+
+    header = fits.Header()
+    for key, value in wcs_dict.items():
+        if not isinstance(key, str) or key in ("", "HISTORY", "COMMENT"):
+            raise DrizzleCheckpointError(f"invalid WCS card key {key!r}")
+        if isinstance(value, bool):
+            header[key] = value
+        elif isinstance(value, (int, float)):
+            if not np.isfinite(float(value)):
+                raise DrizzleCheckpointError(f"non-finite WCS card {key!r}")
+            header[key] = value
+        elif isinstance(value, str):
+            header[key] = value
+        else:
+            raise DrizzleCheckpointError(
+                f"non-JSON WCS card {key!r} value type {type(value).__name__}"
+            )
+
+    try:
+        wcs = WCS(header)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never partial
+        raise DrizzleCheckpointError(
+            f"cannot reconstruct output WCS: {exc}"
+        ) from exc
+    if wcs.naxis != 2:
+        raise DrizzleCheckpointError(
+            f"output WCS has naxis {wcs.naxis} != 2"
+        )
+    wcs.array_shape = tuple(output_shape_hw)
+
+    # Exact output-grid contract: the reconstructed WCS must round-trip back
+    # to exactly the persisted card dict.
+    try:
+        reserialized = serialize_wcs_header(wcs)
+    except DrizzleCheckpointError:
+        raise
+    if reserialized != wcs_dict:
+        raise DrizzleCheckpointError("output WCS does not round-trip exactly")
+    # Astropy axis convention: ``array_shape`` is ``(H, W)`` (numpy order)
+    # while ``pixel_shape`` is ``(W, H)`` (FITS NAXIS order).  ``output_shape_hw``
+    # is the ``(H, W)`` grid shape, so the two checks must use the *reversed*
+    # comparison for ``pixel_shape``.
+    if wcs.array_shape != tuple(output_shape_hw):
+        raise DrizzleCheckpointError(
+            f"output WCS array_shape {wcs.array_shape} != output_shape_hw "
+            f"{output_shape_hw}"
+        )
+    if wcs.pixel_shape != (output_shape_hw[1], output_shape_hw[0]):
+        raise DrizzleCheckpointError(
+            f"output WCS pixel_shape {wcs.pixel_shape} != (W, H) "
+            f"{(output_shape_hw[1], output_shape_hw[0])}"
+        )
+    return wcs
+
+
+def _validate_counters(manifest):
+    """Validate the persisted accepted-exposure counters (strict)."""
+    frame_count = _strict_int(manifest.get("frame_count"), "frame_count")
+    if frame_count <= 0:
+        raise DrizzleCheckpointError("empty checkpoint (frame_count <= 0)")
+    stacked = _strict_int(
+        manifest.get("stacked_batches_count"), "stacked_batches_count"
+    )
+    if stacked < 0:
+        raise DrizzleCheckpointError("negative stacked_batches_count")
+    if stacked != frame_count:
+        raise DrizzleCheckpointError(
+            f"stacked_batches_count {stacked} != frame_count {frame_count}"
+        )
+    total = _strict_float(
+        manifest.get("total_exposure_seconds"), "total_exposure_seconds"
+    )
+    if total < 0.0:
+        raise DrizzleCheckpointError(
+            f"negative total_exposure_seconds {total!r}"
+        )
+    unknown = _strict_int(
+        manifest.get("exposure_unknown_count"), "exposure_unknown_count"
+    )
+    if unknown < 0:
+        raise DrizzleCheckpointError("negative exposure_unknown_count")
+    if unknown > frame_count:
+        raise DrizzleCheckpointError(
+            f"exposure_unknown_count {unknown} > frame_count {frame_count}"
+        )
+    exp_min = _strict_float(
+        manifest.get("exposure_min"), "exposure_min", allow_none=True
+    )
+    exp_max = _strict_float(
+        manifest.get("exposure_max"), "exposure_max", allow_none=True
+    )
+    if exp_min is not None and exp_max is not None and exp_min > exp_max:
+        raise DrizzleCheckpointError(
+            f"exposure_min {exp_min} > exposure_max {exp_max}"
+        )
+    return {
+        "frame_count": frame_count,
+        "stacked_batches_count": stacked,
+        "total_exposure_seconds": total,
+        "exposure_unknown_count": unknown,
+        "exposure_min": exp_min,
+        "exposure_max": exp_max,
+    }
+
+
+def _validate_session(manifest):
+    """Validate and re-stat the session binding (roots / reference / plan)."""
+    session = manifest.get("session")
+    if not isinstance(session, dict):
+        raise DrizzleCheckpointError("session is missing or malformed")
+
+    roots = session.get("input_roots")
+    if not isinstance(roots, list) or not roots:
+        raise DrizzleCheckpointError("missing session input_roots")
+    roots_clean = []
+    for r in roots:
+        if not isinstance(r, str) or not r:
+            raise DrizzleCheckpointError(
+                "session input_roots entries must be non-empty strings"
+            )
+        roots_clean.append(r)
+
+    reference = _validate_identity(session.get("reference"), "session reference")
+
+    plan = session.get("plan")
+    if not isinstance(plan, dict):
+        raise DrizzleCheckpointError("missing session observation plan")
+    sources = plan.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise DrizzleCheckpointError(
+            "session observation plan sources must be a non-empty list"
+        )
+    sources_clean = []
+    seen = set()
+    for entry in sources:
+        ident = _validate_identity(entry, "session plan source")
+        key = (ident["path"], ident["size"], ident["mtime_ns"])
+        if key in seen:
+            raise DrizzleCheckpointError(
+                f"duplicate source identity in session plan: {ident['name']}"
+            )
+        seen.add(key)
+        sources_clean.append(ident)
+
+    plan_clean = {"sources": sources_clean}
+    decomposition = plan.get("decomposition")
+    if decomposition is not None:
+        if not isinstance(decomposition, list):
+            raise DrizzleCheckpointError(
+                "session plan decomposition must be a list"
+            )
+        deco_clean = []
+        for b in decomposition:
+            bi = _strict_int(b, "session plan decomposition element")
+            if bi <= 0:
+                raise DrizzleCheckpointError(
+                    "session plan decomposition elements must be positive"
+                )
+            deco_clean.append(bi)
+        plan_clean["decomposition"] = deco_clean
+
+    # Re-stat the persisted reference and every plan source (must match).
+    _restat_identity(reference, "session reference")
+    for ident in sources_clean:
+        _restat_identity(ident, "session plan source")
+
+    return {
+        "input_roots": roots_clean,
+        "reference": reference,
+        "plan": plan_clean,
+    }
+
+
+def _validate_ledger(manifest, session, counters):
+    """Validate the completed ledger and require the exact ordered plan prefix."""
+    raw = manifest.get("completed_sources")
+    if not isinstance(raw, list):
+        raise DrizzleCheckpointError("completed_sources must be a list")
+    ledger = []
+    seen = set()
+    for entry in raw:
+        ident = _validate_identity(entry, "completed ledger")
+        key = (ident["path"], ident["size"], ident["mtime_ns"])
+        if key in seen:
+            raise DrizzleCheckpointError(
+                f"duplicate source identity in completed ledger: {ident['name']}"
+            )
+        seen.add(key)
+        ledger.append(ident)
+
+    frame_count = counters["frame_count"]
+    plan_sources = session["plan"]["sources"]
+    if len(ledger) != frame_count:
+        raise DrizzleCheckpointError(
+            f"completed_sources length {len(ledger)} != frame_count {frame_count}"
+        )
+    if frame_count > len(plan_sources):
+        raise DrizzleCheckpointError(
+            f"frame_count {frame_count} exceeds session plan length "
+            f"{len(plan_sources)}"
+        )
+    if ledger != plan_sources[:frame_count]:
+        raise DrizzleCheckpointError(
+            "completed_sources is not the exact ordered prefix of the session plan"
+        )
+    # Defense-in-depth: re-stat every completed ledger source too.
+    for ident in ledger:
+        _restat_identity(ident, "completed ledger source")
+    return ledger
+
+
+def _validate_channels(manifest, generation, ckpt_dir, output_shape_hw):
+    """Validate the channel table and load every artifact (fail closed).
+
+    Also verifies the checkpoint directory contains *exactly* the referenced
+    generation artifacts (no missing / extra / mixed-generation artifacts, no
+    unexpected entry, no symlink, no path traversal).
+    """
+    channels = manifest.get("channels")
+    if not isinstance(channels, list) or len(channels) != 3:
+        raise DrizzleCheckpointError(
+            "expected exactly 3 channel entries in the manifest"
+        )
+
+    try:
+        dir_entries = os.listdir(ckpt_dir)
+    except OSError as exc:
+        raise DrizzleCheckpointError(
+            f"cannot list checkpoint directory {ckpt_dir!r}: {exc}"
+        ) from exc
+
+    expected_files = set()
+    channels_clean = []
+    seen_channels = set()
+    ref = None
+
+    for ch in channels:
+        if not isinstance(ch, dict):
+            raise DrizzleCheckpointError("channel entry is not a JSON object")
+        c = _strict_int(ch.get("channel"), "channel index")
+        if c not in (0, 1, 2):
+            raise DrizzleCheckpointError(f"invalid channel index {c}")
+        if c in seen_channels:
+            raise DrizzleCheckpointError(f"duplicate channel index {c}")
+        seen_channels.add(c)
+
+        kernel = ch.get("kernel")
+        if not isinstance(kernel, str) or kernel not in VALID_DRIZZLE_KERNELS:
+            raise DrizzleCheckpointError(
+                f"channel {c} has unknown kernel {kernel!r}"
+            )
+        pixfrac = _strict_float(ch.get("pixfrac"), f"channel {c} pixfrac")
+        if not (0.0 < pixfrac <= 1.0):
+            raise DrizzleCheckpointError(
+                f"channel {c} pixfrac {pixfrac} outside (0, 1]"
+            )
+        fillval = _validate_fillval(ch.get("fillval"), f"channel {c} fillval")
+        total = _strict_float(
+            ch.get("total_exptime"), f"channel {c} total_exptime"
+        )
+        if total < 0.0:
+            raise DrizzleCheckpointError(
+                f"channel {c} negative total_exptime {total!r}"
+            )
+
+        current = (kernel, pixfrac, fillval, total)
+        if ref is None:
+            ref = current
+        elif current != ref:
+            raise DrizzleCheckpointError(
+                f"inconsistent per-channel drizzle config at channel {c}"
+            )
+
+        loaded = {}
+        for kind in ("out_img", "out_wht"):
+            desc = ch.get(kind)
+            if not isinstance(desc, dict):
+                raise DrizzleCheckpointError(
+                    f"channel {c} {kind} descriptor missing"
+                )
+            loaded[kind] = _validate_artifact(
+                desc, generation, c, kind, ckpt_dir, output_shape_hw
+            )
+            expected_files.add(desc["file"])
+
+        channels_clean.append(
+            {
+                "channel": c,
+                "kernel": kernel,
+                "pixfrac": pixfrac,
+                "fillval": fillval,
+                "total_exptime": total,
+                "out_img": loaded["out_img"],
+                "out_wht": loaded["out_wht"],
+            }
+        )
+
+    # Exactly the referenced artifacts; no extra / mixed-generation artifacts
+    # and no unexpected (temp / foreign) entry in the namespace.
+    actual_gen_files = set()
+    for name in dir_entries:
+        if name == MANIFEST_FILENAME:
+            continue
+        if _ARTIFACT_RE.match(name):
+            actual_gen_files.add(name)
+            continue
+        raise DrizzleCheckpointError(
+            f"unexpected entry in checkpoint directory: {name!r}"
+        )
+    if actual_gen_files != expected_files:
+        missing = sorted(expected_files - actual_gen_files)
+        extra = sorted(actual_gen_files - expected_files)
+        raise DrizzleCheckpointError(
+            "generation artifact mismatch: "
+            f"missing {missing}, extra {extra}"
+        )
+
+    return channels_clean
+
+
+def _validate_channel_vs_canonical(config, channels):
+    """Require every channel's deposition params to equal the canonical config.
+
+    The reader already validates the canonical config / fingerprint / digest
+    and the channel entries *separately*; this closes the remaining gap where a
+    manifest-only edit of a channel's ``kernel`` / ``pixfrac`` / ``fillval``
+    (fingerprint still valid) would reconstruct with the wrong deposition
+    parameters.  Fails closed before any accumulator is reconstructed.
+    """
+    scientific = config.scientific
+    for ch in channels:
+        _check_deposition_matches_canonical(
+            ch["kernel"], ch["pixfrac"], ch["fillval"], scientific,
+            f"channel {ch['channel']}",
+        )
+
+
+def _validate_artifact(desc, generation, channel, kind, ckpt_dir, output_shape_hw):
+    """Validate one artifact descriptor and load its array (private float32)."""
+    file_name = desc.get("file")
+    if not isinstance(file_name, str) or not file_name:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} has invalid file name"
+        )
+    # Unsafe name / path traversal: must be a plain basename on the allowlist.
+    if (
+        file_name != os.path.basename(file_name)
+        or file_name.startswith(("/", "\\"))
+        or ".." in file_name
+    ):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} has unsafe file name {file_name!r}"
+        )
+    m = _ARTIFACT_RE.match(file_name)
+    if not m:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} has non-allowlisted file name "
+            f"{file_name!r}"
+        )
+    if int(m.group(1)) != generation:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} file generation {m.group(1)} != "
+            f"manifest generation {generation}"
+        )
+    if int(m.group(2)) != channel:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} file channel {m.group(2)} != {channel}"
+        )
+    expected_kind = "img" if kind == "out_img" else "wht"
+    if m.group(3) != expected_kind:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} file kind {m.group(3)} != {expected_kind}"
+        )
+
+    if desc.get("dtype") != "float32":
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} dtype {desc.get('dtype')!r} != 'float32'"
+        )
+    shape = desc.get("shape")
+    if not isinstance(shape, list) or len(shape) != 2:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} shape must be a 2-element list"
+        )
+    sh = (
+        _strict_int(shape[0], "shape[0]"),
+        _strict_int(shape[1], "shape[1]"),
+    )
+    if sh != tuple(output_shape_hw):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} shape {sh} != output_shape_hw "
+            f"{tuple(output_shape_hw)}"
+        )
+    size = desc.get("size")
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} size must be a strict integer"
+        )
+    sha = desc.get("sha256")
+    if (
+        not isinstance(sha, str)
+        or len(sha) != 64
+        or any(ch not in "0123456789abcdef" for ch in sha)
+    ):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} sha256 must be a 64-char hex string"
+        )
+
+    path = os.path.join(ckpt_dir, file_name)
+    if os.path.islink(path):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} artifact {file_name!r} is a symlink"
+        )
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} artifact missing/unreadable: {exc}"
+        ) from exc
+    if len(raw) != size:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} size mismatch: manifest {size} vs "
+            f"disk {len(raw)}"
+        )
+    if hashlib.sha256(raw).hexdigest() != sha:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} SHA-256 mismatch"
+        )
+    try:
+        arr = np.load(io.BytesIO(raw), allow_pickle=False)
+    except (ValueError, OSError) as exc:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} cannot load array: {exc}"
+        ) from exc
+    arr = np.asarray(arr)
+    if arr.dtype != np.float32:
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} array dtype {arr.dtype} != float32"
+        )
+    if arr.ndim != 2 or tuple(arr.shape) != tuple(output_shape_hw):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} array shape {arr.shape} != "
+            f"{tuple(output_shape_hw)}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise DrizzleCheckpointError(
+            f"channel {channel} {kind} array contains non-finite samples"
+        )
+    return np.array(arr, dtype=np.float32, copy=True)
+
+
+def _validate_versions(manifest, require_exact_versions):
+    """Enforce the documented exact-continuation library version policy."""
+    stored_drizzle = manifest.get("drizzle_lib_version")
+    stored_numpy = manifest.get("numpy_version")
+    if not isinstance(stored_drizzle, str) or not isinstance(stored_numpy, str):
+        raise DrizzleCheckpointError(
+            "manifest drizzle_lib_version / numpy_version must be strings"
+        )
+    if not require_exact_versions:
+        return
+    cur_drizzle = _drizzle_lib_version()
+    cur_numpy = _numpy_version()
+    if stored_drizzle != cur_drizzle:
+        raise DrizzleCheckpointError(
+            f"drizzle library version mismatch: checkpoint {stored_drizzle!r} "
+            f"vs runtime {cur_drizzle!r} (exact-continuation policy)"
+        )
+    if stored_numpy != cur_numpy:
+        raise DrizzleCheckpointError(
+            f"numpy version mismatch: checkpoint {stored_numpy!r} vs runtime "
+            f"{cur_numpy!r} (exact-continuation policy)"
+        )
+
+
+def _reconstruct_accumulators(channels, output_shape_hw):
+    """Reconstruct the three accumulators (only after full validation)."""
+    accs = []
+    for ch in sorted(channels, key=lambda c: c["channel"]):
+        try:
+            acc = DrizzleAccumulator.from_native_state(
+                output_shape_hw,
+                ch["out_img"],
+                ch["out_wht"],
+                kernel=ch["kernel"],
+                pixfrac=ch["pixfrac"],
+                fillval=ch["fillval"],
+                total_exptime=ch["total_exptime"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise DrizzleCheckpointError(
+                f"cannot reconstruct accumulator for channel "
+                f"{ch['channel']}: {exc}"
+            ) from exc
+        accs.append(acc)
+    return accs
