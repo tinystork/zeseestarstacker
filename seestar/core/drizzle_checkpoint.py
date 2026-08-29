@@ -46,6 +46,35 @@ known-exposure summary when only unknown frames are added; (3)
 the factory refuses a symlink swap, so a validated result can never be rebound
 to another run's checkpoint.
 
+RSM2-D2B2A adds the *source-resolution seam*: :func:`read_drizzle_checkpoint`
+accepts an explicit, opt-in ``resolver`` callback / policy.  The default
+(``resolver=None``) remains **strict D2A** — every persisted source identity is
+re-stat'ed at its original path (exact size + mtime_ns, no rename / move /
+missing fallback).  With a resolver, the reader offers each canonical identity
+(plus a context dict: ``role`` / ``index`` / ``is_completed`` / ``output_dir``
+/ ``input_roots``) to the resolver, which may return an *ordered* candidate
+path list; the reader itself re-stats every candidate and only accepts a
+regular, non-symlink file whose size + mtime_ns match exactly (never trusting
+the callback).  Resolution is injective and order-preserving for *distinct*
+canonical identities: two distinct identities resolving to one on-disk path is
+refused as ambiguous, while repeated use of the exact same canonical identity
+(the alignment reference also being one of the plan observations) resolves
+legitimately to the same path.  The shipped production policy
+:class:`SafeStackedSourceResolver` is an **immutable**
+(frozen) object that only ever returns (a) the original path or (b) the
+deterministic ``<original_dir>/<stacked_subdir_name>/<basename>`` counterpart —
+the exact ``move_stacked`` destination of ``tools.file_ops.move_to_stacked`` —
+with no directory search / glob / basename-only fallback / hashless remap /
+arbitrary rename, and a ``_dup_<timestamp>`` collision name is never guessed.
+The validated :class:`DrizzleCheckpointResult` exposes ``resolved_reference`` /
+``resolved_plan_paths`` / ``resolved_completed_paths`` /
+``resolved_remaining_paths`` and carries the immutable ``resolution_policy`` as
+provenance; :meth:`DrizzleCheckpointWriter.from_validated_result` re-applies it
+on its fresh re-read (never a mutable callback), while the continuation writer
+still commits the **original canonical** plan/ledger identities — never a
+rewritten stacked path.  Persisted manifest/session identities and source bytes
+are never mutated by the reader or re-arm.
+
 Layout
 ------
 
@@ -126,6 +155,7 @@ __all__ = [
     "DrizzleCheckpointWriter",
     "DrizzleCheckpointResult",
     "DrizzleContinuation",
+    "SafeStackedSourceResolver",
     "read_drizzle_checkpoint",
     "build_drizzle_canonical_config",
     "serialize_wcs_header",
@@ -175,6 +205,12 @@ _REGISTRATION_CONTRACT_VERSION = 1
 # Explicit allowlist for generation-unique array artifacts.  Garbage collection
 # and failure cleanup may only ever touch names matching this pattern.
 _ARTIFACT_RE = re.compile(r"^gen-(\d{8})-ch([0-2])-out_(img|wht)\.npy$")
+
+# A ``_dup_<timestamp>`` collision name (produced by
+# ``tools.file_ops.move_to_stacked`` when the deterministic destination already
+# exists).  The source-resolution policy must never *guess* such a target: the
+# deterministic ``<stacked>/<basename>`` path is the only acceptable move.
+_DUP_COLLISION_RE = re.compile(r"_dup_\d+")
 
 # Legacy same-directory writer-temp prefix/suffix (still recognized as a
 # restart-refusal trigger; the array artifacts themselves are now claimed
@@ -623,7 +659,14 @@ class DrizzleCheckpointWriter:
         # Fresh, authoritative read-only validation of the on-disk checkpoint.
         # This is the ONLY source of truth for continuation state; the supplied
         # (possibly tampered / stale) result payloads are never trusted.
-        fresh = read_drizzle_checkpoint(output_dir, require_exact_versions=True)
+        # Re-apply the immutable source-resolution policy carried by the
+        # validated result (never a mutable callback).  ``None`` means the
+        # original read was strict D2A and the fresh re-read stays strict.
+        fresh = read_drizzle_checkpoint(
+            output_dir,
+            require_exact_versions=True,
+            resolver=result.resolution_policy,
+        )
         if fresh.generation != expected_generation:
             raise DrizzleCheckpointError(
                 f"stale continuation result: supplied generation "
@@ -1693,6 +1736,11 @@ class DrizzleCheckpointResult:
     next_source_index: int
     generation: int
     source_output_dir: str
+    resolved_reference: object = None        # verified on-disk path (str) | None
+    resolved_plan_paths: tuple = ()          # ordered verified plan paths
+    resolved_completed_paths: tuple = ()     # resolved_plan_paths[:next_source_index]
+    resolved_remaining_paths: tuple = ()     # resolved_plan_paths[next_source_index:]
+    resolution_policy: object = None         # immutable SafeStackedSourceResolver | None
 
     def __post_init__(self):
         """Validate and normalize the source-output provenance (read-only).
@@ -1715,6 +1763,11 @@ class DrizzleCheckpointResult:
                 "directory"
             )
         object.__setattr__(self, "source_output_dir", d)
+        plan = tuple(self.resolved_plan_paths or ())
+        object.__setattr__(self, "resolved_plan_paths", plan)
+        n = int(self.next_source_index)
+        object.__setattr__(self, "resolved_completed_paths", plan[:n])
+        object.__setattr__(self, "resolved_remaining_paths", plan[n:])
 
 
 @dataclass(frozen=True)
@@ -1809,7 +1862,199 @@ def _restat_identity(ident, where):
         )
 
 
-def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
+def _coerce_candidates(raw, where):
+    """Normalize a resolver return value into an ordered candidate list.
+
+    ``None`` (no candidate) yields an empty list; a single path string yields a
+    one-element list; a list/tuple is returned in order.  Anything else is
+    refused (fail closed, never a partial resolution).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    raise DrizzleCheckpointError(
+        f"{where}: resolver must return a path, an ordered list of paths, or "
+        f"None (got {type(raw).__name__})"
+    )
+
+
+def _verify_candidate(ident, path):
+    """Return True iff ``path`` currently carries the exact identity evidence.
+
+    Only a regular, non-symlink file with ``st_size`` == ``ident['size']`` and
+    ``st_mtime_ns`` == ``ident['mtime_ns']`` matches.  A missing / symlink /
+    non-regular / mismatched candidate returns ``False`` so the caller skips it
+    and tries the next candidate — a renamed / tampered / duplicated source is
+    never silently accepted.
+    """
+    if not isinstance(path, str) or not path:
+        return False
+    if os.path.islink(path):
+        return False
+    if not os.path.isfile(path):
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_size == ident["size"] and st.st_mtime_ns == ident["mtime_ns"]
+
+
+def _resolve_identity(ident, where, resolver, context):
+    """Resolve one canonical identity to a verified on-disk path.
+
+    With ``resolver=None`` this is the strict D2A path (re-stat the original
+    path, fail closed on any deviation).  With a resolver, the canonical
+    identity + context are offered to the resolver and each returned candidate
+    is re-stat'ed by the reader (never trusting the callback); the first exact
+    regular-file match wins.  If no candidate matches, fail closed.
+    """
+    if resolver is None:
+        _restat_identity(ident, where)
+        return ident["path"]
+    raw = resolver(ident, context)
+    candidates = _coerce_candidates(raw, where)
+    for cand in candidates:
+        if not isinstance(cand, str) or not cand:
+            raise DrizzleCheckpointError(
+                f"{where}: resolver returned invalid candidate {cand!r}"
+            )
+        if _verify_candidate(ident, cand):
+            return cand
+    raise DrizzleCheckpointError(
+        f"{where} source {ident['path']!r} could not be resolved: no candidate "
+        "matches the persisted size/mtime_ns (missing, moved off-policy, "
+        "tampered, duplicated, or a symlink)"
+    )
+
+
+def _identity_key(ident):
+    """Return the canonical identity key ``(path, size, mtime_ns)``."""
+    return (ident["path"], ident["size"], ident["mtime_ns"])
+
+
+def _resolve_sources(session, counters, resolver, output_dir):
+    """Resolve the reference + ordered plan sources (strict or opt-in).
+
+    Returns ``(resolved_reference, resolved_plan_paths)``.  Resolution is
+    injective and order-preserving for *distinct* canonical identities: two
+    distinct identities resolving to the same on-disk file (ambiguous /
+    duplicated destination) is refused.  Repeated use of the *exact same*
+    canonical identity is legitimate — the alignment reference is allowed to
+    also be one of the plan observations — so it resolves to the same path
+    without being reported as ambiguous.
+    """
+    reference = session["reference"]
+    plan_sources = session["plan"]["sources"]
+    frame_count = counters["frame_count"]
+    input_roots = list(session.get("input_roots", []))
+    real_output_dir = os.path.realpath(output_dir)
+
+    def _context(role, index, is_completed):
+        return {
+            "role": role,
+            "index": index,
+            "is_completed": is_completed,
+            "output_dir": real_output_dir,
+            "input_roots": input_roots,
+        }
+
+    resolved_reference = _resolve_identity(
+        reference, "session reference", resolver,
+        _context("reference", None, True),
+    )
+
+    # Map resolved on-disk path -> (canonical identity, description).  This
+    # enforces injectivity of *distinct* canonical identities while allowing
+    # the same canonical identity to be legitimately referenced more than once
+    # (e.g. the reference also appearing in the plan).
+    claimed = {resolved_reference: (reference, "session reference")}
+    resolved_plan = []
+    for idx, ident in enumerate(plan_sources):
+        is_completed = idx < frame_count
+        path = _resolve_identity(
+            ident, "session plan source", resolver,
+            _context("plan", idx, is_completed),
+        )
+        if path in claimed:
+            claimed_ident, claimed_desc = claimed[path]
+            if _identity_key(claimed_ident) != _identity_key(ident):
+                raise DrizzleCheckpointError(
+                    f"ambiguous source resolution: {claimed_desc} and session "
+                    f"plan source index {idx} both resolve to {path!r}"
+                )
+        else:
+            claimed[path] = (ident, f"session plan source index {idx}")
+        resolved_plan.append(path)
+    return resolved_reference, resolved_plan
+
+
+@dataclass(frozen=True)
+class SafeStackedSourceResolver:
+    """Immutable, deterministic source-resolution policy (original-or-stacked).
+
+    The production policy for the source-resolution seam: a completed /
+    reference source moved by ``tools.file_ops.move_to_stacked`` keeps its size
+    and mtime and lands at ``<src_dir>/<stacked_subdir>/<basename>``.  This
+    resolver therefore returns exactly two candidate paths, in order:
+
+    1. the canonical original path (``ident['path']``);
+    2. ``<original_dir>/<stacked_subdir_name>/<basename>``.
+
+    It performs **no** directory listing, glob, basename-only fallback, hashless
+    remap, or arbitrary-rename search, and it never guesses a
+    ``_dup_<timestamp>`` collision name (a basename carrying that marker is
+    refused outright).  The reader re-stats every returned candidate and only
+    accepts an exact size + mtime_ns regular-file match, so this policy object
+    is pure and performs no verification itself.
+
+    The object is frozen (immutable / hashable), so it can be carried as
+    validated provenance in :class:`DrizzleCheckpointResult` and re-applied by
+    :meth:`DrizzleCheckpointWriter.from_validated_result` without trusting a
+    mutable callback.
+    """
+
+    stacked_subdir_name: str = "stacked"
+
+    def __post_init__(self):
+        sub = self.stacked_subdir_name
+        if not isinstance(sub, str) or not sub:
+            raise DrizzleCheckpointError(
+                "SafeStackedSourceResolver stacked_subdir_name must be a "
+                "non-empty string"
+            )
+        if (
+            sub in (".", "..")
+            or sub != os.path.basename(sub)
+            or sub.startswith(("/", "\\"))
+        ):
+            raise DrizzleCheckpointError(
+                f"stacked_subdir_name {sub!r} is not a plain subdirectory name"
+            )
+        object.__setattr__(self, "stacked_subdir_name", sub)
+
+    def __call__(self, ident, context):
+        return self.resolve(ident, context)
+
+    def resolve(self, ident, context):
+        """Return the deterministic ordered candidate paths for ``ident``."""
+        path = ident.get("path") if isinstance(ident, dict) else None
+        if not isinstance(path, str) or not path:
+            return None
+        base = os.path.basename(path)
+        if not base or _DUP_COLLISION_RE.search(base):
+            # Never guess a _dup_<timestamp> collision target.
+            return None
+        src_dir = os.path.dirname(path)
+        stacked = os.path.join(src_dir, self.stacked_subdir_name, base)
+        return [path, stacked]
+
+
+def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
+                            resolver=None):
     """Read, validate and reconstruct a native Drizzle checkpoint (read-only).
 
     Locates ``<output_dir>/.m3d_checkpoint/checkpoint.json`` and
@@ -1831,6 +2076,18 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
     session plan.  The three accumulators are reconstructed only after the
     entire checkpoint validates (no partial externally visible restore).
 
+    When ``resolver`` is ``None`` (the default) source re-stat is **strict**:
+    each identity must still exist at its original persisted path with the exact
+    size + mtime_ns (a moved / renamed / missing / tampered source fails closed,
+    exactly as D2A).  When a resolver is supplied (explicit opt-in), each
+    canonical identity is offered to it together with a context dict, and the
+    reader itself re-stats every returned candidate path (regular, non-symlink
+    file, exact size + mtime_ns) — a callback claim is never trusted.  The
+    resolved reference / ordered plan paths are exposed on the returned result
+    (``resolved_reference`` / ``resolved_plan_paths`` /
+    ``resolved_completed_paths`` / ``resolved_remaining_paths``); persisted
+    manifest/session identities stay canonical (original paths), never rewritten.
+
     Parameters
     ----------
     output_dir :
@@ -1839,6 +2096,15 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
         When ``True`` (default) a persisted ``drizzle_lib_version`` /
         ``numpy_version`` different from the runtime library is refused
         (documented exact-continuation policy).
+    resolver :
+        Optional explicit source-resolution callback / policy.  Must be callable
+        as ``resolver(ident, context) -> path | [paths] | None``.  Only the
+        exact shipped :class:`SafeStackedSourceResolver` type (never a subclass,
+        which could smuggle mutable state and/or override resolution) is
+        carried forward as ``resolution_policy`` provenance (and thus re-applied
+        by the continuation factory); an arbitrary mutable callable — including
+        a ``SafeStackedSourceResolver`` subclass — is honoured for the immediate
+        read but is **not** carried (re-arm then falls back to strict).
 
     Returns
     -------
@@ -1866,12 +2132,25 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
     counters = _validate_counters(manifest)
     session = _validate_session(manifest)
     ledger = _validate_ledger(manifest, session, counters)
+    resolved_reference, resolved_plan_paths = _resolve_sources(
+        session, counters, resolver, output_dir
+    )
     channels = _validate_channels(manifest, generation, ckpt_dir, output_shape_hw)
     _validate_channel_vs_canonical(config, channels)
     _validate_versions(manifest, require_exact_versions)
 
     # Reconstruct only after the entire checkpoint validated.
     accumulators = _reconstruct_accumulators(channels, output_shape_hw)
+
+    # Only the exact shipped immutable policy *type* is carried as re-arm
+    # provenance.  ``isinstance`` would admit subclasses that can add mutable
+    # state and/or override ``resolve``/``__call__``; ``type(...) is ...``
+    # admits only the canonical frozen policy (fail closed).  Any other
+    # callable — including a ``SafeStackedSourceResolver`` subclass — is
+    # honoured for the immediate read but never re-applied later.
+    resolution_policy = (
+        resolver if type(resolver) is SafeStackedSourceResolver else None
+    )
 
     return DrizzleCheckpointResult(
         manifest=manifest,
@@ -1885,6 +2164,9 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
         next_source_index=counters["frame_count"],
         generation=generation,
         source_output_dir=output_dir,
+        resolved_reference=resolved_reference,
+        resolved_plan_paths=resolved_plan_paths,
+        resolution_policy=resolution_policy,
     )
 
 
@@ -2178,11 +2460,6 @@ def _validate_session(manifest):
             deco_clean.append(bi)
         plan_clean["decomposition"] = deco_clean
 
-    # Re-stat the persisted reference and every plan source (must match).
-    _restat_identity(reference, "session reference")
-    for ident in sources_clean:
-        _restat_identity(ident, "session plan source")
-
     return {
         "input_roots": roots_clean,
         "reference": reference,
@@ -2222,9 +2499,6 @@ def _validate_ledger(manifest, session, counters):
         raise DrizzleCheckpointError(
             "completed_sources is not the exact ordered prefix of the session plan"
         )
-    # Defense-in-depth: re-stat every completed ledger source too.
-    for ident in ledger:
-        _restat_identity(ident, "completed ledger source")
     return ledger
 
 
