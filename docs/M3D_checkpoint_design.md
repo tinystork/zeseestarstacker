@@ -1,11 +1,17 @@
-# M3-D — Design de checkpoint / reprise (D1 writer implémenté, reprise NON implémentée)
+# M3-D — Design de checkpoint / reprise (D1 writer + D2A reader + D2B1 continuation-writer ; reprise lifecycle NON implémentée)
 
 Statut : **D1 (writer) IMPLÉMENTÉ** — écriture atomique du checkpoint natif
 Drizzle (RSM2-D1) — et **D2A (reader) IMPLÉMENTÉ** — lecteur/validateur
 *lecture seule* `read_drizzle_checkpoint` qui reconstruit les trois
-accumulateurs après validation complète (RSM2-D2A).  L'**activation de Resume**
-(wiring lifecycle D2B dans `queue_manager` / GUI / startup) reste **NON
-implémentée** et n'est pas autorisée à démarrer automatiquement (voir §7/§8).
+accumulateurs après validation complète (RSM2-D2A).  **D2B1 (continuation-writer
+seam) IMPLÉMENTÉ** — la factory
+`DrizzleCheckpointWriter.from_validated_result` ré-arme le writer atomique à la
+génération ``N+1`` **uniquement** depuis un `DrizzleCheckpointResult` déjà
+validé, en **relisant intégralement** le checkpoint depuis le disque et en
+retournant un objet de ré-arm dédié `DrizzleContinuation` (RSM2-D2B1).
+L'**activation de Resume** (wiring lifecycle D2B dans `queue_manager` / GUI /
+startup) reste **NON implémentée** et n'est pas autorisée à démarrer
+automatiquement (voir §7/§8).
 Ce document fige l'état mathématique à préserver, le protocole d'écriture
 copy-on-write effectivement livré en D1, le contrat du lecteur D2A, et les
 contraintes que devra respecter l'activation de reprise **sans changer la
@@ -282,6 +288,94 @@ Invariants de sûreté :
   `_build_startup_refusal`/`_validate_resume_headless`/Qt refusent toujours le
   Resume Drizzle comme aujourd'hui.
 
+### 5.4 Seam de continuation-writer (D2B1)
+
+La factory `DrizzleCheckpointWriter.from_validated_result(result)` est le
+**seul** point d'entrée en mode continuation.  Le `__init__` public reste
+fresh-run-only (refus exact D1 de tout namespace non vide, sans bypass public
+`allow_existing`).  Contrat :
+
+- **Confiance minimale** : seuls deux champs du `result` fourni sont consommés —
+  le `source_output_dir` (provenance immuable/normalisée) et la `generation`
+  (jeton de fraîcheur/staleness).  Tous les autres payloads (manifest / session
+  / counters / config / WCS / accumulateurs) sont **ignorés** : ils sont figés
+  superficiellement (shallow-frozen) et donc mutables/tamperables.
+- **Relecture fraîche** : la factory effectue un
+  `read_drizzle_checkpoint(source_output_dir, require_exact_versions=True)`
+  complet en interne, puis exige que la génération relue égale
+  `result.generation` (sinon refus « stale », fermé : un autre writer a déjà
+  continué).  Tout l'état de continuation (config / WCS / grille / session /
+  ledger / compteurs / total d'exposition par canal / accumulateurs) est lié
+  depuis **cette lecture fraîche**, jamais depuis le `result` fourni.
+- **Objet de ré-arm dédié** : la factory retourne un `DrizzleContinuation`
+  (figé) portant le `writer` frais **et** les `accumulators` reconstruits frais,
+  plus `session` / `counters` / `completed_sources` / `generation` /
+  `next_source_index` frais.  Le lifecycle doit continuer en mutant
+  `continuation.accumulators` puis en appelant `continuation.writer.commit(...)`
+  — il ne peut pas continuer par accident depuis les payloads stales/tamperés du
+  `result` d'origine.
+- **Aucune écriture / GC au ré-arm** : ré-armer (et tout refus) ne produit
+  aucune écriture ni garbage-collection ; le dernier manifest commité reste
+  l'autorité.
+
+**Monotonie de continuation** (exécutée avant toute écriture, dans le try du
+commit, donc refus = génération précédente byte-identique) :
+
+- la liaison de session doit être identique à la génération chargée ;
+- `frame_count` doit croître strictement (préfixe strictement plus long) ;
+- `total_exposure_seconds` ne doit pas reculer ;
+- **vérité cumulative, pas seulement `frame_count` / exposition totale** :
+  - `exposure_unknown_count` ne doit pas décroître ;
+  - **arithmétique connu/inconnu cumulative** : avec `delta_frame =
+    new_frame - loaded_frame` et `delta_unknown = new_unknown -
+    loaded_unknown`, on exige `0 <= delta_unknown <= delta_frame` et
+    `known_added = delta_frame - delta_unknown` ; si `known_added == 0`
+    (toutes les nouvelles poses sont inconnues), `total_exposure_seconds` /
+    `exposure_min` / `exposure_max` doivent rester **exactement** inchangés
+    (y compris `None`) — aucune fabrication/réécriture du résumé cumulatif ;
+    si `known_added > 0`, `total_exposure_seconds` doit croître strictement et
+    `exposure_min` / `exposure_max` doivent être connus après le commit ;
+  - si `exposure_min` / `exposure_max` chargés sont connus, le nouveau min ne
+    peut ni augmenter ni disparaître et le nouveau max ne peut ni diminuer ni
+    disparaître ; une valeur chargée `None` **peut** devenir connue quand des
+    poses connues arrivent ensuite (transition sémantiquement légale) ;
+  - le `total_exptime` natif **de chaque canal** doit croître strictement quand
+    `frame_count` croît et ne jamais reculer (les totaux par canal chargés sont
+    capturés dans l'état de continuation et les snapshots sont validés avant
+    écriture) ;
+- le ledger complété doit conserver le ledger chargé comme préfixe exact.
+
+**Avancée du jalon monotone** : après chaque commit de continuation réussi, le
+writer met à jour son jalon interne (generation / session / counters / ledger /
+totaux par canal) vers la génération qui vient d'être commitée.  Le même writer
+ne peut donc jamais commiter ``N+2`` avec des compteurs / ledger reculés par
+rapport à ``N+1``.
+
+**Aucun travail faillible après le commit du manifest** : l'état de continuation
+suivant (deep copies de session / counters / ledger + totaux par canal) est
+construit **entièrement pendant le préflight**, avant toute écriture d'artefact
+et avant le commit du manifest, puis stocké dans une locale.  Après un
+`_write_manifest` réussi, seules des affectations scalaires / de référence non
+faillibles sont autorisées ; le GC reste best-effort.  Un échec d'allocation
+(ex. `MemoryError`) pendant la préparation de l'état suivant survient donc
+**avant** toute écriture et laisse la génération N byte-identique.
+
+**Provenance de répertoire exacte (`realpath`)** : `DrizzleCheckpointResult`
+lie `source_output_dir` au **chemin réel canonique** (`os.path.realpath`), pas
+seulement à un chemin absolu ; une racine symlink est résolue une fois à la
+validation, de sorte qu'un re-pointage ultérieur du symlink ne peut pas
+re-lier un résultat validé à un autre run.  La factory re-résout le chemin réel
+et refuse si la provenance ne résout plus vers le répertoire validé (swap /
+re-pointage de symlink) — elle ne lie jamais l'autre checkpoint.
+
+**Limite connue (reportée à D2B2)** : la politique de *source move / re-stat*
+du cycle de vie (quand les poses sources sont déplacées/archivées après leur
+acceptation puis re-statées lors d'un `read_drizzle_checkpoint` ultérieur) n'est
+**pas** modifiée par D2B1.  Le lecteur D2A re-state déjà strictement (path /
+size / mtime_ns), et D2B1 ne touche ni au `queue_manager`, ni à la GUI, ni au
+lifecycle, ni à la politique de déplacement des sources.  Cette coordination
+source-move ↔ re-stat sera traitée en D2B2.
+
 ## 6. Risques techniques
 
 1. **État interne de `drizzle.resample.Drizzle`.** `Drizzle` maintient
@@ -437,10 +531,56 @@ Invariants de sûreté :
   compteurs, ledger complété, config, WCS, `output_shape_hw`, accumulateurs,
   `next_source_index`, génération) prêt pour le wiring lifecycle D2B.
 
-## 8. Inventaire de la mission de reprise (D2) — reader fait, activation NON implémentée
+### 7.5 Exécutés en D2B1 (seam de continuation-writer)
 
-La fin de D1 ne complète pas RSM2 ; D2A livre le lecteur/validateur read-only.
-Il reste à activer la reprise (D2B, **volontairement non touchée par D1/D2A**) :
+`tests/test_drizzle_checkpoint_continuation.py` couvre (39 cas) :
+
+- **A** — régression du refus fresh-run D1 (un writer frais refuse toujours un
+  namespace non vide, byte-identique) et absence de bypass public
+  `allow_existing` ;
+- **B** — le ré-arm est sans écriture / sans GC et retourne un
+  `DrizzleContinuation` frais ; refus d'un dict arbitraire, d'un `result` stale
+  (génération déplacée sur disque), d'un jeton `generation` falsifié ; et
+  **ignorance des payloads mutés** du `result` fourni (manifest / session /
+  counters / config / WCS / liste d'accumulateurs) — la factory relie l'état à
+  la vérité disque non falsifiée ;
+- **C** — cycles write → read → re-arm → continue → commit → read (``N+1`` et
+  ``N+1 → N+2``) bit-exacts pour `square` et WHT Lanczos **signé** ;
+- **D** — refus rollback / réordonnancement / préfixe de ledger divergent, plus
+  la **vérité cumulative** : décroissance d'`exposure_unknown_count`, montée /
+  disparition d'`exposure_min`, baisse / disparition d'`exposure_max`, rollback
+  / divergence du `total_exptime` natif par canal, transition légale
+  `None → connu` du min/max, et la **régression deux-commits sur le même
+  writer** (``N+1`` commité puis rollback ``N+2`` refusé byte-identique ; une
+  extension ``N+2`` valide réussit) ;
+- **E** — matrice d'injection de panne (array / config / temp de manifest /
+  replace) laissant la génération N byte-identique sans fichier de tentative
+  résiduel ;
+- **F** — deux writers de continuation en course depuis le même `result` :
+  échec fermé, génération commitée cohérente ;
+- **G** — **aucun travail faillible après le commit du manifest** : injection de
+  panne dans la préparation de l'état de continuation suivant (et dans le
+  `copy.deepcopy` sous-jacent) — l'échec survient **avant** toute écriture et
+  laisse la génération N byte-identique sans artefact/temp de tentative ;
+- **H** — **arithmétique connu/inconnu cumulative** : refus de l'inflation
+  rétroactive d'`exposure_unknown_count` (`delta_unknown > delta_frame`), refus
+  de la fabrication/modification de `total_exposure_seconds` /
+  `exposure_min` / `exposure_max` quand toutes les nouvelles poses sont
+  inconnues (`known_added == 0`), et transitions **valides** tout-inconnu et
+  mixtes (connu + inconnu) ;
+- **I** — **provenance de répertoire exacte** : un résultat validé via une
+  racine symlink lie `source_output_dir` au chemin réel canonique ; un
+  re-pointage ultérieur du symlink ne peut pas re-lier le ré-arm à l'autre
+  checkpoint (le ré-arm reste sur le répertoire réel d'origine), et la factory
+  refuse un swap de symlink de la provenance (skip propre si la plateforme ne
+  supporte pas les symlinks).
+
+## 8. Inventaire de la mission de reprise (D2) — reader + continuation-writer faits, activation lifecycle NON implémentée
+
+La fin de D1 ne complète pas RSM2 ; D2A livre le lecteur/validateur read-only
+et D2B1 livre le seam de continuation-writer (ré-arm monotone depuis un résultat
+validé).  Il reste à **activer la reprise** dans le lifecycle (D2B2,
+**volontairement non touchée par D1/D2A/D2B1**) :
 
 - ✅ lire/valider `checkpoint.json` et vérifier SHA-256/taille de chaque
   artefact avant réinjection (fait en D2A) ;
@@ -448,8 +588,13 @@ Il reste à activer la reprise (D2B, **volontairement non touchée par D1/D2A**)
   `DrizzleAccumulator.from_native_state` (fait en D2A) ;
 - ✅ revalider la liaison de session et le ledger, refuser tout fichier
   modifié/renommé (fait en D2A) ;
+- ✅ ré-armer le writer de continuation à ``N+1`` depuis un résultat validé,
+  avec relecture fraîche, objet de ré-arm dédié et monotonie cumulative
+  (fait en D2B1) ;
 - réaffirmer `FINALIZATION_MODE_DRIZZLE` et reprendre strictement après
   `last_processed_index` ;
 - activer le chemin Resume Drizzle dans `_build_startup_refusal` /
   `_validate_resume_headless` / `_validate_and_open_resume` / Qt readiness —
-  chemins **volontairement non touchés** par D1 et D2A.
+  chemins **volontairement non touchés** par D1, D2A et D2B1 ;
+- coordonner la politique *source move / re-stat* du lifecycle avec la reprise
+  (reportée à D2B2 ; non modifiée par D2B1).

@@ -19,6 +19,33 @@ accumulators and continue deposition bit-identically (proved by
 ``tests/test_drizzle_resume_continuation.py`` and
 ``tests/test_drizzle_checkpoint_reader.py``).
 
+RSM2-D2B1 adds the *continuation-writer seam*: the classmethod
+:meth:`DrizzleCheckpointWriter.from_validated_result` re-arms the atomic writer
+at generation ``N+1`` **only** from an already-validated
+:class:`DrizzleCheckpointResult` (which now carries immutable
+``source_output_dir`` provenance).  The public ``__init__`` remains
+fresh-run-only and continues to refuse any non-empty ``.m3d_checkpoint``
+exactly as D1 — there is no ``allow_existing``-style public bypass.  A re-armed
+writer commits atomically and monotonically (no rollback / rewrite / reorder /
+divergent prefix, no cumulative-counter rollback), claiming generation ``N+1``
+artifacts exclusively, and garbage-collects generation ``N`` only *after* the
+``N+1`` manifest commits.  The factory performs a **fresh, full** re-read of
+the on-disk checkpoint (never trusting the shallow-frozen mutable payloads of
+the supplied result) and returns a dedicated :class:`DrizzleContinuation`
+re-arm result carrying the fresh writer and the fresh reconstructed
+accumulators / session / counters / ledger, so the lifecycle cannot
+accidentally continue from stale/tampered result state.  No lifecycle /
+queue_manager / GUI activation is performed.  Three final invariants harden the
+continuation seam: (1) the exact next continuation baseline is deep-copied
+entirely during preflight, so after a successful manifest commit only
+non-fallible scalar/reference assignments occur (GC stays best-effort);
+(2) cumulative unknown/known exposure arithmetic forbids retroactive
+reclassification of already-committed frames and any fabrication of the
+known-exposure summary when only unknown frames are added; (3)
+``source_output_dir`` is bound to the canonical real path (``realpath``) and
+the factory refuses a symlink swap, so a validated result can never be rebound
+to another run's checkpoint.
+
 Layout
 ------
 
@@ -77,6 +104,7 @@ current generation.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import itertools
@@ -97,6 +125,7 @@ __all__ = [
     "DrizzleCheckpointError",
     "DrizzleCheckpointWriter",
     "DrizzleCheckpointResult",
+    "DrizzleContinuation",
     "read_drizzle_checkpoint",
     "build_drizzle_canonical_config",
     "serialize_wcs_header",
@@ -472,7 +501,37 @@ class DrizzleCheckpointWriter:
         self.product_version = str(product_version or "")
         self.canonical_cfg = canonical_cfg
         self.output_wcs = output_wcs
+        self.output_shape_hw = self._validate_output_shape_hw(output_shape_hw)
 
+        self._dir = os.path.join(self.output_dir, CHECKPOINT_DIRNAME)
+
+        # Restart safety: a fresh-run writer must never reuse a prior checkpoint
+        # namespace.  Refuse (fail closed, preserve every pre-existing byte)
+        # before any write if the dedicated namespace is non-empty.  This is the
+        # ONLY construction path that runs the refusal; continuation writers are
+        # created exclusively via :meth:`from_validated_result` (no public
+        # ``allow_existing``-style bypass exists).
+        self._refuse_existing_checkpoint()
+
+        # Fail closed *before* any write: a malformed canonical config (missing
+        # effective field) or an unserializable WCS must never yield a writer
+        # that later publishes an unusable manifest.
+        self._bind_canonical_identity()
+
+        self._next_generation = 1
+        self._current_generation = 0
+        # Manifest temp owned by the *current* commit attempt (if any).  Set by
+        # ``_claim_manifest_temp`` and cleared on replace/cleanup, so cleanup can
+        # only ever remove the temp this attempt created — never a foreign one.
+        self._manifest_tmp_path = None
+        # Fresh run: no loaded checkpoint.  Continuation-mode monotonicity
+        # checks stay disabled until :meth:`from_validated_result` rearms this
+        # writer from an already-validated :class:`DrizzleCheckpointResult`.
+        self._continuation_state = None
+
+    @staticmethod
+    def _validate_output_shape_hw(output_shape_hw):
+        """Validate ``output_shape_hw`` into a canonical ``(H, W)`` tuple."""
         try:
             shape = tuple(int(v) for v in output_shape_hw)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -481,18 +540,16 @@ class DrizzleCheckpointWriter:
             raise DrizzleCheckpointError(
                 f"output_shape_hw must be (H, W), got {shape!r}"
             )
-        self.output_shape_hw = shape
+        return shape
 
-        self._dir = os.path.join(self.output_dir, CHECKPOINT_DIRNAME)
+    def _bind_canonical_identity(self):
+        """Derive the immutable canonical identity (fingerprint / digest /
+        scientific config / serialized WCS) from the bound config and grid.
 
-        # Restart safety: a fresh-run writer must never reuse a prior checkpoint
-        # namespace.  Refuse (fail closed, preserve every pre-existing byte)
-        # before any write if the dedicated namespace is non-empty.
-        self._refuse_existing_checkpoint()
-
-        # Fail closed *before* any write: a malformed canonical config (missing
-        # effective field) or an unserializable WCS must never yield a writer
-        # that later publishes an unusable manifest.
+        Fail closed *before* any write: a malformed canonical config (missing
+        effective field) or an unserializable WCS must never yield a writer
+        that later publishes an unusable manifest.
+        """
         try:
             self.fingerprint = run_contract.drizzle_fingerprint(self.canonical_cfg)
         except run_contract.ConfigError as exc:
@@ -501,14 +558,144 @@ class DrizzleCheckpointWriter:
             ) from exc
         self.run_config_digest = self.canonical_cfg.full_digest()
         self.scientific_config = dict(self.canonical_cfg.scientific)
-        self._wcs_dict = serialize_wcs_header(output_wcs)
+        self._wcs_dict = serialize_wcs_header(self.output_wcs)
 
-        self._next_generation = 1
-        self._current_generation = 0
-        # Manifest temp owned by the *current* commit attempt (if any).  Set by
-        # ``_claim_manifest_temp`` and cleared on replace/cleanup, so cleanup can
-        # only ever remove the temp this attempt created — never a foreign one.
-        self._manifest_tmp_path = None
+    @classmethod
+    def from_validated_result(cls, result):
+        """Re-arm a continuation writer from an already-validated checkpoint.
+
+        This is the **only** supported entry into continuation mode.  The
+        public :meth:`__init__` remains fresh-run-only (refusing any non-empty
+        ``.m3d_checkpoint`` exactly as D1), so there is no public
+        ``allow_existing``-style bypass that can be invoked without an
+        already-validated :class:`DrizzleCheckpointResult`.
+
+        Only two fields of ``result`` are trusted: the immutable, validated
+        ``source_output_dir`` provenance and the frozen ``generation`` (used as
+        a stale-result token).  Every other payload of ``result`` (manifest /
+        session / counters / config / WCS / accumulators) is deliberately
+        **not** trusted — those are shallow-frozen mutable payloads that may
+        have been tampered with, and the result may be stale.  The factory
+        therefore performs a **fresh, full**
+        :func:`read_drizzle_checkpoint` of ``source_output_dir`` (exact library
+        versions required) and binds *all* continuation state — config / WCS /
+        grid / session / ledger / counters / per-channel total exposure / the
+        reconstructed accumulators — from that freshly validated read.  If the
+        freshly read generation differs from ``result.generation`` (another
+        writer already continued, or the checkpoint changed), re-arm fails
+        closed.
+
+        Returns a dedicated :class:`DrizzleContinuation` re-arm result carrying
+        the fresh writer **and** the fresh reconstructed accumulators / session
+        / counters / ledger / ``next_source_index``, so the lifecycle cannot
+        accidentally continue from the stale/tampered ``result`` payloads.
+        Re-arm performs **no** writes and **no** garbage collection; the last
+        committed manifest stays authoritative.
+        """
+        if not isinstance(result, DrizzleCheckpointResult):
+            raise DrizzleCheckpointError(
+                "from_validated_result requires a validated "
+                "DrizzleCheckpointResult (got "
+                f"{type(result).__name__}); re-arming from an arbitrary dict / "
+                "unvalidated path is refused"
+            )
+        output_dir = result.source_output_dir
+        if not isinstance(output_dir, str) or not output_dir:
+            raise DrizzleCheckpointError(
+                "DrizzleCheckpointResult has missing/invalid source_output_dir "
+                "provenance"
+            )
+        # Canonical real-path re-resolution (D2B1 finding 3): a validated result
+        # is bound to the exact real directory it was validated against.  If the
+        # provenance now resolves elsewhere (a symlink was retargeted, or the
+        # validated directory was swapped for a symlink to another checkpoint),
+        # refuse instead of silently binding the other checkpoint.
+        canonical_output_dir = os.path.realpath(output_dir)
+        if canonical_output_dir != output_dir:
+            raise DrizzleCheckpointError(
+                "continuation source_output_dir provenance no longer resolves "
+                "to its validated real directory (symlink swap/retarget "
+                "detected); re-arm refused"
+            )
+        output_dir = canonical_output_dir
+        expected_generation = _strict_int(result.generation, "result.generation")
+
+        # Fresh, authoritative read-only validation of the on-disk checkpoint.
+        # This is the ONLY source of truth for continuation state; the supplied
+        # (possibly tampered / stale) result payloads are never trusted.
+        fresh = read_drizzle_checkpoint(output_dir, require_exact_versions=True)
+        if fresh.generation != expected_generation:
+            raise DrizzleCheckpointError(
+                f"stale continuation result: supplied generation "
+                f"{expected_generation} != on-disk generation "
+                f"{fresh.generation}; re-arm refused (another writer may have "
+                "already continued)"
+            )
+
+        writer = object.__new__(cls)
+        writer.output_dir = output_dir
+        writer.product_version = str(fresh.config.product_version)
+        writer.canonical_cfg = fresh.config
+        writer.output_wcs = fresh.wcs
+        writer.output_shape_hw = tuple(fresh.output_shape_hw)
+        writer._dir = os.path.join(writer.output_dir, CHECKPOINT_DIRNAME)
+
+        # Bind the canonical identity from the *fresh* config/WCS and re-check
+        # it equals the fresh manifest (defense-in-depth; the reader already
+        # validated digest / fingerprint / scientific_config / WCS).
+        writer._bind_canonical_identity()
+        writer._verify_bound_identity(fresh)
+
+        writer._current_generation = int(fresh.generation)
+        writer._next_generation = int(fresh.generation) + 1
+        writer._manifest_tmp_path = None
+        writer._continuation_state = writer._build_continuation_state(fresh)
+
+        return DrizzleContinuation(
+            writer=writer,
+            accumulators=fresh.accumulators,
+            session=copy.deepcopy(fresh.session),
+            counters=copy.deepcopy(fresh.counters),
+            completed_sources=copy.deepcopy(fresh.completed_sources),
+            generation=int(fresh.generation),
+            next_source_index=int(fresh.next_source_index),
+        )
+
+    def _verify_bound_identity(self, fresh):
+        """Fail closed if the bound identity diverges from the fresh manifest."""
+        if self.run_config_digest != fresh.manifest["run_config_digest"]:
+            raise DrizzleCheckpointError(
+                "continuation run_config_digest diverges from the loaded "
+                "manifest"
+            )
+        if self.fingerprint != fresh.manifest["scientific_fingerprint"]:
+            raise DrizzleCheckpointError(
+                "continuation scientific fingerprint diverges from the loaded "
+                "manifest"
+            )
+        if self.scientific_config != fresh.manifest["scientific_config"]:
+            raise DrizzleCheckpointError(
+                "continuation scientific_config diverges from the loaded "
+                "manifest"
+            )
+        if self._wcs_dict != fresh.manifest["wcs"]:
+            raise DrizzleCheckpointError(
+                "continuation output WCS diverges from the loaded manifest"
+            )
+
+    def _build_continuation_state(self, fresh):
+        """Build the monotonic continuation baseline from a fresh read."""
+        per_channel_total = [
+            float(getattr(acc, "_total_exptime", 0.0))
+            for acc in fresh.accumulators
+        ]
+        return {
+            "generation": int(fresh.generation),
+            "session": copy.deepcopy(fresh.session),
+            "counters": copy.deepcopy(fresh.counters),
+            "completed": copy.deepcopy(fresh.completed_sources),
+            "channel_total_exptime": per_channel_total,
+        }
 
     # ------------------------------------------------------------------ state
     @property
@@ -518,6 +705,10 @@ class DrizzleCheckpointWriter:
     @property
     def current_generation(self) -> int:
         return self._current_generation
+
+    @property
+    def next_generation(self) -> int:
+        return self._next_generation
 
     def _artifact_name(self, generation: int, channel: int, kind: str) -> str:
         return f"gen-{int(generation):08d}-ch{int(channel)}-out_{kind}.npy"
@@ -850,6 +1041,214 @@ class DrizzleCheckpointWriter:
                 "session plan"
             )
 
+    def _check_monotonic_extension(self, counters_clean, session_clean,
+                                   ledger_clean, snapshots):
+        """Enforce monotonic continuation for a re-armed writer.
+
+        No-op for a fresh-run writer (``_continuation_state is None``).  For a
+        continuation writer (created only via
+        :meth:`DrizzleCheckpointWriter.from_validated_result`), the next commit
+        must *extend* the loaded checkpoint — never roll back, rewrite, reorder
+        or diverge from it.  This covers **cumulative truth**, not just
+        ``frame_count`` / ``total_exposure_seconds``:
+
+        * the session binding (input roots / reference / ordered plan) must be
+          identical to the loaded checkpoint;
+        * ``frame_count`` must strictly increase (strictly longer prefix);
+        * ``total_exposure_seconds`` must not roll back;
+        * ``exposure_unknown_count`` must not decrease;
+        * a known loaded ``exposure_min`` must not increase nor disappear, and
+          a known loaded ``exposure_max`` must not decrease nor disappear (a
+          loaded ``None`` may still become known once later known frames
+          arrive);
+        * every channel's native ``total_exptime`` must strictly increase (frame
+          count grows) and never roll back;
+        * the completed ledger must keep the loaded ledger as its exact prefix.
+
+        This runs *before* any write, inside the commit try-block, so a
+        divergent continuation is refused with the previous committed
+        generation (and every file it references) byte-identical.
+        """
+        if self._continuation_state is None:
+            return
+        loaded = self._continuation_state
+        if session_clean != loaded["session"]:
+            raise DrizzleCheckpointError(
+                "continuation session binding diverges from the loaded "
+                "checkpoint (input_roots/reference/plan must be identical)"
+            )
+        loaded_counters = loaded["counters"]
+        new_frame = counters_clean["frame_count"]
+        loaded_frame = loaded_counters["frame_count"]
+        if new_frame <= loaded_frame:
+            raise DrizzleCheckpointError(
+                f"continuation must extend the loaded checkpoint: frame_count "
+                f"{new_frame} <= loaded frame_count {loaded_frame}"
+            )
+        self._check_cumulative_counters(loaded_counters, counters_clean)
+        self._check_channel_total_monotonic(loaded, snapshots)
+
+        loaded_ledger = loaded["completed"]
+        if ledger_clean[: len(loaded_ledger)] != loaded_ledger:
+            raise DrizzleCheckpointError(
+                "continuation completed_sources must preserve the exact loaded "
+                "ledger prefix (no rewrite/reorder/divergent prefix)"
+            )
+
+    def _check_cumulative_counters(self, loaded_counters, counters_clean):
+        """Enforce cumulative unknown/known exposure arithmetic (D2B1 finding 2).
+
+        With ``delta_frame = new_frame - loaded_frame`` (> 0, already enforced)
+        and ``delta_unknown = new_unknown - loaded_unknown``, the cumulative
+        unknown count may only grow by counting *new* frames — never by
+        retroactively reclassifying already-committed frames:
+
+        * ``0 <= delta_unknown <= delta_frame``;
+        * ``known_added = delta_frame - delta_unknown``;
+        * if ``known_added == 0`` (every new frame is unknown) then
+          ``total_exposure_seconds`` / ``exposure_min`` / ``exposure_max`` must
+          remain *exactly* unchanged (including ``None``) — no fabricating or
+          rewriting the cumulative known-exposure summary;
+        * if ``known_added > 0`` then ``total_exposure_seconds`` must strictly
+          increase and ``exposure_min`` / ``exposure_max`` must be known after
+          the commit.
+
+        Known loaded ``exposure_min`` / ``exposure_max`` still obey their own
+        monotonic rules (:meth:`_check_exposure_minmax_monotonic`), enforced at
+        the end regardless of ``known_added``.
+        """
+        delta_frame = (
+            counters_clean["frame_count"] - loaded_counters["frame_count"]
+        )
+        delta_unknown = (
+            counters_clean["exposure_unknown_count"]
+            - loaded_counters["exposure_unknown_count"]
+        )
+        if delta_unknown < 0:
+            raise DrizzleCheckpointError(
+                "continuation exposure_unknown_count must not decrease "
+                f"(delta {delta_unknown})"
+            )
+        if delta_unknown > delta_frame:
+            raise DrizzleCheckpointError(
+                "continuation exposure_unknown_count cannot grow by more than "
+                f"the new frames: delta_unknown {delta_unknown} > delta_frame "
+                f"{delta_frame} (retroactive inflation refused)"
+            )
+        known_added = delta_frame - delta_unknown
+        if known_added == 0:
+            if (
+                counters_clean["total_exposure_seconds"]
+                != loaded_counters["total_exposure_seconds"]
+            ):
+                raise DrizzleCheckpointError(
+                    "continuation total_exposure_seconds must be unchanged when "
+                    "no known frames are added (all new frames unknown)"
+                )
+            if counters_clean["exposure_min"] != loaded_counters["exposure_min"]:
+                raise DrizzleCheckpointError(
+                    "continuation exposure_min must be unchanged when no known "
+                    "frames are added (all new frames unknown)"
+                )
+            if counters_clean["exposure_max"] != loaded_counters["exposure_max"]:
+                raise DrizzleCheckpointError(
+                    "continuation exposure_max must be unchanged when no known "
+                    "frames are added (all new frames unknown)"
+                )
+        else:
+            if (
+                counters_clean["total_exposure_seconds"]
+                <= loaded_counters["total_exposure_seconds"]
+            ):
+                raise DrizzleCheckpointError(
+                    "continuation total_exposure_seconds must strictly increase "
+                    "when known frames are added "
+                    f"({counters_clean['total_exposure_seconds']} <= "
+                    f"{loaded_counters['total_exposure_seconds']})"
+                )
+            if (
+                counters_clean["exposure_min"] is None
+                or counters_clean["exposure_max"] is None
+            ):
+                raise DrizzleCheckpointError(
+                    "continuation exposure_min/exposure_max must be known when "
+                    "known frames are committed"
+                )
+        self._check_exposure_minmax_monotonic(
+            loaded_counters, counters_clean
+        )
+
+    @staticmethod
+    def _check_exposure_minmax_monotonic(loaded_counters, new_counters):
+        """Cumulative min/max exposure monotonicity (known values only).
+
+        A known loaded ``exposure_min`` can only stay or decrease and must not
+        disappear; a known loaded ``exposure_max`` can only stay or increase and
+        must not disappear.  A loaded ``None`` may become known (or stay None)
+        once later known frames arrive — that transition is semantically legal
+        and is not refused.
+        """
+        loaded_min = loaded_counters["exposure_min"]
+        loaded_max = loaded_counters["exposure_max"]
+        new_min = new_counters["exposure_min"]
+        new_max = new_counters["exposure_max"]
+        if loaded_min is not None:
+            if new_min is None:
+                raise DrizzleCheckpointError(
+                    "continuation exposure_min must not disappear"
+                )
+            if new_min > loaded_min:
+                raise DrizzleCheckpointError(
+                    f"continuation exposure_min must not increase "
+                    f"({new_min} > loaded {loaded_min})"
+                )
+        if loaded_max is not None:
+            if new_max is None:
+                raise DrizzleCheckpointError(
+                    "continuation exposure_max must not disappear"
+                )
+            if new_max < loaded_max:
+                raise DrizzleCheckpointError(
+                    f"continuation exposure_max must not decrease "
+                    f"({new_max} < loaded {loaded_max})"
+                )
+
+    def _check_channel_total_monotonic(self, loaded, snapshots):
+        """Every channel's native ``total_exptime`` must strictly increase."""
+        loaded_totals = loaded["channel_total_exptime"]
+        new_totals = [float(s["total_exptime"]) for s in snapshots]
+        if len(new_totals) != len(loaded_totals):
+            raise DrizzleCheckpointError(
+                "continuation per-channel total_exptime count changed "
+                f"({len(new_totals)} != {len(loaded_totals)})"
+            )
+        for c, (new_t, loaded_t) in enumerate(zip(new_totals, loaded_totals)):
+            if new_t <= loaded_t:
+                raise DrizzleCheckpointError(
+                    f"continuation channel {c} total_exptime must strictly "
+                    f"increase (got {new_t} <= loaded {loaded_t})"
+                )
+
+    def _build_next_continuation_state(self, generation, counters_clean,
+                                       session_clean, ledger_clean, snapshots):
+        """Build (deep-copied) the continuation baseline for the next commit.
+
+        Pure and fallible: the deep copies and the per-channel total-exposure
+        list are materialized here, during preflight, so any allocation failure
+        (e.g. ``MemoryError``) is raised *before* any artifact write or manifest
+        commit.  Returns the exact next ``_continuation_state`` dict, which the
+        caller assigns by reference **only after** the manifest commits.
+        """
+        return {
+            "generation": int(generation),
+            "session": copy.deepcopy(session_clean),
+            "counters": copy.deepcopy(counters_clean),
+            "completed": copy.deepcopy(ledger_clean),
+            "channel_total_exptime": [
+                float(s["total_exptime"]) for s in snapshots
+            ],
+        }
+
     def _preflight_json_payload(self, counters_clean, session_clean, ledger_clean):
         """Preflight-serialize the non-artifact manifest payload (fail closed).
 
@@ -1087,6 +1486,7 @@ class DrizzleCheckpointWriter:
         generation = int(self._next_generation)
         manifest_committed = False
         created_final_names = []
+        next_continuation_state = None
 
         try:
             # 1. Validate everything *before* any write (fail closed, never a
@@ -1105,8 +1505,29 @@ class DrizzleCheckpointWriter:
                 counters_clean, session_clean, ledger_clean
             )
 
+            # 2b. Continuation monotonicity: a re-armed writer must extend the
+            #     loaded checkpoint (never roll back / rewrite / reorder /
+            #     diverge / roll back cumulative counters or native per-channel
+            #     total exposure).  No-op for a fresh-run writer.
+            self._check_monotonic_extension(
+                counters_clean, session_clean, ledger_clean, snapshots
+            )
+
             # 3. Preflight strict-JSON serialization of the non-artifact payload.
             self._preflight_json_payload(counters_clean, session_clean, ledger_clean)
+
+            # 3b. Build the exact next continuation baseline (deep copies)
+            #     entirely during preflight, BEFORE any artifact write or
+            #     manifest commit.  Any fallible allocation (e.g. MemoryError)
+            #     therefore fails here — with generation N still byte-identical —
+            #     instead of surfacing to the caller after the N+1 manifest is
+            #     already authoritative.  No fallible continuation-state work
+            #     may happen after `_write_manifest`.
+            if self._continuation_state is not None:
+                next_continuation_state = self._build_next_continuation_state(
+                    generation, counters_clean, session_clean, ledger_clean,
+                    snapshots,
+                )
 
             os.makedirs(self._dir, exist_ok=True)
             # 4. Write the six generation-unique array artifacts (exclusive
@@ -1213,8 +1634,14 @@ class DrizzleCheckpointWriter:
             ) from exc
 
         # 8. Advance the generation and best-effort GC older generations.
+        #    After a successful manifest commit only non-fallible scalar /
+        #    reference assignments may occur: the next continuation baseline was
+        #    already deep-copied during preflight, so it is adopted here by a
+        #    single reference assignment.  GC remains strictly best-effort.
         self._current_generation = generation
         self._next_generation = generation + 1
+        if next_continuation_state is not None:
+            self._continuation_state = next_continuation_state
         self._gc_stale_generations(generation)
         return generation
 
@@ -1232,7 +1659,7 @@ class DrizzleCheckpointWriter:
 # never silently continues across a library version boundary.
 
 
-@dataclass
+@dataclass(frozen=True)
 class DrizzleCheckpointResult:
     """Validated read-only reconstruction of a native Drizzle checkpoint.
 
@@ -1245,6 +1672,14 @@ class DrizzleCheckpointResult:
     accumulated (== ``frame_count``, because ``completed_sources`` is the exact
     ordered prefix of the session plan).  Suitable for later D2B lifecycle
     wiring (which is *not* performed here).
+
+    ``source_output_dir`` is the immutable, validated provenance of the exact
+    output directory the checkpoint was read from (normalized to an absolute
+    path in :meth:`__post_init__`).  It is the *only* path a continuation
+    writer (:meth:`DrizzleCheckpointWriter.from_validated_result`) may bind to,
+    so a validated result can never be re-armed against a different directory.
+    The dataclass is frozen: no field (including ``source_output_dir``) can be
+    reassigned after validation.
     """
 
     manifest: dict
@@ -1257,6 +1692,59 @@ class DrizzleCheckpointResult:
     accumulators: list      # [DrizzleAccumulator x3]
     next_source_index: int
     generation: int
+    source_output_dir: str
+
+    def __post_init__(self):
+        """Validate and normalize the source-output provenance (read-only).
+
+        The provenance is bound to the **canonical real path** (``realpath``),
+        not merely an absolute path: any symlink component in the supplied path
+        (including a symlink root) is resolved once, here, so a later symlink
+        retargeting cannot rebind this validated result to a different run's
+        checkpoint directory.
+        """
+        d = self.source_output_dir
+        if not isinstance(d, (str, os.PathLike)) or not os.fspath(d):
+            raise DrizzleCheckpointError(
+                "DrizzleCheckpointResult requires a non-empty source_output_dir"
+            )
+        d = os.path.realpath(os.fspath(d))
+        if not os.path.isdir(d):
+            raise DrizzleCheckpointError(
+                f"DrizzleCheckpointResult source_output_dir {d!r} is not a "
+                "directory"
+            )
+        object.__setattr__(self, "source_output_dir", d)
+
+
+@dataclass(frozen=True)
+class DrizzleContinuation:
+    """Unambiguous D2B1 re-arm result: a fresh writer + fresh disk state.
+
+    Produced only by
+    :meth:`DrizzleCheckpointWriter.from_validated_result`, which **freshly**
+    re-reads and re-validates the on-disk checkpoint (never trusting the
+    shallow-frozen mutable payloads of the supplied
+    :class:`DrizzleCheckpointResult`).  The lifecycle must continue by mutating
+    ``accumulators`` (the freshly reconstructed native buffers) and then
+    calling ``writer.commit(...)`` with the freshly loaded ``session`` /
+    ``counters`` / ``completed_sources`` extended for the new frames.  It must
+    **not** continue from the original (possibly tampered or stale) result
+    payloads — those are deliberately not part of this object.
+
+    The object is frozen (field *names* cannot be reassigned); the mutable
+    payloads (``session`` / ``counters`` / ``completed_sources``) are fresh
+    deep copies, and ``accumulators`` are the live reconstructed buffers that
+    the lifecycle is expected to advance.
+    """
+
+    writer: DrizzleCheckpointWriter
+    accumulators: list          # [DrizzleAccumulator x3] fresh from disk
+    session: dict               # fresh loaded session binding (baseline)
+    counters: dict              # fresh loaded counters (baseline)
+    completed_sources: list     # fresh loaded ledger (baseline)
+    generation: int
+    next_source_index: int
 
 
 def _reject_json_constant(value: str):
@@ -1396,6 +1884,7 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True):
         accumulators=accumulators,
         next_source_index=counters["frame_count"],
         generation=generation,
+        source_output_dir=output_dir,
     )
 
 
