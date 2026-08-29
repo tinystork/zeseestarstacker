@@ -207,6 +207,28 @@ def pixmap_from_alignment(data_shape_hw, tf, reference_wcs, output_wcs):
     return pixmap, in_grid_mask
 
 
+def _validate_native_buffer(buf, name, out_shape_hw):
+    """Validate a persisted native drizzle buffer for restoration.
+
+    Fails closed (raises) on any state that is not an exact float32 ``(H, W)``
+    finite array matching ``out_shape_hw``.  Returns an owned (private) float32
+    copy so that the caller's snapshot arrays are never aliased and therefore
+    never mutated by subsequent accumulation.
+    """
+    arr = np.asarray(buf)
+    if arr.dtype != np.float32:
+        raise TypeError(f"{name} must be float32, got {arr.dtype}")
+    if arr.ndim != 2:
+        raise ValueError(f"{name} must be 2-D (H, W), got ndim={arr.ndim}")
+    if tuple(arr.shape) != tuple(out_shape_hw):
+        raise ValueError(
+            f"{name} shape {tuple(arr.shape)} != out_shape_hw {tuple(out_shape_hw)}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} contains non-finite samples")
+    return np.array(arr, dtype=np.float32, copy=True)
+
+
 class DrizzleAccumulator:
     """A single-channel drizzle accumulator wrapping
     :class:`drizzle.resample.Drizzle`.
@@ -227,6 +249,8 @@ class DrizzleAccumulator:
         self.out_shape_hw = tuple(int(v) for v in out_shape_hw)
         self.kernel = kernel
         self.pixfrac = float(pixfrac)
+        self.fillval = fillval
+        self._total_exptime = 0.0
 
         self._out_img = np.zeros(self.out_shape_hw, dtype=np.float32)
         self._out_wht = np.zeros(self.out_shape_hw, dtype=np.float32)
@@ -236,6 +260,111 @@ class DrizzleAccumulator:
             kernel=kernel,
             fillval=fillval,
         )
+
+    @classmethod
+    def from_native_state(
+        cls,
+        out_shape_hw,
+        out_img,
+        out_wht,
+        *,
+        kernel="square",
+        pixfrac=1.0,
+        fillval="0.0",
+        total_exptime=0.0,
+    ):
+        """Reconstruct an accumulator from persisted native drizzle buffers.
+
+        This is the supported resume/continuation seam: it rebuilds a
+        :class:`DrizzleAccumulator` around the exact native ``out_img``
+        (weighted *mean*) and ``out_wht`` (total weight, possibly signed for the
+        Lanczos kernels) arrays that the engine mutates in place, so that
+        subsequent :meth:`add` calls continue the accumulation bit-identically
+        to a run that never stopped.  ``finalize``/``sci``/``wht`` are never
+        used as resume state (they are derived views, not accumulation state).
+
+        Upstream ``drizzle`` 2.2.0 facts that shape this reconstruction
+        (verified against the installed library):
+
+        * Passing a pre-populated ``out_wht`` to the ``Drizzle`` constructor
+          while ``exptime == 0`` raises (``"Exposure time cannot be 0 when
+          context and/or weight arrays are non-zero"``), so the accumulated
+          ``total_exptime`` must be restored alongside the buffers.
+        * Passing a pre-populated ``out_wht`` without a matching ``out_ctx``
+          raises (``"Pixels with non-zero context values must have positive
+          weights and vice-versa"``).  The context bitmap is *bookkeeping only*
+          — it is never part of the science invariant (``out_img``/``out_wht``)
+          and never persisted — so the reconstructed engine disables context
+          tracking (``disable_ctx=True``) instead of persisting it.  This
+          changes no science: ``out_img``/``out_wht`` remain bit-identical.
+
+        Parameters
+        ----------
+        out_shape_hw : tuple of int
+            Output grid shape ``(height, width)``; must match both buffers.
+        out_img : array_like
+            Native weighted-mean science, float32 ``(H, W)``, all finite.
+        out_wht : array_like
+            Native total weight, float32 ``(H, W)``, all finite (signed
+            negative samples are valid for the Lanczos kernels).
+        kernel, pixfrac, fillval :
+            The exact drizzle parameters used to build the original
+            accumulator (the runtime-*effective* values; ``pixfrac == 1.0``
+            for Lanczos).
+        total_exptime : float
+            Sum of the ``exptime`` of every frame already accumulated into the
+            buffers.  Must be ``> 0`` whenever ``out_wht`` has positive mass
+            (matching the upstream consistency rule), and must always be a
+            finite non-negative number (NaN/±Inf are rejected).
+
+        Returns
+        -------
+        DrizzleAccumulator
+            A fresh accumulator owning private float32 copies of the buffers,
+            ready to accept further :meth:`add` calls.
+
+        Raises
+        ------
+        TypeError
+            If a buffer is not array-like or not ``float32``.
+        ValueError
+            If a buffer is not 2-D, its shape does not match ``out_shape_hw``,
+            it contains non-finite samples, or ``total_exptime`` is
+            non-finite/negative or inconsistent with a non-empty ``out_wht``.
+        """
+        out_shape_hw = tuple(int(v) for v in out_shape_hw)
+        img = _validate_native_buffer(out_img, "out_img", out_shape_hw)
+        wht = _validate_native_buffer(out_wht, "out_wht", out_shape_hw)
+
+        total_exptime = float(total_exptime)
+        if not np.isfinite(total_exptime):
+            raise ValueError("total_exptime must be finite")
+        if total_exptime < 0.0:
+            raise ValueError("total_exptime must be non-negative")
+        if total_exptime == 0.0 and np.sum(wht) > 0.0:
+            raise ValueError(
+                "total_exptime must be > 0 when out_wht has positive mass "
+                "(upstream drizzle rejects a zero total exposure time with "
+                "non-empty weight arrays)"
+            )
+
+        acc = cls.__new__(cls)
+        acc.out_shape_hw = out_shape_hw
+        acc.kernel = kernel
+        acc.pixfrac = float(pixfrac)
+        acc.fillval = fillval
+        acc._total_exptime = total_exptime
+        acc._out_img = img
+        acc._out_wht = wht
+        acc._drizzle = Drizzle(
+            out_img=acc._out_img,
+            out_wht=acc._out_wht,
+            kernel=kernel,
+            fillval=fillval,
+            exptime=total_exptime,
+            disable_ctx=True,
+        )
+        return acc
 
     @property
     def sci(self):
@@ -269,6 +398,18 @@ class DrizzleAccumulator:
         The exposure scale (``exptime`` for ``"counts"``, ``1.0`` for
         ``"cps"``) is folded into the weight via ``wht_scale`` so that the
         final ``sci / wht`` ratio is the exposure-weighted mean of the rate.
+
+        The persistable exposure counter (``_total_exptime``) and the wrapped
+        engine's ``total_exptime`` advance **only when an add is accepted**.
+        Upstream ``drizzle`` 2.2.0 increments its internal exposure counter
+        *before* some validations (e.g. the pixmap/weight-map shape checks), so
+        a rejected add is rolled back here to keep the accumulator coherent and
+        reusable: the engine's exposure counter is snapshotted before the call
+        and restored if ``add_image`` raises, and this wrapper's counter is
+        advanced only after a successful deposition.  A rejected add therefore
+        never mutates the native buffers (the shape validations raise before
+        the C deposition), never advances either exposure counter, and leaves
+        the accumulator bit-identical to one that never saw the rejected frame.
         """
         data = np.asarray(data, dtype=np.float32)
         weight_map = np.asarray(weight_map, dtype=np.float32)
@@ -278,15 +419,28 @@ class DrizzleAccumulator:
 
         expscale = exptime if in_units == "counts" else 1.0
 
-        self._drizzle.add_image(
-            data=data,
-            exptime=exptime,
-            pixmap=pixmap,
-            weight_map=weight_map,
-            in_units=in_units,
-            pixfrac=self.pixfrac,
-            wht_scale=expscale,
-        )
+        # Upstream drizzle 2.2.0 advances ``_texptime`` inside ``add_image``
+        # *before* it validates the pixmap/weight-map shapes, so a rejected
+        # add would otherwise leave the engine's exposure bookkeeping
+        # desynchronised from its (unchanged) buffers.  Snapshot and restore it
+        # on any failure so the accumulator stays coherent and reusable.
+        saved_texptime = self._drizzle._texptime
+        try:
+            self._drizzle.add_image(
+                data=data,
+                exptime=exptime,
+                pixmap=pixmap,
+                weight_map=weight_map,
+                in_units=in_units,
+                pixfrac=self.pixfrac,
+                wht_scale=expscale,
+            )
+        except Exception:
+            self._drizzle._texptime = saved_texptime
+            raise
+
+        # Advance the persistable wrapper counter only after a successful add.
+        self._total_exptime += float(exptime)
 
     def finalize(self, mode="divide"):
         """Normalise the accumulated image.

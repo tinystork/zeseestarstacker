@@ -89,7 +89,10 @@ def test_defaults_aligned_with_settings_manager():
         # equivalent — the Tk ``SettingsManager`` has no theme, so there is no
         # default to align against.  Exclude it from the backend-default
         # alignment invariant (it is never read by the engine or Tk).
-        if key == "theme":
+        # ``resume_intent`` / ``resume_source`` are the explicit run-intent
+        # carrier (Resume Contract v2): Qt-side per-run fields with no Tk
+        # equivalent (the Tk flow defaults to fresh and never carries them).
+        if key in ("theme", "resume_intent", "resume_source"):
             continue
         assert key in sm_defaults, f"QtSettingsState.{key} missing from SettingsManager"
         assert value == sm_defaults[key], (
@@ -310,3 +313,52 @@ def test_from_dict_mutable_defaults_are_independent():
     b = QtSettingsState.from_dict({})
     a.order_file_list.append("y")
     assert b.order_file_list == []
+
+
+# --------------------------------------------------------------------------
+# M8-R1: transient run intent is never persisted / restored (Resume Contract v2)
+# --------------------------------------------------------------------------
+def test_to_dict_excludes_transient_run_intent():
+    state = _make_state()
+    state.resume_intent = "resume"
+    state.resume_source = "/old/run"
+    state.last_stack_path = "/outputs/last.fit"
+    d = state.to_dict()
+    assert "resume_intent" not in d
+    assert "resume_source" not in d
+    # last_stack_path is a normal persisted field and must remain.
+    assert d["last_stack_path"] == "/outputs/last.fit"
+
+
+def test_from_dict_ignores_stale_transient_intent():
+    state = QtSettingsState.from_dict(
+        {
+            "resume_intent": "resume",
+            "resume_source": "/old/run",
+            "last_stack_path": "/outputs/last.fit",
+            "batch_size": 4,
+        }
+    )
+    # A stale/corrupt/user-edited resume intent never survives the load.
+    assert state.resume_intent == "fresh"
+    assert state.resume_source == ""
+    # last_stack_path is persisted normally.
+    assert state.last_stack_path == "/outputs/last.fit"
+    assert state.batch_size == 4
+
+
+def test_transient_intent_round_trips_as_fresh():
+    state = _make_state()
+    state.resume_intent = "resume"
+    state.resume_source = "/old/run"
+    restored = QtSettingsState.from_dict(state.to_dict())
+    assert restored.resume_intent == "fresh"
+    assert restored.resume_source == ""
+
+
+def test_defaults_exclude_transient_run_intent():
+    defaults = QtSettingsState.defaults()
+    assert "resume_intent" not in defaults
+    assert "resume_source" not in defaults
+    # The persisted surface still equals a default state's to_dict().
+    assert QtSettingsState().to_dict() == defaults

@@ -42,7 +42,7 @@ from queue import Empty, Queue
 import time
 from typing import Any, Callable, Optional
 
-from .run_bridge import RunRequest, split_backend_kwargs
+from .run_bridge import RUN_INTENT_FRESH, RunRequest, split_backend_kwargs
 from .run_log import RunLog
 from .startup_refusal import StartupRefusedError, build_payload_from_engine
 from .summary_payload import SummaryPayload, build_summary_payload
@@ -650,7 +650,15 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             if callable(setter):
                 setter(self._make_preview_callback(preview_callback))
 
-        started = stacker.start_processing(**start_kwargs)
+        # Resume Contract v2: intent is carried explicitly from the run
+        # request (never derived from artifacts by the engine).  The engine
+        # treats a missing/None intent as fresh; ``resume_source`` is optional
+        # and only meaningful for a resume.
+        started = stacker.start_processing(
+            **start_kwargs,
+            resume_intent=getattr(request, "resume_intent", RUN_INTENT_FRESH),
+            resume_source=getattr(request, "resume_source", None),
+        )
         if not started:
             self._stop_stackers()
             # Structured startup refusal (known code) vs generic false start.
@@ -668,6 +676,7 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         run_log.warning = log_callback
         metadata = self._allowlisted_metadata(start_kwargs)
         metadata["product_version"] = self._product_version()
+        metadata["resume_intent"] = getattr(request, "resume_intent", RUN_INTENT_FRESH)
         run_log.open(
             start_kwargs.get("output_dir") or getattr(stacker, "output_folder", None),
             metadata=metadata,

@@ -170,7 +170,12 @@ from .preview_view import (
     zoomed_image_size,
 )
 from .progress_time import UNKNOWN, estimate_remaining_seconds, format_duration
-from .run_bridge import RunRequest, build_run_request as _build_run_request
+from .run_bridge import (
+    RUN_INTENT_FRESH,
+    RUN_INTENT_RESUME,
+    RunRequest,
+    build_run_request as _build_run_request,
+)
 from .run_controller import RunController
 from .run_handoff import attach_run_settings
 from .settings_validation import normalize_batch_size, validate_settings_for_backend
@@ -181,6 +186,8 @@ from .solver_probe import probe_zesolver_operational
 from .summary_payload import SummaryPayload, derive_terminal_status
 
 from .resources import load_empty_preview_pixmap, load_window_icon
+
+from seestar import resume_locator
 
 # Real product window-title *name* (the Tk ``localization`` "title" key, en/fr
 # identical).  The full default window title appends the lazily-read package
@@ -1022,6 +1029,11 @@ class MainWindow(QMainWindow):
         # Re-entrancy guards for atomic BP/WP and WB control application.
         self._bp_wp_sync_guard: bool = False
         self._wb_sync_guard: bool = False
+        # Re-entrancy guard for the Resume apply flow: while a discovered
+        # config is being pushed into the controls, the programmatic widget
+        # writes must not be mistaken for user-originated path changes that
+        # would invalidate the just-prepared Resume (RSM2-02C R1).
+        self._applying_resume_result: bool = False
         self.settings_state: QtSettingsState = QtSettingsState()
         self.controller = RunController(self)
 
@@ -1229,7 +1241,10 @@ class MainWindow(QMainWindow):
         # in the exact Tk "Options Drizzle" order, before local solver.
         # Same widget specs as the former Expert fields.
         self.drizzle_scale_spin = QSpinBox()
-        self.drizzle_scale_spin.setRange(2, 4)
+        # x1 is a valid runtime-effective value and must remain representable
+        # when restoring a headless standard-Drizzle checkpoint.  The normal
+        # new-run default remains x2.
+        self.drizzle_scale_spin.setRange(1, 4)
         self.drizzle_scale_spin.setSingleStep(1)
         self.drizzle_scale_spin.setValue(int(self.settings_state.drizzle_scale))
 
@@ -1254,6 +1269,14 @@ class MainWindow(QMainWindow):
         self.solver_combo = QComboBox()
         self.solver_combo.addItems(SOLVER_PREFERENCES)
         self.solver_combo.setCurrentText("none")
+
+        # Explicit New/Resume selector (RSM2-02C).  Fresh/New by default on
+        # every construction; a persisted/browsed/edited last-stack path alone
+        # never selects Resume — only this explicit user choice does.
+        self.resume_mode_combo = QComboBox()
+        self.resume_mode_combo.addItem(self._tr("resume_mode_new"), "fresh")
+        self.resume_mode_combo.addItem(self._tr("resume_mode_resume"), "resume")
+        self.resume_mode_combo.setCurrentIndex(0)
 
         form = QFormLayout()
         self._add_form_row(
@@ -1282,6 +1305,7 @@ class MainWindow(QMainWindow):
             "last_stack",
             self._path_row(self.last_stack_edit, self.browse_last_stack_button),
         )
+        self._add_form_row(form, "resume_mode_label", self.resume_mode_combo)
         self._add_form_row(form, "batch_size", self.batch_spin)
         form.addRow("", self.boring_check)
         self._add_form_row(form, "stacking_mode", self.stacking_mode_combo)
@@ -2042,11 +2066,14 @@ class MainWindow(QMainWindow):
         """Mirror every settings widget into ``self.settings_state`` on change."""
         self.input_edit.textChanged.connect(self._sync_state_from_controls)
         self.output_edit.textChanged.connect(self._sync_state_from_controls)
+        self.output_edit.textEdited.connect(self._invalidate_resume_on_user_path_change)
         self.temp_edit.textChanged.connect(self._sync_state_from_controls)
         self.output_filename_edit.textChanged.connect(self._sync_state_from_controls)
         self.reference_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._on_last_stack_changed)
+        self.last_stack_edit.textEdited.connect(self._invalidate_resume_on_user_path_change)
+        self.resume_mode_combo.currentIndexChanged.connect(self._on_resume_mode_changed)
         self.browse_input_button.clicked.connect(self._browse_input)
         self.browse_output_button.clicked.connect(self._browse_output)
         self.browse_temp_button.clicked.connect(self._browse_temp)
@@ -2633,6 +2660,9 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.output_edit.setText(os.path.abspath(folder))
+            # ``setText`` never emits ``textEdited``, so invalidate an armed
+            # Resume explicitly (a freshly browsed output is a new target).
+            self._invalidate_resume_on_user_path_change()
 
     def _browse_temp(self) -> None:
         """Select the temporary folder via a directory dialog (Tk parity)."""
@@ -2677,6 +2707,9 @@ class MainWindow(QMainWindow):
         if filepath:
             abs_path = os.path.abspath(filepath)
             self.last_stack_edit.setText(abs_path)
+            # ``setText`` never emits ``textEdited``, so invalidate an armed
+            # Resume explicitly (a freshly browsed stack is a new target).
+            self._invalidate_resume_on_user_path_change()
 
     def _on_last_stack_changed(self, *_ignored) -> None:
         """Pre-fill the output folder from the last-stack path when empty.
@@ -2692,6 +2725,120 @@ class MainWindow(QMainWindow):
         p = self.last_stack_edit.text().strip()
         if p:
             self.output_edit.setText(os.path.dirname(p))
+
+    # ------------------------------------------------------ resume selector
+    def _on_resume_mode_changed(self, _index: Optional[int] = None) -> None:
+        """Handle an explicit New/Resume selector change (RSM2-02C).
+
+        ``Resume`` runs the bounded locator/restore flow; ``New`` (or any
+        non-resume value) clears the transient run intent only.  This is the
+        *only* path that sets ``resume_intent`` — editing/browsing the Last
+        Stack path never does.
+        """
+        mode = self.resume_mode_combo.currentData()
+        if mode == "resume":
+            self._activate_resume()
+        else:
+            self._clear_resume_intent()
+
+    def _clear_resume_intent(self) -> None:
+        """Clear the transient resume intent/source (keep last-stack history)."""
+        self.settings_state.resume_intent = RUN_INTENT_FRESH
+        self.settings_state.resume_source = ""
+
+    def _invalidate_resume_on_user_path_change(self, *_ignored) -> None:
+        """Invalidate an armed Resume on a user-originated path change.
+
+        Editing or browsing Last Stack / Output after a Resume has been
+        prepared would otherwise leave ``resume_intent`` / ``resume_source``
+        pointing at the old run while the request carries the new path — an
+        incoherent source/target pairing.  Any such user-originated change
+        reverts the selector to New and clears the transient intent/source,
+        while keeping the newly entered/browsed path and history; the user may
+        explicitly select Resume again to re-run discovery.  Programmatic
+        updates during ``_apply_resume_result`` are guarded, and a fresh
+        (never-armed) window is a no-op.
+        """
+        if self._applying_resume_result:
+            return
+        if self.settings_state.resume_intent != RUN_INTENT_RESUME:
+            return
+        self._set_resume_mode_combo("fresh")
+        self._clear_resume_intent()
+
+    def _set_resume_mode_combo(self, mode: str) -> None:
+        """Set the selector to ``mode`` without re-firing the handler."""
+        index = 1 if mode == "resume" else 0
+        self.resume_mode_combo.blockSignals(True)
+        try:
+            self.resume_mode_combo.setCurrentIndex(index)
+        finally:
+            self.resume_mode_combo.blockSignals(False)
+
+    def _activate_resume(self) -> None:
+        """Run the explicit Resume flow from the current locator.
+
+        The locator is the selected previous-stack FITS (last-stack path) or,
+        when empty, the output folder.  A missing locator prompts a browse.  On
+        success the owning run directory's config is restored and the transient
+        resume intent/source are set; on failure the selector reverts to New and
+        a bounded warning is shown (never a hidden Resume intent).
+        """
+        locator = self.last_stack_edit.text().strip() or self.output_edit.text().strip()
+        if not locator:
+            self._browse_last_stack()
+            locator = self.last_stack_edit.text().strip()
+        result = resume_locator.discover_resume(locator)
+        if result.status == resume_locator.STATUS_READY:
+            self._apply_resume_result(result)
+        else:
+            self._refuse_resume(result)
+
+    def _apply_resume_result(self, result) -> None:
+        """Restore the discovered config and arm an explicit Resume run intent."""
+        state = self.settings_state
+        resume_locator.restore_to_settings(
+            result.config, state, checkpoint_kind=result.checkpoint_kind
+        )
+        # Coherent output folder: the resolved owning run directory.
+        state.output_folder = result.run_dir
+        state.resume_intent = RUN_INTENT_RESUME
+        state.resume_source = result.run_dir
+        self._applying_resume_result = True
+        try:
+            self._apply_state_to_controls(state)
+        finally:
+            self._applying_resume_result = False
+        # The trailing control sync never touches resume_intent/resume_source,
+        # but re-assert them defensively so the model stays coherent.
+        self.settings_state.resume_intent = RUN_INTENT_RESUME
+        self.settings_state.resume_source = result.run_dir
+        self.log(
+            f"Resume prepared from {result.run_dir} "
+            f"(config: {result.config_source or 'none'})"
+        )
+        self.statusBar().showMessage(f"Resume: {result.run_dir}")
+
+    def _refuse_resume(self, result) -> None:
+        """Refuse an invalid Resume and leave the window Fresh (no mutation)."""
+        self._set_resume_mode_combo("fresh")
+        self._clear_resume_intent()
+        reason_key = resume_locator.STATUS_REASON_KEYS.get(
+            result.status, "resume_refuse_no_run"
+        )
+        body = self._tr(reason_key, default=reason_key)
+        if result.detail:
+            body = f"{body}\n\n{result.detail}"
+        self.log(
+            f"Resume refused: {reason_key}"
+            + (f" — {result.detail}" if result.detail else "")
+        )
+        self.statusBar().showMessage(self._tr("resume_refuse_title"))
+        self._show_error_box(
+            self._tr("resume_refuse_title", default="Cannot resume"),
+            body,
+            severity="warning",
+        )
 
     def _input_folder_summary_text(self) -> str:
         """Return the human-readable input-folder summary (main + staged)."""
@@ -4140,17 +4287,22 @@ class MainWindow(QMainWindow):
     def _format_refusal(self, payload) -> tuple:
         """Map a structured refusal payload to a localized (title, body) pair.
 
-        The known ``OUTPUT_STATE_INCOMPATIBLE`` code is mapped through the
-        existing localization architecture; any unknown code falls back to a
-        generic (English) refusal so generic false starts stay generic.  The
-        wording is mode-independent: it distinguishes resuming the previous
-        run from starting a new stack and never promises a specific mode is
-        resumable.
+        The known startup-refusal codes are mapped through the existing
+        localization architecture; any unknown code falls back to a generic
+        (English) refusal so generic false starts stay generic.  The technical
+        detail is never used as the primary presentation text.
         """
         code = getattr(payload, "code", None)
-        if code == "OUTPUT_STATE_INCOMPATIBLE":
-            title = self._tr("startup_refusal_output_state_incompatible_title")
-            body = self._tr("startup_refusal_output_state_incompatible_body")
+        key_by_code = {
+            "OUTPUT_STATE_INCOMPATIBLE": "startup_refusal_output_state_incompatible",
+            "FRESH_OUTPUT_HAS_STATE": "startup_refusal_fresh_output_has_state",
+            "RESUME_STATE_MISSING": "startup_refusal_resume_state_missing",
+            "RESUME_MODE_UNSUPPORTED": "startup_refusal_resume_mode_unsupported",
+        }
+        key = key_by_code.get(code)
+        if key:
+            title = self._tr(f"{key}_title")
+            body = self._tr(f"{key}_body")
             return title, body
         detail = getattr(payload, "technical_detail", "") or str(code)
         return "Cannot start run", f"Cannot start run: {detail}"

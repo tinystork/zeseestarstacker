@@ -60,6 +60,7 @@ from astropy.wcs import WCS
 from astropy.stats import sigma_clip
 
 from seestar.queuep.autotuner import CpuIoAutoTuner
+from seestar import run_contract
 from seestar.utils.wcs_utils import (
     inject_sanitized_wcs,
     write_wcs_to_fits_inplace,
@@ -280,6 +281,13 @@ from ..core.drizzle_background import (
     apply_wb_basique,
     estimate_background_offsets,
     rescale_01_to_adu,
+)
+from ..core.drizzle_checkpoint import (
+    DrizzleCheckpointError,
+    DrizzleCheckpointWriter,
+    SafeStackedSourceResolver,
+    build_drizzle_canonical_config,
+    read_drizzle_checkpoint,
 )
 from ..core.incremental_reprojection import (
     reproject_and_coadd_batch,
@@ -586,12 +594,29 @@ class StartupRefusal:
     """
 
     CODE_OUTPUT_STATE_INCOMPATIBLE = "OUTPUT_STATE_INCOMPATIBLE"
+    # Resume Contract v2 differentiated startup-refusal codes.  Emitted at the
+    # explicit-intent gate in ``start_processing`` (or its early preflight).
+    # The precise reason stays in ``technical_detail`` and is never parsed.
+    CODE_FRESH_OUTPUT_HAS_STATE = "FRESH_OUTPUT_HAS_STATE"
+    CODE_RESUME_STATE_MISSING = "RESUME_STATE_MISSING"
+    CODE_RESUME_MODE_UNSUPPORTED = "RESUME_MODE_UNSUPPORTED"
+    CODE_RESUME_SOURCE_MISMATCH = "RESUME_SOURCE_MISMATCH"
 
     def __init__(self, code, technical_detail="", semantic_key=None, semantic_data=None):
         self.code = code
         self.technical_detail = technical_detail
         self.semantic_key = semantic_key
         self.semantic_data = dict(semantic_data or {})
+
+
+# Resume Contract v2 explicit run-intent vocabulary.  These string values are
+# the single source of truth shared with ``seestar.gui.run_config`` (kept local
+# so the heavy engine never imports the GUI request builder).  The intent is
+# carried explicitly through ``start_processing``; it is never derived from
+# artifacts (``_resume_artifacts_present``/``_can_resume`` are only
+# state-presence helpers).
+_RUN_INTENT_FRESH = "fresh"
+_RUN_INTENT_RESUME = "resume"
 
 
 # ----------------------------------------------------------------------
@@ -602,11 +627,31 @@ class StartupRefusal:
 # memmaps, so presenting resume artifacts for those modes fails closed.
 # ----------------------------------------------------------------------
 
-_RESUME_MANIFEST_VERSION = 1
+# Manifest schema currently *written* by fresh classic checkpoint initialization.
+# Schema v1 manifests (the legacy engine hash + HSI fields only) remain readable
+# and resumable under their exact fingerprint contract; they are never upgraded
+# in place.
+_RESUME_MANIFEST_VERSION = 2
+_RESUME_MANIFEST_VERSION_MIN = 1
 _RESUME_MANIFEST_FILENAME = "resume_manifest.json"
+_RUN_CONFIG_FILENAME = "run_config.cfg"
 _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
+
+# Bounded, explicit allowlist of the checkpoint artifacts ZSSS itself writes
+# during *synchronous* startup (fresh initialize).  Failed-start cleanup may
+# remove only these names (when they were not present before the attempt);
+# anything else found under ``memmap_accumulators`` — preexisting sentinels or
+# unrelated/concurrently-created files — is never touched.  The ``.tmp`` entry
+# is the atomic temp counterpart written by ``_write_resume_manifest`` before
+# ``os.replace``.
+_ATTEMPT_CREATED_CHECKPOINT_ARTIFACTS = (
+    "cumulative_SUM.npy",
+    "cumulative_WHT.npy",
+    _RESUME_MANIFEST_FILENAME,
+    _RESUME_MANIFEST_FILENAME + ".tmp",
+)
 
 # ----------------------------------------------------------------------
 # Quality-weighting domain constants (HSI P5-FIX).
@@ -2531,6 +2576,195 @@ class SeestarQueuedStacker:
             if self.enable_preview:
                 self._downsample_preview(reproj_data, _coverage_hw(reproj_wht))
 
+    # --- ZSSS-LIFECYCLE-01-R1: failed-start resource unwind -----------------
+
+    def _snapshot_existing_state(self):
+        """Record the pre-existing output-bound checkpoint state.
+
+        Returns a set of normalised absolute paths (files and the
+        ``memmap_accumulators`` directory) that already existed before this
+        start attempt.  Cleanup uses this snapshot to remove *only* artifacts
+        this attempt created, so a failed Fresh attempt never deletes
+        preexisting output contents and a Resume attempt never loses its
+        preexisting checkpoint files.
+        """
+        snapshot = set()
+        out = getattr(self, "output_folder", None)
+        if not out:
+            return snapshot
+        memdir = os.path.join(out, "memmap_accumulators")
+        if os.path.isdir(memdir):
+            snapshot.add(os.path.normcase(os.path.abspath(memdir)))
+            try:
+                for name in os.listdir(memdir):
+                    snapshot.add(
+                        os.path.normcase(os.path.abspath(os.path.join(memdir, name)))
+                    )
+            except OSError:
+                pass
+        batch_count = os.path.join(out, "batches_count.txt")
+        if os.path.isfile(batch_count):
+            snapshot.add(os.path.normcase(os.path.abspath(batch_count)))
+        run_cfg = os.path.join(out, _RUN_CONFIG_FILENAME)
+        if os.path.isfile(run_cfg):
+            snapshot.add(os.path.normcase(os.path.abspath(run_cfg)))
+        dckpt = os.path.join(out, ".m3d_checkpoint")
+        if os.path.isdir(dckpt):
+            snapshot.add(os.path.normcase(os.path.abspath(dckpt)))
+        return snapshot
+
+    def _remove_attempt_created_state(self):
+        """Remove only output-bound checkpoint artifacts this attempt created.
+
+        Called on a failed *fresh* start (never resume): it prunes the
+        explicit, bounded set of checkpoint artifact names ZSSS writes during
+        synchronous startup (``memmap_accumulators`` ``cumulative_SUM.npy`` /
+        ``cumulative_WHT.npy`` / ``resume_manifest.json`` and its atomic temp,
+        plus ``batches_count.txt``) that were not present before the attempt,
+        so a second Fresh attempt is not falsely refused by
+        ``_resume_artifacts_present`` seeing its own failed start's leftovers.
+
+        The destructive scope is deliberately bounded to that allowlist: an
+        arbitrary new file or directory found under ``memmap_accumulators``
+        (a preexisting sentinel or an unrelated/concurrently-created entry) is
+        never deleted merely because it was absent from the directory snapshot.
+        The directory itself is only removed when this attempt created it and
+        it is now empty.
+        """
+        snapshot = getattr(self, "_attempt_preexisting_state", None)
+        if snapshot is None:
+            # No pre-existing state was snapshotted for this attempt (either it
+            # was never recorded, or a prior cleanup already consumed it), so
+            # there is nothing this attempt can be proven to have created.
+            # Returning here also keeps a second cleanup idempotent.
+            return
+        out = getattr(self, "output_folder", None)
+        if not out:
+            return
+        memdir = os.path.join(out, "memmap_accumulators")
+        if os.path.isdir(memdir):
+            for name in _ATTEMPT_CREATED_CHECKPOINT_ARTIFACTS:
+                p = os.path.abspath(os.path.join(memdir, name))
+                if os.path.normcase(p) in snapshot:
+                    continue
+                try:
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                    else:
+                        os.remove(p)
+                except OSError:
+                    pass
+            # Remove the directory itself only if this attempt created it and
+            # it is now empty.
+            if os.path.normcase(os.path.abspath(memdir)) not in snapshot:
+                try:
+                    if not os.listdir(memdir):
+                        os.rmdir(memdir)
+                except OSError:
+                    pass
+        batch_count = os.path.join(out, "batches_count.txt")
+        if (
+            os.path.isfile(batch_count)
+            and os.path.normcase(os.path.abspath(batch_count)) not in snapshot
+        ):
+            try:
+                os.remove(batch_count)
+            except OSError:
+                pass
+        run_cfg = os.path.join(out, _RUN_CONFIG_FILENAME)
+        if (
+            os.path.isfile(run_cfg)
+            and os.path.normcase(os.path.abspath(run_cfg)) not in snapshot
+        ):
+            try:
+                os.remove(run_cfg)
+            except OSError:
+                pass
+        dckpt = os.path.join(out, ".m3d_checkpoint")
+        if (
+            os.path.isdir(dckpt)
+            and os.path.normcase(os.path.abspath(dckpt)) not in snapshot
+        ):
+            try:
+                shutil.rmtree(dckpt)
+            except OSError:
+                pass
+
+    def _start_autotuner_for_attempt(self):
+        """Start the autotuner and record that this attempt owns it.
+
+        Never raises: a failing ``start()`` leaves the ownership flag clear so
+        cleanup will not try to stop a tuner that never started.
+        """
+        self._autotuner_started_this_attempt = False
+        tuner = getattr(self, "autotuner", None)
+        if tuner is None:
+            return
+        try:
+            tuner.start()
+            self._autotuner_started_this_attempt = True
+        except Exception:
+            self._autotuner_started_this_attempt = False
+
+    def _cleanup_failed_start(self):
+        """Idempotent, ownership-safe unwind of a failed start attempt.
+
+        Releases every resource this attempt may have opened before the worker
+        thread exists, and removes only the output-bound checkpoint artifacts
+        this attempt created.  It is callable regardless of
+        ``processing_active`` (unlike the public :meth:`stop`), never raises,
+        and never touches ``startup_refusal`` — the structured refusal carrier
+        is preserved verbatim for the caller.
+        """
+        # 1. Stop the autotuner only if this attempt started it.
+        if getattr(self, "_autotuner_started_this_attempt", False):
+            self._autotuner_started_this_attempt = False
+            tuner = getattr(self, "autotuner", None)
+            if tuner is not None:
+                try:
+                    tuner.stop()
+                except Exception:
+                    pass
+
+        # 2. Release the session-scoped normalization/reference memory
+        #    (idempotent).
+        try:
+            self._release_norm_reference()
+        except Exception:
+            pass
+
+        # 3. Close/drop any SUM/WHT memmap handles this attempt opened or held.
+        #    This runs for *every* failed start — including a resume attempt —
+        #    because a resume false start still opened the preexisting SUM/WHT
+        #    memmaps ``r+`` and must release those handles without touching the
+        #    files.  Removing attempt-created checkpoint artifacts is
+        #    fresh-only: resume artifacts are preexisting and must stay
+        #    byte-identical.
+        try:
+            self._close_memmaps()
+        except Exception:
+            pass
+        if not getattr(self, "_resume_active", False):
+            self._remove_attempt_created_state()
+
+        # 4. Clear every stale lifecycle flag without creating attributes a
+        #    bare/``__new__`` instance never had.
+        self.processing_active = False
+        self.stop_processing = False
+        self.user_requested_stop = False
+        # Resume state is attempt-scoped: a second Start must never inherit a
+        # stale ``_resume_active`` (or the snapshot/ownership it depended on).
+        self._resume_active = False
+        self._attempt_preexisting_state = None
+        if hasattr(self, "processing_thread"):
+            self.processing_thread = None
+        aligner = getattr(self, "aligner", None)
+        if aligner is not None and hasattr(aligner, "stop_processing"):
+            try:
+                aligner.stop_processing = False
+            except Exception:
+                pass
+
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _interbatch_start_session(self) -> None:
@@ -3262,10 +3496,35 @@ class SeestarQueuedStacker:
         self._current_batch_paths = []
         self.batch_count_path = None
         self._resume_requested = False
+        # Resume Contract v2: explicit resume source path (None for fresh;
+        # a resolvable output/run directory or Last Stack parent for resume).
+        # Carried end-to-end but not used for CFG discovery/restoration yet.
+        self.resume_source = None
         self._resume_active = False
         self._resume_completed_sources = []
         self._resume_pending_count = 0
         self._checkpointing_enabled = False
+        # RSM2-D1: native Drizzle checkpoint (write-only, no resume/reader).
+        # Dedicated state — never sets the classic ``_checkpointing_enabled``
+        # and never makes ``_is_plain_classic`` lie.  ``_drizzle_checkpoint_enabled``
+        # is armed only for a standard (non-mosaic) Drizzle run in ``initialize``.
+        self._drizzle_checkpoint_enabled = False
+        self._drizzle_checkpoint_writer = None
+        self._drizzle_checkpoint_plan = None
+        self._drizzle_completed_sources = []
+        self._drizzle_checkpoint_last_committed_frames = 0
+        # RSM2-D2B2B: read-only validated Drizzle resume token.  It is created
+        # during the pre-reference startup preflight and consumed only by the
+        # continuation factory's mandatory fresh disk re-read before worker
+        # launch.  Fresh Drizzle runs leave both fields ``None``.
+        self._drizzle_resume_result = None
+        self._drizzle_resume_continuation = None
+        # RSM2-02B1: canonical classic run config cache (schema v2) and the
+        # effective manifest schema version this session writes.  A fresh run
+        # writes v2; a session opened from a v1 manifest keeps v1 write
+        # semantics (no run_config.cfg) until a later dedicated upgrade task.
+        self._run_config_canonical = None
+        self._resume_manifest_schema_version = _RESUME_MANIFEST_VERSION
         # HSI-2B C1: scientific-session binding (input roots, classic-alignment
         # reference identity, and the planned observation set/order/decomposition).
         # ``None`` means "not yet bound"; a manifest written without a full
@@ -3351,17 +3610,16 @@ class SeestarQueuedStacker:
         except Exception:
             self.preview_downsample_factor = 2
 
-        # Cumulative weight map across all batches
-        from numpy.lib.format import open_memmap
-
-        seestar_root = Path(__file__).resolve().parents[1]
-        self.cumulative_wht_path = str(seestar_root / "cumulative_wht.dat")
-        H, W = 1, 1
-        self.cumulative_wht_memmap = open_memmap(
-            self.cumulative_wht_path, mode="w+", dtype=np.float32, shape=(H, W)
-        )
-        self.cumulative_wht_path = self.cumulative_wht_memmap.filename
-        self.cumulative_wht_memmap[:] = 0.0
+        # Resume Contract v2: no mutable run state may ever be created inside
+        # the package directory.  The obsolete constructor-created package-local
+        # ``<package>/seestar/cumulative_wht.dat`` memmap is gone: the modern
+        # output-bound scientific state lives under
+        # ``<output>/memmap_accumulators/cumulative_SUM.npy`` +
+        # ``cumulative_WHT.npy`` (allocated by ``_initialize_classic_sumw_accumulators``).
+        # ``cumulative_wht_path``/``cumulative_wht_memmap`` stay inert (``None``)
+        # until a real output-bound allocation opens them.
+        self.cumulative_wht_path = None
+        self.cumulative_wht_memmap = None
 
         # Options pour déplacement et sauvegarde partiels
         self.partial_save_interval = 1
@@ -3999,17 +4257,58 @@ class SeestarQueuedStacker:
                 self.drizzle_pixfrac_requested = pixfrac_requested
                 self.drizzle_wht_threshold_requested = wht_threshold_requested
                 self.drizzle_wht_threshold_effective = wht_threshold_eff
-                self.drizzle_accumulators = [
-                    DrizzleAccumulator(
-                        out_shape_hw, kernel=kernel_eff, pixfrac=pixfrac_eff
+                resume_result = getattr(self, "_drizzle_resume_result", None)
+                if resume_result is not None:
+                    if tuple(resume_result.output_shape_hw) != out_shape_hw:
+                        raise DrizzleCheckpointError(
+                            "restored Drizzle output shape differs from the "
+                            "checkpoint grid"
+                        )
+                    current_cfg = build_drizzle_canonical_config(
+                        self, product_version=self._canonical_product_version()
                     )
-                    for _ in range(3)
-                ]
+                    if current_cfg.full_digest() != resume_result.config.full_digest():
+                        raise DrizzleCheckpointError(
+                            "restored Drizzle configuration differs from the "
+                            "validated checkpoint"
+                        )
+                    # Native SCI/WHT state only: never reconstruct a derived
+                    # science image or reinterpret signed Lanczos weights.
+                    self.drizzle_accumulators = resume_result.accumulators
+                else:
+                    self.drizzle_accumulators = [
+                        DrizzleAccumulator(
+                            out_shape_hw, kernel=kernel_eff, pixfrac=pixfrac_eff
+                        )
+                        for _ in range(3)
+                    ]
                 # Attribut legacy conservé (plus utilisé) : le mode
                 # Incrémental/Final historique est désormais sans effet.
                 self.incremental_drizzle_objects = []
-                self._drizzle_frame_count = 0
-                self._drizzle_group_index = 0
+                if resume_result is not None:
+                    self._restore_drizzle_checkpoint_runtime(resume_result)
+                else:
+                    self._drizzle_frame_count = 0
+                    self._drizzle_group_index = 0
+                # RSM2-D1: arm the native Drizzle checkpoint for this standard
+                # (non-mosaic) Drizzle run.  The writer itself is created later
+                # in ``_init_drizzle_checkpoint`` (after the queue/plan and the
+                # effective config are known); no empty scientific checkpoint is
+                # ever published from this flag alone.
+                self._drizzle_checkpoint_enabled = True
+                self._drizzle_checkpoint_writer = None
+                self._drizzle_checkpoint_plan = (
+                    resume_result.session["plan"]
+                    if resume_result is not None
+                    else None
+                )
+                if resume_result is None:
+                    self._drizzle_completed_sources = []
+                    self._drizzle_checkpoint_last_committed_frames = 0
+                else:
+                    self._drizzle_checkpoint_last_committed_frames = int(
+                        resume_result.counters["frame_count"]
+                    )
                 # Persistent effective-runtime configuration line (Qt durable
                 # run log + logger): one concise line, never requested/effective
                 # confusion.
@@ -4159,23 +4458,27 @@ class SeestarQueuedStacker:
         # count (and keep the completed-source ledger) when a valid checkpoint
         # was reopened above.
         if getattr(self, "_resume_active", False):
-            self.stacked_batches_count = int(
-                getattr(self, "_resume_pending_count", 0) or 0
-            )
-            self.images_in_cumulative_stack = int(
-                getattr(self, "_resume_images_in_cumulative_stack", 0) or 0
-            )
-            self.total_exposure_seconds = float(
-                getattr(self, "_resume_total_exposure_seconds", 0.0) or 0.0
-            )
-            self._exposure_unknown_count = int(
-                getattr(self, "_resume_exposure_unknown_count", 0) or 0
-            )
-            self._exposure_min = getattr(self, "_resume_exposure_min", None)
-            self._exposure_max = getattr(self, "_resume_exposure_max", None)
-            self.current_stack_header = self._header_from_serialized(
-                getattr(self, "_resume_cumulative_header", None)
-            )
+            drizzle_resume = getattr(self, "_drizzle_resume_result", None)
+            if drizzle_resume is not None:
+                self._restore_drizzle_checkpoint_runtime(drizzle_resume)
+            else:
+                self.stacked_batches_count = int(
+                    getattr(self, "_resume_pending_count", 0) or 0
+                )
+                self.images_in_cumulative_stack = int(
+                    getattr(self, "_resume_images_in_cumulative_stack", 0) or 0
+                )
+                self.total_exposure_seconds = float(
+                    getattr(self, "_resume_total_exposure_seconds", 0.0) or 0.0
+                )
+                self._exposure_unknown_count = int(
+                    getattr(self, "_resume_exposure_unknown_count", 0) or 0
+                )
+                self._exposure_min = getattr(self, "_resume_exposure_min", None)
+                self._exposure_max = getattr(self, "_resume_exposure_max", None)
+                self.current_stack_header = self._header_from_serialized(
+                    getattr(self, "_resume_cumulative_header", None)
+                )
         logger.debug(
             "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Initialisation terminée avec succès."
         )
@@ -6928,6 +7231,17 @@ class SeestarQueuedStacker:
                                         # non-scientific side effects run only
                                         # after the accepted bookkeeping above.
                                         self.stacked_batches_count += 1
+                                        # RSM2-D1: record the accepted source and
+                                        # commit the native checkpoint at the
+                                        # group cadence.  Runs after all three
+                                        # channel adds and the accepted
+                                        # counters/exposure advanced, and BEFORE
+                                        # the source is moved; a persistence
+                                        # failure raises (mandatory-abort) and
+                                        # never warns-and-continues.
+                                        self._drizzle_checkpoint_after_frame(
+                                            file_path
+                                        )
                                         self._send_eta_update()
                                         self._move_to_stacked(self._current_batch_paths)
                                         self._save_partial_stack()
@@ -7218,6 +7532,9 @@ class SeestarQueuedStacker:
                         "   Sauvegarde du stack Drizzle partiel (accumulateur unique)..."
                     )
                     self._drizzle_flush_partial_group()
+                    # RSM2-D1: force a final clean checkpoint snapshot for the
+                    # trailing partial group on orderly Stop (idempotent).
+                    self._drizzle_checkpoint_force_flush()
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_stopped",
                         stopped_early=True,
@@ -7294,6 +7611,10 @@ class SeestarQueuedStacker:
                         "🏁 Finalisation Drizzle (accumulateur unique)..."
                     )
                     self._drizzle_flush_partial_group()
+                    # RSM2-D1: force a final clean checkpoint snapshot for the
+                    # trailing partial group on successful finalization
+                    # (idempotent).
+                    self._drizzle_checkpoint_force_flush()
                     self._save_final_stack(
                         output_filename_suffix="_drizzle_final"
                     )
@@ -12748,9 +13069,15 @@ class SeestarQueuedStacker:
         out = Path(out_dir)
         memdir = out / "memmap_accumulators"
         candidates = [
+            # Native standard-Drizzle state is a first-class Resume Contract
+            # artifact.  Include the namespace itself (not only its manifest)
+            # so a partial/corrupt checkpoint is routed through strict
+            # validation instead of being mistaken for an empty output.
+            out / ".m3d_checkpoint",
             memdir / "cumulative_SUM.npy",
             memdir / "cumulative_WHT.npy",
             memdir / _RESUME_MANIFEST_FILENAME,
+            out / _RUN_CONFIG_FILENAME,
             out / "batches_count.txt",
         ]
         return any(p.exists() for p in candidates)
@@ -12791,17 +13118,28 @@ class SeestarQueuedStacker:
     def _build_startup_refusal(self, early_result) -> "StartupRefusal":
         """Build the structured startup refusal for a *known* early refusal.
 
-        Every early refusal of a session that requested resume carries the
-        stable ``OUTPUT_STATE_INCOMPATIBLE`` code: the refusal means the
-        selected output folder already holds processing/resume state that this
-        run cannot resume (non-plain Drizzle/mosaic/reproject mode, missing/
-        corrupt/legacy manifest, scientific fingerprint or dtype mismatch,
-        incompatible reference shape, invalid quality reference scale, etc.).
+        Resume Contract v2 differentiated codes:
+
+        * a resume in a non-plain (Drizzle/mosaic/reproject) mode carries the
+          stable ``RESUME_MODE_UNSUPPORTED`` code (the mode itself is not
+          resumable);
+        * any other resume-requested early refusal (missing/corrupt/legacy
+          manifest, scientific fingerprint or dtype mismatch, incompatible
+          reference shape, invalid quality reference scale, etc.) carries
+          ``OUTPUT_STATE_INCOMPATIBLE``.
+
         The precise reason stays in ``technical_detail`` and is never parsed
-        downstream.  Early refusals of sessions without resume artifacts (a
-        genuinely unknown false start) return ``None`` so they stay generic.
+        downstream.  Early refusals of sessions that did not request resume
+        return ``None`` so they stay generic.
         """
         if getattr(self, "_resume_requested", False):
+            if not self._is_plain_classic() and not self._is_drizzle_resume_mode():
+                return StartupRefusal(
+                    StartupRefusal.CODE_RESUME_MODE_UNSUPPORTED,
+                    early_result,
+                    semantic_key="resume_mode_unsupported",
+                    semantic_data={"mode": self._session_mode_label()},
+                )
             return StartupRefusal(
                 StartupRefusal.CODE_OUTPUT_STATE_INCOMPATIBLE,
                 early_result,
@@ -13108,6 +13446,46 @@ class SeestarQueuedStacker:
         sources, decomposition, _has_breaks = self._scan_queue_decomposition()
         return {"sources": sources, "decomposition": decomposition}
 
+    @staticmethod
+    def _decomposition_suffix_at_index(decomposition, next_source_index):
+        """Return the exact remaining batch decomposition at a source boundary.
+
+        Native Drizzle checkpoints may be committed after an accepted frame,
+        including inside a queue batch.  In that case the first remaining
+        batch is the unconsumed tail of the persisted batch; all later batch
+        boundaries remain unchanged.  Invalid decompositions/indexes fail
+        closed instead of being normalized or guessed.
+        """
+        try:
+            index = int(next_source_index)
+            parts = [int(value) for value in decomposition]
+        except (TypeError, ValueError):
+            raise DrizzleCheckpointError(
+                "invalid persisted Drizzle batch decomposition"
+            )
+        if index < 0 or any(value <= 0 for value in parts):
+            raise DrizzleCheckpointError(
+                "invalid persisted Drizzle batch decomposition"
+            )
+        total = sum(parts)
+        if index > total:
+            raise DrizzleCheckpointError(
+                "Drizzle next source index exceeds persisted decomposition"
+            )
+        if index == total:
+            return []
+
+        consumed = 0
+        for batch_index, batch_size in enumerate(parts):
+            batch_end = consumed + batch_size
+            if index < batch_end:
+                first_remaining = batch_end - index
+                return [first_remaining, *parts[batch_index + 1 :]]
+            consumed = batch_end
+        raise DrizzleCheckpointError(
+            "Drizzle next source index is outside persisted decomposition"
+        )
+
     def _validate_plan_against_manifest(self):
         """Validate the persisted plan against the current (post-filter) queue.
 
@@ -13179,13 +13557,69 @@ class SeestarQueuedStacker:
                 return False
         else:
             self._resume_plan = self._capture_plan_from_queue()
-            self._write_resume_manifest(state=_RESUME_STATE_CLEAN)
+            try:
+                self._write_resume_manifest(state=_RESUME_STATE_CLEAN)
+            except (_ResumeCheckpointError, run_contract.ConfigError) as exc:
+                self.update_progress(f"❌ Échec initialisation checkpoint: {exc}", "ERROR")
+                self.processing_error = f"Checkpoint init failed: {exc}"
+                return False
         return True
+
+    def _canonical_product_version(self) -> str:
+        """Best-effort product version for the canonical run config (no I/O)."""
+        try:
+            import seestar as _seestar
+            return str(getattr(_seestar, "__version__", "") or "").strip()
+        except Exception:
+            return ""
+
+    def _canonical_run_config(self):
+        """Build (and cache) the canonical classic run config for this run.
+
+        Derived from the configured engine state via
+        ``run_contract.collect_from_backend`` (FIELD_DEFS-driven; no parallel
+        field list).  Cached on the instance so every manifest write of the
+        same run carries an identical ``scientific_config`` /
+        ``run_config_digest``.  No I/O occurs here.
+        """
+        cached = getattr(self, "_run_config_canonical", None)
+        if cached is not None:
+            return cached
+        cfg = run_contract.collect_from_backend(
+            self, product_version=self._canonical_product_version()
+        )
+        # Item B (bounded): the run CFG should describe the *run* (execution
+        # context), not only the scientific fingerprint.  Populate the
+        # non-fingerprinted execution section with the engine's own I/O context
+        # so the CFG is a faithful run recipe.  The scientific fingerprint
+        # remains sourced solely from collect_from_backend (no divergence).
+        execution = {
+            "input_folder": getattr(self, "current_folder", None),
+            "output_folder": getattr(self, "output_folder", None),
+            "output_filename": getattr(self, "output_filename", None),
+        }
+        for name, value in execution.items():
+            if value is not None and value != "":
+                cfg.execution[name] = str(value)
+        self._run_config_canonical = cfg
+        return cfg
 
     def _write_resume_manifest(
         self, state, completed_sources=None, stacked_batches_count=None
     ):
-        """Atomically write the versioned resume manifest (temp + os.replace)."""
+        """Atomically write the versioned resume manifest (temp + os.replace).
+
+        A fresh classic checkpoint initializes schema v2 and persists the
+        canonical ``run_config.cfg`` (schema v2, UTF-8, atomic) plus the
+        explainable ``scientific_config``, the authoritative classic fingerprint
+        and the ``run_config_digest`` of exactly that canonical model.  A
+        session opened from a schema-v1 manifest keeps v1 write semantics
+        (legacy field set only, no ``run_config.cfg``) until a later dedicated
+        upgrade task; v1 manifests are never upgraded in place by this task.
+
+        ``run_config.cfg`` is configuration evidence only — never a scientific
+        checkpoint.
+        """
         # P5-FIX (HSI closure): a quality-weighted checkpoint must carry the
         # exact pinned finite-positive q_ref it was produced with.  Refuse to
         # write a manifest that a later resume would reject; never knowingly
@@ -13206,10 +13640,38 @@ class SeestarQueuedStacker:
                 getattr(self, "stacked_batches_count", 0) or 0
             )
         shape = tuple(getattr(self, "memmap_shape", None) or (0, 0, 3))
+
+        schema_version = getattr(
+            self, "_resume_manifest_schema_version", _RESUME_MANIFEST_VERSION
+        )
+        if schema_version not in (
+            _RESUME_MANIFEST_VERSION,
+            _RESUME_MANIFEST_VERSION_MIN,
+        ):
+            schema_version = _RESUME_MANIFEST_VERSION
+
+        fingerprint = self._scientific_fingerprint()
+
+        # Schema v2 only: build the canonical config, prove it is consistent
+        # with the engine's authoritative classic fingerprint, and persist the
+        # canonical run_config.cfg.  Fail closed *before any write*: a
+        # malformed/uncoercible effective field (or any canonical/engine
+        # divergence) must never produce a self-inconsistent manifest/CFG.
+        cfg = None
+        if schema_version == _RESUME_MANIFEST_VERSION:
+            cfg = self._canonical_run_config()
+            if run_contract.classic_fingerprint(cfg) != fingerprint:
+                raise _ResumeCheckpointError(
+                    "canonical classic fingerprint diverges from the engine "
+                    "scientific fingerprint; refusing to write a "
+                    "self-inconsistent checkpoint"
+                )
+
         manifest = {
-            "schema_version": _RESUME_MANIFEST_VERSION,
+            "schema_version": schema_version,
             "state": state,
             "mode": _RESUME_MODE_CLASSIC_SUMW,
+            "fingerprint": fingerprint,
             "semantics": {
                 "sum": "HWC numerator: sum over completed batches of V * W",
                 "wht": "HWC effective denominator: sum over completed batches of W",
@@ -13222,7 +13684,6 @@ class SeestarQueuedStacker:
             "dtype_wht": np.dtype(
                 getattr(self, "memmap_dtype_wht", np.float32)
             ).name,
-            "fingerprint": self._scientific_fingerprint(),
             # P5-FIX (HSI closure): the immutable session quality reference
             # scale.  ``None`` when quality weighting is disabled; otherwise a
             # positive finite float pinned once from the session reference and
@@ -13252,8 +13713,18 @@ class SeestarQueuedStacker:
             },
             "completed_sources": completed_sources,
         }
+        if cfg is not None:
+            manifest["scientific_config"] = cfg.scientific
+            manifest["run_config_digest"] = cfg.full_digest()
+
         memdir = Path(self.output_folder) / "memmap_accumulators"
         memdir.mkdir(parents=True, exist_ok=True)
+        if cfg is not None:
+            # Persist the canonical config first (atomic), so the manifest never
+            # references a run_config.cfg that failed to persist.
+            run_contract.write_cfg(
+                cfg, str(Path(self.output_folder) / _RUN_CONFIG_FILENAME)
+            )
         manifest_path = memdir / _RESUME_MANIFEST_FILENAME
         tmp_path = manifest_path.with_name(_RESUME_MANIFEST_FILENAME + ".tmp")
         tmp_path.write_text(
@@ -13269,6 +13740,147 @@ class SeestarQueuedStacker:
                 mmap_obj._mmap.close()
         except Exception:
             pass
+
+    def _validate_manifest_v2_config(self, manifest):
+        """Read-only validation of a schema-v2 manifest's canonical config.
+
+        Returns ``(True, None)`` or ``(False, reason)``.  Bounded, fail-closed,
+        and never opens SUM/WHT.  Checks the stored explainable
+        ``scientific_config`` structure, recomputes the classic fingerprint from
+        that payload and requires exact agreement with the stored authoritative
+        fingerprint (tamper detection), then verifies the on-disk
+        ``run_config.cfg`` is a valid schema-v2 config whose full digest matches
+        the recorded ``run_config_digest`` and whose scientific section equals
+        the manifest's ``scientific_config``.
+        """
+        sci = manifest.get("scientific_config")
+        if not isinstance(sci, dict):
+            return (False, "manifest scientific_config missing or not an object")
+        digest = manifest.get("run_config_digest")
+        if not isinstance(digest, str) or len(digest) != 64:
+            return (False, "manifest run_config_digest missing or malformed")
+
+        # Recompute the classic fingerprint from the stored canonical payload.
+        # Any secret/unsafe or non-JSON value, or any field that fails coercion,
+        # surfaces as a bounded ConfigError here.
+        try:
+            recomputed = run_contract.classic_fingerprint(
+                run_contract.RunConfig.from_sections(scientific=sci)
+            )
+        except run_contract.ConfigError as exc:
+            return (False, f"manifest scientific_config invalid: {exc}")
+        if recomputed != manifest.get("fingerprint"):
+            return (False, "manifest scientific_config does not match its fingerprint")
+
+        run_cfg_path = Path(self.output_folder) / _RUN_CONFIG_FILENAME
+        if not run_cfg_path.is_file():
+            return (False, "run_config.cfg missing")
+        try:
+            report = run_contract.read_cfg(str(run_cfg_path))
+        except run_contract.ConfigError as exc:
+            return (False, f"run_config.cfg invalid: {exc}")
+        if report.config.full_digest() != digest:
+            return (False, "run_config.cfg does not match its recorded digest")
+        if report.config.scientific != sci:
+            return (False, "manifest scientific_config differs from run_config.cfg")
+        return (True, None)
+
+    def _is_drizzle_resume_mode(self):
+        """True only for the supported standard, non-mosaic Drizzle resume."""
+        return (
+            bool(getattr(self, "drizzle_active_session", False))
+            and not bool(getattr(self, "is_mosaic_run", False))
+            and not bool(getattr(self, "reproject_between_batches", False))
+            and not bool(getattr(self, "reproject_coadd_final", False))
+        )
+
+    def _normalize_effective_drizzle_config(self):
+        """Apply the same deterministic effective Drizzle policy as initialize.
+
+        This is in-memory only and is intentionally called by the read-only
+        startup preflight so configuration incompatibility is rejected before
+        reference preparation or any output write.
+        """
+        kernel_eff, _kernel_reason = validate_drizzle_kernel(
+            getattr(self, "drizzle_kernel", "square")
+        )
+        pixfrac_requested, _pixfrac_reason = validate_drizzle_pixfrac(
+            getattr(self, "drizzle_pixfrac", 1.0)
+        )
+        is_lanczos = kernel_eff in LANCZOS_KERNELS
+        self.drizzle_kernel = kernel_eff
+        self.drizzle_pixfrac_requested = pixfrac_requested
+        self.drizzle_pixfrac = 1.0 if is_lanczos else pixfrac_requested
+        requested_wht = float(
+            getattr(self, "drizzle_wht_threshold", 0.0) or 0.0
+        )
+        self.drizzle_wht_threshold_requested = requested_wht
+        self.drizzle_wht_threshold_effective = (
+            0.0 if is_lanczos else requested_wht
+        )
+
+    def _restore_drizzle_checkpoint_runtime(self, restored):
+        """Restore the exact native Drizzle lifecycle state from disk truth.
+
+        ``restored`` may be the validated read result used during initialize or
+        the freshly re-read continuation returned by the writer factory.  This
+        single seam prevents the common initialize reset from silently zeroing
+        counters that belong to the already accumulated native SCI/WHT state.
+        """
+        counters = restored.counters
+        self.drizzle_accumulators = restored.accumulators
+        self._drizzle_frame_count = int(counters["frame_count"])
+        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        self._drizzle_group_index = self._drizzle_frame_count // group_size
+        self.stacked_batches_count = int(counters["stacked_batches_count"])
+        self.total_exposure_seconds = float(counters["total_exposure_seconds"])
+        self._exposure_unknown_count = int(counters["exposure_unknown_count"])
+        self._exposure_min = counters["exposure_min"]
+        self._exposure_max = counters["exposure_max"]
+        self._drizzle_completed_sources = list(restored.completed_sources)
+        self._resume_completed_sources = list(restored.completed_sources)
+        self._resume_plan = restored.session["plan"]
+        self._resume_input_roots = list(restored.session["input_roots"])
+        self._resume_reference_identity = restored.session["reference"]
+        self._resume_active = True
+
+    def _validate_drizzle_resume_headless(self):
+        """Validate a native Drizzle checkpoint without mutating disk/runtime.
+
+        The reader is strict by default.  The immutable original-or-stacked
+        resolver is opted into only when this lifecycle is configured to move
+        successfully consumed sources into ``stacked/``.
+        """
+        if not self._is_drizzle_resume_mode():
+            return (False, "Drizzle resume requires standard non-mosaic mode", None)
+        try:
+            self._normalize_effective_drizzle_config()
+            resolver = None
+            if getattr(self, "move_stacked", False):
+                resolver = SafeStackedSourceResolver(
+                    getattr(self, "stacked_subdir_name", "stacked")
+                )
+            result = read_drizzle_checkpoint(
+                self.output_folder,
+                require_exact_versions=True,
+                resolver=resolver,
+            )
+            current_cfg = build_drizzle_canonical_config(
+                self, product_version=self._canonical_product_version()
+            )
+            if current_cfg.full_digest() != result.config.full_digest():
+                return (False, "Drizzle scientific configuration mismatch", None)
+            current_roots = sorted(
+                list(getattr(self, "_resume_input_roots", None) or [])
+            )
+            persisted_roots = sorted(
+                list((result.session or {}).get("input_roots") or [])
+            )
+            if current_roots != persisted_roots:
+                return (False, "Drizzle session input roots mismatch", None)
+            return (True, result, result.resolved_reference)
+        except Exception as exc:
+            return (False, f"invalid Drizzle checkpoint: {exc}", None)
 
     def _validate_resume_headless(self):
         """Read-only, shape-independent resume validation.
@@ -13309,10 +13921,11 @@ class SeestarQueuedStacker:
         if not isinstance(manifest, dict):
             return (False, "corrupt resume manifest (not an object)", None)
 
-        if manifest.get("schema_version") != _RESUME_MANIFEST_VERSION:
+        schema_version = manifest.get("schema_version")
+        if schema_version not in (_RESUME_MANIFEST_VERSION, _RESUME_MANIFEST_VERSION_MIN):
             return (
                 False,
-                f"unsupported manifest version {manifest.get('schema_version')}",
+                f"unsupported manifest version {schema_version}",
                 None,
             )
         if manifest.get("state") != _RESUME_STATE_CLEAN:
@@ -13327,6 +13940,16 @@ class SeestarQueuedStacker:
         fp = manifest.get("fingerprint")
         if not fp or fp != self._scientific_fingerprint():
             return (False, "scientific configuration mismatch", None)
+
+        # --- schema v2 canonical config consistency (fail-closed, read-only) ---
+        # Schema v1 keeps its exact legacy behavior (fingerprint match above is
+        # the whole config contract).  Schema v2 additionally proves the stored
+        # explainable scientific_config and the on-disk run_config.cfg have not
+        # been tampered with, before any SUM/WHT memmap is opened.
+        if schema_version == 2:
+            ok, reason = self._validate_manifest_v2_config(manifest)
+            if not ok:
+                return (False, reason, None)
 
         # --- quality reference scale (fail-closed for quality-weighted) ---
         # P5-FIX: a quality-weighted checkpoint must carry the exact positive
@@ -13716,8 +14339,18 @@ class SeestarQueuedStacker:
         self._resume_preflight_passed = False
         self._resume_preflight_manifest = None
         self._resume_preflight_resolved_ref = None
+        self._drizzle_resume_result = None
+        self._drizzle_resume_continuation = None
         if not getattr(self, "_resume_requested", False):
             return (True, None)
+        if self._is_drizzle_resume_mode():
+            ok, result, resolved_ref = self._validate_drizzle_resume_headless()
+            if not ok:
+                return (False, result)
+            self._drizzle_resume_result = result
+            self._resume_preflight_passed = True
+            self._resume_preflight_resolved_ref = resolved_ref
+            return (True, resolved_ref)
         ok, manifest, resolved_ref = self._validate_resume_headless()
         if not ok:
             return (False, manifest)
@@ -13862,6 +14495,13 @@ class SeestarQueuedStacker:
                 self.stacked_batches_count = count
                 self._resume_active = True
                 self._checkpointing_enabled = True
+                # RSM2-02B1 R1: preserve the *opened* manifest's schema version
+                # for this session's subsequent writes, so a v1 resume keeps v1
+                # write semantics (no run_config.cfg) instead of silently
+                # upgrading on its next dirty/clean manifest write.
+                self._resume_manifest_schema_version = int(
+                    manifest.get("schema_version", _RESUME_MANIFEST_VERSION)
+                )
                 self._resume_input_roots = sorted(manifest_roots)
                 self._resume_reference_identity = ref_ident
                 self._resume_plan = plan
@@ -13963,11 +14603,26 @@ class SeestarQueuedStacker:
         self._resume_active = False
         self._resume_completed_sources = []
         self._checkpointing_enabled = True
-        self._write_resume_manifest(
-            state=_RESUME_STATE_CLEAN,
-            completed_sources=[],
-            stacked_batches_count=0,
-        )
+        self._resume_manifest_schema_version = _RESUME_MANIFEST_VERSION
+        try:
+            self._write_resume_manifest(
+                state=_RESUME_STATE_CLEAN,
+                completed_sources=[],
+                stacked_batches_count=0,
+            )
+        except (_ResumeCheckpointError, run_contract.ConfigError) as exc:
+            # Fail closed and clean: release the just-opened memmaps and report
+            # the refusal.  ``initialize`` -> ``start_processing`` will call
+            # ``_cleanup_failed_start``, which removes only the artifacts this
+            # attempt created (never any pre-existing state).
+            self._close_memmap_handle(self.cumulative_sum_memmap)
+            self._close_memmap_handle(self.cumulative_wht_memmap)
+            self.cumulative_sum_memmap = None
+            self.cumulative_wht_memmap = None
+            self._checkpointing_enabled = False
+            self.update_progress(f"❌ Échec initialisation checkpoint: {exc}", "ERROR")
+            self.processing_error = f"Checkpoint init failed: {exc}"
+            return False
         return True
 
     def _checkpoint_mark_dirty(self):
@@ -17705,6 +18360,8 @@ class SeestarQueuedStacker:
         reproject_coadd_final=None,
         match_background_for_final=None,
         chunk_size=None,
+        resume_intent=_RUN_INTENT_FRESH,
+        resume_source=None,
     ):
         logger.debug(
             f"!!!!!!!!!! VALEUR BRUTE ARGUMENT astap_search_radius REÇU : {astap_search_radius} !!!!!!!!!!"
@@ -17761,6 +18418,12 @@ class SeestarQueuedStacker:
         # ZSSS-LIFECYCLE-01: reset any stale refusal from a previous start
         # attempt so a new attempt starts with a clean carrier.
         self.startup_refusal = None
+        # RSM2-02B1 R1: a new Start attempt must never reuse the previous
+        # session's cached canonical run config.  Invalidate it here, before any
+        # manifest / run_config.cfg write, so the first canonical build for this
+        # attempt (which happens lazily, after the arguments below are
+        # configured) reflects this session's classic settings.
+        self._run_config_canonical = None
         if hasattr(self, "aligner") and self.aligner is not None:
             self.aligner.stop_processing = False
         else:
@@ -17780,8 +18443,80 @@ class SeestarQueuedStacker:
         )
         self._has_stack_plan = bool(plan_candidate and os.path.isfile(plan_candidate))
 
-        if self.autotuner:
-            self.autotuner.start()
+        # =====================================================================
+        # Resume Contract v2: explicit-intent gating, *before* any resource is
+        # started and *before* any output mutation.  Intent is carried in
+        # explicitly (``resume_intent``) and never derived from artifacts;
+        # ``_resume_artifacts_present`` is only a state-presence helper here.
+        # =====================================================================
+        self._resume_requested = resume_intent == _RUN_INTENT_RESUME
+        self.resume_source = resume_source if resume_source else None
+
+        if self._resume_requested and self.resume_source and self.output_folder:
+            # Resume source must resolve to the same run the output folder opens.
+            # Normalize paths (platform-safe) before comparing; a mismatch means
+            # the caller is trying to resume one run while opening another, which
+            # must never mutate the wrong checkpoint.
+            rs = os.path.normcase(os.path.abspath(os.fspath(self.resume_source)))
+            of = os.path.normcase(os.path.abspath(os.fspath(self.output_folder)))
+            if rs != of:
+                self.startup_refusal = StartupRefusal(
+                    StartupRefusal.CODE_RESUME_SOURCE_MISMATCH,
+                    "resume source does not match the selected output folder",
+                    semantic_key="resume_source_mismatch",
+                )
+                self.update_progress(
+                    "❌ Reprise impossible: la source de reprise ne correspond pas au dossier de sortie.",
+                    "ERROR",
+                )
+                self.processing_active = False
+                return False
+
+        if not self._resume_requested and self.output_folder:
+            if self._resume_artifacts_present(self.output_folder):
+                # Fresh run over a recognized prior state: refuse read-only.
+                # Never delete/overwrite the existing state.
+                self.startup_refusal = StartupRefusal(
+                    StartupRefusal.CODE_FRESH_OUTPUT_HAS_STATE,
+                    "output folder already holds processing/resume state; "
+                    "refusing to overwrite (resume intent not requested)",
+                    semantic_key="fresh_output_has_state",
+                )
+                self.update_progress(
+                    "❌ Démarrage annulé: le dossier de sortie contient déjà "
+                    "l'état d'un traitement précédent. Choisissez un dossier "
+                    "vide ou demandez une reprise.",
+                    "ERROR",
+                )
+                self.processing_active = False
+                return False
+
+        if self._resume_requested and (
+            not self.output_folder
+            or not self._resume_artifacts_present(self.output_folder)
+        ):
+            # Resume requested but no recognized run state is present.
+            self.startup_refusal = StartupRefusal(
+                StartupRefusal.CODE_RESUME_STATE_MISSING,
+                "resume requested but no recognized run state found in the "
+                "output folder",
+                semantic_key="resume_state_missing",
+            )
+            self.update_progress(
+                "❌ Reprise impossible: aucun état de traitement reconnu dans "
+                "le dossier de sortie.",
+                "ERROR",
+            )
+            self.processing_active = False
+            return False
+
+        # ZSSS-LIFECYCLE-01-R1: snapshot the pre-existing output-bound state and
+        # reset attempt ownership before any resource is started or any output
+        # is mutated.  The autotuner is intentionally started at the latest
+        # safe point (just before the worker thread), so no synchronous
+        # validation failure below can leak it.
+        self._autotuner_started_this_attempt = False
+        self._attempt_preexisting_state = self._snapshot_existing_state()
 
         # =========================================================================================
         # === ÉTAPE 1 : CONFIGURATION DES PARAMÈTRES DE SESSION SUR L'INSTANCE (AVANT TOUT LE RESTE) ===
@@ -17795,11 +18530,13 @@ class SeestarQueuedStacker:
                 f"❌ Dossier d'entrée principal '{input_dir}' invalide ou non défini.",
                 "ERROR",
             )
+            self._cleanup_failed_start()
             return False
         if not self.output_folder:
             self.update_progress(
                 f"❌ Dossier de sortie '{output_dir}' non défini.", "ERROR"
             )
+            self._cleanup_failed_start()
             return False
         try:
             os.makedirs(self.output_folder, exist_ok=True)
@@ -17808,6 +18545,7 @@ class SeestarQueuedStacker:
                 f"❌ Erreur création dossier de sortie '{self.output_folder}': {e_mkdir}",
                 "ERROR",
             )
+            self._cleanup_failed_start()
             return False
         self.temp_folder = (
             os.path.abspath(temp_folder) if temp_folder else self.output_folder
@@ -17820,7 +18558,6 @@ class SeestarQueuedStacker:
         self.master_sum = None
         self.master_coverage = None
         self.reproject_output_wcs = None
-        self._resume_requested = self._can_resume(Path(self.output_folder))
         logger.debug(
             f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'"
         )
@@ -18149,19 +18886,11 @@ class SeestarQueuedStacker:
             # this run cannot resume).  All other early refusals stay generic.
             self.startup_refusal = self._build_startup_refusal(early_result)
             self.update_progress(f"❌ Reprise impossible: {early_result}", "ERROR")
-            self.processing_active = False
-            # Startup-side resource unwind: ``autotuner`` was started before this
-            # early refusal and ``stacker.stop()`` returns early while
-            # ``processing_active`` is False, so stop it here directly (smallest
-            # safe correction) to avoid leaking a started service.
-            # ZSSS-LIFECYCLE-01-C2: the cleanup itself must never raise — a
-            # failing ``autotuner.stop()`` must not replace the known structured
-            # refusal (fail-closed output state and no artifact writes).
-            if self.autotuner:
-                try:
-                    self.autotuner.stop()
-                except Exception:
-                    pass
+            # ZSSS-LIFECYCLE-01-R1: idempotent, ownership-safe resource unwind.
+            # The autotuner is never started this early (it starts only just
+            # before the worker thread), but the helper covers memmaps/flags and
+            # preserves the structured refusal carrier.
+            self._cleanup_failed_start()
             return False
         # Pin the verified resolved original reference (original path or its
         # verified moved-to-stacked counterpart) for reference preparation.
@@ -18264,6 +18993,7 @@ class SeestarQueuedStacker:
                         "session introuvable ou modifiée.",
                         "ERROR",
                     )
+                    self._cleanup_failed_start()
                     return False
                 self.aligner.reference_image_path = resolved_ref
                 reference_path_ui = resolved_ref
@@ -18310,6 +19040,14 @@ class SeestarQueuedStacker:
                 files_in_folder_for_shape,
                 reference_header_for_shape_determination,
             )
+            drizzle_resume_result = getattr(self, "_drizzle_resume_result", None)
+            if drizzle_resume_result is not None and not _identities_equivalent(
+                drizzle_resume_result.session.get("reference"),
+                self._resume_reference_identity,
+            ):
+                raise DrizzleCheckpointError(
+                    "session reference identity differs from the Drizzle checkpoint"
+                )
             logger.debug(
                 f"DEBUG QM (start_processing): Shape de référence HWC déterminée: {ref_shape_hwc}"
             )
@@ -18342,6 +19080,7 @@ class SeestarQueuedStacker:
                     self.update_progress(
                         "❌ ERREUR CRITIQUE: AstrometrySolver non initialisé.", "ERROR"
                     )
+                    self._cleanup_failed_start()
                     return False
 
                 solver_settings_for_ref = {
@@ -18466,6 +19205,7 @@ class SeestarQueuedStacker:
                             "❌ ERREUR CRITIQUE: Impossible d'obtenir un WCS pour la référence globale. Drizzle/Mosaïque ne peut continuer.",
                             "ERROR",
                         )
+                        self._cleanup_failed_start()
                         return False
             else:
                 logger.debug(
@@ -18500,6 +19240,7 @@ class SeestarQueuedStacker:
                 f"ERREUR QM (start_processing): Échec préparation référence/WCS : {e_ref_prep}"
             )
             traceback.print_exc(limit=2)
+            self._cleanup_failed_start()
             return False
 
         logger.debug(f"DEBUG QM (start_processing): AVANT APPEL initialize():")
@@ -18546,6 +19287,20 @@ class SeestarQueuedStacker:
                     f"WARN start_processing: erreur creation grille fixe: {e_fix}"
                 )
 
+        # RSM2-D2B2B: the persisted output grid is authoritative on resume.
+        # Reference preparation still supplies the immutable input reference
+        # used by registration, but must never silently recompute/change the
+        # Drizzle deposition grid across Stop -> Resume.
+        drizzle_resume_result = getattr(self, "_drizzle_resume_result", None)
+        if drizzle_resume_result is not None:
+            self.drizzle_output_wcs = drizzle_resume_result.wcs
+            self.drizzle_output_shape_hw = tuple(
+                drizzle_resume_result.output_shape_hw
+            )
+            self.fixed_output_wcs = drizzle_resume_result.wcs
+            self.fixed_output_shape = tuple(drizzle_resume_result.output_shape_hw)
+            self.reference_shape = tuple(drizzle_resume_result.output_shape_hw)
+
         init_shape_hwc = ref_shape_hwc
         if (
             self.reproject_between_batches
@@ -18562,8 +19317,8 @@ class SeestarQueuedStacker:
             f"DEBUG QM (start_processing): Étape 3 - Appel à self.initialize() avec output_dir='{output_dir}', shape_ref_HWC={init_shape_hwc}..."
         )
         if not self.initialize(output_dir, init_shape_hwc):
-            self.processing_active = False
             logger.debug("ERREUR QM (start_processing): Échec de self.initialize().")
+            self._cleanup_failed_start()
             return False
         logger.debug(
             "DEBUG QM (start_processing): self.initialize() terminé avec succès."
@@ -18784,6 +19539,7 @@ class SeestarQueuedStacker:
             except _ResumeCheckpointError as ckpt_err:
                 self.update_progress(f"❌ Reprise impossible: {ckpt_err}", "ERROR")
                 self.processing_error = str(ckpt_err)
+                self._cleanup_failed_start()
                 return False
             if skipped:
                 self.update_progress(
@@ -18795,12 +19551,20 @@ class SeestarQueuedStacker:
         # started.  On resume this proves the remaining queue is the exact
         # ordered suffix of the persisted plan; on a fresh run it binds the plan.
         if not self._checkpoint_preflight():
-            self.processing_active = False
+            self._cleanup_failed_start()
+            return False
+
+        # RSM2-D1: bind the native Drizzle checkpoint (plan + writer) after the
+        # queue is filled and the effective config/output grid are known, and
+        # before the worker thread starts.  Fails closed on any error.
+        if not self._init_drizzle_checkpoint():
+            self._cleanup_failed_start()
             return False
 
         if self.is_mosaic_run and self.reproject_between_batches:
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
+                self._cleanup_failed_start()
                 return False
             self.fixed_output_wcs = self.reference_wcs_object
             self.fixed_output_shape = self.reference_shape
@@ -18817,6 +19581,7 @@ class SeestarQueuedStacker:
         ):
             ok_grid = self._prepare_global_reprojection_grid()
             if not ok_grid:
+                self._cleanup_failed_start()
                 return False
             self.fixed_output_wcs = self.reference_wcs_object
             self.fixed_output_shape = self.reference_shape
@@ -18834,6 +19599,11 @@ class SeestarQueuedStacker:
             self._interbatch_start_session()
         else:
             self.interbatch_norm_active = False
+
+        # ZSSS-LIFECYCLE-01-R1: start the autotuner at the latest safe point —
+        # after every synchronous validation step has passed — so no earlier
+        # false start can leak a running tuner thread.
+        self._start_autotuner_for_attempt()
 
         logger.debug(
             "DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker..."
@@ -19149,6 +19919,179 @@ class SeestarQueuedStacker:
                 self._drizzle_group_index,
                 frame_count,
             )
+
+    # ------------------------------------------------------------------
+    # RSM2-D1: native Drizzle checkpoint (write-only) — safe-boundary hooks
+    # ------------------------------------------------------------------
+
+    def _drizzle_checkpoint_counters(self):
+        """Snapshot the accepted-exposure truthfulness counters for the manifest."""
+        return {
+            "frame_count": int(getattr(self, "_drizzle_frame_count", 0) or 0),
+            "stacked_batches_count": int(
+                getattr(self, "stacked_batches_count", 0) or 0
+            ),
+            "total_exposure_seconds": float(
+                getattr(self, "total_exposure_seconds", 0.0) or 0.0
+            ),
+            "exposure_unknown_count": int(
+                getattr(self, "_exposure_unknown_count", 0) or 0
+            ),
+            "exposure_min": getattr(self, "_exposure_min", None),
+            "exposure_max": getattr(self, "_exposure_max", None),
+        }
+
+    def _drizzle_checkpoint_session_binding(self):
+        """Return the scientific-session binding (input roots/reference/plan)."""
+        return {
+            "input_roots": list(getattr(self, "_resume_input_roots", None) or []),
+            "reference": getattr(self, "_resume_reference_identity", None),
+            "plan": getattr(self, "_drizzle_checkpoint_plan", None),
+        }
+
+    def _init_drizzle_checkpoint(self):
+        """Bind the Drizzle observation plan and create the writer (fail closed).
+
+        Called once from ``start_processing`` after the queue is filled and the
+        effective Drizzle config/output grid are known, and before the worker
+        thread starts.  Returns ``False`` to abort the run cleanly on any
+        failure (never a partial writer, never a silent disable).
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return True
+        try:
+            resume_result = getattr(self, "_drizzle_resume_result", None)
+            if resume_result is not None:
+                (
+                    current_remaining,
+                    current_decomposition,
+                    _has_breaks,
+                ) = self._scan_queue_decomposition()
+                persisted_plan = resume_result.session["plan"]
+                persisted_sources = persisted_plan["sources"]
+                next_index = int(resume_result.next_source_index)
+                if current_remaining != persisted_sources[next_index:]:
+                    raise DrizzleCheckpointError(
+                        "remaining Drizzle observation set/order differs from "
+                        "the validated checkpoint plan"
+                    )
+                expected_decomposition = self._decomposition_suffix_at_index(
+                    persisted_plan["decomposition"], next_index
+                )
+                if current_decomposition != expected_decomposition:
+                    raise DrizzleCheckpointError(
+                        "remaining Drizzle batch decomposition differs from "
+                        "the validated checkpoint plan"
+                    )
+                continuation = DrizzleCheckpointWriter.from_validated_result(
+                    resume_result
+                )
+                # The continuation object is the only authoritative runtime
+                # state: it comes from the factory's fresh full disk re-read.
+                self._drizzle_resume_continuation = continuation
+                self._drizzle_checkpoint_writer = continuation.writer
+                self._drizzle_checkpoint_plan = continuation.session["plan"]
+                self._restore_drizzle_checkpoint_runtime(continuation)
+                self.finalization_mode = FINALIZATION_MODE_DRIZZLE
+                self._drizzle_checkpoint_last_committed_frames = int(
+                    continuation.counters["frame_count"]
+                )
+                return True
+
+            self._drizzle_checkpoint_plan = self._capture_plan_from_queue()
+            cfg = build_drizzle_canonical_config(
+                self, product_version=self._canonical_product_version()
+            )
+            self._drizzle_checkpoint_writer = DrizzleCheckpointWriter(
+                output_dir=self.output_folder,
+                product_version=self._canonical_product_version(),
+                canonical_cfg=cfg,
+                output_wcs=self.drizzle_output_wcs,
+                output_shape_hw=self.drizzle_output_shape_hw,
+            )
+            return True
+        except Exception as exc:
+            self.update_progress(
+                f"❌ Échec initialisation checkpoint Drizzle: {exc}", "ERROR"
+            )
+            self.processing_error = f"Drizzle checkpoint init failed: {exc}"
+            return False
+
+    def _drizzle_checkpoint_commit(self):
+        """Persist one generation from the current accumulator/ledger state.
+
+        Raises :class:`DrizzleCheckpointError` on any failure (mandatory-abort);
+        the prior committed checkpoint stays byte-identical and usable.
+        """
+        writer = getattr(self, "_drizzle_checkpoint_writer", None)
+        if writer is None:
+            raise DrizzleCheckpointError("drizzle checkpoint writer not initialized")
+        generation = writer.commit(
+            self.drizzle_accumulators,
+            session_binding=self._drizzle_checkpoint_session_binding(),
+            counters=self._drizzle_checkpoint_counters(),
+            completed_sources=list(
+                getattr(self, "_drizzle_completed_sources", []) or []
+            ),
+        )
+        self._drizzle_checkpoint_last_committed_frames = int(
+            getattr(self, "_drizzle_frame_count", 0) or 0
+        )
+        logger.info(
+            "DRIZZLE CHECKPOINT: generation %d committed (frames=%d)",
+            generation,
+            self._drizzle_checkpoint_last_committed_frames,
+        )
+
+    def _drizzle_checkpoint_after_frame(self, source_path):
+        """Record an accepted source identity and commit at the group cadence.
+
+        Called ONLY after ``_add_frame_to_drizzle_accumulators`` returned True
+        and the accepted counters/exposure have advanced, but BEFORE the source
+        is moved.  Never runs between channel adds, never on a failed add, and
+        never publishes an empty checkpoint (``frame_count`` is already >= 1).
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return
+        # Fail closed: an unstat'able source must not become a ledger entry
+        # with size=None / mtime_ns=None.
+        ident = self._source_identity(source_path)
+        ledger = list(getattr(self, "_drizzle_completed_sources", []) or [])
+        ledger.append(ident)
+        keys = set()
+        for e in ledger:
+            key = (e.get("path"), e.get("size"), e.get("mtime_ns"))
+            if key in keys:
+                raise DrizzleCheckpointError(
+                    f"duplicate source identity in drizzle ledger: {e.get('name')}"
+                )
+            keys.add(key)
+        self._drizzle_completed_sources = ledger
+
+        group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
+        frame_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+        if frame_count % group_size == 0:
+            self._drizzle_checkpoint_commit()
+
+    def _drizzle_checkpoint_force_flush(self):
+        """Force a final clean snapshot for a trailing partial group.
+
+        Idempotent: no-op when disabled, when no pose was accepted, or when the
+        frame count has not advanced since the last commit.
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return
+        writer = getattr(self, "_drizzle_checkpoint_writer", None)
+        if writer is None:
+            return
+        frame_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
+        if frame_count <= 0:
+            return
+        if frame_count == int(
+            getattr(self, "_drizzle_checkpoint_last_committed_frames", 0) or 0
+        ):
+            return
+        self._drizzle_checkpoint_commit()
 
     def _update_preview_drizzle_accumulator(self):
         """Derive a DISPLAY-ONLY preview from ``self.drizzle_accumulators``.
@@ -19667,16 +20610,6 @@ class SeestarQueuedStacker:
         # Close memmaps to release the underlying file handles
         if hasattr(self, "_close_memmaps"):
             self._close_memmaps()
-
-        # Remove the temporary cumulative weight file
-        if getattr(self, "cumulative_wht_path", None):
-            try:
-                if os.path.isfile(self.cumulative_wht_path):
-                    os.remove(self.cumulative_wht_path)
-            except Exception as e:
-                logger.debug(
-                    f"WARN QM [finish]: Failed to remove cumulative weight file: {e}"
-                )
 
 
 ######################################################################################################################################################

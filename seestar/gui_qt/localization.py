@@ -425,6 +425,61 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "un nouveau dossier de sortie ou un dossier vide."
         ),
     },
+    # Resume Contract v2 differentiated startup refusals (mapped by stable
+    # code, never by parsing progress/log strings).  Each carries only the
+    # actionable user guidance; the engine's precise technical reason stays in
+    # ``technical_detail`` and is logged separately, never the primary text.
+    "startup_refusal_fresh_output_has_state_title": {
+        "en": "Output folder already has data",
+        "fr": "Le dossier de sortie contient déjà des données",
+    },
+    "startup_refusal_fresh_output_has_state_body": {
+        "en": (
+            "The selected output folder already contains data from a previous "
+            "processing run.\n\n"
+            "To start a new stack, select a new or empty output folder. "
+            "Your existing data was not modified."
+        ),
+        "fr": (
+            "Le dossier de sortie sélectionné contient déjà les données d’un "
+            "traitement précédent.\n\n"
+            "Pour démarrer un nouveau stack, sélectionnez un nouveau dossier "
+            "de sortie ou un dossier vide. Vos données existantes n’ont pas "
+            "été modifiées."
+        ),
+    },
+    "startup_refusal_resume_state_missing_title": {
+        "en": "Nothing to resume",
+        "fr": "Rien à reprendre",
+    },
+    "startup_refusal_resume_state_missing_body": {
+        "en": (
+            "No previous processing state was found in the selected output "
+            "folder, so there is nothing to resume.\n\n"
+            "Start a new stack instead."
+        ),
+        "fr": (
+            "Aucun état de traitement précédent n’a été trouvé dans le dossier "
+            "de sortie sélectionné : il n’y a rien à reprendre.\n\n"
+            "Démarrez plutôt un nouveau stack."
+        ),
+    },
+    "startup_refusal_resume_mode_unsupported_title": {
+        "en": "Resume not supported for this mode",
+        "fr": "Reprise non prise en charge pour ce mode",
+    },
+    "startup_refusal_resume_mode_unsupported_body": {
+        "en": (
+            "The selected processing mode does not support resume.\n\n"
+            "Start a new stack with a new or empty output folder instead."
+        ),
+        "fr": (
+            "Le mode de traitement sélectionné ne prend pas en charge la "
+            "reprise.\n\n"
+            "Démarrez plutôt un nouveau stack avec un nouveau dossier de "
+            "sortie ou un dossier vide."
+        ),
+    },
     # Terminal-failure QMessageBox titles (ZSSS-OTPUX-STABLE-C).  The dialog is
     # additive to the truthful status-bar/log text; the title is the only new
     # visible chrome, so it localizes like every other visible string.  The
@@ -437,6 +492,91 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "error_box_preflight_title": {
         "en": "Cannot start run",
         "fr": "Impossible de démarrer",
+    },
+    # Explicit New/Resume selector (RSM2-02C).  The run intent is chosen by the
+    # user here; a persisted last-stack path alone never selects Resume.
+    "resume_mode_label": {"en": "Run", "fr": "Exécution"},
+    "resume_mode_new": {"en": "New", "fr": "Nouveau"},
+    "resume_mode_resume": {"en": "Resume", "fr": "Reprendre"},
+    "resume_refuse_title": {"en": "Cannot resume", "fr": "Reprise impossible"},
+    "resume_refuse_no_run": {
+        "en": (
+            "No previous run was found at the selected location.\n\n"
+            "Select a previous stack (FITS) or its output folder, then "
+            "choose Resume again."
+        ),
+        "fr": (
+            "Aucune exécution précédente n’a été trouvée à l’emplacement "
+            "sélectionné.\n\n"
+            "Sélectionnez un stack précédent (FITS) ou son dossier de sortie, "
+            "puis choisissez à nouveau Reprendre."
+        ),
+    },
+    "resume_refuse_no_checkpoint": {
+        "en": (
+            "The selected location has saved configuration but no recognized "
+            "checkpoint to resume.\n\n"
+            "A configuration file alone is not proof of a resumable run."
+        ),
+        "fr": (
+            "L’emplacement sélectionné contient une configuration mais aucun "
+            "point de reprise reconnu.\n\n"
+            "Un fichier de configuration seul ne prouve pas qu’une reprise "
+            "est possible."
+        ),
+    },
+    "resume_refuse_config_unavailable": {
+        "en": (
+            "A checkpoint was found but its original settings cannot be "
+            "reconstructed automatically.\n\n"
+            "Start a new stack instead."
+        ),
+        "fr": (
+            "Un point de reprise a été trouvé mais ses réglages d’origine ne "
+            "peuvent pas être reconstruits automatiquement.\n\n"
+            "Démarrez plutôt un nouveau stack."
+        ),
+    },
+    "resume_refuse_corrupt_config": {
+        "en": "The saved configuration could not be read safely and was not applied.",
+        "fr": (
+            "La configuration enregistrée n’a pas pu être lue de façon sûre "
+            "et n’a pas été appliquée."
+        ),
+    },
+    "resume_refuse_unsafe_config": {
+        "en": "The saved configuration contains sensitive data and was not applied.",
+        "fr": (
+            "La configuration enregistrée contient des données sensibles et "
+            "n’a pas été appliquée."
+        ),
+    },
+    "resume_refuse_ambiguous_legacy": {
+        "en": "The saved configuration is ambiguous and could not be restored safely.",
+        "fr": (
+            "La configuration enregistrée est ambiguë et n’a pas pu être "
+            "restaurée de façon sûre."
+        ),
+    },
+    "resume_refuse_ambiguous_checkpoint": {
+        "en": (
+            "Both Classic and Drizzle checkpoints were found in this run. "
+            "Resume was not armed."
+        ),
+        "fr": (
+            "Des points de reprise Classic et Drizzle ont été trouvés dans "
+            "cette exécution. La reprise n’a pas été activée."
+        ),
+    },
+    "resume_refuse_corrupt_checkpoint": {
+        "en": (
+            "The Drizzle checkpoint is incomplete or inconsistent and was "
+            "not armed."
+        ),
+        "fr": (
+            "Le point de reprise Drizzle est incomplet ou incohérent et n’a "
+            "pas été activé."
+        ),
     },
 }
 

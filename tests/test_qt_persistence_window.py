@@ -264,3 +264,57 @@ def test_loaded_paths_persist_through_state(tmp_path):
         assert st.last_stack_path == "/out/last.fit"
     finally:
         win2.shutdown()
+
+
+def test_explicit_resume_before_close_reopens_fresh_with_last_stack_remembered(tmp_path):
+    """A past explicit Resume must never survive a save/reload (Resume Contract
+    v2): the reopened window is fresh with an empty resume source, while the
+    last-stack path is remembered as ordinary persisted GUI state."""
+    p = _settings_path(tmp_path)
+    last_stack = str(tmp_path / "outputs" / "last.fit")
+
+    win = MainWindow(settings_path=p)
+    win.last_stack_edit.setText(last_stack)
+    # Simulate an explicit Resume run intent on the in-memory model (the future
+    # Resume selector sets these per operation, never via persistence).
+    win.settings_state.resume_intent = "resume"
+    win.settings_state.resume_source = str(tmp_path / "outputs")
+    win.shutdown()
+
+    # The persisted file must not carry the transient intent/source.
+    with open(p, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert "resume_intent" not in data
+    assert "resume_source" not in data
+    assert data["last_stack_path"] == last_stack
+
+    win2 = MainWindow(settings_path=p)
+    try:
+        state = win2.collect_settings_state()
+        assert state.resume_intent == "fresh"
+        assert state.resume_source == ""
+        assert state.last_stack_path == last_stack
+    finally:
+        win2.shutdown()
+
+
+def test_stale_resume_intent_in_settings_file_is_ignored(tmp_path):
+    """A user-edited/corrupt settings file with resume_intent='resume' must load
+    as a fresh state (no silent past-Resume resurrection on restart)."""
+    p = _settings_path(tmp_path)
+    _write_json(
+        p,
+        {
+            "resume_intent": "resume",
+            "resume_source": "/old/run",
+            "last_stack_path": "/outputs/last.fit",
+        },
+    )
+    win = MainWindow(settings_path=p)
+    try:
+        state = win.collect_settings_state()
+        assert state.resume_intent == "fresh"
+        assert state.resume_source == ""
+        assert state.last_stack_path == "/outputs/last.fit"
+    finally:
+        win.shutdown()
