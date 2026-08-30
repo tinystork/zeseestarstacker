@@ -304,6 +304,14 @@ from ..core.weights import (
     _calculate_image_weights_noise_variance,
 )
 from ..enhancement.stack_enhancement import apply_edge_crop
+from ..core.geometry_reference import (
+    ORIGIN_AUTO_GEOMETRY,
+    ORIGIN_AUTO_LEGACY,
+    ORIGIN_RESUME,
+    ORIGIN_USER,
+    canonical_session_sources,
+    select_geometry_reference,
+)
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
@@ -18325,6 +18333,39 @@ class SeestarQueuedStacker:
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
+    def _resolve_automatic_reference(self, current_folder, additional_folders, plan_path, requested_batch_size):
+        """Resolve a geometry-aware automatic reference once, or fall back."""
+        stack_plan_path = plan_path if (requested_batch_size <= 0 and plan_path and os.path.isfile(plan_path)) else None
+        self._resolved_reference_origin = ORIGIN_AUTO_LEGACY
+        try:
+            sources = canonical_session_sources(
+                current_folder, additional_folders,
+                stack_plan_path=stack_plan_path, apply_name_filter=True,
+            )
+        except Exception:
+            sources = []
+        if not sources:
+            self.update_progress("Geometry-aware reference unavailable: no usable sources. Falling back to legacy automatic selection.", "INFO")
+            return
+        selection = select_geometry_reference(
+            sources,
+            bayer_pattern=self.bayer_pattern,
+            correct_hot_pixels=self.correct_hot_pixels,
+            hot_pixel_threshold=self.hot_pixel_threshold,
+            neighborhood_size=self.neighborhood_size,
+            stop_requested=lambda: bool(getattr(self, "stop_processing", False)),
+            progress=lambda message: self.update_progress(message, "INFO"),
+        )
+        if selection.resolved.origin == ORIGIN_AUTO_GEOMETRY and selection.resolved.path:
+            self.aligner.reference_image_path = selection.resolved.path
+            self._resolved_reference_origin = ORIGIN_AUTO_GEOMETRY
+            self.update_progress("Reference selected: " + os.path.basename(selection.resolved.path), "INFO")
+        else:
+            reason = "geometry selector rejected the field"
+            if selection.gate is not None and selection.gate.reason:
+                reason = selection.gate.reason
+            self.update_progress("Geometry-aware reference unavailable: " + reason + ". Falling back to legacy automatic selection.", "INFO")
+
     def start_processing(
         self,
         input_dir,
@@ -19043,6 +19084,22 @@ class SeestarQueuedStacker:
                     return False
                 self.aligner.reference_image_path = resolved_ref
                 reference_path_ui = resolved_ref
+
+            # GAR-04: resolve the automatic reference once.  A resume-pinned or
+            # explicit external reference wins; otherwise run the geometry-aware
+            # selector, which falls back to legacy auto-selection on any failure.
+            self._resolved_reference_origin = None
+            if self._resume_requested:
+                self._resolved_reference_origin = ORIGIN_RESUME
+            elif reference_path_ui and os.path.isfile(reference_path_ui):
+                self._resolved_reference_origin = ORIGIN_USER
+            else:
+                self._resolve_automatic_reference(
+                    current_folder=self.current_folder,
+                    additional_folders=initial_additional_folders,
+                    plan_path=plan_path,
+                    requested_batch_size=requested_batch_size,
+                )
 
             (
                 reference_image_data_for_shape_determination,
