@@ -1,0 +1,32 @@
+ZESOLVER-WCS-CANONICAL-02 — threaded witness BEFORE fix
+=============================================================
+Harness: fake zesolver.api.v1 returns a SOLVED result whose CanonicalWcsHeader
+carries NAXIS=3 (RGB cube, celestial WCS on the first two axes).  The real
+ZeSolverAdapter.solve() is invoked synchronously and via ThreadPoolExecutor.
+
+Result: SolverOutcome.wcs is a 3-axis WCS -> is_celestial False -> ZSSS
+AstrometrySolver._try_solve_zesolver rejects it ("SOLVED mais WCS absent/non
+celeste") and falls back to ASTAP.
+
+--- sync ---
+status solved
+failure_code None
+pixel_n_dim 3
+world_n_dim 3
+naxis 3
+CTYPE ['RA---TAN', 'DEC--TAN', '']
+CRVAL [275.037495, -13.730556, 0.0]
+has_celestial True
+is_celestial False
+WCS.celestial.is_celestial True
+--- threaded ---
+status solved
+failure_code None
+pixel_n_dim 3
+world_n_dim 3
+naxis 3
+CTYPE ['RA---TAN', 'DEC--TAN', '']
+CRVAL [275.037495, -13.730556, 0.0]
+has_celestial True
+is_celestial False
+WCS.celestial.is_celestial True

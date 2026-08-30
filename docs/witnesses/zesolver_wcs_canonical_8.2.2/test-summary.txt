@@ -1,0 +1,20 @@
+ZESOLVER-WCS-CANONICAL-02 — résumé d'exécution des tests
+=============================================================
+
+Tests ciblés (nouveaux):
+  test_zesolver_adapter.py::test_adapter_solve_rgb_cube_canonicalizes_to_celestial_2d  PASS
+  test_zesolver_adapter.py::test_adapter_solve_rgb_cube_threaded                        PASS
+  test_zesolver_adapter.py::test_adapter_solve_solved_without_celestial_component_fails PASS
+  test_zesolver_adapter.py::test_adapter_solve_2d_celestial_unchanged                  PASS
+  test_solver_dispatch.py::test_zesolver_rgb_cube_threaded_witness                     PASS
+  => 5 passed
+
+Suites (isolées, post-fix):
+  tests/test_solver_dispatch.py         10 passed
+  tests/test_solver_port.py             7 passed
+  tests/test_zesolver_gate01_reference_wcs.py  2 passed
+  tests/test_zesolver_adapter.py        51 passed, 2 failed (pré-existants)
+
+Échecs pré-existants (vérifiés identiques sur baseline, stash du correctif) :
+  test_discover_not_installed  -> ZeSolver 1.2.1 installé dans la venv (le test suppose absence)
+  test_adapter_solve_unavailable_when_not_installed -> idem (découvre le vrai ZeSolver, échoue sur /tmp/img.fits inexistant)

@@ -1,0 +1,143 @@
+2026-08-30T07:02:29.515998Z ENGINE_PROGRESS message=⚙️ Sélection auto de la meilleure image de référence...
+2026-08-30T07:02:29.516052Z ENGINE_PROGRESS message=🔍 [GET_REF/Auto] Analyse de 20 images candidates pour référence...
+2026-08-30T07:02:36.717615Z ENGINE_PROGRESS message=⭐ Référence auto sélectionnée: Light_M 16_10.0s_LP_20250530-035421.fit (Métrique: 24.11)
+2026-08-30T07:02:39.193914Z ENGINE_PROGRESS message=📁 Image référence sauvegardée: F:\astro photos\seestar s 50\M 16\out\temp_processing\reference_image.fit
+2026-08-30T07:02:55.773017Z RUN_METADATA stacking_mode=winsorized-sigma-clip use_drizzle=False drizzle_mode=Incremental is_mosaic_run=False batch_size=5 input_dir=F:\astro photos\seestar s 50\M 16\M16_ZESOLVER_NOWCS_20 output_dir=F:\astro photos\seestar s 50\M 16\out reference_path_ui= product_version=8.2.2 Phoenix consedit resume_intent=fresh
+2026-08-30T07:02:55.773793Z ENGINE_PROGRESS message=⚙️ Sélection auto de la meilleure image de référence...
+2026-08-30T07:02:55.773917Z RUN_ACCEPTED output_dir=F:\astro photos\seestar s 50\M 16\out
+2026-08-30T07:02:55.773983Z RUN_STARTED mode=winsorized-sigma-clip use_drizzle=False input_count=20
+2026-08-30T07:02:55.774029Z ENGINE_PROGRESS message=🔍 [GET_REF/Auto] Analyse de 20 images candidates pour référence...
+2026-08-30T07:02:55.774368Z ENGINE_PROGRESS message=   [StartProcRefSolve] Tentative résolution astrométrique pour référence globale...
+2026-08-30T07:02:55.774441Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.774755Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.775662Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.775772Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.775817Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.775852Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.776534Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.776827Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.777308Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.777656Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.777694Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778028Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778063Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778088Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778113Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778137Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778164Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778189Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778213Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778243Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778267Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778291Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778315Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778363Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778391Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778416Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778439Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778463Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778491Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778514Z ENGINE_PROGRESS message=   [StartProcRefSolve] Résolution astrométrique en cours...
+2026-08-30T07:02:55.778542Z ENGINE_PROGRESS message=ZeSolver: writing - writing WCS
+2026-08-30T07:02:55.778567Z ENGINE_PROGRESS message=   [StartProcRefSolve] Échelle image de référence estimée à: 2.37 arcsec/pix. percent=INFO
+2026-08-30T07:02:55.778598Z ENGINE_PROGRESS message=INFO: Inter-batch normalization (MASTER_REF + BG2D) enabled (auto-start) percent=INFO
+2026-08-30T07:03:02.899855Z ENGINE_PROGRESS message=⭐ Référence auto sélectionnée: Light_M 16_10.0s_LP_20250530-035421.fit (Métrique: 24.11)
+2026-08-30T07:03:05.278398Z ENGINE_PROGRESS message=📁 Image référence sauvegardée: F:\astro photos\seestar s 50\M 16\out\temp_processing\reference_image.fit
+2026-08-30T07:03:06.289589Z ENGINE_PROGRESS message=DEBUG WORKER: Section 1.A - Plate-solving de la référence...
+2026-08-30T07:03:06.290487Z ENGINE_PROGRESS message=   -> Drizzle Std/AstroMosaic: WCS de référence déjà présent. Solving ignoré. percent=INFO_DETAIL
+2026-08-30T07:03:06.290626Z ENGINE_PROGRESS message=⭐ Référence(s) prête(s). percent=5
+2026-08-30T07:03:07.271363Z ENGINE_PROGRESS message=Aligned: 1 percent=5.0
+2026-08-30T07:03:08.285670Z ENGINE_PROGRESS message=Aligned: 2 percent=10.0
+2026-08-30T07:03:09.300494Z ENGINE_PROGRESS message=Aligned: 3 percent=15.0
+2026-08-30T07:03:10.266721Z ENGINE_PROGRESS message=Aligned: 4 percent=20.0
+2026-08-30T07:03:11.237646Z ENGINE_PROGRESS message=Aligned: 5 percent=25.0
+2026-08-30T07:03:16.620733Z ENGINE_PROGRESS message=RejWinsor: done - 0.00% pixels rejected
+2026-08-30T07:03:17.075291Z ENGINE_PROGRESS message=INFO: Batch k=1 BG2D: gaussian blur (RMS=0.0001, valid_px=1954381, context=stack_batch) percent=INFO
+2026-08-30T07:03:17.581914Z ENGINE_PROGRESS message=      Quality Scores -> SNR: 74.44, Stars: 0.250 (50 raw)
+2026-08-30T07:03:17.634685Z ENGINE_PROGRESS message=INFO: MASTER_REF built from N=1 frames (weighted mean) percent=INFO
+2026-08-30T07:03:19.053244Z ENGINE_PROGRESS message=INFO: Batch k=1 Gain RGB: overlap=1954381 px a=1.000/1.000/1.000 offset=0.0000/0.0000/0.0000 ref_med=0.0146/0.0146/0.0146 new_med=0.0146/0.0146/0.0146 percent=INFO
+2026-08-30T07:03:28.444609Z ENGINE_PROGRESS message=ℹ️ SUM min=0.00, max=2.52 percent=INFO_DETAIL
+2026-08-30T07:03:28.444768Z ENGINE_PROGRESS message=ℹ️ WHT min=0.00, max=5.00 percent=INFO_DETAIL
+2026-08-30T07:03:28.444809Z ENGINE_PROGRESS message=📊 images_in_cumulative_stack=5 percent=INFO_DETAIL
+2026-08-30T07:03:28.905983Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035203.fit percent=INFO_DETAIL
+2026-08-30T07:03:28.906838Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035214.fit percent=INFO_DETAIL
+2026-08-30T07:03:28.906948Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035225.fit percent=INFO_DETAIL
+2026-08-30T07:03:28.907244Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035236.fit percent=INFO_DETAIL
+2026-08-30T07:03:28.907340Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035248.fit percent=INFO_DETAIL
+2026-08-30T07:03:30.560939Z ENGINE_PROGRESS message=💾 Saved stack_batch001.fit
+2026-08-30T07:03:31.511848Z ENGINE_PROGRESS message=Aligned: 6 percent=30.0
+2026-08-30T07:03:32.482903Z ENGINE_PROGRESS message=Aligned: 7 percent=35.0
+2026-08-30T07:03:33.455017Z ENGINE_PROGRESS message=Aligned: 8 percent=40.0
+2026-08-30T07:03:34.461398Z ENGINE_PROGRESS message=Aligned: 9 percent=45.0
+2026-08-30T07:03:35.462681Z ENGINE_PROGRESS message=Aligned: 10 percent=50.0
+2026-08-30T07:03:41.207422Z ENGINE_PROGRESS message=RejWinsor: done - 0.00% pixels rejected
+2026-08-30T07:03:41.712979Z ENGINE_PROGRESS message=INFO: Batch k=2 BG2D: gaussian blur (RMS=0.0002, valid_px=1920516, context=stack_batch) percent=INFO
+2026-08-30T07:03:43.388000Z ENGINE_PROGRESS message=INFO: Batch k=2 Gain RGB: overlap=1920516 px a=0.935/0.935/0.936 offset=0.0000/0.0000/0.0000 ref_med=0.0146/0.0146/0.0146 new_med=0.0156/0.0156/0.0156 percent=INFO
+2026-08-30T07:03:52.934307Z ENGINE_PROGRESS message=ℹ️ SUM min=0.00, max=5.16 percent=INFO_DETAIL
+2026-08-30T07:03:52.934512Z ENGINE_PROGRESS message=ℹ️ WHT min=0.00, max=10.00 percent=INFO_DETAIL
+2026-08-30T07:03:52.934592Z ENGINE_PROGRESS message=📊 images_in_cumulative_stack=10 percent=INFO_DETAIL
+2026-08-30T07:03:53.482941Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035307.fit percent=INFO_DETAIL
+2026-08-30T07:03:53.483103Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035318.fit percent=INFO_DETAIL
+2026-08-30T07:03:53.483150Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035329.fit percent=INFO_DETAIL
+2026-08-30T07:03:53.533514Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035340.fit percent=INFO_DETAIL
+2026-08-30T07:03:53.534371Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035352.fit percent=INFO_DETAIL
+2026-08-30T07:03:55.402642Z ENGINE_PROGRESS message=💾 Saved stack_batch002.fit
+2026-08-30T07:03:56.443346Z ENGINE_PROGRESS message=Aligned: 11 percent=55.00000000000001
+2026-08-30T07:03:57.439323Z ENGINE_PROGRESS message=Aligned: 12 percent=60.0
+2026-08-30T07:03:58.441787Z ENGINE_PROGRESS message=Aligned: 13 percent=65.0
+2026-08-30T07:03:59.434980Z ENGINE_PROGRESS message=Aligned: 14 percent=70.0
+2026-08-30T07:04:00.400534Z ENGINE_PROGRESS message=Aligned: 15 percent=75.0
+2026-08-30T07:04:05.473120Z ENGINE_PROGRESS message=RejWinsor: done - 0.00% pixels rejected
+2026-08-30T07:04:05.927896Z ENGINE_PROGRESS message=INFO: Batch k=3 BG2D: gaussian blur (RMS=0.0001, valid_px=2071679, context=stack_batch) percent=INFO
+2026-08-30T07:04:07.343456Z ENGINE_PROGRESS message=INFO: Batch k=3 Gain RGB: overlap=1952478 px a=1.262/1.262/1.262 offset=-0.0000/0.0000/0.0000 ref_med=0.0146/0.0146/0.0146 new_med=0.0115/0.0116/0.0116 percent=INFO
+2026-08-30T07:04:16.817871Z ENGINE_PROGRESS message=ℹ️ SUM min=0.00, max=7.60 percent=INFO_DETAIL
+2026-08-30T07:04:16.818097Z ENGINE_PROGRESS message=ℹ️ WHT min=0.00, max=15.00 percent=INFO_DETAIL
+2026-08-30T07:04:16.818243Z ENGINE_PROGRESS message=📊 images_in_cumulative_stack=15 percent=INFO_DETAIL
+2026-08-30T07:04:17.257285Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035410.fit percent=INFO_DETAIL
+2026-08-30T07:04:17.307907Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035421.fit percent=INFO_DETAIL
+2026-08-30T07:04:17.308064Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035433.fit percent=INFO_DETAIL
+2026-08-30T07:04:17.308106Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035444.fit percent=INFO_DETAIL
+2026-08-30T07:04:17.308144Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035455.fit percent=INFO_DETAIL
+2026-08-30T07:04:18.949548Z ENGINE_PROGRESS message=💾 Saved stack_batch003.fit
+2026-08-30T07:04:19.933696Z ENGINE_PROGRESS message=Aligned: 16 percent=80.0
+2026-08-30T07:04:20.918702Z ENGINE_PROGRESS message=Aligned: 17 percent=85.0
+2026-08-30T07:04:21.857588Z ENGINE_PROGRESS message=Aligned: 18 percent=90.0
+2026-08-30T07:04:22.799189Z ENGINE_PROGRESS message=Aligned: 19 percent=95.0
+2026-08-30T07:04:23.739589Z ENGINE_PROGRESS message=Aligned: 20 percent=100.0
+2026-08-30T07:04:28.596207Z ENGINE_PROGRESS message=RejWinsor: done - 0.00% pixels rejected
+2026-08-30T07:04:29.050408Z ENGINE_PROGRESS message=INFO: Batch k=4 BG2D: gaussian blur (RMS=0.0002, valid_px=1940075, context=stack_batch) percent=INFO
+2026-08-30T07:04:30.368742Z ENGINE_PROGRESS message=INFO: Batch k=4 Gain RGB: overlap=1934273 px a=1.068/1.069/1.068 offset=0.0000/0.0000/-0.0000 ref_med=0.0146/0.0146/0.0146 new_med=0.0136/0.0137/0.0137 percent=INFO
+2026-08-30T07:04:39.649704Z ENGINE_PROGRESS message=ℹ️ SUM min=0.00, max=10.19 percent=INFO_DETAIL
+2026-08-30T07:04:39.650279Z ENGINE_PROGRESS message=ℹ️ WHT min=0.00, max=20.00 percent=INFO_DETAIL
+2026-08-30T07:04:39.650385Z ENGINE_PROGRESS message=📊 images_in_cumulative_stack=20 percent=INFO_DETAIL
+2026-08-30T07:04:40.096442Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035516.fit percent=INFO_DETAIL
+2026-08-30T07:04:40.096638Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035527.fit percent=INFO_DETAIL
+2026-08-30T07:04:40.147114Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035601.fit percent=INFO_DETAIL
+2026-08-30T07:04:40.147324Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035612.fit percent=INFO_DETAIL
+2026-08-30T07:04:40.147377Z ENGINE_PROGRESS message=📦 Moved to stacked: Light_M 16_10.0s_LP_20250530-035631.fit percent=INFO_DETAIL
+2026-08-30T07:04:41.822582Z ENGINE_PROGRESS message=💾 Saved stack_batch004.fit
+2026-08-30T07:04:42.841296Z ENGINE_PROGRESS message=INFO: Plus aucun fichier ni dossier supplémentaire. Fin de la boucle de traitement.
+2026-08-30T07:05:28.041992Z ENGINE_PROGRESS message=DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '_classic_reproject_zm', Arrêt précoce: False
+2026-08-30T07:05:28.143729Z ENGINE_PROGRESS message=    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [0, 0.5095]
+2026-08-30T07:05:28.447017Z ENGINE_PROGRESS message=  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [0.0000, 1.0000], Dtype: float32
+2026-08-30T07:05:28.454130Z FINAL_FITS_SAVE_ENTERED path=stack_final_classic_reproject_zm.fit
+2026-08-30T07:05:30.096694Z FINAL_FITS_SAVE_RETURNED success=True path=stack_final_classic_reproject_zm.fit
+2026-08-30T07:05:30.096804Z FINAL_PREVIEW_SAVE_ENTERED path=stack_final_classic_reproject_zm.png
+2026-08-30T07:05:30.123142Z ENGINE_PROGRESS message=   ✅ Sauvegarde FITS (uint16) terminee.
+2026-08-30T07:05:30.941740Z FINAL_PREVIEW_SAVE_RETURNED success=True path=stack_final_classic_reproject_zm.png error=None
+2026-08-30T07:05:30.982170Z ENGINE_PROGRESS message=     ✅ Sauvegarde Preview PNG terminee.
+2026-08-30T07:05:30.982313Z ENGINE_PROGRESS message=INFO: Inter-batch normalization summary: master_ready=True, applied_to=4, skipped=0 (BG2D applied=4), batches_seen=4 percent=INFO
+2026-08-30T07:05:31.192500Z ENGINE_PROCESSING_RETURNING error=False
+2026-08-30T07:05:31.195408Z ENGINE_PROGRESS message=🚪 Thread de traitement principal terminé.
+2026-08-30T07:05:31.196325Z ENGINE_PROCESSING_RETURNED
+2026-08-30T07:05:31.204764Z BACKEND_RETURNING status=finished processed_files_count=20
+2026-08-30T07:05:31.204916Z BACKEND_RETURNED status=finished
+2026-08-30T07:05:31.204977Z COMPLETION_CALLBACK_EMITTING kind=finished
+2026-08-30T07:05:31.205042Z COMPLETION_CALLBACK_EMITTED kind=finished
+2026-08-30T07:05:31.205069Z WORKER_OUTCOME status=finished
+2026-08-30T07:05:31.205688Z QTHREAD_FINISHED
+2026-08-30T07:05:31.205835Z QT_COMPLETION_HANDLER_ENTERED outcome=finished
+2026-08-30T07:05:31.237665Z CONTROLS_RESTORED
+2026-08-30T07:05:31.237800Z GUI_IDLE
+2026-08-30T07:05:31.237830Z RUN_SUCCEEDED terminal_status=success
+2026-08-30T07:05:31.237865Z QT_COMPLETION_HANDLER_RETURNED outcome=finished

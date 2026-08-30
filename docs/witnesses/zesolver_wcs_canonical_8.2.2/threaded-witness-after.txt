@@ -1,0 +1,32 @@
+ZESOLVER-WCS-CANONICAL-02 — threaded witness AFTER fix
+============================================================
+Same harness.  The adapter now canonicalizes the celestial component.
+
+Result: SolverOutcome.wcs is a 2-axis celestial WCS -> is_celestial True ->
+AstrometrySolver accepts it ("ZeSolver OK").  No false negative, no ASTAP fallback.
+
+--- sync ---
+status solved
+failure_code None
+pixel_n_dim 2
+world_n_dim 2
+naxis 2
+CTYPE ['RA---TAN', 'DEC--TAN']
+CRVAL [275.037495, -13.730556]
+has_celestial True
+is_celestial True
+WCS.celestial.is_celestial True
+--- threaded ---
+status solved
+failure_code None
+pixel_n_dim 2
+world_n_dim 2
+naxis 2
+CTYPE ['RA---TAN', 'DEC--TAN']
+CRVAL [275.037495, -13.730556]
+has_celestial True
+is_celestial True
+WCS.celestial.is_celestial True
+
+(threading is NOT the cause: sync and threaded are identical both before and
+after — the WCS canonicalization is the only difference.)
