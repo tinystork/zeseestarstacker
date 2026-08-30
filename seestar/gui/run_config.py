@@ -132,7 +132,9 @@ def _copy_dict_or_none(value: Any) -> Any:
 #   them to the stacker after this split.  They are *not* emitted by
 #   ``build_backend_kwargs`` (so the Tk flow is byte-identical) — the Qt shell
 #   attaches them to its ``RunRequest`` at the call site.
-SEAM_ONLY_KWARGS = frozenset({"stack_final_combine", "use_gpu", "max_hq_mem_gb"})
+SEAM_ONLY_KWARGS = frozenset(
+    {"stack_final_combine", "use_gpu", "max_hq_mem_gb", "reference_origin_hint"}
+)
 
 
 def split_backend_kwargs(

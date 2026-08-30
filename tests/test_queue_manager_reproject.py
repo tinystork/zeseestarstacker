@@ -663,7 +663,13 @@ def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
 
     obj._worker = lambda: None
 
-    ok = obj.start_processing(str(tmp_path), str(tmp_path), batch_size=0, reproject_coadd_final=True)
+    ok = obj.start_processing(
+        str(tmp_path),
+        str(tmp_path),
+        reference_path_ui=str(ref_path),
+        batch_size=0,
+        reproject_coadd_final=True,
+    )
 
     assert ok
     assert called["grid"]
@@ -771,7 +777,12 @@ def test_start_processing_bs0_defaults_to_reproject_coadd(monkeypatch, tmp_path)
 
     obj._worker = lambda: None
 
-    ok = obj.start_processing(str(tmp_path), str(tmp_path), batch_size=0)
+    ok = obj.start_processing(
+        str(tmp_path),
+        str(tmp_path),
+        reference_path_ui=str(ref_path),
+        batch_size=0,
+    )
 
     assert ok
     assert obj.reproject_coadd_final is True
@@ -884,6 +895,7 @@ def test_bs0_reproject_disables_inter_batch(monkeypatch, tmp_path):
     ok = obj.start_processing(
         str(tmp_path),
         str(tmp_path),
+        reference_path_ui=str(ref_path),
         batch_size=0,
         reproject_coadd_final=True,
         reproject_between_batches=True,
@@ -994,7 +1006,11 @@ def test_reproject_coadd_skips_solver_when_wcs_present(monkeypatch, tmp_path):
     obj.astrometry_solver = DummySolver()
 
     ok = obj.start_processing(
-        str(tmp_path), str(tmp_path), batch_size=0, reproject_coadd_final=True
+        str(tmp_path),
+        str(tmp_path),
+        reference_path_ui=str(paths[0]),
+        batch_size=0,
+        reproject_coadd_final=True,
     )
     assert ok
 

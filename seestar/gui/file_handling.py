@@ -83,6 +83,7 @@ class FileHandlingManager:
         )
         if file:
             abs_file = os.path.abspath(file)
+            self.gui._reference_origin_hint = "USER"
             self.gui.reference_image_path.set(abs_file)
             self.gui.settings.reference_image_path = abs_file  # Save setting
             self.gui.settings.save_settings()

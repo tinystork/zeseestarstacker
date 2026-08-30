@@ -85,10 +85,14 @@ def test_attach_run_settings_injects_seam_fields():
     assert "max_hq_mem_gb" not in request.backend_kwargs
 
     attached = attach_run_settings(
-        request, use_gpu=state.use_gpu, max_hq_mem_gb=state.max_hq_mem_gb
+        request,
+        use_gpu=state.use_gpu,
+        max_hq_mem_gb=state.max_hq_mem_gb,
+        reference_origin_hint="ZEANALYSER_V1",
     )
     assert attached.backend_kwargs["use_gpu"] is True
     assert attached.backend_kwargs["max_hq_mem_gb"] == 16.0
+    assert attached.backend_kwargs["reference_origin_hint"] == "ZEANALYSER_V1"
     # The seam fields are the Qt-collected values, verbatim.
     assert attached.backend_kwargs["use_gpu"] is state.use_gpu
 
@@ -113,6 +117,12 @@ def test_main_window_build_run_request_carries_seam_settings(window):
     assert request.backend_kwargs["max_hq_mem_gb"] == 32.0
     # The bytes conversion is NOT done in the snapshot (backend adapter's job).
     assert "max_hq_mem" not in request.backend_kwargs
+
+
+def test_main_window_build_run_request_carries_reference_origin_hint(window):
+    window._reference_origin_hint = "ZEANALYSER_V1"
+    request = window.build_run_request()
+    assert request.backend_kwargs["reference_origin_hint"] == "ZEANALYSER_V1"
 
 
 # --------------------------------------------------------------------------
@@ -283,6 +293,7 @@ def test_backend_applies_seam_gpu_and_mem_to_stackers_instance():
         build_run_request(state),
         use_gpu=state.use_gpu,
         max_hq_mem_gb=state.max_hq_mem_gb,
+        reference_origin_hint="ZEANALYSER_V1",
     )
 
     result = backend.run(request, lambda p: None, lambda m: None, lambda: False)
@@ -292,6 +303,7 @@ def test_backend_applies_seam_gpu_and_mem_to_stackers_instance():
     # Seam fields reached the stacker instance...
     assert stacker.use_gpu is True
     assert stacker.max_hq_mem == 16 * 1024 ** 3
+    assert stacker.reference_origin_hint == "ZEANALYSER_V1"
     # ...and were filtered out of the start_processing surface.
     assert "use_gpu" not in stacker.start_kwargs
     assert "max_hq_mem_gb" not in stacker.start_kwargs
@@ -357,4 +369,8 @@ def test_offscreen_smoke_gpu_and_mem_reach_backend(qapp):
 # --------------------------------------------------------------------------
 def test_handoff_adds_no_localization_keys():
     """The handoff layer adds no user-facing strings (nothing to localize)."""
-    assert QT_SEAM_FIELDS == ("use_gpu", "max_hq_mem_gb")
+    assert QT_SEAM_FIELDS == (
+        "use_gpu",
+        "max_hq_mem_gb",
+        "reference_origin_hint",
+    )

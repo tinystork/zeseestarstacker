@@ -97,6 +97,7 @@ def test_reference_arrives_tick_updates_gui_and_triggers_consequence(
         # Reference field + settings state updated (single-shot seam path).
         assert win.reference_edit.text() == str(ref_file)
         assert win.collect_settings_state().reference_image_path == str(ref_file)
+        assert win._reference_origin_hint == "ZEANALYSER_V1"
         # Output preparation (Tk: default output when none set).
         assert win.output_edit.text() == str(tmp_path / "stack_output_analyzer")
         # Historical consequence: run start triggered exactly once.

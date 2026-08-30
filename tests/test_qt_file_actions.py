@@ -88,6 +88,7 @@ def test_browse_reference_writes_absolute_path(window, monkeypatch):
     )
     window._browse_reference()
     assert window.reference_edit.text() == os.path.abspath("/inputs/ref.fit")
+    assert window._reference_origin_hint == "USER"
     assert (
         window.collect_settings_state().reference_image_path
         == os.path.abspath("/inputs/ref.fit")

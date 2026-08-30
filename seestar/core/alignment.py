@@ -26,6 +26,7 @@ from .image_processing import (
     save_preview_image      # For saving reference preview
 )
 from .hot_pixels import detect_and_correct_hot_pixels
+from .reference_state import FrozenReference
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 logger = logging.getLogger(__name__)
@@ -42,6 +43,8 @@ class SeestarAligner:
         self.bayer_pattern = "GRBG"
         self.batch_size = 0
         self.reference_image_path = None
+        self.frozen_reference = None
+        self._reference_resolution_frozen = False
         self.correct_hot_pixels = True
         self.hot_pixel_threshold = 3.0
         self.neighborhood_size = 5
@@ -50,6 +53,22 @@ class SeestarAligner:
         self.NUM_IMAGES_FOR_AUTO_REF = 20 # Ou une autre valeur par défaut
         self.move_to_unaligned_callback = move_to_unaligned_callback
         self.use_cuda = False
+
+    def set_frozen_reference(self, descriptor):
+        """Install the canonical run-level reference decision."""
+        if not isinstance(descriptor, FrozenReference):
+            raise TypeError("descriptor must be a FrozenReference")
+        self.frozen_reference = descriptor
+        # Compatibility field: always canonical source identity, never the
+        # temp_processing/reference_image.fit artifact.
+        self.reference_image_path = descriptor.source_path
+        self._reference_resolution_frozen = True
+
+    def clear_frozen_reference(self):
+        """Clear run-scoped handoff state before resolving a new run."""
+        self.frozen_reference = None
+        self.reference_image_path = None
+        self._reference_resolution_frozen = False
     
     def set_progress_callback(self, callback):
         """Définit la fonction de rappel pour les mises à jour de progression."""
@@ -474,13 +493,28 @@ class SeestarAligner:
         
         source_basename_of_selected_ref = None # Nom de base du fichier sélectionné comme référence
 
-        # --- Étape 1: Essayer de Charger une Référence Manuelle si Spécifiée ---
-        if self.reference_image_path and os.path.isfile(self.reference_image_path):
-            manual_ref_basename = os.path.basename(self.reference_image_path)
+        # --- Étape 1: Charger la décision explicite/figée si disponible ---
+        frozen_reference = getattr(self, 'frozen_reference', None)
+        if isinstance(frozen_reference, FrozenReference):
+            reference_load_path = frozen_reference.available_load_path()
+            canonical_ref_basename = frozen_reference.source_basename
+        else:
+            reference_load_path = (
+                self.reference_image_path
+                if self.reference_image_path and os.path.isfile(self.reference_image_path)
+                else None
+            )
+            canonical_ref_basename = (
+                os.path.basename(self.reference_image_path)
+                if self.reference_image_path else None
+            )
+
+        if reference_load_path:
+            manual_ref_basename = canonical_ref_basename or os.path.basename(reference_load_path)
             if hasattr(self, 'update_progress'): self.update_progress(f"📌 Chargement référence manuelle: {manual_ref_basename}")
-            print(f"DEBUG ALIGNER [_get_reference_image]: Tentative chargement référence manuelle: {self.reference_image_path}")
+            print(f"DEBUG ALIGNER [_get_reference_image]: Tentative chargement référence figée: {reference_load_path}")
             try:
-                ref_img_tuple_manual = load_and_validate_fits(self.reference_image_path)
+                ref_img_tuple_manual = load_and_validate_fits(reference_load_path)
                 if ref_img_tuple_manual is None or ref_img_tuple_manual[0] is None:
                     raise ValueError(f"Échec chargement/validation (données None) de la référence manuelle: {manual_ref_basename}")
                 
@@ -526,7 +560,10 @@ class SeestarAligner:
         # here more than once (startup shape/WCS, then worker), but it must
         # never trigger a second automatic decision.  A missing or unreadable
         # frozen path is a hard failure, not permission to silently reselect.
-        if reference_image_data is None and getattr(self, '_reference_resolution_frozen', False):
+        if reference_image_data is None and (
+            isinstance(frozen_reference, FrozenReference)
+            or getattr(self, '_reference_resolution_frozen', False)
+        ):
             if hasattr(self, 'update_progress'):
                 self.update_progress(
                     "❌ Frozen registration reference is unavailable; automatic reselection is forbidden."

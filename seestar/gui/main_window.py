@@ -502,6 +502,7 @@ class SeestarStackerGUI:
         self.output_path = tk.StringVar()
         self.output_filename_var = tk.StringVar()
         self.reference_image_path = tk.StringVar()
+        self._reference_origin_hint = None
         self.last_stack_path = tk.StringVar()
         self.temp_folder_path = tk.StringVar()
         self.stacking_mode = tk.StringVar(value="kappa-sigma")
@@ -1031,6 +1032,10 @@ class SeestarStackerGUI:
         )
         self.browse_ref_button.pack(side=tk.RIGHT)
         self.ref_entry = ttk.Entry(ref_frame, textvariable=self.reference_image_path)
+        self.ref_entry.bind(
+            "<KeyRelease>",
+            lambda _event: setattr(self, "_reference_origin_hint", "USER"),
+        )
         self.ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         last_frame = ttk.Frame(self.folders_frame)
         last_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -2741,6 +2746,7 @@ class SeestarStackerGUI:
                             self.settings.output_folder = default_output
 
                         print(f"DEBUG (GUI): Référence recommandée reçue: {ref_path}")
+                        self._reference_origin_hint = "ZEANALYSER_V1"
                         self.reference_image_path.set(ref_path)
                         self.settings.reference_image_path = ref_path
 
@@ -6731,6 +6737,9 @@ class SeestarStackerGUI:
                 # ``start_processing`` (which does not accept it).
                 start_kwargs, _seam_kwargs = split_backend_kwargs(
                     run_request.backend_kwargs
+                )
+                self.queued_stacker.reference_origin_hint = getattr(
+                    self, "_reference_origin_hint", None
                 )
                 started = self.queued_stacker.start_processing(
                     **start_kwargs

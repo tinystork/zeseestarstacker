@@ -305,6 +305,8 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
           at run time.
         * ``max_hq_mem_gb`` — HQ RAM limit in GB; the engine reads
           ``stacker.max_hq_mem`` in bytes, so the GB value is converted here.
+        * ``reference_origin_hint`` — ephemeral provenance for an explicit
+          reference returned by ZeAnalyser versus one entered by the user.
         """
         combine = seam_kwargs.get("stack_final_combine")
         if combine is not None:
@@ -323,6 +325,8 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
 
         if "max_hq_mem_gb" in seam_kwargs:
             stacker.max_hq_mem = int(float(seam_kwargs["max_hq_mem_gb"]) * 1024 ** 3)
+
+        stacker.reference_origin_hint = seam_kwargs.get("reference_origin_hint")
 
     @staticmethod
     def _make_progress_callback(

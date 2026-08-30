@@ -852,6 +852,10 @@ class MainWindow(QMainWindow):
         # set on launch and consumed (single-shot) by
         # ``_check_analyzer_command_file``.
         self._analyzer_command_file_path: Optional[str] = None
+        # Ephemeral provenance for the visible reference field.  It is not a
+        # persisted scientific setting: ZeAnalyser sets it for the immediate
+        # run; direct typing/browsing resets it to USER semantics.
+        self._reference_origin_hint: Optional[str] = None
         # ZeAnalyser reference-return watcher (M25.5-A).  A GUI-thread QTimer
         # polls the command file written by the launched ZeAnalyser and applies
         # the historical Tk consequences when ``REFERENCE=`` arrives.  It is
@@ -2070,6 +2074,7 @@ class MainWindow(QMainWindow):
         self.temp_edit.textChanged.connect(self._sync_state_from_controls)
         self.output_filename_edit.textChanged.connect(self._sync_state_from_controls)
         self.reference_edit.textChanged.connect(self._sync_state_from_controls)
+        self.reference_edit.textEdited.connect(self._on_reference_text_edited)
         self.last_stack_edit.textChanged.connect(self._sync_state_from_controls)
         self.last_stack_edit.textChanged.connect(self._on_last_stack_changed)
         self.last_stack_edit.textEdited.connect(self._invalidate_resume_on_user_path_change)
@@ -2572,6 +2577,7 @@ class MainWindow(QMainWindow):
         except OSError:
             return None
         if ref:
+            self._reference_origin_hint = "ZEANALYSER_V1"
             self.reference_edit.setText(ref)
             self.log(f"Analyzer reference received: {ref}")
             self.statusBar().showMessage(f"Analyzer reference: {ref}")
@@ -2683,6 +2689,10 @@ class MainWindow(QMainWindow):
             return input_folder
         return "."
 
+    def _on_reference_text_edited(self, text: str) -> None:
+        """Mark a directly edited explicit reference as user-provided."""
+        self._reference_origin_hint = "USER" if str(text).strip() else None
+
     def _browse_reference(self) -> None:
         """Select the reference image via a FITS file dialog (Tk parity)."""
         filepath, _ = QFileDialog.getOpenFileName(
@@ -2692,6 +2702,7 @@ class MainWindow(QMainWindow):
             FITS_FILE_FILTER,
         )
         if filepath:
+            self._reference_origin_hint = "USER"
             self.reference_edit.setText(os.path.abspath(filepath))
 
     def _browse_last_stack(self) -> None:
@@ -4855,6 +4866,7 @@ class MainWindow(QMainWindow):
             request,
             use_gpu=bool(state.use_gpu),
             max_hq_mem_gb=float(state.max_hq_mem_gb),
+            reference_origin_hint=self._reference_origin_hint,
         )
 
     # ------------------------------------------- progress/log time + copy

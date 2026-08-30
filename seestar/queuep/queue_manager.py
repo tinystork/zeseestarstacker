@@ -310,12 +310,14 @@ from ..core.geometry_reference import (
     ORIGIN_AUTO_LEGACY,
     ORIGIN_RESUME,
     ORIGIN_USER,
+    ORIGIN_ZEANALYSER,
     ResolvedReference,
     canonical_session_sources,
     legacy_session_sources,
     select_legacy_reference,
     select_geometry_reference,
 )
+from ..core.reference_state import FrozenReference
 
 logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 
@@ -327,6 +329,11 @@ _last_drz_prev = 0.0
 _MAX_PREVIEW_SIDE_PX = 1000
 _QM_LAST_GUI_PUSH = 0.0  # horodatage du dernier push
 _QM_DEBOUNCE = 0.20  # secondes mini entre deux messages GUI
+_QM_DURABLE_REFERENCE_PREFIXES = (
+    "Frozen reference:",
+    "Reference selected:",
+    "Worker consumes:",
+)
 _BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
 
 # ----------------------------------------------------------------------
@@ -4508,9 +4515,10 @@ class SeestarQueuedStacker:
 
         # 2.a throttle : si le dernier envoi < _QM_DEBOUNCE sec → on ignore
         now = _mono()
+        durable_reference_event = message.startswith(_QM_DURABLE_REFERENCE_PREFIXES)
         if now - _QM_LAST_GUI_PUSH < _QM_DEBOUNCE:
             # … sauf si c'est une véritable valeur de pourcentage
-            if progress is None:
+            if progress is None and not durable_reference_event:
                 return
         _QM_LAST_GUI_PUSH = now
 
@@ -6251,6 +6259,7 @@ class SeestarQueuedStacker:
             # === SECTION 1: PRÉPARATION DE L'IMAGE DE RÉFÉRENCE ET DU/DES WCS DE RÉFÉRENCE ===
             # =====================================================================================
 
+            frozen_reference = self._consume_frozen_reference_for_worker()
             self.update_progress("⭐ Préparation image(s) de référence...")
 
             # --- Détermination du dossier et des fichiers pour la référence ---
@@ -18345,6 +18354,99 @@ class SeestarQueuedStacker:
 
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
+    def _clear_frozen_reference(self):
+        """Reset run-scoped reference handoff state before one new decision."""
+        self._frozen_reference = None
+        aligner = getattr(self, "aligner", None)
+        clear = getattr(aligner, "clear_frozen_reference", None)
+        if callable(clear):
+            clear()
+        elif aligner is not None:
+            aligner.frozen_reference = None
+            aligner.reference_image_path = None
+            aligner._reference_resolution_frozen = False
+
+    def _sync_frozen_reference_to_aligner(self):
+        """Make the canonical descriptor authoritative at the aligner seam."""
+        descriptor = getattr(self, "_frozen_reference", None)
+        if not isinstance(descriptor, FrozenReference):
+            return False
+        aligner = getattr(self, "aligner", None)
+        if aligner is None:
+            return False
+        setter = getattr(aligner, "set_frozen_reference", None)
+        if callable(setter):
+            setter(descriptor)
+        else:
+            aligner.frozen_reference = descriptor
+            aligner.reference_image_path = descriptor.source_path
+            aligner._reference_resolution_frozen = True
+        return True
+
+    def _freeze_reference(self, source_path, origin):
+        """Freeze one canonical source identity for the complete run."""
+        if not source_path:
+            raise RuntimeError("cannot freeze an empty registration reference")
+        descriptor = FrozenReference(source_path=source_path, origin=origin)
+        self._frozen_reference = descriptor
+        self._resolved_reference_origin = origin
+        if not self._sync_frozen_reference_to_aligner():
+            raise RuntimeError("registration aligner unavailable during reference freeze")
+        self.update_progress(
+            "Frozen reference: " + descriptor.source_basename,
+            level="INFO",
+        )
+        return descriptor
+
+    def _record_materialized_reference(self, materialized_path):
+        """Attach the prepared FITS without changing canonical source identity."""
+        descriptor = getattr(self, "_frozen_reference", None)
+        if not isinstance(descriptor, FrozenReference):
+            raise RuntimeError("frozen registration reference state is missing")
+        if not materialized_path or not os.path.isfile(materialized_path):
+            raise RuntimeError(
+                "materialized registration reference is missing: "
+                + str(materialized_path)
+            )
+        self._frozen_reference = descriptor.with_materialized(materialized_path)
+        self._sync_frozen_reference_to_aligner()
+        return self._frozen_reference
+
+    def _require_frozen_reference(self):
+        """Return usable frozen state or fail closed with the durable message."""
+        descriptor = getattr(self, "_frozen_reference", None)
+        if not isinstance(descriptor, FrozenReference):
+            raise RuntimeError(
+                "Frozen registration reference is unavailable; "
+                "automatic reselection is forbidden."
+            )
+        if descriptor.available_load_path() is None:
+            raise RuntimeError(
+                "Frozen registration reference is unavailable; "
+                "automatic reselection is forbidden."
+            )
+        self._sync_frozen_reference_to_aligner()
+        return descriptor
+
+    def _consume_frozen_reference_for_worker(self):
+        """Validate and announce the exact canonical source consumed by worker."""
+        descriptor = self._require_frozen_reference()
+        self.update_progress(
+            "Worker consumes: " + descriptor.source_basename,
+            level="INFO",
+        )
+        return descriptor
+
+    def _run_started_input_fields(self):
+        """Describe input cardinality without publishing a misleading zero."""
+        count = getattr(self, "files_in_queue", None)
+        if not isinstance(count, int) or count <= 0:
+            return {
+                "input_count": None,
+                "input_count_state": "not_yet_enumerated",
+            }
+        return {"input_count": count, "input_count_state": "known"}
+
     def _resolve_automatic_reference(self, current_folder, additional_folders, plan_path, requested_batch_size):
         """Resolve and freeze exactly one automatic reference for this run."""
         def _report(message, progress=None, level="INFO"):
@@ -18389,8 +18491,12 @@ class SeestarQueuedStacker:
 
         legacy = None
         if selection.resolved.origin == ORIGIN_AUTO_GEOMETRY and selection.resolved.path:
-            self.aligner.reference_image_path = selection.resolved.path
-            self._resolved_reference_origin = ORIGIN_AUTO_GEOMETRY
+            _report(
+                "Reference selected: "
+                + os.path.basename(selection.resolved.path),
+                level="INFO",
+            )
+            self._freeze_reference(selection.resolved.path, ORIGIN_AUTO_GEOMETRY)
         else:
             reason = selection.fallback_reason or "geometry selector rejected the field"
             _report(
@@ -18406,24 +18512,26 @@ class SeestarQueuedStacker:
                 stop_requested=lambda: bool(getattr(self, "stop_processing", False)),
             )
             if legacy.resolved.path:
-                self.aligner.reference_image_path = legacy.resolved.path
-                self._resolved_reference_origin = ORIGIN_AUTO_LEGACY
+                _report(
+                    "Reference selected: "
+                    + os.path.basename(legacy.resolved.path),
+                    level="INFO",
+                )
+                self._freeze_reference(legacy.resolved.path, ORIGIN_AUTO_LEGACY)
             else:
                 self.aligner.reference_image_path = None
+                self.aligner.frozen_reference = None
+                self.aligner._reference_resolution_frozen = True
                 self._resolved_reference_origin = ORIGIN_AUTO_LEGACY
                 reason = legacy.reason or reason
 
-        # Freeze both a successful automatic path and a terminal no-candidate
-        # decision.  _get_reference_image may materialize the path, but it may
-        # never launch an independent selector after this point.
-        self.aligner._reference_resolution_frozen = True
-
-        selected_path = getattr(self.aligner, "reference_image_path", None)
-        if selected_path:
-            _report(
-                "Reference selected: " + os.path.basename(selected_path), level="INFO"
-            )
-        else:
+        descriptor = getattr(self, "_frozen_reference", None)
+        selected_path = (
+            descriptor.source_path
+            if isinstance(descriptor, FrozenReference)
+            else None
+        )
+        if not selected_path:
             _report(
                 "Automatic reference resolution failed: " + str(reason), level="ERROR"
             )
@@ -19103,7 +19211,7 @@ class SeestarQueuedStacker:
             "RUN_STARTED",
             mode=stacking_mode,
             use_drizzle=bool(use_drizzle),
-            input_count=getattr(self, "files_in_queue", None),
+            **self._run_started_input_fields(),
         )
 
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
@@ -19188,8 +19296,7 @@ class SeestarQueuedStacker:
             self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
             self.aligner.neighborhood_size = self.neighborhood_size
             self.aligner.bayer_pattern = self.bayer_pattern
-            self.aligner._reference_resolution_frozen = False
-            self.aligner.reference_image_path = reference_path_ui or None
+            self._clear_frozen_reference()
 
             # HSI-2B C2: on resume, pin the already-verified resolved original
             # reference (from the early preflight) *before* auto-selection so
@@ -19206,7 +19313,6 @@ class SeestarQueuedStacker:
                     )
                     self._cleanup_failed_start()
                     return False
-                self.aligner.reference_image_path = resolved_ref
                 reference_path_ui = resolved_ref
 
             # GAR-04: resolve the automatic reference once.  A resume-pinned or
@@ -19214,9 +19320,15 @@ class SeestarQueuedStacker:
             # selector, which falls back to legacy auto-selection on any failure.
             self._resolved_reference_origin = None
             if self._resume_requested:
-                self._resolved_reference_origin = ORIGIN_RESUME
+                self._freeze_reference(reference_path_ui, ORIGIN_RESUME)
             elif reference_path_ui and os.path.isfile(reference_path_ui):
-                self._resolved_reference_origin = ORIGIN_USER
+                origin_hint = getattr(self, "reference_origin_hint", None)
+                explicit_origin = (
+                    ORIGIN_ZEANALYSER
+                    if origin_hint == ORIGIN_ZEANALYSER
+                    else ORIGIN_USER
+                )
+                self._freeze_reference(reference_path_ui, explicit_origin)
             else:
                 self._resolve_automatic_reference(
                     current_folder=self.current_folder,
@@ -19224,9 +19336,6 @@ class SeestarQueuedStacker:
                     plan_path=plan_path,
                     requested_batch_size=requested_batch_size,
                 )
-
-            if self._resolved_reference_origin in (ORIGIN_RESUME, ORIGIN_USER):
-                self.aligner._reference_resolution_frozen = True
 
             (
                 reference_image_data_for_shape_determination,
@@ -19288,6 +19397,7 @@ class SeestarQueuedStacker:
             reference_image_path_for_solving = os.path.join(
                 ref_temp_processing_dir, "reference_image.fit"
             )
+            self._record_materialized_reference(reference_image_path_for_solving)
 
             self.reference_wcs_object = None
 
@@ -19816,7 +19926,19 @@ class SeestarQueuedStacker:
             self.fixed_output_wcs = self.reference_wcs_object
             self.fixed_output_shape = self.reference_shape
 
-        self.aligner.reference_image_path = reference_path_ui or None
+        # GAR-05B: never restore the raw UI argument here.  AUTO_GEOMETRY has
+        # no reference_path_ui, so that historical assignment erased the
+        # successfully resolved source immediately before _worker().
+        try:
+            self._require_frozen_reference()
+        except RuntimeError as frozen_err:
+            # The canonical source and its prepared artifact are both gone at
+            # the thread-start boundary.  Fail closed with the durable message
+            # instead of leaking an unhandled exception out of start_processing.
+            self.update_progress(str(frozen_err), "ERROR")
+            self.processing_error = str(frozen_err)
+            self._cleanup_failed_start()
+            return False
 
         # P1-FIX (HSI closure): auto-start the batch-output IBN (MASTER_REF +
         # BG2D) layer only for non-plain sessions.  Plain classic SUM/WHT must

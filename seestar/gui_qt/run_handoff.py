@@ -29,7 +29,7 @@ from .run_bridge import RunRequest
 # Seam-only fields the Qt shell attaches to its RunRequest.  These mirror the
 # entries in ``seestar.gui.run_config.SEAM_ONLY_KWARGS`` (they are filtered out
 # of ``start_processing`` kwargs by ``split_backend_kwargs``).
-QT_SEAM_FIELDS = ("use_gpu", "max_hq_mem_gb")
+QT_SEAM_FIELDS = ("use_gpu", "max_hq_mem_gb", "reference_origin_hint")
 
 
 def attach_run_settings(
@@ -37,6 +37,7 @@ def attach_run_settings(
     *,
     use_gpu: bool = False,
     max_hq_mem_gb: float = 8.0,
+    reference_origin_hint: str | None = None,
 ) -> RunRequest:
     """Return a new ``RunRequest`` carrying the Qt-collected seam settings.
 
@@ -49,6 +50,7 @@ def attach_run_settings(
     merged = dict(request.backend_kwargs)
     merged["use_gpu"] = bool(use_gpu)
     merged["max_hq_mem_gb"] = float(max_hq_mem_gb)
+    merged["reference_origin_hint"] = reference_origin_hint
     return RunRequest(
         backend_kwargs=MappingProxyType(merged),
         align_on_disk=request.align_on_disk,
