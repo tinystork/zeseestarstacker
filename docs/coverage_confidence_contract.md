@@ -1,0 +1,129 @@
+# Coverage Confidence Contract — COV-01A (positive support core)
+
+<!-- project: path:/home/tristan/.openclaw/workspace/projects/zeseestarstacker -->
+
+## Scope / status
+
+COV-01A is the first bounded subgate of COV-01.  It introduces and proves the
+isolated, backend-neutral **positive support core** state/math contract only.
+COV-00 (architecture archaeology) is ACCEPTED at f2d54b3.  This gate is NOT
+wired into QueueManager, the classic/drizzle/reproject reducers, checkpoints,
+GUI, render, or any existing scientific reducer — those are later COV-01
+subgates after Junior ACCEPT.
+
+## Contract
+
+For each original exposure `i`, define a per-pixel positive support
+
+```
+s_i = valid_geometric_support
+      * optional_quality_significance
+      * optional_spatial_support_taper
+```
+
+and accumulate
+
+```
+SUP_W1 += s_i
+SUP_W2 += s_i**2
+```
+
+with the derived effective support
+
+```
+N_eff_support = SUP_W1**2 / SUP_W2     where SUP_W2 > 0
+                0.0                     otherwise (documented neutral value)
+```
+
+## Semantics (non-negotiable)
+
+1. This is a **support/confidence** domain, NOT the scientific estimator
+   denominator and NOT a rejection-survivor count.
+2. No dependency on scientific WHT; no low-WHT gain; no science-pixel mutation.
+3. No rejection-mask semantics: for rejection reducers the support confidence
+   describes the *original geometric/quality* support and may deliberately
+   differ from the surviving estimator WHT.  Rejection masks are never
+   consumed here.
+4. `SUP_W1` is a raw exposure count ONLY in the unit-weight case
+   (`s_i ∈ {0,1}`).  The API never reports `SUP_W1` as a count.
+5. Median science is unchanged and its support remains independent.
+
+## Module / API
+
+`seestar/core/coverage_support.py` — `PositiveSupportAccumulator`
+
+* `PositiveSupportAccumulator(shape, *, dtype=float64)`
+* `.add(support)` — atomic per-original-exposure accumulation
+* `.support_w1` / `.support_w2` — owned read copies of SUP_W1 / SUP_W2
+* `.n_eff_support` — pure derived view (never mutates state)
+* `.to_state()` / `.from_state(state)` — snapshot / restore
+* `SUPPORT_STATE_VERSION = 1`, `SUPPORT_DTYPES = (float32, float64)`
+
+## Guarantees
+
+* **Fail-before-mutation**: negative / NaN / Inf / shape-mismatch /
+  non-finite-squared support is rejected before SUP_W1 or SUP_W2 changes.
+* **Atomic pair mutation**: a failed `add()` or `from_state()` leaves both
+  SUP_W1 and SUP_W2 byte/array unchanged.
+* **Restore after full validation**: `from_state` validates type, version,
+  shape, dtype, and both arrays (shape/dtype/finiteness/non-negativity) before
+  constructing any visible object; restored arrays are owned copies (no
+  aliasing to the caller's state).
+* **No batch/merge API**: decomposition invariance across partition markers
+  (61 vs 3+17+41 vs 1+…+1) is exact by construction for an identical ordered
+  sequence (same float64 operation order).
+
+## Dtype / memory decision
+
+Accumulators default to `numpy.float64`.  `N_eff_support` squares SUP_W1;
+float32 loses integer exactness beyond 2**24 (~1.67e7) and would round
+`SUP_W1**2` for large exposure counts, corrupting the ratio.  float64 keeps
+`SUP_W1**2` exact for unit-weight counts up to ~9.0e15 exposures — the safe
+choice for the up-to-~100k-exposure target.
+
+Bytes-per-pixel for the SUP_W1+SUP_W2 pair: **16** (float64) / **8** (float32).
+Support is channel-invariant (one per-pixel map per exposure regardless of
+channel count), so there is no hidden HWC duplication.
+
+Microbenchmark (real, venv python 3.13.5 / numpy 2.5.2, this machine):
+
+* 1080×1920 (2.1 MP): 9.02 ms/add, 16.0 bytes/px pair, 33.18 MB.
+* 4096×4096 (16.8 MP): 92.37 ms/add, 16.0 bytes/px pair, 268.44 MB.
+* 100k unit adds on 64×64: 2.439 s; SUP_W1 == 100000.0 exact;
+  N_eff_support == 100000.0 exact.
+
+## Tests
+
+`tests/test_coverage_support.py` — 19 tests, all passing.  Covers: exact
+W1/W2 known-weight witness; derived N_eff witness; zero/undefined support;
+invalid negative/NaN/Inf/shape fail-before-mutation; overflow-squared
+fail-before-mutation; shape/dtype validation; restore-invalid-state fail-closed;
+snapshot/restore exactness + no aliasing; decomposition partitions (61 vs
+3+17+41 vs singletons); unit-weight reduces to count; 100k float64 exact;
+float32 supported; N_eff does not mutate state.
+
+## Limitations (COV-01A only)
+
+* In-memory ndarray only — no memmap / disk backing yet.
+* Not integrated with QueueManager, classic/drizzle/reproject, checkpoints,
+  GUI, render, or any reducer.
+* No scalar constant-support shortcut (support must be a full-shape array).
+* No alternate merge API (and therefore no alternate-rounding tolerance to
+  document); decomposition invariance is exact only for identical operation
+  order.
+
+## Deferred to COV-01B (explicitly not done here)
+
+* Backend wiring into the per-batch reducer loop, before irreversible
+  mini-stack reduction (COV-01 seam from the archaeology).
+* Persistence / transaction ownership: classic memmap manifest + drizzle
+  checkpoint fields, and registration into the failed-start cleanup allowlist
+  (`_ATTEMPT_CREATED_CHECKPOINT_ARTIFACTS`).
+* Final dtype policy for large outputs (float32 vs float64 under a documented
+  tolerance) if memory pressure demands it.
+* Reproject per-exposure support transform accumulation (`R(s_i)`, `R(s_i)**2`).
+* Unit-weight fast path optimization (skip the square when `s_i ∈ {0,1}`).
+
+
+*Prepared by Coco (COV-01A). No production code changes outside the isolated
+core module and its focused tests + this contract doc.*
