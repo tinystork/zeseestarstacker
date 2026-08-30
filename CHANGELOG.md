@@ -2,6 +2,12 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.2.2] — Phoenix consedit
+
+- fix ZeSolver RGB reference WCS: canonicalize the transported WCS to its
+  celestial 2D component so a solved NAXIS=3 cube is no longer rejected as
+  non-celestial (no false ASTAP fallback)
+
 ## [8.2.1] — Phoenix consedit
 
 - fixed long-run live-preview analysis drift
