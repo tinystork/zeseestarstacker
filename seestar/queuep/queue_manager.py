@@ -18366,6 +18366,25 @@ class SeestarQueuedStacker:
                 reason = selection.gate.reason
             self.update_progress("Geometry-aware reference unavailable: " + reason + ". Falling back to legacy automatic selection.", "INFO")
 
+        self._reference_geometry_stats = {
+            "origin": self._resolved_reference_origin,
+            "dataset_sources": selection.source_count,
+            "usable_geometry": selection.geometry_count,
+            "coherent": bool(selection.gate.accepted) if selection.gate is not None else None,
+            "central_candidates": selection.candidate_count,
+            "selected_metric": selection.selected_metric,
+        }
+        _logger = getattr(self, "logger", None)
+        if _logger is not None:
+            _logger.info(
+                "Reference origin: %s; sources=%d geometry=%d coherent=%s candidates=%d",
+                self._resolved_reference_origin,
+                selection.source_count,
+                selection.geometry_count,
+                self._reference_geometry_stats["coherent"],
+                selection.candidate_count,
+            )
+
     def start_processing(
         self,
         input_dir,
