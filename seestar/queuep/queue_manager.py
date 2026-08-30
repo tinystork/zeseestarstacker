@@ -305,11 +305,15 @@ from ..core.weights import (
 )
 from ..enhancement.stack_enhancement import apply_edge_crop
 from ..core.geometry_reference import (
+    GeometrySelection,
     ORIGIN_AUTO_GEOMETRY,
     ORIGIN_AUTO_LEGACY,
     ORIGIN_RESUME,
     ORIGIN_USER,
+    ResolvedReference,
     canonical_session_sources,
+    legacy_session_sources,
+    select_legacy_reference,
     select_geometry_reference,
 )
 
@@ -4519,6 +4523,14 @@ class SeestarQueuedStacker:
                     except TypeError:
                         cb(message, progress)
 
+                # GAR-05: the Qt backend sets this flag only while its
+                # synchronous start_processing preflight/reference phase is
+                # running.  The callback is a thread-safe Qt signal adapter,
+                # so direct delivery keeps Start acknowledgement and coarse
+                # pointing progress visible before the worker thread exists.
+                if getattr(self, "_direct_startup_progress", False):
+                    _call_cb()
+                    return
                 if hasattr(self, "gui_event_queue") and self.gui_event_queue is not None:
                     try:
                         # Avoid potential blocking if a bounded queue is used
@@ -18334,9 +18346,24 @@ class SeestarQueuedStacker:
     # --- DANS LA CLASSE SeestarQueuedStacker DANS seestar/queuep/queue_manager.py ---
 
     def _resolve_automatic_reference(self, current_folder, additional_folders, plan_path, requested_batch_size):
-        """Resolve a geometry-aware automatic reference once, or fall back."""
+        """Resolve and freeze exactly one automatic reference for this run."""
+        def _report(message, progress=None, level="INFO"):
+            try:
+                self.update_progress(message, progress=progress, level=level)
+            except TypeError:
+                # Small legacy/test adapters expose only (message, level).
+                self.update_progress(message, level)
+
         stack_plan_path = plan_path if (requested_batch_size <= 0 and plan_path and os.path.isfile(plan_path)) else None
-        self._resolved_reference_origin = ORIGIN_AUTO_LEGACY
+        if int(getattr(self, "_automatic_reference_resolution_count", 0)) >= 1:
+            _report(
+                "Automatic reference already resolved; reusing frozen decision.",
+                level="INFO",
+            )
+            return
+        self._automatic_reference_resolution_count = 1
+        self._resolved_reference_origin = None
+        _report("Selecting registration reference...", 0, level="INFO")
         try:
             sources = canonical_session_sources(
                 current_folder, additional_folders,
@@ -18344,45 +18371,110 @@ class SeestarQueuedStacker:
             )
         except Exception:
             sources = []
-        if not sources:
-            self.update_progress("Geometry-aware reference unavailable: no usable sources. Falling back to legacy automatic selection.", "INFO")
-            return
-        selection = select_geometry_reference(
-            sources,
-            bayer_pattern=self.bayer_pattern,
-            correct_hot_pixels=self.correct_hot_pixels,
-            hot_pixel_threshold=self.hot_pixel_threshold,
-            neighborhood_size=self.neighborhood_size,
-            stop_requested=lambda: bool(getattr(self, "stop_processing", False)),
-            progress=lambda message: self.update_progress(message, "INFO"),
-        )
+        if sources:
+            selection = select_geometry_reference(
+                sources,
+                bayer_pattern=self.bayer_pattern,
+                correct_hot_pixels=self.correct_hot_pixels,
+                hot_pixel_threshold=self.hot_pixel_threshold,
+                neighborhood_size=self.neighborhood_size,
+                stop_requested=lambda: bool(getattr(self, "stop_processing", False)),
+                progress=_report,
+            )
+        else:
+            selection = GeometrySelection(
+                ResolvedReference(None, ORIGIN_AUTO_LEGACY),
+                fallback_reason="no usable dataset sources",
+            )
+
+        legacy = None
         if selection.resolved.origin == ORIGIN_AUTO_GEOMETRY and selection.resolved.path:
             self.aligner.reference_image_path = selection.resolved.path
             self._resolved_reference_origin = ORIGIN_AUTO_GEOMETRY
-            self.update_progress("Reference selected: " + os.path.basename(selection.resolved.path), "INFO")
         else:
-            reason = "geometry selector rejected the field"
-            if selection.gate is not None and selection.gate.reason:
-                reason = selection.gate.reason
-            self.update_progress("Geometry-aware reference unavailable: " + reason + ". Falling back to legacy automatic selection.", "INFO")
+            reason = selection.fallback_reason or "geometry selector rejected the field"
+            _report(
+                "Reference geometry source unavailable; trying AUTO_LEGACY. reason=" + reason,
+                level="INFO",
+            )
+            legacy = select_legacy_reference(
+                legacy_session_sources(current_folder, additional_folders),
+                bayer_pattern=self.bayer_pattern,
+                correct_hot_pixels=self.correct_hot_pixels,
+                hot_pixel_threshold=self.hot_pixel_threshold,
+                neighborhood_size=self.neighborhood_size,
+                stop_requested=lambda: bool(getattr(self, "stop_processing", False)),
+            )
+            if legacy.resolved.path:
+                self.aligner.reference_image_path = legacy.resolved.path
+                self._resolved_reference_origin = ORIGIN_AUTO_LEGACY
+            else:
+                self.aligner.reference_image_path = None
+                self._resolved_reference_origin = ORIGIN_AUTO_LEGACY
+                reason = legacy.reason or reason
+
+        # Freeze both a successful automatic path and a terminal no-candidate
+        # decision.  _get_reference_image may materialize the path, but it may
+        # never launch an independent selector after this point.
+        self.aligner._reference_resolution_frozen = True
+
+        selected_path = getattr(self.aligner, "reference_image_path", None)
+        if selected_path:
+            _report(
+                "Reference selected: " + os.path.basename(selected_path), level="INFO"
+            )
+        else:
+            _report(
+                "Automatic reference resolution failed: " + str(reason), level="ERROR"
+            )
 
         self._reference_geometry_stats = {
             "origin": self._resolved_reference_origin,
             "dataset_sources": selection.source_count,
             "usable_geometry": selection.geometry_count,
+            "usable_pointing": selection.pointing_count,
+            "pointing_fraction": selection.pointing_fraction,
+            "geometry_source": selection.geometry_source,
+            "center_ra_deg": selection.center_ra_deg,
+            "center_dec_deg": selection.center_dec_deg,
+            "selected_offset_deg": selection.selected_offset_deg,
+            "fallback_reason": selection.fallback_reason,
+            "scan_elapsed_s": selection.scan_elapsed_s,
+            "scan_files_per_s": selection.scan_files_per_s,
+            "progress_events": selection.progress_event_count,
             "coherent": bool(selection.gate.accepted) if selection.gate is not None else None,
             "central_candidates": selection.candidate_count,
-            "selected_metric": selection.selected_metric,
+            "selected_metric": (
+                selection.selected_metric
+                if legacy is None else legacy.selected_metric
+            ),
         }
         _logger = getattr(self, "logger", None)
         if _logger is not None:
+            _logger.info("Reference geometry source: %s", selection.geometry_source)
+            if selection.fallback_reason:
+                _logger.info("Reference fallback reason: %s", selection.fallback_reason)
             _logger.info(
-                "Reference origin: %s; sources=%d geometry=%d coherent=%s candidates=%d",
-                self._resolved_reference_origin,
-                selection.source_count,
-                selection.geometry_count,
-                self._reference_geometry_stats["coherent"],
-                selection.candidate_count,
+                "Pointing coverage: %d/%d", selection.pointing_count, selection.source_count
+            )
+            if selection.center_ra_deg is not None and selection.center_dec_deg is not None:
+                _logger.info(
+                    "Dataset pointing centre: RA=%.8f DEC=%.8f",
+                    selection.center_ra_deg, selection.center_dec_deg,
+                )
+            _logger.info("Central candidates: %d", selection.candidate_count)
+            if selected_path:
+                _logger.info("Reference selected: %s", os.path.basename(selected_path))
+            if selection.selected_offset_deg is not None:
+                _logger.info(
+                    "Reference offset from centre: %.8f deg", selection.selected_offset_deg
+                )
+            _logger.info("Reference origin: %s", self._resolved_reference_origin)
+            _logger.info(
+                "Reference scan: %.3fs %.1f files/s progress_events=%d",
+                selection.scan_elapsed_s,
+                selection.scan_files_per_s,
+                selection.progress_event_count,
             )
 
     def start_processing(
@@ -18976,6 +19068,7 @@ class SeestarQueuedStacker:
         logger.debug(
             "DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session."
         )
+        self._automatic_reference_resolution_count = 0
 
         # HSI-2B C2: read-only early resume preflight.  All scientific/session
         # configuration and input-root binding are now known, but no reference
@@ -19001,6 +19094,17 @@ class SeestarQueuedStacker:
         # Pin the verified resolved original reference (original path or its
         # verified moved-to-stacked counterpart) for reference preparation.
         self._resume_resolved_reference = early_result
+
+        # GAR-05: the run has passed the fail-closed resume/configuration gate
+        # and is now accepted.  Emit lifecycle acknowledgement before the
+        # potentially expensive header scan and quality shortlist.
+        self._emit_lifecycle("RUN_ACCEPTED", output_dir=output_dir)
+        self._emit_lifecycle(
+            "RUN_STARTED",
+            mode=stacking_mode,
+            use_drizzle=bool(use_drizzle),
+            input_count=getattr(self, "files_in_queue", None),
+        )
 
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
         # ... (le reste de la méthode est inchangé) ...
@@ -19084,6 +19188,7 @@ class SeestarQueuedStacker:
             self.aligner.hot_pixel_threshold = self.hot_pixel_threshold
             self.aligner.neighborhood_size = self.neighborhood_size
             self.aligner.bayer_pattern = self.bayer_pattern
+            self.aligner._reference_resolution_frozen = False
             self.aligner.reference_image_path = reference_path_ui or None
 
             # HSI-2B C2: on resume, pin the already-verified resolved original
@@ -19119,6 +19224,9 @@ class SeestarQueuedStacker:
                     plan_path=plan_path,
                     requested_batch_size=requested_batch_size,
                 )
+
+            if self._resolved_reference_origin in (ORIGIN_RESUME, ORIGIN_USER):
+                self.aligner._reference_resolution_frozen = True
 
             (
                 reference_image_data_for_shape_determination,

@@ -365,7 +365,9 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         return _cb
 
     @staticmethod
-    def _make_lifecycle_callback(run_log: RunLog) -> Callable[[str, dict], None]:
+    def _make_lifecycle_callback(
+        run_log: RunLog, log_callback: Optional[LogCallback] = None
+    ) -> Callable[[str, dict], None]:
         """Adapt the engine's ``(event, fields)`` lifecycle seam to the run log.
 
         The engine calls this through :meth:`SeestarQueuedStacker._emit_lifecycle`
@@ -374,10 +376,20 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         """
 
         def _cb(event: str, fields: dict) -> None:
+            seen = getattr(run_log, "_engine_lifecycle_seen", None)
+            if seen is None:
+                seen = set()
+                setattr(run_log, "_engine_lifecycle_seen", seen)
+            seen.add(str(event))
             try:
                 run_log.emit(str(event), **dict(fields or {}))
             except Exception:
                 pass
+            if log_callback is not None and str(event) in ("RUN_ACCEPTED", "RUN_STARTED"):
+                try:
+                    log_callback(str(event))
+                except Exception:
+                    pass
 
         return _cb
 
@@ -640,7 +652,7 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         self.run_log = run_log
         lifecycle_setter = getattr(stacker, "set_lifecycle_callback", None)
         if callable(lifecycle_setter):
-            lifecycle_setter(self._make_lifecycle_callback(run_log))
+            lifecycle_setter(self._make_lifecycle_callback(run_log, log_callback))
 
         stacker.set_progress_callback(
             self._make_progress_callback(progress_callback, log_callback, run_log)
@@ -654,11 +666,15 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         # request (never derived from artifacts by the engine).  The engine
         # treats a missing/None intent as fresh; ``resume_source`` is optional
         # and only meaningful for a resume.
-        started = stacker.start_processing(
-            **start_kwargs,
-            resume_intent=getattr(request, "resume_intent", RUN_INTENT_FRESH),
-            resume_source=getattr(request, "resume_source", None),
-        )
+        stacker._direct_startup_progress = True
+        try:
+            started = stacker.start_processing(
+                **start_kwargs,
+                resume_intent=getattr(request, "resume_intent", RUN_INTENT_FRESH),
+                resume_source=getattr(request, "resume_source", None),
+            )
+        finally:
+            stacker._direct_startup_progress = False
         if not started:
             self._stop_stackers()
             # Structured startup refusal (known code) vs generic false start.
@@ -681,13 +697,19 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             start_kwargs.get("output_dir") or getattr(stacker, "output_folder", None),
             metadata=metadata,
         )
-        run_log.emit("RUN_ACCEPTED", output_dir=start_kwargs.get("output_dir"))
-        run_log.emit(
-            "RUN_STARTED",
-            mode=start_kwargs.get("stacking_mode"),
-            use_drizzle=bool(start_kwargs.get("use_drizzle")),
-            input_count=getattr(stacker, "files_in_queue", None),
-        )
+        # RUN_ACCEPTED/RUN_STARTED were emitted by the engine immediately after
+        # its fail-closed preflight and before reference selection.  They were
+        # buffered by RunLog until this open and must not be duplicated here.
+        seen_lifecycle = getattr(run_log, "_engine_lifecycle_seen", set())
+        if "RUN_ACCEPTED" not in seen_lifecycle:
+            run_log.emit("RUN_ACCEPTED", output_dir=start_kwargs.get("output_dir"))
+        if "RUN_STARTED" not in seen_lifecycle:
+            run_log.emit(
+                "RUN_STARTED",
+                mode=start_kwargs.get("stacking_mode"),
+                use_drizzle=bool(start_kwargs.get("use_drizzle")),
+                input_count=getattr(stacker, "files_in_queue", None),
+            )
 
         while not (is_cancel_requested() or self._cancel_requested):
             if not stacker.is_running():

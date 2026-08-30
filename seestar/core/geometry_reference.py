@@ -12,18 +12,23 @@ from __future__ import annotations
 import csv
 import math
 import os
+import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 import numpy as np
 from astropy.io import fits
 
 from .fast_geometry import (
     CENTRAL_CANDIDATES,
-    FootprintGateResult,
     angular_separation_deg,
     evaluate_footprint_gate,
     fast_geometry,
+)
+from .native_pointing import (
+    angular_offsets_deg,
+    evaluate_native_pointing_gate,
+    parse_native_pointing,
 )
 
 ORIGIN_RESUME = "RESUME"
@@ -31,6 +36,10 @@ ORIGIN_USER = "USER"
 ORIGIN_ZEANALYSER = "ZEANALYSER_V1"
 ORIGIN_AUTO_GEOMETRY = "AUTO_GEOMETRY"
 ORIGIN_AUTO_LEGACY = "AUTO_LEGACY"
+
+GEOMETRY_SOURCE_NATIVE = "native_pointing"
+GEOMETRY_SOURCE_WCS = "wcs"
+GEOMETRY_SOURCE_UNAVAILABLE = "unavailable"
 
 _FITS_EXTS = (".fit", ".fits")
 _REF_PREFIXES_TO_SKIP = ("stack_", "mosaic_final_", "aligned_", "drizzle_")
@@ -51,12 +60,62 @@ class ResolvedReference:
 class GeometrySelection:
     """Result of one geometry-aware selection attempt."""
     resolved: ResolvedReference
-    gate: Optional[FootprintGateResult] = None
+    gate: Optional[Any] = None
     source_count: int = 0
     geometry_count: int = 0
+    pointing_count: int = 0
+    pointing_fraction: float = 0.0
     candidate_count: int = 0
     selected_metric: Optional[float] = None
     selected_distance_diagonals: Optional[float] = None
+    selected_offset_deg: Optional[float] = None
+    geometry_source: str = GEOMETRY_SOURCE_UNAVAILABLE
+    center_ra_deg: Optional[float] = None
+    center_dec_deg: Optional[float] = None
+    fallback_reason: Optional[str] = None
+    scan_elapsed_s: float = 0.0
+    scan_files_per_s: float = 0.0
+    progress_event_count: int = 0
+
+
+@dataclass(frozen=True)
+class LegacySelection:
+    """One historical first-20 quality decision, without materialization."""
+
+    resolved: ResolvedReference
+    candidate_count: int = 0
+    selected_metric: Optional[float] = None
+    reason: Optional[str] = None
+
+
+class _CoarseProgress:
+    """Bounded progress adapter supporting modern and legacy callbacks."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.count = 0
+        self._last_scan_bucket = None
+
+    def emit(self, message: str, percent: Optional[int] = None, level: str = "INFO") -> None:
+        if self.callback is None:
+            return
+        self.count += 1
+        try:
+            self.callback(message, percent, level=level)
+        except TypeError:
+            try:
+                self.callback(message, percent)
+            except TypeError:
+                self.callback(message)
+
+    def scan(self, completed: int, total: int) -> None:
+        percent = 100 if total <= 0 else int((completed * 100) // total)
+        bucket = min(10, percent // 10)
+        if self._last_scan_bucket == bucket:
+            return
+        self._last_scan_bucket = bucket
+        shown = bucket * 10
+        self.emit(f"Scanning dataset pointing... {shown}%", shown)
 
 
 def ref_name_filtered(basename: str) -> bool:
@@ -197,6 +256,79 @@ def reference_quality_metric(
         return None
 
 
+def legacy_session_sources(
+    current_folder: str,
+    initial_additional_folders: Optional[Iterable[str]] = None,
+) -> list:
+    """Return the historical first folder's sorted FITS population.
+
+    This intentionally does not aggregate roots: AUTO_LEGACY retains its
+    pre-GAR semantics while becoming an explicit, once-per-run decision.
+    """
+
+    roots = [current_folder]
+    roots.extend(initial_additional_folders or [])
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        paths = [
+            os.path.realpath(os.path.join(root, name))
+            for name in sorted(os.listdir(root))
+            if name.lower().endswith(_FITS_EXTS)
+        ]
+        if paths:
+            return paths
+    return []
+
+
+def select_legacy_reference(
+    sources: Sequence[str],
+    quality_fn: Optional[Callable[[str], Optional[float]]] = None,
+    bayer_pattern: str = "GRBG",
+    correct_hot_pixels: bool = True,
+    hot_pixel_threshold: float = 3.0,
+    neighborhood_size: int = 5,
+    stop_requested: Optional[Callable[[], bool]] = None,
+) -> LegacySelection:
+    """Resolve historical first-20 quality selection exactly once."""
+
+    if quality_fn is None:
+        quality_fn = lambda path: reference_quality_metric(
+            path, bayer_pattern, correct_hot_pixels, hot_pixel_threshold, neighborhood_size
+        )
+    subset = list(sources[:20])
+    candidates = [path for path in subset if not ref_name_filtered(os.path.basename(path))]
+    if not candidates:
+        return LegacySelection(
+            ResolvedReference(None, ORIGIN_AUTO_LEGACY),
+            reason="no valid legacy candidate among first 20 inputs",
+        )
+    best_path = None
+    best_metric = -math.inf
+    for path in candidates:
+        if stop_requested is not None and stop_requested():
+            return LegacySelection(
+                ResolvedReference(None, ORIGIN_AUTO_LEGACY),
+                candidate_count=len(candidates),
+                reason="reference selection cancelled",
+            )
+        metric = quality_fn(path)
+        if metric is not None and metric > best_metric:
+            best_path = path
+            best_metric = metric
+    if best_path is None:
+        return LegacySelection(
+            ResolvedReference(None, ORIGIN_AUTO_LEGACY),
+            candidate_count=len(candidates),
+            reason="no legacy candidate passed the historical quality metric",
+        )
+    return LegacySelection(
+        ResolvedReference(os.path.realpath(best_path), ORIGIN_AUTO_LEGACY),
+        candidate_count=len(candidates),
+        selected_metric=float(best_metric),
+    )
+
+
 def select_geometry_reference(
     sources: Sequence[str],
     quality_fn: Optional[Callable[[str], Optional[float]]] = None,
@@ -205,44 +337,107 @@ def select_geometry_reference(
     hot_pixel_threshold: float = 3.0,
     neighborhood_size: int = 5,
     stop_requested: Optional[Callable[[], bool]] = None,
-    progress: Optional[Callable[[str], None]] = None,
+    progress: Optional[Callable[..., None]] = None,
 ) -> GeometrySelection:
-    """Select the best central candidate, or fall back to legacy auto."""
+    """Select one coherent geometry source, then the best central frame.
+
+    Native pointing has run-level priority.  If its dataset gate rejects, the
+    existing strict WCS/TAN population is evaluated intact.  Populations are
+    never mixed image by image.
+    """
     if quality_fn is None:
         quality_fn = lambda p: reference_quality_metric(
             p, bayer_pattern, correct_hot_pixels, hot_pixel_threshold, neighborhood_size
         )
 
+    reporter = _CoarseProgress(progress)
+    scan_started = time.monotonic()
     geometries = []
-    frames = []
+    wcs_frames = []
+    pointings = []
+    pointing_frames = []
     total = len(sources)
+    reporter.scan(0, total)
     for index, path in enumerate(sources):
         if stop_requested is not None and stop_requested():
-            return GeometrySelection(ResolvedReference(None, ORIGIN_AUTO_LEGACY))
-        if progress is not None:
-            progress("Scanning dataset geometry... %d / %d" % (index + 1, total))
+            elapsed = time.monotonic() - scan_started
+            return GeometrySelection(
+                ResolvedReference(None, ORIGIN_AUTO_LEGACY),
+                source_count=total,
+                fallback_reason="reference selection cancelled",
+                scan_elapsed_s=elapsed,
+                scan_files_per_s=(index / elapsed if elapsed > 0.0 else 0.0),
+                progress_event_count=reporter.count,
+            )
         try:
             header = fits.getheader(path)
         except Exception:
+            reporter.scan(index + 1, total)
             continue
+        pointing = parse_native_pointing(header)
+        if pointing is not None:
+            pointings.append(pointing)
+            pointing_frames.append((path, pointing))
         geometry = fast_geometry(header)
-        if geometry is None:
-            continue
-        geometries.append(geometry)
-        frames.append((path, geometry))
+        if geometry is not None:
+            geometries.append(geometry)
+            wcs_frames.append((path, geometry))
+        reporter.scan(index + 1, total)
 
-    gate = evaluate_footprint_gate(geometries, dataset_size=total)
-    if not gate.accepted:
-        return GeometrySelection(
-            ResolvedReference(None, ORIGIN_AUTO_LEGACY),
-            gate=gate, source_count=total, geometry_count=len(geometries),
-        )
+    scan_elapsed = time.monotonic() - scan_started
+    scan_rate = total / scan_elapsed if scan_elapsed > 0.0 else 0.0
+    native_gate = evaluate_native_pointing_gate(pointings, dataset_size=total)
+    wcs_gate = None
+    gate = native_gate
+    source = GEOMETRY_SOURCE_UNAVAILABLE
+    center = None
+    frames = []
+    native_reason = native_gate.reason or "native pointing unavailable"
+    if native_gate.accepted:
+        source = GEOMETRY_SOURCE_NATIVE
+        center = (native_gate.center_ra_deg, native_gate.center_dec_deg)
+        inlier_mask = native_gate.inlier_mask or tuple(True for _ in pointing_frames)
+        frames = [
+            (path, pointing)
+            for (path, pointing), is_inlier in zip(pointing_frames, inlier_mask)
+            if is_inlier
+        ]
+    else:
+        wcs_gate = evaluate_footprint_gate(geometries, dataset_size=total)
+        gate = wcs_gate
+        if wcs_gate.accepted:
+            source = GEOMETRY_SOURCE_WCS
+            center = (wcs_gate.center_ra_deg, wcs_gate.center_dec_deg)
+            frames = list(wcs_frames)
+        else:
+            reason = "native: %s; wcs: %s" % (
+                native_reason,
+                wcs_gate.reason or "strict WCS geometry unavailable",
+            )
+            return GeometrySelection(
+                ResolvedReference(None, ORIGIN_AUTO_LEGACY),
+                gate=wcs_gate,
+                source_count=total,
+                geometry_count=len(geometries),
+                pointing_count=len(pointings),
+                pointing_fraction=(len(pointings) / total if total else 0.0),
+                geometry_source=GEOMETRY_SOURCE_UNAVAILABLE,
+                fallback_reason=reason,
+                scan_elapsed_s=scan_elapsed,
+                scan_files_per_s=scan_rate,
+                progress_event_count=reporter.count,
+            )
 
-    center = (gate.center_ra_deg, gate.center_dec_deg)
-    seps = []
-    for path, geometry in frames:
-        sep = angular_separation_deg((geometry.center_ra_deg, geometry.center_dec_deg), center)
-        seps.append((sep, path, geometry))
+    if source == GEOMETRY_SOURCE_NATIVE:
+        offsets = angular_offsets_deg([item for _path, item in frames], center)
+        seps = [(float(sep), path, item) for sep, (path, item) in zip(offsets, frames)]
+    else:
+        seps = []
+        for path, geometry in frames:
+            sep = angular_separation_deg(
+                (geometry.center_ra_deg, geometry.center_dec_deg), center
+            )
+            seps.append((sep, path, geometry))
     seps.sort(key=lambda item: item[0])
     pool = seps[: min(CENTRAL_CANDIDATES, len(seps))]
 
@@ -252,8 +447,12 @@ def select_geometry_reference(
     for index, (sep, path, _geometry) in enumerate(pool):
         if stop_requested is not None and stop_requested():
             return GeometrySelection(ResolvedReference(None, ORIGIN_AUTO_LEGACY))
-        if progress is not None:
-            progress("Evaluating central candidates... %d / %d" % (index + 1, len(pool)))
+        if index == 0 or index + 1 == len(pool) or (index + 1) % 8 == 0:
+            percent = int(round(100.0 * (index + 1) / len(pool))) if pool else 100
+            reporter.emit(
+                "Evaluating central candidates... %d / %d" % (index + 1, len(pool)),
+                percent,
+            )
         metric = quality_fn(path)
         if metric is None:
             continue
@@ -266,17 +465,30 @@ def select_geometry_reference(
         return GeometrySelection(
             ResolvedReference(None, ORIGIN_AUTO_LEGACY),
             gate=gate, source_count=total, geometry_count=len(geometries),
-            candidate_count=len(pool),
+            pointing_count=len(pointings),
+            pointing_fraction=(len(pointings) / total if total else 0.0),
+            candidate_count=len(pool), geometry_source=source,
+            center_ra_deg=center[0], center_dec_deg=center[1],
+            fallback_reason="no central candidate passed the historical quality metric",
+            scan_elapsed_s=scan_elapsed, scan_files_per_s=scan_rate,
+            progress_event_count=reporter.count,
         )
 
     distance_diagonals = None
-    if gate.representative_diagonal_deg:
+    if source == GEOMETRY_SOURCE_WCS and gate.representative_diagonal_deg:
         distance_diagonals = best_sep / gate.representative_diagonal_deg
     return GeometrySelection(
         ResolvedReference(os.path.realpath(best_path), ORIGIN_AUTO_GEOMETRY),
         gate=gate, source_count=total, geometry_count=len(geometries),
+        pointing_count=len(pointings),
+        pointing_fraction=(len(pointings) / total if total else 0.0),
         candidate_count=len(pool), selected_metric=best_metric,
         selected_distance_diagonals=distance_diagonals,
+        selected_offset_deg=best_sep,
+        geometry_source=source,
+        center_ra_deg=center[0], center_dec_deg=center[1],
+        scan_elapsed_s=scan_elapsed, scan_files_per_s=scan_rate,
+        progress_event_count=reporter.count,
     )
 
 
@@ -300,4 +512,3 @@ def resolve_reference_precedence(
     if legacy_path:
         return ResolvedReference(os.path.realpath(legacy_path), ORIGIN_AUTO_LEGACY)
     return ResolvedReference(None, None)
-

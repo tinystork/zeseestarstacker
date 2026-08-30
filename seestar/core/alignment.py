@@ -522,6 +522,17 @@ class SeestarAligner:
         else:
             print("DEBUG ALIGNER [_get_reference_image]: Aucune référence manuelle spécifiée ou fichier non trouvé.")
         
+        # GAR-05: an authoritative run-level resolution may be materialized
+        # here more than once (startup shape/WCS, then worker), but it must
+        # never trigger a second automatic decision.  A missing or unreadable
+        # frozen path is a hard failure, not permission to silently reselect.
+        if reference_image_data is None and getattr(self, '_reference_resolution_frozen', False):
+            if hasattr(self, 'update_progress'):
+                self.update_progress(
+                    "❌ Frozen registration reference is unavailable; automatic reselection is forbidden."
+                )
+            return None, None
+
         # --- Étape 2: Sélection Automatique si pas de Référence Manuelle Valide ---
         if reference_image_data is None: # Si la référence manuelle a échoué ou n'était pas spécifiée
             if hasattr(self, 'update_progress'): self.update_progress("⚙️ Sélection auto de la meilleure image de référence...")
