@@ -673,12 +673,22 @@ class ZeSolverAdapter:
                 )
             try:
                 header = self._canonical_to_header(result.wcs_header)
-                wcs = self._header_to_wcs(header)
+                wcs = self._canonicalize_celestial_wcs(self._header_to_wcs(header))
             except Exception as exc:
                 return SolverOutcome(
                     status=SolveStatus.FAILED,
                     failure_code="wcs_conversion_failed",
                     message=f"{type(exc).__name__}: {exc}",
+                    backend_used=self.name,
+                )
+            if wcs is None:
+                return SolverOutcome(
+                    status=SolveStatus.FAILED,
+                    failure_code="no_celestial_component",
+                    message=(
+                        "solve succeeded but the canonical WCS has no usable "
+                        "celestial component"
+                    ),
                     backend_used=self.name,
                 )
             merged_header = self._merge_header(fits_header, header)
@@ -733,12 +743,22 @@ class ZeSolverAdapter:
         if existing is not None:
             try:
                 header = self._canonical_to_header(existing)
-                wcs = self._header_to_wcs(header)
+                wcs = self._canonicalize_celestial_wcs(self._header_to_wcs(header))
             except Exception as exc:
                 return SolverOutcome(
                     status=SolveStatus.SKIPPED,
                     failure_code="skipped_existing_wcs",
                     message=f"file already has WCS (conversion failed: {exc})",
+                    backend_used=self.name,
+                )
+            if wcs is None:
+                return SolverOutcome(
+                    status=SolveStatus.SKIPPED,
+                    failure_code="skipped_existing_wcs",
+                    message=(
+                        "file already has WCS but it has no usable celestial "
+                        "component"
+                    ),
                     backend_used=self.name,
                 )
             return SolverOutcome(
@@ -772,6 +792,31 @@ class ZeSolverAdapter:
         from astropy.wcs import WCS
 
         return WCS(header)
+
+    @staticmethod
+    def _canonicalize_celestial_wcs(wcs):
+        """Return the canonical celestial 2D sub-WCS, or ``None``.
+
+        A solved RGB cube (``NAXIS=3``) carries a celestial 2D WCS on its first
+        two axes plus a non-celestial third axis.  Astropy reports such a WCS as
+        ``has_celestial == True`` but ``is_celestial == False`` (``is_celestial``
+        requires a purely celestial 2D WCS).  ZSSS always expects a canonical
+        celestial 2D WCS regardless of the number of FITS axes, so we extract
+        the ``celestial`` sub-WCS here.  ``None`` is returned when the WCS has
+        no celestial component at all (the caller then emits an explicit
+        diagnostic instead of accepting a non-celestial result).
+        """
+        if wcs is None:
+            return None
+        try:
+            if not getattr(wcs, "has_celestial", False):
+                return None
+            celestial = wcs.celestial
+            if getattr(celestial, "is_celestial", False):
+                return celestial
+            return None
+        except Exception:  # pragma: no cover - defensive
+            return None
 
     @staticmethod
     def _merge_header(fits_header, canonical_header):

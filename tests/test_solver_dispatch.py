@@ -290,3 +290,165 @@ def test_no_top_level_zesolver_import():
     )
     assert "import zesolver" not in src
     assert "from zesolver" not in src
+
+
+
+# ---------------------------------------------------------------------------
+# ZESOLVER-WCS-CANONICAL: full AstrometrySolver chain under threading
+# ---------------------------------------------------------------------------
+
+
+def _naxis3_celestial_cards():
+    """FITS cards for a solved RGB cube (NAXIS=3, celestial 2D WCS)."""
+    h = fits.Header()
+    h["SIMPLE"] = True
+    h["BITPIX"] = -32
+    h["NAXIS"] = 3
+    h["NAXIS1"] = 1920
+    h["NAXIS2"] = 1080
+    h["NAXIS3"] = 3
+    h["CTYPE1"] = "RA---TAN"
+    h["CTYPE2"] = "DEC--TAN"
+    h["CRVAL1"] = 275.037495
+    h["CRVAL2"] = -13.730556
+    h["CRPIX1"] = 960.5
+    h["CRPIX2"] = 540.5
+    h["CD1_1"] = -6.6666667e-05
+    h["CD1_2"] = 0.0
+    h["CD2_1"] = 0.0
+    h["CD2_2"] = 6.6666667e-05
+    return tuple(c.image for c in h.cards)
+
+
+def _install_fake_v1_rgb(monkeypatch, cards):
+    """Install a minimal fake zesolver.api.v1 returning a NAXIS=3 SOLVED."""
+    import enum
+    import types
+
+    class _E(enum.Enum):
+        pass
+
+    class NetworkPolicy(_E):
+        DISABLED = "disabled"
+
+    class GpuPolicy(_E):
+        AUTO = "auto"
+        DISABLED = "disabled"
+        REQUIRED = "required"
+
+    class BackendPolicy(_E):
+        AUTO = "auto"
+        NEAR_ONLY = "near_only"
+        BLIND_ONLY = "blind_only"
+
+    class WritePolicy(_E):
+        OVERWRITE_INPUT = "overwrite_input"
+        WRITE_NONE = "write_none"
+
+    class SolveStatus(_E):
+        SOLVED = "solved"
+        FAILED = "failed"
+        SKIPPED_EXISTING_WCS = "skipped_existing_wcs"
+        CANCELLED = "cancelled"
+
+    class FailureCode(_E):
+        NO_SOLUTION = "no_solution"
+
+    class SolveHints:
+        def __init__(self, **kw):
+            pass
+
+    class SolveOptions:
+        def __init__(self, **kw):
+            pass
+
+    class SolveRequest:
+        def __init__(self, input_path, hints=None, options=None):
+            pass
+
+    class CancellationToken:
+        def __init__(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    class CanonicalWcsHeader:
+        def __init__(self, cards):
+            self.format = "fits-header-cards-v1"
+            self.cards = cards
+
+    class SolveResult:
+        def __init__(self, status, wcs_header=None, failure_code=None, message=None):
+            self.status = status
+            self.wcs_header = wcs_header
+            self.failure_code = failure_code
+            self.message = message
+
+    class _Session:
+        def solve(self, request, cancellation=None, progress=None):
+            return SolveResult(SolveStatus.SOLVED, wcs_header=CanonicalWcsHeader(cards))
+
+        def close(self):
+            pass
+
+    class _Runtime:
+        def create_session(self):
+            return _Session()
+
+        def close(self):
+            pass
+
+    v1 = types.ModuleType("zesolver.api.v1")
+    v1.API_VERSION = "1.2"
+    v1.API_MAJOR = 1
+    v1.get_api_info = lambda: types.SimpleNamespace(
+        product_version="1.2.1",
+        supported_capabilities=("near_solve", "blind_solve", "wcs_write", "gpu", "cancel"),
+    )
+    v1.probe = lambda **kw: None
+    v1.SolveHints = SolveHints
+    v1.SolveOptions = SolveOptions
+    v1.SolveRequest = SolveRequest
+    v1.CanonicalWcsHeader = CanonicalWcsHeader
+    v1.SolveResult = SolveResult
+    v1.SolveStatus = SolveStatus
+    v1.FailureCode = FailureCode
+    v1.NetworkPolicy = NetworkPolicy
+    v1.GpuPolicy = GpuPolicy
+    v1.BackendPolicy = BackendPolicy
+    v1.WritePolicy = WritePolicy
+    v1.CancellationToken = CancellationToken
+    v1.create_solver_runtime = lambda **kw: _Runtime()
+
+    for name in ("zesolver", "zesolver.api"):
+        mod = types.ModuleType(name)
+        mod.__path__ = []
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setitem(sys.modules, "zesolver.api.v1", v1)
+
+
+def test_zesolver_rgb_cube_threaded_witness(monkeypatch):
+    import concurrent.futures
+
+    _install_fake_v1_rgb(monkeypatch, _naxis3_celestial_cards())
+    settings = {"local_solver_preference": "zesolver"}
+
+    def _solve():
+        msgs = []
+        hdr = fits.Header()
+        hdr["NAXIS"] = 3
+        wcs = AstrometrySolver(progress_callback=lambda m, p: msgs.append(m)).solve(
+            "/tmp/rgb.fits", hdr, settings, update_header_with_solution=False
+        )
+        return wcs, msgs
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        results = [f.result() for f in [ex.submit(_solve) for _ in range(2)]]
+
+    for wcs, msgs in results:
+        assert wcs is not None
+        assert wcs.is_celestial
+        joined = "\n".join(msgs)
+        assert "SOLVED mais WCS absent/non" not in joined
+        assert "Fallback ASTAP" not in joined

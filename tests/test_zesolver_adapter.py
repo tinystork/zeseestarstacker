@@ -971,3 +971,142 @@ def test_session_refresh_action_is_running_raises():
             raise RuntimeError("boom")
 
     assert adapter.zesolver_session_refresh_action(_BoomHandle()) == "none"
+
+
+
+# ---------------------------------------------------------------------------
+# ZESOLVER-WCS-CANONICAL: RGB (NAXIS=3) canonical header -> celestial 2D WCS
+# ---------------------------------------------------------------------------
+
+
+def _naxis3_celestial_cards():
+    """FITS card strings for a solved RGB cube (NAXIS=3, celestial 2D WCS).
+
+    Mirrors what ZeSolver returns via CanonicalWcsHeader for an RGB reference
+    image: the full primary-HDU header carries NAXIS=3 while the celestial WCS
+    lives on the first two axes.
+    """
+    from astropy.io import fits
+
+    h = fits.Header()
+    h["SIMPLE"] = True
+    h["BITPIX"] = -32
+    h["NAXIS"] = 3
+    h["NAXIS1"] = 1920
+    h["NAXIS2"] = 1080
+    h["NAXIS3"] = 3
+    h["CTYPE1"] = "RA---TAN"
+    h["CTYPE2"] = "DEC--TAN"
+    h["CRVAL1"] = 275.037495
+    h["CRVAL2"] = -13.730556
+    h["CRPIX1"] = 960.5
+    h["CRPIX2"] = 540.5
+    h["CD1_1"] = -6.6666667e-05
+    h["CD1_2"] = 0.0
+    h["CD2_1"] = 0.0
+    h["CD2_2"] = 6.6666667e-05
+    return tuple(c.image for c in h.cards)
+
+
+NON_CELESTIAL_CARDS = (
+    "SIMPLE  =                    T",
+    "NAXIS   =                    2",
+    "NAXIS1  =                  100",
+    "NAXIS2  =                  100",
+    "CTYPE1  = 'LINEAR  '",
+    "CTYPE2  = 'LINEAR  '",
+)
+
+
+def test_adapter_solve_rgb_cube_canonicalizes_to_celestial_2d(monkeypatch):
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(
+        _FakeSolveStatus.SOLVED,
+        wcs_header=v1.CanonicalWcsHeader(_naxis3_celestial_cards()),
+    )
+    _install_package_stubs(monkeypatch, v1)
+
+    outcome = adapter.ZeSolverAdapter().solve(
+        image_fits_path="/tmp/rgb.fits",
+        fits_header={"NAXIS": 3},
+        settings={},
+        progress_callback=None,
+    )
+
+    assert outcome.status is SolveStatus.SOLVED
+    assert outcome.wcs is not None
+    assert outcome.wcs.is_celestial is True
+    assert outcome.wcs.pixel_n_dim == 2
+    assert outcome.wcs.world_n_dim == 2
+    assert list(outcome.wcs.wcs.ctype) == ["RA---TAN", "DEC--TAN"]
+    assert outcome.should_write_header_back is True
+
+
+def test_adapter_solve_rgb_cube_threaded(monkeypatch):
+    import concurrent.futures
+
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(
+        _FakeSolveStatus.SOLVED,
+        wcs_header=v1.CanonicalWcsHeader(_naxis3_celestial_cards()),
+    )
+    _install_package_stubs(monkeypatch, v1)
+
+    def _solve():
+        return adapter.ZeSolverAdapter().solve(
+            image_fits_path="/tmp/rgb.fits",
+            fits_header={"NAXIS": 3},
+            settings={},
+            progress_callback=None,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        outcomes = [f.result() for f in [ex.submit(_solve) for _ in range(2)]]
+
+    for outcome in outcomes:
+        assert outcome.status is SolveStatus.SOLVED
+        assert outcome.wcs is not None
+        assert outcome.wcs.is_celestial is True
+        assert outcome.wcs.pixel_n_dim == 2
+
+
+def test_adapter_solve_solved_without_celestial_component_fails(monkeypatch):
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(
+        _FakeSolveStatus.SOLVED,
+        wcs_header=v1.CanonicalWcsHeader(NON_CELESTIAL_CARDS),
+    )
+    _install_package_stubs(monkeypatch, v1)
+
+    outcome = adapter.ZeSolverAdapter().solve(
+        image_fits_path="/tmp/img.fits",
+        fits_header={},
+        settings={},
+        progress_callback=None,
+    )
+
+    assert outcome.status is SolveStatus.FAILED
+    assert outcome.failure_code == "no_celestial_component"
+    assert outcome.wcs is None
+
+
+def test_adapter_solve_2d_celestial_unchanged(monkeypatch):
+    # A canonical 2D celestial header must keep producing a 2D celestial WCS.
+    v1, rec = _make_full_v1()
+    rec.result = v1.SolveResult(
+        _FakeSolveStatus.SOLVED, wcs_header=v1.CanonicalWcsHeader(VALID_WCS_CARDS)
+    )
+    _install_package_stubs(monkeypatch, v1)
+
+    outcome = adapter.ZeSolverAdapter().solve(
+        image_fits_path="/tmp/img.fits",
+        fits_header={"NAXIS1": 100},
+        settings={},
+        progress_callback=None,
+    )
+
+    assert outcome.status is SolveStatus.SOLVED
+    assert outcome.wcs is not None
+    assert outcome.wcs.is_celestial is True
+    assert outcome.wcs.pixel_n_dim == 2
+    assert list(outcome.wcs.wcs.ctype) == ["RA---TAN", "DEC--TAN"]
