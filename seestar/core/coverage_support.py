@@ -36,41 +36,47 @@ Semantics
   (s_i in {0, 1} per pixel).  Nothing in this API reports SUP_W1 as a
   "count"; callers derive that interpretation themselves, if ever, only for
   the unit-weight case.
+* Spatial support is channel-invariant and exactly 2-D (H, W): one per-pixel
+  support map per original exposure, independent of colour-channel count.
 
 Design constraints honoured here
 --------------------------------
 1. Positive-only, finite, per-pixel support: negative / NaN / Inf /
    shape-mismatch / non-finite-squared inputs are rejected BEFORE any mutation.
-2. Atomic pair mutation: a failed add() (or a failed restore) leaves both
+2. Cumulative-overflow preflight: if EITHER candidate SUP_W1 or SUP_W2 would
+   become non-finite after accumulation, the add is rejected BEFORE either
+   array is mutated (atomic pair semantics; both stay byte/array identical).
+3. Atomic pair mutation: a failed add() (or a failed restore) leaves both
    SUP_W1 and SUP_W2 byte/array unchanged.
-3. No dependency on scientific WHT; no low-WHT gain; no science-pixel mutation;
+4. No dependency on scientific WHT; no low-WHT gain; no science-pixel mutation;
    no rejection-mask semantics.
-4. No batch/merge API: add() is the sole mutation, so decomposition invariance
+5. No batch/merge API: add() is the sole mutation, so decomposition invariance
    across partition markers (61 vs 3+17+41 vs 1+...+1) is exact by construction
    for an identical ordered sequence of per-exposure additions (same float64
    operation order).  There is deliberately no alternate merge API, so there is
    no alternate rounding order to document.
-5. n_eff_support is a pure derived view: it never mutates state and returns
-   0.0 wherever SUP_W2 is not positive.
+6. n_eff_support is a pure derived view that never mutates state; it uses an
+   exact-first strategy (naive W1**2/W2 where the square stays finite) with an
+   overflow-resistant fallback (W1/sqrt(W2))**2 for pixels whose square would
+   overflow, so a finite W1 and W2 never produce a spurious undefined 0.0.
 
 Dtype / memory rationale
 ------------------------
-Accumulators default to numpy.float64.  N_eff_support squares SUP_W1; float32
-would lose integer exactness beyond 2**24 (~1.67e7) and would round SUP_W1**2
-for large exposure counts, corrupting the ratio.  float64 keeps SUP_W1**2 exact
-for unit-weight counts up to ~9.0e15 exposures and is the safe choice for the
-up-to-~100k-exposure target.
+Accumulators default to numpy.float64.  N_eff_support uses the
+overflow-resistant evaluation described above, so no finite SUP_W1/SUP_W2 pair
+can silently degrade to an undefined result via the W1**2 term.  float64
+provides ample precision headroom for the up-to-~100k-exposure target: a 100k
+unit-weight witness is exact on this implementation.  float32 remains an
+opt-in, memory-constrained option whose integer-exactness ceiling is 2**24
+and which must be used only under a documented tolerance.
 
 Bytes-per-pixel for the SUP_W1+SUP_W2 pair:
 
 * float64: 16 bytes/pixel  (8 + 8)
-* float32:  8 bytes/pixel  (4 + 4) - opt-in only for memory-constrained,
-  low-exposure-count, tolerance-documented use.
+* float32:  8 bytes/pixel  (4 + 4)
 
-No hidden HWC duplication: the two accumulators are the only live arrays; a
-colour image contributes the same per-pixel support map regardless of channel
-count (support is channel-invariant by contract), so no per-channel copies are
-made here.
+No hidden HWC duplication: the two accumulators are the only live arrays;
+support is channel-invariant 2-D, so no per-channel copies are made here.
 """
 
 from __future__ import annotations
@@ -100,12 +106,12 @@ class PositiveSupportAccumulator:
     Parameters
     ----------
     shape : tuple of int
-        Spatial (H, W) shape of the support maps.  Must be >= 2-D with all
-        dimensions positive.
+        Spatial (H, W) shape of the support maps.  Must be exactly 2-D with
+        both dimensions positive.
     dtype : numpy.dtype, optional
         Accumulator dtype; must be float32 or float64 (default float64).
 
-    The accumulator is channel-invariant: a single per-pixel support map
+    The accumulator is channel-invariant: a single 2-D per-pixel support map
     represents the geometric/quality support of one original exposure,
     independent of colour-channel count.
     """
@@ -133,8 +139,10 @@ class PositiveSupportAccumulator:
             shape = tuple(int(v) for v in shape)
         except (TypeError, ValueError):
             raise ValueError(f"support shape must be a sequence of ints, got {shape!r}")
-        if len(shape) < 2:
-            raise ValueError(f"support shape must be >= 2-D, got {shape!r}")
+        if len(shape) != 2:
+            raise ValueError(
+                f"support shape must be exactly 2-D (H, W), got {shape!r}"
+            )
         if any(v <= 0 for v in shape):
             raise ValueError(f"support shape dims must be positive, got {shape!r}")
         return shape
@@ -193,7 +201,8 @@ class PositiveSupportAccumulator:
         """Accumulate one original exposure's positive per-pixel support.
 
         Atomic: both SUP_W1 and SUP_W2 are updated together only after the
-        support map has fully validated; a failed call leaves both unchanged.
+        support map has fully validated AND the cumulative sums have been
+        preflighted against overflow; a failed call leaves both unchanged.
 
         Parameters
         ----------
@@ -206,9 +215,21 @@ class PositiveSupportAccumulator:
         if not np.all(np.isfinite(s2)):
             # s is finite but s**2 overflowed; refuse before mutating.
             raise ValueError("support**2 overflowed to non-finite")
-        # Commit atomically (no further validation can fail).
-        self._w1 += s
-        self._w2 += s2
+
+        # Preflight both cumulative sums BEFORE any mutation.  This is the
+        # cumulative-overflow gate: a finite s (and s**2) may still overflow
+        # the running SUP_W1/SUP_W2 totals.  Compute both candidates, then
+        # commit only if both stay finite (atomic pair semantics).
+        with np.errstate(over="ignore", invalid="ignore"):
+            new_w1 = self._w1 + s
+            new_w2 = self._w2 + s2
+        if not (np.all(np.isfinite(new_w1)) and np.all(np.isfinite(new_w2))):
+            raise ValueError(
+                "cumulative support overflow: SUP_W1/SUP_W2 would become "
+                "non-finite"
+            )
+        self._w1[:] = new_w1
+        self._w2[:] = new_w2
 
     # -------------------------------------------------------------- derived
     @property
@@ -218,20 +239,37 @@ class PositiveSupportAccumulator:
         Computed only where SUP_W2 > 0; 0.0 (documented neutral value) where
         undefined.  Non-negative and finite everywhere.  Never mutates state
         and returns an owned copy.
+
+        Exact-first: naive W1**2 / W2 where the square stays finite (the common
+        case, bit-exact), with an overflow-resistant fallback (W1 / sqrt(W2))**2
+        for pixels whose W1**2 overflows.  Algebraically equal, so a finite W1
+        and W2 never yield a spurious 0.0 from intermediate square overflow.
         """
         w1 = self._w1
         w2 = self._w2
         valid = w2 > 0.0
-        out = np.zeros(self._shape, dtype=self._dtype)
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            np.divide(w1 * w1, w2, out=out, where=valid)
-        # Clamp any residual non-finite / negative ratio to the neutral value.
-        out = np.where(np.isfinite(out) & (out >= 0.0), out, N_EFF_UNDEFINED_VALUE)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            w1_sq = w1 * w1
+            out = w1_sq / w2
+            # Overflow-resistant fallback: (w1 / sqrt(w2))**2 == w1**2 / w2 but
+            # never squares w1 directly.
+            ratio = w1 / np.sqrt(w2)
+            safe = ratio * ratio
+        overflowed = ~np.isfinite(w1_sq)
+        out = np.where(overflowed & valid, safe, out)
+        # Clamp undefined / non-finite / negative to the documented neutral value.
+        out = np.where(valid & np.isfinite(out) & (out >= 0.0), out, N_EFF_UNDEFINED_VALUE)
         return out
 
     # ------------------------------------------------------- snapshot/restore
     def to_state(self):
-        """Export a canonical, JSON-friendly state snapshot (owned copies)."""
+        """Export a canonical persistence-ready state snapshot (owned copies).
+
+        The returned mapping carries version/shape/dtype metadata plus owned
+        ndarray copies of SUP_W1/SUP_W2.  It is a canonical in-process
+        restore source; it is NOT JSON-serializable as-is (arrays are kept as
+        ndarrays to avoid bulky list serialization).
+        """
         return {
             "version": SUPPORT_STATE_VERSION,
             "shape": list(self._shape),
@@ -300,4 +338,3 @@ class PositiveSupportAccumulator:
             f"dtype={self._dtype.name}, "
             f"n_positive={int(np.count_nonzero(self._w1 > 0))})"
         )
-

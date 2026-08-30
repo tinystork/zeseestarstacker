@@ -52,17 +52,22 @@ N_eff_support = SUP_W1**2 / SUP_W2     where SUP_W2 > 0
 
 `seestar/core/coverage_support.py` — `PositiveSupportAccumulator`
 
-* `PositiveSupportAccumulator(shape, *, dtype=float64)`
+* `PositiveSupportAccumulator(shape, *, dtype=float64)` — `shape` is exactly
+  2-D `(H, W)`
 * `.add(support)` — atomic per-original-exposure accumulation
 * `.support_w1` / `.support_w2` — owned read copies of SUP_W1 / SUP_W2
-* `.n_eff_support` — pure derived view (never mutates state)
-* `.to_state()` / `.from_state(state)` — snapshot / restore
+* `.n_eff_support` — pure derived view (never mutates state; overflow-resistant)
+* `.to_state()` / `.from_state(state)` — canonical persistence-ready snapshot /
+  restore (arrays kept as ndarrays, not JSON-serialized)
 * `SUPPORT_STATE_VERSION = 1`, `SUPPORT_DTYPES = (float32, float64)`
 
 ## Guarantees
 
 * **Fail-before-mutation**: negative / NaN / Inf / shape-mismatch /
   non-finite-squared support is rejected before SUP_W1 or SUP_W2 changes.
+* **Cumulative-overflow preflight**: if either candidate SUP_W1 or SUP_W2
+  would become non-finite after accumulation, the `add` is rejected before
+  either array is mutated (both stay byte/array identical).
 * **Atomic pair mutation**: a failed `add()` or `from_state()` leaves both
   SUP_W1 and SUP_W2 byte/array unchanged.
 * **Restore after full validation**: `from_state` validates type, version,
@@ -75,39 +80,53 @@ N_eff_support = SUP_W1**2 / SUP_W2     where SUP_W2 > 0
 
 ## Dtype / memory decision
 
-Accumulators default to `numpy.float64`.  `N_eff_support` squares SUP_W1;
-float32 loses integer exactness beyond 2**24 (~1.67e7) and would round
-`SUP_W1**2` for large exposure counts, corrupting the ratio.  float64 keeps
-`SUP_W1**2` exact for unit-weight counts up to ~9.0e15 exposures — the safe
-choice for the up-to-~100k-exposure target.
+Accumulators default to `numpy.float64`.  `N_eff_support` is evaluated
+exact-first (naive `SUP_W1**2 / SUP_W2` where the square stays finite) with an
+overflow-resistant fallback `(SUP_W1 / sqrt(SUP_W2))**2` for pixels whose
+square would overflow, so a finite SUP_W1 and SUP_W2 never silently degrade to
+an undefined 0.0 via an intermediate square overflow.  float64 provides ample
+precision headroom for the up-to-~100k-exposure target (a 100k unit-weight
+witness is exact on this implementation).  float32 remains an opt-in,
+memory-constrained option whose integer-exactness ceiling is 2**24 and which
+must be used only under a documented tolerance.
 
 Bytes-per-pixel for the SUP_W1+SUP_W2 pair: **16** (float64) / **8** (float32).
-Support is channel-invariant (one per-pixel map per exposure regardless of
-channel count), so there is no hidden HWC duplication.
+Support is channel-invariant and exactly 2-D `(H, W)` — one per-pixel map per
+exposure regardless of channel count — so there is no hidden HWC duplication.
 
 Microbenchmark (real, venv python 3.13.5 / numpy 2.5.2, this machine):
 
-* 1080×1920 (2.1 MP): 9.02 ms/add, 16.0 bytes/px pair, 33.18 MB.
-* 4096×4096 (16.8 MP): 92.37 ms/add, 16.0 bytes/px pair, 268.44 MB.
-* 100k unit adds on 64×64: 2.439 s; SUP_W1 == 100000.0 exact;
+* 1080×1920 (2.1 MP): 21.64 ms/add, 16.0 bytes/px pair, 33.18 MB.
+* 4096×4096 (16.8 MP): 165.53 ms/add, 16.0 bytes/px pair, 268.44 MB.
+* 100k unit adds on 64×64: 4.317 s; SUP_W1 == 100000.0 exact;
   N_eff_support == 100000.0 exact.
+
+The cumulative-overflow preflight allocates two full-frame temporaries per `add`
+(the candidate SUP_W1/SUP_W2 sums), roughly doubling the add-path cost versus a
+naive `+=` (measured ~9 → ~21.6 ms/add at 2.1 MP and ~92 → ~165 ms/add at
+16.8 MP).  This is the bounded, documented cost of fail-before-mutation
+atomicity and is confined to this isolated core.
 
 ## Tests
 
-`tests/test_coverage_support.py` — 19 tests, all passing.  Covers: exact
+`tests/test_coverage_support.py` — 23 tests, all passing.  Covers: exact
 W1/W2 known-weight witness; derived N_eff witness; zero/undefined support;
 invalid negative/NaN/Inf/shape fail-before-mutation; overflow-squared
-fail-before-mutation; shape/dtype validation; restore-invalid-state fail-closed;
-snapshot/restore exactness + no aliasing; decomposition partitions (61 vs
-3+17+41 vs singletons); unit-weight reduces to count; 100k float64 exact;
-float32 supported; N_eff does not mutate state.
+fail-before-mutation; shape (incl. 3-D rejection) / dtype validation;
+restore-invalid-state fail-closed; snapshot/restore exactness + no aliasing;
+decomposition partitions (61 vs 3+17+41 vs singletons); unit-weight reduces to
+count; 100k float64 exact; float32 supported; cumulative-overflow regression
+(float64 and float32); huge-but-valid N_eff not overflow; N_eff does not mutate
+state.
 
 ## Limitations (COV-01A only)
 
 * In-memory ndarray only — no memmap / disk backing yet.
 * Not integrated with QueueManager, classic/drizzle/reproject, checkpoints,
   GUI, render, or any reducer.
-* No scalar constant-support shortcut (support must be a full-shape array).
+* No scalar constant-support shortcut (support must be a full-shape 2-D array).
+* The cumulative-overflow preflight allocates two bounded full-frame temporaries
+  per `add` (documented in the benchmark below).
 * No alternate merge API (and therefore no alternate-rounding tolerance to
   document); decomposition invariance is exact only for identical operation
   order.

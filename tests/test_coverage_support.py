@@ -2,8 +2,9 @@
 
 Synthetic, fast, deterministic.  These pin the core state/math contract only:
 positive per-exposure support, SUP_W1/SUP_W2 accumulation, derived N_eff_support,
-atomic fail-before-mutation, snapshot/restore exactness, decomposition
-invariance, and the unit-weight / 100k-exposure dtype boundary.
+atomic fail-before-mutation (including cumulative overflow), snapshot/restore
+exactness, decomposition invariance, unit-weight / 100k-exposure dtype boundary,
+and the exact-2D shape contract.
 """
 
 import numpy as np
@@ -74,7 +75,7 @@ def test_partial_support_is_zero_where_undefined():
     s = np.array([[0.0, 1.0], [0.0, 2.0]], dtype=np.float64)
     acc.add(s)
     result = acc.n_eff_support
-    # Pixels with support: N_eff == SUP_W1 (single exposure, W1==W2==s).
+    # Pixels with support: single exposure => N_eff == 1.0 (W1==s, W2==s**2).
     assert result[0, 1] == 1.0
     assert result[1, 1] == 1.0
     # Pixels with no support: neutral 0.0.
@@ -136,6 +137,11 @@ def test_shape_validation_rejects_bad_shapes():
         PositiveSupportAccumulator((5, -1))
 
 
+def test_3d_shape_rejected():
+    with pytest.raises(ValueError):
+        PositiveSupportAccumulator((2, 2, 3))
+
+
 def test_dtype_validation_rejects_unknown():
     with pytest.raises(TypeError):
         PositiveSupportAccumulator((2, 2), dtype=np.int64)
@@ -150,7 +156,6 @@ def test_restore_invalid_state_fails_closed():
     acc = _acc((2, 2))
     acc.add(np.ones((2, 2)))
     good = acc.to_state()
-    # Corrupt each field and assert from_state raises without partial objects.
     cases = []
     for key in ("support_w1", "support_w2"):
         c = dict(good)
@@ -268,7 +273,6 @@ def test_100k_unit_contributions_float64_exact():
     n = 100_000
     for _ in range(n):
         acc.add(np.ones(shape))
-    # float64 keeps the count and the squared ratio exact at 100k.
     assert np.all(acc.support_w1 == float(n))
     assert np.all(acc.support_w2 == float(n))
     assert np.all(acc.n_eff_support == float(n))
@@ -295,3 +299,52 @@ def test_n_eff_does_not_mutate_state():
     assert np.array_equal(acc.support_w1, w1_before)
     assert np.array_equal(acc.support_w2, w2_before)
 
+
+# ---------------------------------------------------------------------------
+# 11. Cumulative-overflow regression (float64 and float32)
+# ---------------------------------------------------------------------------
+def test_cumulative_overflow_fails_before_mutation_float64():
+    acc = _acc((1, 1), dtype=np.float64)
+    s = np.array([[1e154]], dtype=np.float64)
+    acc.add(s)  # W1=1e154, W2=1e308 (both finite)
+    w1_before = acc.support_w1
+    w2_before = acc.support_w2
+    assert np.all(np.isfinite(w1_before))
+    assert np.all(np.isfinite(w2_before))
+    # Second add would push W2 (1e308) to 2e308 = +Inf.
+    with pytest.raises(ValueError):
+        acc.add(s)
+    assert np.array_equal(acc.support_w1, w1_before)
+    assert np.array_equal(acc.support_w2, w2_before)
+
+
+def test_cumulative_overflow_fails_before_mutation_float32():
+    acc = _acc((1, 1), dtype=np.float32)
+    s = np.array([[1.5e19]], dtype=np.float32)
+    acc.add(s)  # W1~1.5e19, W2~2.25e38 (both finite in float32)
+    w1_before = acc.support_w1
+    w2_before = acc.support_w2
+    assert np.all(np.isfinite(w1_before))
+    assert np.all(np.isfinite(w2_before))
+    # Second add would push W2 (~2.25e38) past float32 max (~3.4e38).
+    with pytest.raises(ValueError):
+        acc.add(s)
+    assert np.array_equal(acc.support_w1, w1_before)
+    assert np.array_equal(acc.support_w2, w2_before)
+
+
+# ---------------------------------------------------------------------------
+# 12. Huge-but-valid N_eff must not silently overflow to 0
+# ---------------------------------------------------------------------------
+def test_huge_valid_n_eff_not_overflow():
+    acc = _acc((1, 1), dtype=np.float64)
+    s = np.array([[7e153]], dtype=np.float64)
+    acc.add(s)
+    acc.add(s)
+    # W1 = 1.4e154, W2 = 9.8e307 (both finite); naive W1**2 would overflow.
+    assert np.all(np.isfinite(acc.support_w1))
+    assert np.all(np.isfinite(acc.support_w2))
+    n_eff = float(acc.n_eff_support[0, 0])
+    assert np.isfinite(n_eff)
+    # Two equal supports => effective support ~2.0, not 0.0.
+    assert np.isclose(n_eff, 2.0, rtol=1e-3, atol=1e-3)
