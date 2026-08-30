@@ -142,16 +142,16 @@ Current edge treatment | Resume state | Proposed support treatment (COV-01..05).
 
 | Mode | Canonical key | Scientific reducer | Coverage source | WHT semantics | Current edge treatment | Resume state | Proposed support treatment |
 |---|---|---|---|---|---|---|---|
-| Classic / default | `classic` + `classic_sumw` | weighted arithmetic mean (reducer `else` branch, `queue_manager.py:12784-12811`) | `cumulative_wht_memmap` | effective denominator W; `max(wht,0)` on finalize | `_feather_batch_coverage` radial taper (`11896`); interbatch feather (`3262`) | `memmap_accumulators/{SUM,WHT,resume_manifest.json}` (v2) | COV-01: per-original-exposure positive support accumulator before mini-stack reduction; parallel SUP_W1 state |
+| Classic / default | `classic` + `classic_sumw` | weighted arithmetic mean (reducer `else` branch, `queue_manager.py:12784-12811`) | `cumulative_wht_memmap` | effective denominator W; `max(wht,0)` on finalize | `_feather_batch_coverage` radial taper (`11896`); interbatch feather (`3262`) | `memmap_accumulators/{SUM,WHT,resume_manifest.json}` (v2) | COV-01: per-original-exposure positive support s_i (SUP_W1+=s_i, SUP_W2+=s_i²) before mini-stack reduction |
 | Mean | `mean` | `_stack_mean` (`stack_methods.py:107`) | per-image weight sum | `Σ(d·w)/Σw` | `_feather_batch_coverage` | classic manifest | same as classic (per-exposure support accumulation) |
-| Median | `median` | `_stack_median` (`stack_methods.py:131`) — unchanged | valid-sample count | W = count(non-NaN) | `_feather_batch_coverage` (`12735`) | classic manifest | median science **unchanged**; support-effective-exposure = original-exposure count, distinct from estimator denominator |
-| Kappa-sigma | `kappa-sigma`/`kappa_sigma` | `_stack_kappa_sigma` (`stack_methods.py:148`) | accepted-sample weight sum | `Σw` over in-range | `_feather_batch_coverage` (`12701`) | classic manifest | honest support-effective-exposure (accepted original exposures), NOT exact estimator N_eff |
-| Winsorized sigma clip | `winsorized-sigma-clip`/`winsorized_sigma_clip` | `_stack_winsorized_sigma_iter` (`stack_methods.py:262`) | contributing-sample weight sum | W matches `apply_rewinsor` | `_feather_batch_coverage` (`12664`) | classic manifest | honest support-effective-exposure (contributing original exposures), NOT exact estimator N_eff |
-| Linear-fit clip | `linear-fit-clip`/`linear_fit_clip` | `_stack_linear_fit_clip` (`stack_methods.py:204`) | accepted-sample weight sum | `Σw` over in-range residual | `_feather_batch_coverage` (`12767`) | classic manifest | honest support-effective-exposure, NOT exact estimator N_eff |
+| Median | `median` | `_stack_median` (`stack_methods.py:131`) — unchanged | valid-sample count | W = count(non-NaN) | `_feather_batch_coverage` (`12735`) | classic manifest | median science **unchanged**; per-exposure s_i support independent of the estimator denominator |
+| Kappa-sigma | `kappa-sigma`/`kappa_sigma` | `_stack_kappa_sigma` (`stack_methods.py:148`) | accepted-sample weight sum | `Σw` over in-range | `_feather_batch_coverage` (`12701`) | classic manifest | original geometric/quality support via s_i (independent of rejection survivors), NOT exact estimator N_eff |
+| Winsorized sigma clip | `winsorized-sigma-clip`/`winsorized_sigma_clip` | `_stack_winsorized_sigma_iter` (`stack_methods.py:262`) | contributing-sample weight sum | W matches `apply_rewinsor` | `_feather_batch_coverage` (`12664`) | classic manifest | original geometric/quality support via s_i (independent of rejection survivors), NOT exact estimator N_eff |
+| Linear-fit clip | `linear-fit-clip`/`linear_fit_clip` | `_stack_linear_fit_clip` (`stack_methods.py:204`) | accepted-sample weight sum | `Σw` over in-range residual | `_feather_batch_coverage` (`12767`) | classic manifest | original geometric/quality support via s_i (independent of rejection survivors), NOT exact estimator N_eff |
 | Boring (CLI) | not a reducer — `stacking_mode="winsorized-sigma"`, `use_drizzle=False` (`boring_stack.py:891,908`) | winsorized-sigma (or final-combine override) | classic SUM/W memmaps | classic denominator | classic radial taper | classic manifest | routes through the same backend support contract (no separate boring path) |
-| Reproject (between batches) | `reproject` → `classic_sumw` | per-batch reducer on reprojected batches | `cumulative_wht_memmap` via `_reproject_worker` | reprojected footprint × radial (`1357`) | footprint mask + radial; IBN (`2861`) | classic manifest | support transported via reprojection, **APPROXIMATE BY DESIGN** (R(SUP) separate transport) |
-| Reproject coadd (final) | `reproject_coadd` → `reproject_coadd` | per-batch reducer + `reproject_and_coadd`/incremental master | `initialize_master`/`reproject_and_combine` (`incremental_reprojection.py`) + `reproject_and_coadd` | `R(V)*R(W)` separate transport (approx) | background matching; radial on classic WHT (`16330`) | classic manifest + transient master_sum/cov | support transported via reprojection, APPROXIMATE BY DESIGN |
-| Drizzle | `drizzle` (`use_drizzle=True`) | native drizzle weighted mean (`finalize("divide")` → native `out_img`) | native `out_wht` (signed for Lanczos) | **signed** WHT; valid iff finite & `wht>WEIGHT_EPSILON` (`drizzle_core.py:59`) | `wht_relative_threshold` (`715`), 0.0 for Lanczos; no gain | `.m3d_checkpoint/checkpoint.json` + `from_native_state` | keep native signed WHT; accumulate **separate** positive support domain |
+| Reproject (between batches) | `reproject` → `classic_sumw` | per-batch reducer on reprojected batches | `cumulative_wht_memmap` via `_reproject_worker` | reprojected footprint × radial (`1357`) | footprint mask + radial; IBN (`2861`) | classic manifest | support evaluated/transformed per original exposure onto the output grid, then SUP_W1+=R(s_i), SUP_W2+=R(s_i)²; never use mini-stack count as N_eff |
+| Reproject coadd (final) | `reproject_coadd` → `reproject_coadd` | per-batch reducer + `reproject_and_coadd`/incremental master | `initialize_master`/`reproject_and_combine` (`incremental_reprojection.py`) + `reproject_and_coadd` | `R(V)*R(W)` separate transport (approx) | background matching; radial on classic WHT (`16330`) | classic manifest + transient master_sum/cov | per-exposure transformed support accumulation (SUP_W1+=R(s_i), SUP_W2+=R(s_i)²); R(V)·R(W) stays APPROXIMATE BY DESIGN |
+| Drizzle | `drizzle` (`use_drizzle=True`) | native drizzle weighted mean (`finalize("divide")` → native `out_img`) | native `out_wht` (signed for Lanczos) | **signed** WHT; valid iff finite & `wht>WEIGHT_EPSILON` (`drizzle_core.py:59`) | `wht_relative_threshold` (`715`), 0.0 for Lanczos; no gain | `.m3d_checkpoint/checkpoint.json` + `from_native_state` | keep native signed WHT; accumulate **separate** positive support (s_i, s_i² per original exposure) |
 
 Notes:
 - "classic" is a *finalization* concept (`classic_sumw`), not a distinct reducer; it
@@ -254,12 +254,15 @@ domain and must not be promoted to one (see §8.2).
 - **HSI classification**: this is `FINALIZATION_MODE_REPROJECT_COADD`. The SCI/WHT pair
   (`master_sum`/`master_coverage`) is finalized by `_save_final_stack` under
   `is_classic_reproject_mode`.
-- **Future positive support domain through this path**: a separate SUP map would be
-  reprojected the same way (`R(SUP)`), inheriting the identical separate-transport
-  approximation — per-original-exposure `N_eff_support` would be *approximately*
-  transported, never exactly accumulated. COV-01 must therefore decide whether support for
-  reproject modes is accumulated *pre*-reprojection (per original exposure) or transported
-  through R (approximate) — flagged in §12.4.
+- **Future positive support domain through this path (R2-2)**: positive support must be
+  evaluated/transformed **per original exposure** onto the applicable output grid *before*
+  accumulation whenever required to preserve the contract — accumulate transformed `s_i`
+  into `SUP_W1` and transformed `s_i²` into `SUP_W2`. Transporting a *batch aggregate*
+  `SUP_W2` through `R` is **not** generally equivalent to the sum of squared per-exposure
+  transformed supports and can become batch-dependent. No design may use the number of
+  mini-stacks/batches as an effective exposure count. Scientific `R(V)·R(W)` remains
+  APPROXIMATE BY DESIGN, but support-decomposition invariance across the *same* original
+  exposures is mandatory.
 
 ### 6.8 Drizzle native WHT handling (signed Lanczos)
 
@@ -302,8 +305,10 @@ domain and must not be promoted to one (see §8.2).
 ## 7. Candidate path classification
 
 Classification vocabulary (corrected per R6):
-- **ACTIVE_VALID_CURRENT** — live on a user-facing scientific/cosmetic path today, with no
-  demonstrated replacement.
+- **ACTIVE_VALID** — live/currently valid on a user-facing scientific/cosmetic path
+  today, with no demonstrated replacement. This is a *liveness* classification only — NOT a
+  permanent scientific endorsement; a path may be ACTIVE_VALID and still be a COV
+  replacement candidate (e.g. the radial taper is ACTIVE_VALID today but a COV-02 target).
 - **ACTIVE_OBSOLETE_REPLACED** — live OR legacy, but only *after* a proven replacement
   exists (never asserted in advance).
 - **COMPATIBILITY_ONLY** — legacy surface retained for compatibility; not on the primary
@@ -311,7 +316,7 @@ Classification vocabulary (corrected per R6):
 - **DEAD** — no live caller on the scientific path.
 - **UNKNOWN** — liveness/semantics not yet established.
 
-- **ACTIVE_VALID_CURRENT**
+- **ACTIVE_VALID**
   - `DrizzleAccumulator` + `drizzle_stream` + `wht_relative_threshold` +
     `support_integrity_violations` (`drizzle_core.py`) — M3 drizzle finalization
     (`queue_manager.py:16882-16997`).
@@ -380,6 +385,17 @@ SUP_W2 / `N_eff_support` absent — `rg` returns nothing). Concretely:
 - **COV-01 must not feed the final scientific WHT into the support domain**; the support
   accumulator must be generated from original exposures before irreversible mini-stack
   reduction (§11).
+
+**Proposed support-domain contract (COV-01 target, not implemented).** For each original
+exposure `i`, define a positive per-pixel support
+`s_i = valid_geometric_support · optional_quality_significance · optional_spatial_support_taper`,
+accumulate `SUP_W1 += s_i` and `SUP_W2 += s_i²`, and define
+`N_eff_support = SUP_W1² / SUP_W2` where defined. `SUP_W1` is **not** a raw exposure count
+except in the restricted unit-weight case (`s_i ∈ {0,1}`). For rejection reducers, support
+confidence describes the *original geometric/quality* support and may deliberately differ
+from the surviving estimator WHT; rejection masks are not used for support unless a
+separately named, justified future metric is introduced. Median science remains unchanged
+and its support remains independent.
 
 ### 8.3 Batch-level radial weighting of the denominator (HIGH — replacement candidate)
 
@@ -473,8 +489,19 @@ later docs-only cleanup (not this gate).
 - `<output>/.m3d_checkpoint/checkpoint.json` (`drizzle_checkpoint.py:184-186`) is the
   single commit point. Writer is **write-only**; `read_drizzle_checkpoint` validates the
   *entire* checkpoint before `DrizzleAccumulator.from_native_state`
-  (`drizzle_core.py:291`) rebuilds the native `out_img`/`out_wht` (bit-identical
-  continuation). `total_exptime` must be restored alongside the buffers.
+  (`drizzle_core.py:291`) rebuilds the native `out_img`/`out_wht`. `total_exptime` must be
+  restored alongside the buffers.
+- **Exactness (honest, per R2-3)**: the restore seam can be byte/array exact — unit
+  witnesses `tests/test_drizzle_resume_continuation.py` and
+  `tests/test_drizzle_resume_backend.py::test_stop_resume_backend_is_bit_identical_and_commits_n_plus_1`
+  assert `np.array_equal` / `max_abs_diff == 0.0` for the native buffers across the `.npy`
+  roundtrip and the backend Stop→Resume; `read_drizzle_checkpoint` also pins the
+  drizzle/numpy library versions so continuation is refused across a rounding-behaviour
+  change (`drizzle_checkpoint.py:1701`). However, known production E2E Stop→Resume evidence
+  on this baseline showed SCI and WCS **bit-identical** while native WHT continuation may
+  differ at float32 **ULP-level** (historically 1–2 ULP in bounded witnesses). Do not claim
+  blanket bit identity. COV support state must target the strongest reproducibility
+  contract and record exact evidence (bit-exact where proven, bounded-ULP otherwise).
 - Failed-start cleanup treats `.m3d_checkpoint` as a whole-directory artifact: it is
   removed only if absent from the pre-existing snapshot (`2699-2713`). A
   failed-first-checkpoint (fresh run) therefore leaves no stale `.m3d_checkpoint` to
@@ -512,13 +539,19 @@ future legacy contract, not current behavior.
 > cosmetic reconstruction; final-only render is COV-04.
 
 - **COV-01 — original-exposure support generation.** Generate positive support **before**
-  irreversible mini-stack reduction: accumulate per-original-exposure positive support
-  (SUP_W1 = count of original exposures with positive support at each output pixel), as
-  separate SUP_W1/SUP_W2 state, backend-neutral. Seams: the batch reducer loop
+  irreversible mini-stack reduction. Per original exposure define
+  `s_i = valid_geometric_support · optional_quality_significance · optional_spatial_taper`
+  (NOT a raw count except unit-weight), then `SUP_W1 += s_i`, `SUP_W2 += s_i²`, and
+  `N_eff_support = SUP_W1²/SUP_W2`. Backend-neutral, separate SUP_W1/SUP_W2 state. For
+  reproject modes the support is evaluated/transformed per original exposure onto the
+  output grid before accumulation (never transported as a batch aggregate, never
+  batch-count-as-N_eff). Rejection reducers: support describes original geometric/quality
+  support and may deliberately differ from the surviving estimator WHT; rejection masks
+  are not used for support. Median science unchanged. Seams: the batch reducer loop
   (`queue_manager.py:12400-12830`) where per-image masks are consumed *before*
-  `_feather_batch_coverage`; the classic memmap accumulator init/load/commit
-  (`4400-4410`, `13662-14040`) and drizzle `DrizzleAccumulator`/`from_native_state`
-  for persistence. New SUP artifacts must join the cleanup allowlist (§10.1).
+  `_feather_batch_coverage`; classic memmap init/load/commit (`4400-4410`, `13662-14040`)
+  and drizzle `DrizzleAccumulator`/`from_native_state` for persistence. New SUP artifacts
+  must join the cleanup allowlist (§10.1).
 - **COV-02 — transformed real-footprint taper.** Replace the global
   `make_radial_weight_map` taper (§6.3/§6.4) with a per-footprint transformed taper.
   Seam: `_feather_batch_coverage` (`11896`) and the six radial call sites.
@@ -544,9 +577,11 @@ architecture; it is at most a temporary cosmetic safety idea.
    `reproject_and_combine` callers.
 3. **Radial cancellation (single-grid)** — Test: `apply_batch_feathering=True/False`,
    diff final FITS.
-4. **Mosaic/reproject edge bias + reproject support transport** — Test: synthetic two-panel
-   mosaic; measure edge vs centre photometry; additionally measure `R(SUP)` vs
-   pre-projection SUP accumulation to decide COV-01 support placement.
+4. **Mosaic/reproject edge bias + reproject support decomposition** — Test: synthetic
+   two-panel mosaic; measure edge vs centre photometry; and prove that accumulating
+   per-exposure transformed supports (`SUP_W2 = Σ R(s_i)²`) is invariant to batch grouping
+   for the same original exposures, versus the (batch-dependent) `R(Σ s_i²)` aggregate
+   transport.
 5. **`feather_by_weight_map` gain magnitude** — Test: instrument, log `gain_map_clipped`.
 6. **`livestack_mode` reachability** — Test: grep imports of `LiveStackController`.
 
