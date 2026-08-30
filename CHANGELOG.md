@@ -2,6 +2,13 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.2.1] — Phoenix consedit
+
+- fixed long-run live-preview analysis drift
+- fixed Classic/Reproject processing of inputs without pre-existing WCS
+- preserve and propagate the solved immutable reference WCS across aligned batches
+- ZeSolver can be used for Reproject without requiring ASTAP when operational
+
 ## [8.2.0] — Phoenix consedit
 
 - hardened Drizzle photometric normalization across changing frame coverage

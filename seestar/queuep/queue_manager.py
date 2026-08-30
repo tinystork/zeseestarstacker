@@ -6343,6 +6343,7 @@ class SeestarQueuedStacker:
             # Préparation du header qui sera utilisé pour le WCS de référence global
             self.reference_header_for_wcs = reference_header_for_global_alignment.copy()
             self.ref_wcs_header = self.reference_header_for_wcs
+            self._reinject_frozen_reference_wcs()
             # RF2: record the immutable registration target provenance (basename).
             # This is the source identifier carried by the header returned from
             # _get_reference_image (HIERARCH SEESTAR REF SRCFILE).  The temporary
@@ -14966,6 +14967,26 @@ class SeestarQueuedStacker:
             fits.PrimaryHDU(
                 data=wht_data, header=_hsi_wht_header(i, n_channels)
             ).writeto(wht_path, overwrite=True, output_verify="ignore")
+
+    def _reinject_frozen_reference_wcs(self):
+        """Preserve the reference WCS solved once in start_processing.
+
+        ``_get_reference_image`` runs again in ``_worker`` and returns the
+        original reference header (no WCS), which would otherwise clobber the
+        frozen celestial solution carried by ``self.reference_wcs_object``.
+        Re-inject the frozen WCS so every classic batch inherits the same
+        immutable astrometric grid and is never re-solved downstream.  A no-op
+        for plain-classic modes (``reference_wcs_object`` is None there).
+        """
+        if self.reference_wcs_object is None or not getattr(
+            self.reference_wcs_object, "is_celestial", False
+        ):
+            return
+        try:
+            for key, value in self.reference_wcs_object.to_header(relax=True).items():
+                self.reference_header_for_wcs[key] = value
+        except Exception:
+            pass
 
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
         """Save a classic batch and optionally solve/reproject it."""
