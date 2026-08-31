@@ -2642,6 +2642,16 @@ class SeestarQueuedStacker:
         dckpt = os.path.join(out, ".m3d_checkpoint")
         if os.path.isdir(dckpt):
             snapshot.add(os.path.normcase(os.path.abspath(dckpt)))
+        sup = os.path.join(out, "drizzle_support")
+        if os.path.isdir(sup):
+            snapshot.add(os.path.normcase(os.path.abspath(sup)))
+            try:
+                for name in os.listdir(sup):
+                    snapshot.add(
+                        os.path.normcase(os.path.abspath(os.path.join(sup, name)))
+                    )
+            except OSError:
+                pass
         return snapshot
 
     def _remove_attempt_created_state(self):
@@ -2718,6 +2728,15 @@ class SeestarQueuedStacker:
         ):
             try:
                 shutil.rmtree(dckpt)
+            except OSError:
+                pass
+        sup = os.path.join(out, "drizzle_support")
+        if (
+            os.path.isdir(sup)
+            and os.path.normcase(os.path.abspath(sup)) not in snapshot
+        ):
+            try:
+                shutil.rmtree(sup)
             except OSError:
                 pass
 
@@ -3731,6 +3750,13 @@ class SeestarQueuedStacker:
         # M3: accumulateur drizzle unique par canal (le mode Final/Incremental
         # historique est désormais sans effet — un seul chemin scientifique).
         self.drizzle_accumulators = None
+        # COV-01C: distinct positive per-original-exposure support domain
+        # (square-kernel, channel-invariant 2-D), independent of the native
+        # (possibly signed) Drizzle WHT.
+        self.drizzle_sup_w1 = None
+        self.drizzle_sup_w2 = None
+        self._drizzle_support_available = False
+        self._drizzle_support_unavailable_reason = None
         # M3 DPIC-01: immutable run-level per-channel background anchor for the
         # additive background match applied before each Drizzle deposition.
         # Captured once from the immutable registration reference (returned by
@@ -4321,6 +4347,35 @@ class SeestarQueuedStacker:
                         )
                         for _ in range(3)
                     ]
+                # COV-01C: distinct positive per-original-exposure support
+                # accumulators (square kernel, channel-invariant 2-D), never the
+                # native (possibly signed) WHT.
+                if resume_result is not None:
+                    frame_count = int(resume_result.counters.get("frame_count", 0) or 0)
+                    self.drizzle_sup_w1, self.drizzle_sup_w2 = self._load_drizzle_support(
+                        out_shape_hw, frame_count
+                    )
+                    if self.drizzle_sup_w1 is None:
+                        self._drizzle_support_available = False
+                        self._drizzle_support_unavailable_reason = (
+                            "legacy Drizzle checkpoint has no support state"
+                        )
+                        logger.warning(
+                            "Drizzle resume: legacy checkpoint has no support "
+                            "state; confidence unavailable (never fabricated)."
+                        )
+                    else:
+                        self._drizzle_support_available = True
+                        self._drizzle_support_unavailable_reason = None
+                else:
+                    self.drizzle_sup_w1 = DrizzleAccumulator(
+                        out_shape_hw, kernel="square", pixfrac=1.0
+                    )
+                    self.drizzle_sup_w2 = DrizzleAccumulator(
+                        out_shape_hw, kernel="square", pixfrac=1.0
+                    )
+                    self._drizzle_support_available = True
+                    self._drizzle_support_unavailable_reason = None
                 # Attribut legacy conservé (plus utilisé) : le mode
                 # Incrémental/Final historique est désormais sans effet.
                 self.incremental_drizzle_objects = []
@@ -20567,6 +20622,35 @@ class SeestarQueuedStacker:
                     in_grid_mask=in_grid_mask,
                 )
 
+            # COV-01C: deposit the positive per-original-exposure support into
+            # the separate square-kernel support accumulators (never the native
+            # signed WHT).  Support is channel-invariant; q = 1.0 (uniform).
+            sup_w1 = getattr(self, "drizzle_sup_w1", None)
+            sup_w2 = getattr(self, "drizzle_sup_w2", None)
+            if (
+                getattr(self, "_drizzle_support_available", False)
+                and sup_w1 is not None
+                and sup_w2 is not None
+            ):
+                s_i = weight.astype(np.float32)
+                s_i_sq = s_i * s_i
+                sup_w1.add(
+                    s_i,
+                    s_i,
+                    pixmap,
+                    exptime=1.0,
+                    in_units="cps",
+                    in_grid_mask=in_grid_mask,
+                )
+                sup_w2.add(
+                    s_i,
+                    s_i_sq,
+                    pixmap,
+                    exptime=1.0,
+                    in_units="cps",
+                    in_grid_mask=in_grid_mask,
+                )
+
             # M3: libérer les références de frame dès l'ajout (mémoire bornée).
             del data_hwc, weight, pixmap, in_grid_mask
             gc.collect()
@@ -20574,6 +20658,32 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.warning("M3: échec ajout frame au Drizzle: %s", e)
             return False
+
+    def _drizzle_support_n_eff(self):
+        """Derived N_eff_support = SUP_W1**2 / SUP_W2 (overflow-resistant).
+
+        Returns a 2-D float32 array where SUP_W2 > 0, else 0.0 (neutral), or
+        ``None`` when support is unavailable.  Never mutates accumulator state.
+        This is a *support/confidence* count, NOT the native estimator N_eff.
+        """
+        w1 = getattr(self, "drizzle_sup_w1", None)
+        w2 = getattr(self, "drizzle_sup_w2", None)
+        if not getattr(self, "_drizzle_support_available", False):
+            return None
+        if w1 is None or w2 is None:
+            return None
+        a = np.asarray(w1.wht, dtype=np.float64)
+        b = np.asarray(w2.wht, dtype=np.float64)
+        valid = b > 0.0
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            w1_sq = a * a
+            out = w1_sq / b
+            ratio = a / np.sqrt(b)
+            safe = ratio * ratio
+        overflowed = ~np.isfinite(w1_sq)
+        out = np.where(overflowed & valid, safe, out)
+        out = np.where(valid & np.isfinite(out) & (out >= 0.0), out, 0.0)
+        return out.astype(np.float32)
 
     def _capture_reference_drizzle_bg_anchor(self, reference_data_01, provenance_id):
         """Build the immutable M3 background anchor from the registration reference.
@@ -20836,6 +20946,10 @@ class SeestarQueuedStacker:
         self._drizzle_checkpoint_last_committed_frames = int(
             getattr(self, "_drizzle_frame_count", 0) or 0
         )
+        # COV-01C: persist the positive-support sidecar after the native
+        # checkpoint commits (never before; a failed native commit leaves both
+        # unchanged).
+        self._persist_drizzle_support()
         logger.info(
             "DRIZZLE CHECKPOINT: generation %d committed (frames=%d)",
             generation,
@@ -20891,6 +21005,76 @@ class SeestarQueuedStacker:
         ):
             return
         self._drizzle_checkpoint_commit()
+
+    # ------------------------------------------------------------------
+    # COV-01C: Drizzle positive-support sidecar persistence (isolated, additive)
+    # ------------------------------------------------------------------
+
+    def _drizzle_support_dir(self):
+        return os.path.join(self.output_folder, "drizzle_support")
+
+    def _drizzle_support_sidecar_paths(self):
+        d = self._drizzle_support_dir()
+        return (
+            os.path.join(d, "sup_w1.npy"),
+            os.path.join(d, "sup_w2.npy"),
+        )
+
+    def _persist_drizzle_support(self):
+        """Atomically persist SUP_W1/SUP_W2 (the positive square-kernel sums).
+
+        Never persists the native (possibly signed) WHT.  No-op when support is
+        unavailable.  The two arrays are written to temps and ``os.replace``d
+        so a crash mid-write cannot leave a half-written sidecar.
+        """
+        w1 = getattr(self, "drizzle_sup_w1", None)
+        w2 = getattr(self, "drizzle_sup_w2", None)
+        if not getattr(self, "_drizzle_support_available", False) or w1 is None or w2 is None:
+            return
+        d = self._drizzle_support_dir()
+        os.makedirs(d, exist_ok=True)
+        p1, p2 = self._drizzle_support_sidecar_paths()
+        for p, arr in ((p1, w1.wht), (p2, w2.wht)):
+            a = np.asarray(arr, dtype=np.float64)
+            tmp = p + ".tmp"
+            np.save(tmp, a)
+            os.replace(tmp, p)
+
+    def _load_drizzle_support(self, out_shape_hw, frame_count):
+        """Reopen the positive-support accumulators from the sidecar, or None.
+
+        Returns ``(w1, w2)`` (two square-kernel ``DrizzleAccumulator``) or
+        ``(None, None)`` when the sidecar is absent (legacy).  Reconstruction
+        uses ``from_native_state`` so continued accumulation is bit-consistent.
+        """
+        p1, p2 = self._drizzle_support_sidecar_paths()
+        if not (os.path.exists(p1) and os.path.exists(p2)):
+            return None, None
+        try:
+            arr1 = np.load(p1).astype(np.float32)
+            arr2 = np.load(p2).astype(np.float32)
+        except Exception as exc:
+            raise DrizzleCheckpointError(f"cannot load Drizzle support sidecar: {exc}")
+        shape = tuple(int(v) for v in out_shape_hw)
+        if arr1.shape != shape or arr2.shape != shape:
+            raise DrizzleCheckpointError(
+                f"Drizzle support sidecar shape mismatch: {arr1.shape}/{arr2.shape} "
+                f"!= {shape}"
+            )
+        if not (np.all(np.isfinite(arr1)) and np.all(np.isfinite(arr2))):
+            raise DrizzleCheckpointError("Drizzle support sidecar non-finite")
+        if np.any(arr1 < 0) or np.any(arr2 < 0):
+            raise DrizzleCheckpointError("Drizzle support sidecar negative")
+        te = float(max(0, int(frame_count or 0)))
+        w1 = DrizzleAccumulator.from_native_state(
+            shape, np.zeros(shape, dtype=np.float32), arr1,
+            kernel="square", pixfrac=1.0, fillval="0.0", total_exptime=te,
+        )
+        w2 = DrizzleAccumulator.from_native_state(
+            shape, np.zeros(shape, dtype=np.float32), arr2,
+            kernel="square", pixfrac=1.0, fillval="0.0", total_exptime=te,
+        )
+        return w1, w2
 
     def _update_preview_drizzle_accumulator(self):
         """Derive a DISPLAY-ONLY preview from ``self.drizzle_accumulators``.

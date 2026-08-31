@@ -144,5 +144,31 @@ state.
 * Unit-weight fast path optimization (skip the square when `s_i ∈ {0,1}`).
 
 
-*Prepared by Coco (COV-01A). No production code changes outside the isolated
-core module and its focused tests + this contract doc.*
+## COV-01C — Drizzle positive-support domain
+
+Drizzle accumulates a **distinct positive per-original-exposure support**,
+independent of the native (possibly signed Lanczos) WHT:
+
+* Native `out_img` / `out_wht` are **byte-identical** with and without support
+  tracking (support is purely additive after the native deposition).
+* Support uses a **square-kernel** `DrizzleAccumulator` pair
+  (`drizzle_sup_w1` / `drizzle_sup_w2`), channel-invariant 2-D, depositing the
+  validity footprint per frame: `s_i = weight` (q = 1.0, uniform),
+  `SUP_W1 += s_i`, `SUP_W2 += s_i²`.
+* `N_eff_support = SUP_W1² / SUP_W2` (overflow-resistant), never the native
+  estimator N_eff and never the signed WHT.
+
+Persistence is an **isolated additive sidecar** (`<output>/drizzle_support/`
+`sup_w1.npy` + `sup_w2.npy`), written atomically after a native checkpoint
+commit, reopened via `DrizzleAccumulator.from_native_state` on resume.  The
+native `.m3d_checkpoint` format/contract is unchanged.  A legacy Drizzle
+checkpoint without the sidecar resumes native SCI/WHT unchanged and marks
+confidence unavailable (diagnostic logged, never fabricated).  Failed-start
+cleanup and orphan detection include the `drizzle_support` directory.
+
+Tests: `tests/test_coverage_drizzle.py` (kernel parity incl. signed Lanczos,
+decomposition determinism, N_eff, legacy reopen).
+
+*Prepared by Coco (COV-01A + COV-01C). No production code changes outside the
+isolated core module, the classic/drizzle backend wiring, and their focused
+tests + this contract doc.*
