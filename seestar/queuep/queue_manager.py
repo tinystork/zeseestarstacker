@@ -294,6 +294,7 @@ from ..core.incremental_reprojection import (
     reproject_and_combine,
     initialize_master,
 )
+from ..core.coverage_support import accumulate_support_pair
 from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
@@ -658,6 +659,15 @@ _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
 
+# COV-01B: positive original-exposure support domain (plain classic only).
+# Channel-invariant 2-D (H, W) float64 accumulators, transactional with the
+# classic checkpoint.  ``_SUPPORT_STATE_SCHEMA`` is the manifest metadata tag;
+# its presence distinguishes a support-carrying checkpoint from a legacy one.
+_SUPPORT_W1_FILENAME = "coverage_SUP_W1.npy"
+_SUPPORT_W2_FILENAME = "coverage_SUP_W2.npy"
+_SUPPORT_DTYPE = np.dtype(np.float64)
+_SUPPORT_STATE_SCHEMA = "sup_v1"
+
 # Bounded, explicit allowlist of the checkpoint artifacts ZSSS itself writes
 # during *synchronous* startup (fresh initialize).  Failed-start cleanup may
 # remove only these names (when they were not present before the attempt);
@@ -668,6 +678,8 @@ _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
 _ATTEMPT_CREATED_CHECKPOINT_ARTIFACTS = (
     "cumulative_SUM.npy",
     "cumulative_WHT.npy",
+    _SUPPORT_W1_FILENAME,
+    _SUPPORT_W2_FILENAME,
     _RESUME_MANIFEST_FILENAME,
     _RESUME_MANIFEST_FILENAME + ".tmp",
 )
@@ -3521,6 +3533,14 @@ class SeestarQueuedStacker:
         self.resume_source = None
         self._resume_active = False
         self._resume_completed_sources = []
+        # COV-01B: positive original-exposure support domain (plain classic).
+        # ``_support_state_available`` is monotonic within a run: True for a
+        # fresh classic run and a valid-support resume; False for a legacy
+        # support-less resume (confidence render disabled, never fabricated).
+        self.coverage_sup_w1_memmap = None
+        self.coverage_sup_w2_memmap = None
+        self._support_state_available = False
+        self._support_unavailable_reason = None
         self._resume_pending_count = 0
         self._checkpointing_enabled = False
         # RSM2-D1: native Drizzle checkpoint (write-only, no resume/reader).
@@ -11186,6 +11206,120 @@ class SeestarQueuedStacker:
             fmax = float(max_known)
             self._exposure_max = fmax if cur_max is None else max(cur_max, fmax)
 
+    # =====================================================================
+    # COV-01B: positive original-exposure support domain (plain classic only)
+    # =====================================================================
+
+    def _build_support_payload(self, masks, scalars):
+        """Build an ordered support payload (mask refs + validated scalars).
+
+        Returns a list of (mask_ref, float_q) tuples in ORIGINAL EXPOSURE ORDER,
+        or None when support is unavailable.  Fails closed
+        (_ResumeCheckpointError) on any mask/scalar cardinality mismatch or a
+        non-finite / negative scalar (no silent coercion, no silent zip
+        truncation).
+        """
+        if not getattr(self, "_support_state_available", False):
+            return None
+        if masks is None or scalars is None:
+            raise _ResumeCheckpointError(
+                "support payload missing masks/scalars while support state is available"
+            )
+        masks = list(masks)
+        scalars = list(scalars)
+        if len(masks) != len(scalars):
+            raise _ResumeCheckpointError(
+                f"support mask/scalar cardinality mismatch: "
+                f"{len(masks)} masks vs {len(scalars)} scalars"
+            )
+        payload = []
+        for mask_ref, q_raw in zip(masks, scalars):
+            try:
+                q = float(q_raw)
+            except (TypeError, ValueError):
+                raise _ResumeCheckpointError(
+                    f"invalid support scalar weight {q_raw!r}"
+                )
+            if not np.isfinite(q) or q < 0.0:
+                raise _ResumeCheckpointError(
+                    f"invalid support scalar weight {q!r} (must be finite >= 0)"
+                )
+            payload.append((mask_ref, q))
+        return payload
+
+    def _apply_support_payload(self, payload):
+        """Apply one accepted batch's support, per original exposure, in order.
+
+        Uses the shared atomic seam (accumulate_support_pair) so each exposure
+        is fail-before-mutation on shape/dtype/finiteness/square/cumulative
+        overflow.  Masks must be boolean geometric support (no silent
+        transpose).  Raises _ResumeCheckpointError on any violation.
+        """
+        if payload is None:
+            return
+        w1 = getattr(self, "coverage_sup_w1_memmap", None)
+        w2 = getattr(self, "coverage_sup_w2_memmap", None)
+        if w1 is None or w2 is None:
+            raise _ResumeCheckpointError("support accumulators not initialised")
+        expect = tuple(w1.shape)
+        for mask_ref, q in payload:
+            m = np.asarray(mask_ref)
+            if m.dtype != np.bool_:
+                raise _ResumeCheckpointError(
+                    f"support mask must be boolean, got dtype {m.dtype}"
+                )
+            if m.shape != expect:
+                raise _ResumeCheckpointError(
+                    f"support mask shape {m.shape} != accumulator {expect}"
+                )
+            qf = float(q)
+            support_map = m.astype(np.float64) * qf
+            accumulate_support_pair(w1, w2, support_map, dtype=np.float64)
+
+    def _create_support_memmaps(self, shape_hw):
+        """Create zeroed 2-D float64 support accumulators (fresh run only).
+
+        Refuses (fail-closed) if support accumulators already exist, so a
+        dynamic resize / re-entry can never silently zero accumulated support.
+        """
+        if (
+            getattr(self, "coverage_sup_w1_memmap", None) is not None
+            or getattr(self, "coverage_sup_w2_memmap", None) is not None
+        ):
+            raise _ResumeCheckpointError(
+                "support accumulators already exist; refusing to recreate/zero"
+            )
+        memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
+        os.makedirs(memmap_dir, exist_ok=True)
+        shape2 = (int(shape_hw[0]), int(shape_hw[1]))
+        self.coverage_sup_w1_memmap = np.lib.format.open_memmap(
+            os.path.join(memmap_dir, _SUPPORT_W1_FILENAME),
+            mode="w+",
+            dtype=_SUPPORT_DTYPE,
+            shape=shape2,
+        )
+        self.coverage_sup_w1_memmap[:] = 0.0
+        self.coverage_sup_w2_memmap = np.lib.format.open_memmap(
+            os.path.join(memmap_dir, _SUPPORT_W2_FILENAME),
+            mode="w+",
+            dtype=_SUPPORT_DTYPE,
+            shape=shape2,
+        )
+        self.coverage_sup_w2_memmap[:] = 0.0
+        self._support_state_available = True
+        self._support_unavailable_reason = None
+
+    def _support_manifest_metadata(self):
+        """Canonical support-state metadata for the resume manifest, or None."""
+        w1 = getattr(self, "coverage_sup_w1_memmap", None)
+        if not getattr(self, "_support_state_available", False) or w1 is None:
+            return None
+        return {
+            "schema": _SUPPORT_STATE_SCHEMA,
+            "dtype": _SUPPORT_DTYPE.name,
+            "shape": [int(w1.shape[0]), int(w1.shape[1])],
+        }
+
     def _combine_batch_result(
         self,
         stacked_batch_data_np,
@@ -11204,6 +11338,9 @@ class SeestarQueuedStacker:
             batch_coverage_map_2d (np.ndarray): Carte de poids/couverture 2D (HW, float32)
                                                 pour ce lot spécifique.
         """
+        # COV-01B: the support payload travels bound to this exact batch result
+        # (attached to ``stack_info_header`` by ``_stack_batch``).
+        support_payload = getattr(stack_info_header, "_coverage_support_payload", None)
         logger.debug(
             f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D."
         )
@@ -11544,6 +11681,16 @@ class SeestarQueuedStacker:
                 self.cumulative_sum_memmap.flush()
             if hasattr(self.cumulative_wht_memmap, "flush"):
                 self.cumulative_wht_memmap.flush()
+
+            # COV-01B: commit the accepted batch's positive support, one
+            # original exposure at a time in order (dirty already marked above).
+            # A failure here propagates as _ResumeCheckpointError and leaves the
+            # manifest dirty (never publishes clean with mismatched support).
+            if support_payload is not None and self._support_state_available:
+                self._apply_support_payload(support_payload)
+                if hasattr(self.coverage_sup_w1_memmap, "flush"):
+                    self.coverage_sup_w1_memmap.flush()
+                    self.coverage_sup_w2_memmap.flush()
             try:
                 post_sum_min = float(np.min(self.cumulative_sum_memmap))
                 post_sum_max = float(np.max(self.cumulative_sum_memmap))
@@ -12398,6 +12545,7 @@ class SeestarQueuedStacker:
         ):
             single_img = valid_images_for_ccdproc[0].astype(np.float32)
             batch_coverage_map_2d = valid_pixel_masks_for_coverage[0].astype(np.float32)
+            single_q = 1.0
             # Fold the batch-independent quality weight into the coverage map
             # so a single-image batch still carries its effective denominator
             # (V * W == image * mask * quality_weight).
@@ -12406,6 +12554,7 @@ class SeestarQueuedStacker:
                     qw = self._calculate_weights(valid_scores_for_quality_weights)
                     if qw is not None and qw.size == 1:
                         batch_coverage_map_2d = batch_coverage_map_2d * float(qw[0])
+                        single_q = float(qw[0])
                 except _QualityReferenceError:
                     # A missing/malformed q_ref must abort the scientific
                     # reduction (never silently continue unweighted).
@@ -12462,6 +12611,10 @@ class SeestarQueuedStacker:
                     "Max accepted exposure [s]",
                 )
             _log_mem("after_stack")
+            support_payload = self._build_support_payload(
+                [valid_pixel_masks_for_coverage[0]], [single_q]
+            )
+            stack_info_header._coverage_support_payload = support_payload
             return single_img, stack_info_header, batch_coverage_map_2d
 
         # --- Vérification WCS seulement si nécessaire ---
@@ -12583,6 +12736,14 @@ class SeestarQueuedStacker:
                 )
             if extra_w is not None and extra_w.size == quality_weights.size:
                 quality_weights = quality_weights * extra_w
+
+            # COV-01B: stage the ordered per-exposure support payload (mask
+            # references + effective scalars, NOT a pre-summed batch delta).  It
+            # is committed in _combine_batch_result only after all acceptance
+            # gates pass, one original exposure at a time in order.
+            support_payload = self._build_support_payload(
+                coverage_maps_list, quality_weights
+            )
 
             mode = getattr(self, "stacking_mode", "")
             per_img_bytes = image_data_list[0].nbytes
@@ -12920,6 +13081,7 @@ class SeestarQueuedStacker:
                     context="stack_batch",
                     batch_num=current_batch_num,
                 )
+        stack_info_header._coverage_support_payload = support_payload
         return stacked_batch_data_np, stack_info_header, batch_coverage_map_2d
 
     #########################################################################################################################################
@@ -13739,6 +13901,9 @@ class SeestarQueuedStacker:
             "dtype_wht": np.dtype(
                 getattr(self, "memmap_dtype_wht", np.float32)
             ).name,
+            # COV-01B: positive support domain metadata (None for a legacy
+            # support-less checkpoint, or when support is unavailable).
+            "support": self._support_manifest_metadata(),
             # P5-FIX (HSI closure): the immutable session quality reference
             # scale.  ``None`` when quality weighting is disabled; otherwise a
             # positive finite float pinned once from the session reference and
@@ -14339,11 +14504,85 @@ class SeestarQueuedStacker:
                 # the dtype contract) turn finiteness/negativity into an
                 # unhandled exception — fail closed deterministically instead.
                 return (False, f"SUM/WHT numeric validation failed: {e}")
+
+            # COV-01B: read-only validation of the support domain (if present).
+            support_meta = manifest.get("support")
+            if support_meta is not None:
+                ok, reason = self._validate_support_readonly(support_meta, memdir)
+                if not ok:
+                    return (False, reason)
             return (True, None)
         finally:
             self._close_memmap_handle(sum_mm)
             if wht_mm is not None:
                 self._close_memmap_handle(wht_mm)
+
+    def _validate_support_readonly(self, support_meta, memdir):
+        """Read-only fail-closed validation of persisted support metadata/files."""
+        if not isinstance(support_meta, dict):
+            return (False, "support metadata not an object")
+        if support_meta.get("schema") != _SUPPORT_STATE_SCHEMA:
+            return (False, "support schema mismatch")
+        s_shape = support_meta.get("shape")
+        if not isinstance(s_shape, list) or len(s_shape) != 2:
+            return (False, "support shape malformed")
+        s_dtype = support_meta.get("dtype")
+        if s_dtype != _SUPPORT_DTYPE.name:
+            return (False, f"support dtype {s_dtype!r} != {_SUPPORT_DTYPE.name}")
+        w1_path = memdir / _SUPPORT_W1_FILENAME
+        w2_path = memdir / _SUPPORT_W2_FILENAME
+        if not w1_path.exists() or not w2_path.exists():
+            return (False, "support memmap file(s) missing")
+        s_w1 = None
+        s_w2 = None
+        try:
+            try:
+                s_w1 = np.lib.format.open_memmap(str(w1_path), mode="r")
+                s_w2 = np.lib.format.open_memmap(str(w2_path), mode="r")
+            except Exception as e2:
+                return (False, f"cannot read support memmaps: {e2}")
+            if s_w1.shape != tuple(s_shape) or s_w2.shape != tuple(s_shape):
+                return (False, "support memmap shape mismatch")
+            if s_w1.dtype != _SUPPORT_DTYPE or s_w2.dtype != _SUPPORT_DTYPE:
+                return (False, "support memmap dtype mismatch")
+            if not (np.all(np.isfinite(s_w1)) and np.all(np.isfinite(s_w2))):
+                return (False, "support contains non-finite values")
+            if np.any(s_w1 < 0) or np.any(s_w2 < 0):
+                return (False, "support contains negative values")
+            return (True, None)
+        finally:
+            if s_w1 is not None:
+                self._close_memmap_handle(s_w1)
+            if s_w2 is not None:
+                self._close_memmap_handle(s_w2)
+
+    def _load_support_on_resume(self, manifest, memdir):
+        """Open persisted support accumulators r+ (or mark unavailable for legacy)."""
+        support_meta = manifest.get("support")
+        if support_meta is None:
+            # Legacy checkpoint without support: science resumes unchanged;
+            # confidence render is disabled (never a fabricated partial map).
+            self._support_state_available = False
+            self._support_unavailable_reason = (
+                "legacy classic checkpoint has no support state"
+            )
+            self.coverage_sup_w1_memmap = None
+            self.coverage_sup_w2_memmap = None
+            logger.warning(
+                "Classic resume: legacy checkpoint has no support state; "
+                "cosmetic confidence render disabled for this run."
+            )
+            return
+        w1_path = memdir / _SUPPORT_W1_FILENAME
+        w2_path = memdir / _SUPPORT_W2_FILENAME
+        self.coverage_sup_w1_memmap = np.lib.format.open_memmap(
+            str(w1_path), mode="r+"
+        )
+        self.coverage_sup_w2_memmap = np.lib.format.open_memmap(
+            str(w2_path), mode="r+"
+        )
+        self._support_state_available = True
+        self._support_unavailable_reason = None
 
     def _probe_reference_shape_hwc(self, ref_path):
         """Read-only probe of the reference FITS header to derive the expected
@@ -14550,6 +14789,9 @@ class SeestarQueuedStacker:
                 self.stacked_batches_count = count
                 self._resume_active = True
                 self._checkpointing_enabled = True
+                # COV-01B: load/restore the positive support domain (or mark
+                # unavailable for a legacy support-less checkpoint).
+                self._load_support_on_resume(manifest, memdir)
                 # RSM2-02B1 R1: preserve the *opened* manifest's schema version
                 # for this session's subsequent writes, so a v1 resume keeps v1
                 # write semantics (no run_config.cfg) instead of silently
@@ -14654,6 +14896,9 @@ class SeestarQueuedStacker:
             shape=expected_hwc,
         )
         self.cumulative_wht_memmap[:] = 0.0
+        # COV-01B: create the channel-invariant 2-D positive support
+        # accumulators (fresh run only; refuse if they already exist).
+        self._create_support_memmaps(tuple(expected_hwc[:2]))
         self.memmap_shape = tuple(expected_hwc)
         self._resume_active = False
         self._resume_completed_sources = []
@@ -17799,6 +18044,21 @@ class SeestarQueuedStacker:
                 logger.debug(
                     f"WARN QM [_close_memmaps]: Erreur fermeture/suppression memmap WHT: {e_close_wht}"
                 )
+        # COV-01B: close the positive support accumulators too.
+        for attr_name in ("coverage_sup_w1_memmap", "coverage_sup_w2_memmap"):
+            sup_mm = getattr(self, attr_name, None)
+            if sup_mm is None:
+                continue
+            try:
+                if hasattr(sup_mm, "flush"):
+                    sup_mm.flush()
+                if hasattr(sup_mm, "_mmap") and sup_mm._mmap is not None:
+                    sup_mm._mmap.close()
+            except Exception as e_close_sup:
+                logger.debug(
+                    f"WARN QM [_close_memmaps]: Erreur fermeture support memmap: {e_close_sup}"
+                )
+            setattr(self, attr_name, None)
         gc.collect()  # FIX MEMLEAK
         # Optionnel: Essayer de supprimer les fichiers .npy si le nettoyage est activé
         # Cela devrait être fait dans le bloc finally de _worker après l'appel à _save_final_stack

@@ -85,6 +85,7 @@ import numpy as np
 
 __all__ = [
     "PositiveSupportAccumulator",
+    "accumulate_support_pair",
     "SUPPORT_STATE_VERSION",
     "SUPPORT_DTYPES",
 ]
@@ -98,6 +99,70 @@ SUPPORT_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
 
 # Documented neutral value for N_eff_support where SUP_W2 is not positive.
 N_EFF_UNDEFINED_VALUE = 0.0
+
+
+def accumulate_support_pair(w1, w2, support, *, dtype=np.float64):
+    """Atomically accumulate one positive support map into two external arrays.
+
+    Mirrors PositiveSupportAccumulator.add() exactly, but mutates caller-provided
+    (in-memory or memmap) float32/float64 (H, W) arrays in place.  This is the
+    single source of truth for the atomic per-exposure support accumulation
+    shared by the in-memory accumulator and the classic backend memmaps.
+
+    Fail-before-mutation: a shape/dtype/finiteness/negativity/square-overflow or
+    cumulative-overflow violation raises and leaves both arrays byte-identical.
+
+    Parameters
+    ----------
+    w1, w2 : ndarray
+        Existing (H, W) float accumulators (SUP_W1, SUP_W2) to mutate.
+    support : array_like
+        Per-pixel positive support map (H, W).
+    dtype : numpy.dtype, optional
+        Accumulator dtype (float32 or float64; default float64).
+    """
+    dtype = np.dtype(dtype)
+    if dtype not in SUPPORT_DTYPES:
+        raise TypeError(f"support dtype must be float32/float64, got {dtype.name!r}")
+    w1 = np.asarray(w1)
+    w2 = np.asarray(w2)
+    if w1.ndim != 2 or w2.ndim != 2:
+        raise ValueError("support accumulators must be 2-D (H, W)")
+    if w1.shape != w2.shape:
+        raise ValueError("support accumulators must share a shape")
+    if w1.dtype != dtype or w2.dtype != dtype:
+        raise TypeError(
+            f"support accumulators must have dtype {dtype}, got {w1.dtype}/{w2.dtype}"
+        )
+    if not (np.all(np.isfinite(w1)) and np.all(np.isfinite(w2))):
+        raise ValueError("support accumulators contain non-finite samples")
+    if np.any(w1 < 0.0) or np.any(w2 < 0.0):
+        raise ValueError("support accumulators contain negative samples")
+    shape = w1.shape
+    s = np.asarray(support)
+    if s.shape != shape:
+        raise ValueError(f"support shape {s.shape} does not match accumulator shape {shape}")
+    if not np.issubdtype(s.dtype, np.floating):
+        s = s.astype(dtype)
+    elif s.dtype != dtype:
+        s = s.astype(dtype, copy=False)
+    else:
+        s = s.astype(dtype, copy=False)
+    if not np.all(np.isfinite(s)):
+        raise ValueError("support must be finite (NaN/Inf rejected)")
+    if np.any(s < 0.0):
+        raise ValueError("support must be non-negative")
+    with np.errstate(over="ignore"):
+        s2 = s * s
+    if not np.all(np.isfinite(s2)):
+        raise ValueError("support**2 overflowed to non-finite")
+    with np.errstate(over="ignore", invalid="ignore"):
+        new_w1 = w1 + s
+        new_w2 = w2 + s2
+    if not (np.all(np.isfinite(new_w1)) and np.all(np.isfinite(new_w2))):
+        raise ValueError("cumulative support overflow: SUP_W1/SUP_W2 would become non-finite")
+    w1[:] = new_w1
+    w2[:] = new_w2
 
 
 class PositiveSupportAccumulator:
@@ -173,30 +238,6 @@ class PositiveSupportAccumulator:
         return self._w2.copy()
 
     # -------------------------------------------------------------- mutation
-    def _coerce_support(self, support):
-        """Validate one per-pixel support map and return an owned float copy.
-
-        Raises before any mutation on: non-array-like, shape mismatch,
-        non-finite (NaN/Inf), or negative values.
-        """
-        s = np.asarray(support)
-        if s.shape != self._shape:
-            raise ValueError(
-                f"support shape {s.shape} does not match accumulator shape "
-                f"{self._shape}"
-            )
-        if not np.issubdtype(s.dtype, np.floating):
-            s = s.astype(self._dtype)
-        elif s.dtype != self._dtype:
-            s = s.astype(self._dtype, copy=False)
-        else:
-            s = s.astype(self._dtype, copy=False)
-        if not np.all(np.isfinite(s)):
-            raise ValueError("support must be finite (NaN/Inf rejected)")
-        if np.any(s < 0.0):
-            raise ValueError("support must be non-negative")
-        return s
-
     def add(self, support):
         """Accumulate one original exposure's positive per-pixel support.
 
@@ -207,29 +248,10 @@ class PositiveSupportAccumulator:
         Parameters
         ----------
         support : array_like
-            Per-pixel positive support map of shape :attr:`shape`.
+            Per-pixel positive support map of shape (H, W) matching the
+            accumulator.
         """
-        s = self._coerce_support(support)  # validates first (no mutation yet)
-        with np.errstate(over="ignore"):
-            s2 = s * s
-        if not np.all(np.isfinite(s2)):
-            # s is finite but s**2 overflowed; refuse before mutating.
-            raise ValueError("support**2 overflowed to non-finite")
-
-        # Preflight both cumulative sums BEFORE any mutation.  This is the
-        # cumulative-overflow gate: a finite s (and s**2) may still overflow
-        # the running SUP_W1/SUP_W2 totals.  Compute both candidates, then
-        # commit only if both stay finite (atomic pair semantics).
-        with np.errstate(over="ignore", invalid="ignore"):
-            new_w1 = self._w1 + s
-            new_w2 = self._w2 + s2
-        if not (np.all(np.isfinite(new_w1)) and np.all(np.isfinite(new_w2))):
-            raise ValueError(
-                "cumulative support overflow: SUP_W1/SUP_W2 would become "
-                "non-finite"
-            )
-        self._w1[:] = new_w1
-        self._w2[:] = new_w2
+        accumulate_support_pair(self._w1, self._w2, support, dtype=self._dtype)
 
     # -------------------------------------------------------------- derived
     @property
