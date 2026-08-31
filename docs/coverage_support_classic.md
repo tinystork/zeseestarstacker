@@ -67,10 +67,24 @@ sets `processing_error` + `stop_processing` and leaves the checkpoint dirty.
 validation, boolean-mask/shape validation, exact SUP_W1/SUP_W2 witness, and
 ARRAY-EXACT 61 vs 3+17+41 vs singletons decomposition).
 
+## R1 hardening (fail-closed)
+
+* A `_stack_batch`-produced batch must carry a support payload when support is
+  tracked; a missing payload fails closed before SUM/WHT/SUP mutation.
+* `_support_manifest_metadata` refuses to downgrade a support-aware checkpoint
+  to legacy/no-confidence when the accumulators are missing.
+* `_validate_support_readonly` cross-checks the support shape against the
+  scientific manifest shape, not only its own self-consistency.
+* SUM/WHT resize paths fail closed while support is tracked (no orphaned
+  support), and support artifacts are detected as resume signals + cleaned by
+  failed-start policy.
+* The singleton fast path applies the same batch-independent variance/FWHM
+  scalar (float32) as the multi-image path, so support is batch-boundary
+  independent.
+
 ## Deferred (not this gate)
 
 * Drizzle / reproject / mosaic support accumulation.
 * COV-02 spatial taper, COV-03 normalization, COV-04 final render, COV-05
   cleanup-after-proof.
 * Per-mode support metadata for non-classic finalization.
-

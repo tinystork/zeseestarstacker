@@ -146,3 +146,117 @@ def test_decomposition_exact_61_vs_partitions(tmp_path):
     assert np.array_equal(w1_all, qm_single.coverage_sup_w1_memmap)
     assert np.array_equal(w2_all, qm_single.coverage_sup_w2_memmap)
 
+
+# ---------------------------------------------------------------------------
+# REWORK R1: adversarial + production witnesses
+# ---------------------------------------------------------------------------
+
+def _bare_mean_stack(weighting_method="none"):
+    import types as _types
+    o = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    o.update_progress = lambda *a, **k: None
+    o.logger = _types.SimpleNamespace(
+        warning=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
+        info=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+    )
+    o.stacking_mode = "mean"
+    o.normalize_method = "none"
+    o.weighting_method = weighting_method
+    o.use_quality_weighting = False
+    o.weight_by_snr = False
+    o.weight_by_stars = False
+    o.snr_exponent = 1.0
+    o.stars_exponent = 0.5
+    o.min_weight = 0.0
+    o.apply_batch_feathering = False
+    o.reproject_between_batches = False
+    o.reproject_coadd_final = False
+    o.drizzle_active_session = False
+    o.is_mosaic_run = False
+    o.stack_kappa_low = 3.0
+    o.stack_kappa_high = 3.0
+    o.winsor_limits = (0.05, 0.05)
+    o.stack_reject_algo = "none"
+    o.max_hq_mem = 1_000_000_000
+    o.batch_size = 10
+    o.settings = None
+    o.reference_header_for_wcs = None
+    o.reference_wcs_object = None
+    o.interbatch_norm_active = False
+    o.max_stack_workers = 1
+    o._current_batch_paths = []
+    o._norm_reference = None
+    o._is_plain_classic = lambda: False
+    o._support_state_available = True
+    return o
+
+
+def test_combine_fails_closed_missing_payload(tmp_path):
+    from astropy.io import fits as _fits
+    qm = _fresh(tmp_path, "fc")
+    hdr = _fits.Header()
+    # Simulate a _stack_batch-produced header whose payload is missing.
+    hdr._coverage_support_payload = None
+    with pytest.raises(_ResumeCheckpointError):
+        qm._combine_batch_result(
+            np.ones((4, 5, 3), np.float32), hdr, np.ones((4, 5), np.float32)
+        )
+
+
+def test_manifest_metadata_fails_closed_missing_accumulators():
+    qm = object.__new__(SeestarQueuedStacker)
+    qm._support_state_available = True
+    qm.coverage_sup_w1_memmap = None
+    qm.coverage_sup_w2_memmap = None
+    with pytest.raises(_ResumeCheckpointError):
+        qm._support_manifest_metadata()
+
+
+def test_support_artifacts_detected_as_resume_signal(tmp_path):
+    import pathlib
+    d = tmp_path / "out"
+    memdir = d / "memmap_accumulators"
+    memdir.mkdir(parents=True)
+    (memdir / "coverage_SUP_W1.npy").write_bytes(b"x")
+    qm = object.__new__(SeestarQueuedStacker)
+    assert qm._resume_artifacts_present(str(d)) is True
+
+
+def test_validate_support_readonly_shape_cross_check(tmp_path):
+    import pathlib
+    qm = _fresh(tmp_path, "xs", shape=(4, 5))
+    memdir = pathlib.Path(qm.output_folder) / "memmap_accumulators"
+    support_meta = {"schema": "sup_v1", "dtype": "float64", "shape": [3, 3]}
+    ok, reason = qm._validate_support_readonly(support_meta, memdir, (4, 5, 3))
+    assert ok is False
+    assert "shape" in reason
+
+
+def test_production_singleton_vs_multi_support_consistency():
+    from astropy.io import fits as _fits
+    o = _bare_mean_stack(weighting_method="variance")
+    rng = np.random.default_rng(7)
+
+    def make_img(mu, sig):
+        return np.stack([
+            rng.normal(mu, sig, (4, 5)),
+            rng.normal(mu, sig * 0.2, (4, 5)),
+            rng.normal(mu, sig * 0.2, (4, 5)),
+        ], axis=-1).astype(np.float32)
+
+    img_a = make_img(100.0, 30.0)
+    img_b = make_img(50.0, 10.0)
+    mask = np.ones((4, 5), dtype=bool)
+
+    def item(img):
+        return (img, _fits.Header(), {"snr": 1.0, "stars": 0.0}, None, mask)
+
+    _, hdr_multi, _ = o._stack_batch([item(img_a), item(img_b)], 1, 1)
+    q_a_multi = hdr_multi._coverage_support_payload[0][1]
+
+    _, hdr_single, _ = o._stack_batch([item(img_a)], 1, 1)
+    q_a_single = hdr_single._coverage_support_payload[0][1]
+
+    assert q_a_multi == q_a_single

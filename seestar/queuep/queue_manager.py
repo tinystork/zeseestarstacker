@@ -11312,8 +11312,13 @@ class SeestarQueuedStacker:
     def _support_manifest_metadata(self):
         """Canonical support-state metadata for the resume manifest, or None."""
         w1 = getattr(self, "coverage_sup_w1_memmap", None)
-        if not getattr(self, "_support_state_available", False) or w1 is None:
+        if not getattr(self, "_support_state_available", False):
             return None
+        if w1 is None or getattr(self, "coverage_sup_w2_memmap", None) is None:
+            raise _ResumeCheckpointError(
+                "support state is available but support accumulators are missing "
+                "(refusing to publish a legacy/no-confidence manifest)"
+            )
         return {
             "schema": _SUPPORT_STATE_SCHEMA,
             "dtype": _SUPPORT_DTYPE.name,
@@ -11341,6 +11346,20 @@ class SeestarQueuedStacker:
         # COV-01B: the support payload travels bound to this exact batch result
         # (attached to ``stack_info_header`` by ``_stack_batch``).
         support_payload = getattr(stack_info_header, "_coverage_support_payload", None)
+        # COV-01B fail-closed: a batch produced by _stack_batch must carry a
+        # support payload when support is being tracked.  (Direct
+        # _combine_batch_result callers — legacy/test paths — have no
+        # ``_coverage_support_payload`` attribute and are not subject to this
+        # gate.)
+        if (
+            self._support_state_available
+            and hasattr(stack_info_header, "_coverage_support_payload")
+            and support_payload is None
+        ):
+            raise _ResumeCheckpointError(
+                "support state is available but this batch carries no support "
+                "payload (fail closed before any scientific mutation)"
+            )
         logger.debug(
             f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D."
         )
@@ -12562,6 +12581,22 @@ class SeestarQueuedStacker:
                 except Exception:
                     # Only non-scientific robustness failures are tolerated.
                     pass
+            # COV-01B: apply the same batch-independent variance/FWHM scalar that
+            # the multi-image path applies, in float32 (matching its effective
+            # per-source scalar), so support is batch-boundary independent and
+            # bit-consistent between singleton and multi decomposition.
+            if self.weighting_method == "variance":
+                _wm = _calculate_image_weights_noise_variance([single_img])
+                if _wm and _wm[0] is not None:
+                    single_q = float(
+                        np.float32(single_q) * np.float32(np.nanmean(_wm[0]))
+                    )
+            elif self.weighting_method == "fwhm":
+                _wm = _calculate_image_weights_noise_fwhm([single_img])
+                if _wm and _wm[0] is not None:
+                    single_q = float(
+                        np.float32(single_q) * np.float32(np.nanmean(_wm[0]))
+                    )
             if getattr(self, "apply_batch_feathering", True):
                 h, w = batch_coverage_map_2d.shape
                 if not hasattr(self, "_radial_w_base") or self._radial_w_base.shape != (h, w):
@@ -13268,6 +13303,8 @@ class SeestarQueuedStacker:
             out / ".m3d_checkpoint",
             memdir / "cumulative_SUM.npy",
             memdir / "cumulative_WHT.npy",
+            memdir / _SUPPORT_W1_FILENAME,
+            memdir / _SUPPORT_W2_FILENAME,
             memdir / _RESUME_MANIFEST_FILENAME,
             out / _RUN_CONFIG_FILENAME,
             out / "batches_count.txt",
@@ -14508,7 +14545,9 @@ class SeestarQueuedStacker:
             # COV-01B: read-only validation of the support domain (if present).
             support_meta = manifest.get("support")
             if support_meta is not None:
-                ok, reason = self._validate_support_readonly(support_meta, memdir)
+                ok, reason = self._validate_support_readonly(
+                    support_meta, memdir, manifest_shape
+                )
                 if not ok:
                     return (False, reason)
             return (True, None)
@@ -14517,8 +14556,12 @@ class SeestarQueuedStacker:
             if wht_mm is not None:
                 self._close_memmap_handle(wht_mm)
 
-    def _validate_support_readonly(self, support_meta, memdir):
-        """Read-only fail-closed validation of persisted support metadata/files."""
+    def _validate_support_readonly(self, support_meta, memdir, manifest_shape):
+        """Read-only fail-closed validation of persisted support metadata/files.
+
+        Cross-checks the support shape against the scientific manifest shape
+        (``manifest_shape[:2]``), not merely its own self-consistency.
+        """
         if not isinstance(support_meta, dict):
             return (False, "support metadata not an object")
         if support_meta.get("schema") != _SUPPORT_STATE_SCHEMA:
@@ -14526,6 +14569,12 @@ class SeestarQueuedStacker:
         s_shape = support_meta.get("shape")
         if not isinstance(s_shape, list) or len(s_shape) != 2:
             return (False, "support shape malformed")
+        if tuple(s_shape) != tuple(manifest_shape[:2]):
+            return (
+                False,
+                f"support shape {s_shape} != scientific shape "
+                f"{list(manifest_shape[:2])}",
+            )
         s_dtype = support_meta.get("dtype")
         if s_dtype != _SUPPORT_DTYPE.name:
             return (False, f"support dtype {s_dtype!r} != {_SUPPORT_DTYPE.name}")
@@ -15049,6 +15098,14 @@ class SeestarQueuedStacker:
         The previously processed batch count is preserved to avoid
         skewing ETA calculations when memmaps are reallocated.
         """
+        # COV-01B: a resize while support is being tracked would orphan the
+        # support accumulators (they are on the previous grid).  Fail closed
+        # before any scientific mutation instead of silently losing support.
+        if getattr(self, "_support_state_available", False):
+            raise _ResumeCheckpointError(
+                "refusing to recreate SUM/WHT memmaps while positive support is "
+                "being tracked (support would be orphaned)"
+            )
         prev_count = getattr(self, "stacked_batches_count", 0)
 
         memmap_dir = os.path.join(self.output_folder, "memmap_accumulators")
@@ -15093,6 +15150,11 @@ class SeestarQueuedStacker:
         )
 
         if need_recreate:
+            if getattr(self, "_support_state_available", False):
+                raise _ResumeCheckpointError(
+                    "refusing to recreate SUM/WHT memmaps while positive support "
+                    "is being tracked (support would be orphaned)"
+                )
             self._close_memmaps()
             prev_count = getattr(self, "stacked_batches_count", 0)
 
