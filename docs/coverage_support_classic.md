@@ -63,11 +63,18 @@ sets `processing_error` + `stop_processing` and leaves the checkpoint dirty.
 ## Tests
 
 `tests/test_coverage_support.py` (COV-01A core) +
-`tests/test_coverage_support_classic.py` (dtype/state adversarial, payload
-validation, boolean-mask/shape validation, exact SUP_W1/SUP_W2 witness, and
-ARRAY-EXACT 61 vs 3+17+41 vs singletons decomposition).
+`tests/test_coverage_support_classic.py`.  Coverage is **transaction-level**
+(`_stack_batch` → `_combine_batch_result` / `_apply_support_payload` /
+`_support_manifest_metadata` / `_cleanup_failed_start`), NOT a full
+`start_processing` synthetic-image pipeline: dtype/state adversarial, strict
+payload preflight (absent/None/malformed/cardinality/mask-dtype/shape/scalar),
+exact SUP_W1/SUP_W2 witness, ARRAY-EXACT 61 vs 3+17+41 vs singletons,
+production singleton-vs-multi decomposition (none/variance/fwhm + mean/median),
+legacy resume preserves SUM/WHT and marks support unavailable, support-apply
+failure keeps the manifest dirty, failed-start cleanup removes support
+artifacts, and support tracking does not change SCI/WHT.
 
-## R1 hardening (fail-closed)
+## Fail-closed hardening (R1/R2/R3)
 
 * A `_stack_batch`-produced batch must carry a support payload when support is
   tracked; a missing payload fails closed before SUM/WHT/SUP mutation.
@@ -81,6 +88,11 @@ ARRAY-EXACT 61 vs 3+17+41 vs singletons decomposition).
 * The singleton fast path applies the same batch-independent variance/FWHM
   scalar (float32) as the multi-image path, so support is batch-boundary
   independent.
+* (R3) The complete payload is preflighted before any mutation: list/tuple,
+  exact cardinality vs accepted `NIMAGES`, every entry a 2-item pair, boolean
+  mask of exact shape, scalar finite ≥ 0.
+* (R3) `_support_manifest_metadata` verifies file/path identity of file-backed
+  accumulators (canonical basename + file existence) before publishing.
 
 ## Deferred (not this gate)
 

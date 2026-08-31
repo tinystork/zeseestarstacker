@@ -11247,6 +11247,50 @@ class SeestarQueuedStacker:
             payload.append((mask_ref, q))
         return payload
 
+    def _validate_support_payload(self, payload, expect_shape, expected_count):
+        """Fail-closed preflight of the complete support payload.
+
+        Validates the payload is a list/tuple of exactly ``expected_count``
+        2-item (mask, scalar) pairs; every mask boolean with exactly
+        ``expect_shape``; every scalar a finite non-negative number.  No silent
+        zip/truncation/coercion.  Raises _ResumeCheckpointError before any
+        scientific mutation.
+        """
+        if not isinstance(payload, (list, tuple)):
+            raise _ResumeCheckpointError("support payload must be a list/tuple")
+        if len(payload) != expected_count:
+            raise _ResumeCheckpointError(
+                f"support payload cardinality {len(payload)} != accepted "
+                f"{expected_count}"
+            )
+        for i, entry in enumerate(payload):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise _ResumeCheckpointError(
+                    f"support payload entry {i} must be a 2-item (mask, scalar) "
+                    "pair"
+                )
+            mask_ref, q_raw = entry
+            m = np.asarray(mask_ref)
+            if m.dtype != np.bool_:
+                raise _ResumeCheckpointError(
+                    f"support payload entry {i} mask must be boolean, got {m.dtype}"
+                )
+            if m.shape != tuple(expect_shape):
+                raise _ResumeCheckpointError(
+                    f"support payload entry {i} mask shape {m.shape} != "
+                    f"{tuple(expect_shape)}"
+                )
+            try:
+                q = float(q_raw)
+            except (TypeError, ValueError):
+                raise _ResumeCheckpointError(
+                    f"support payload entry {i} scalar is not numeric"
+                )
+            if not np.isfinite(q) or q < 0.0:
+                raise _ResumeCheckpointError(
+                    f"support payload entry {i} scalar must be finite >= 0"
+                )
+
     def _apply_support_payload(self, payload):
         """Apply one accepted batch's support, per original exposure, in order.
 
@@ -11348,6 +11392,26 @@ class SeestarQueuedStacker:
             raise _ResumeCheckpointError(
                 "support accumulators contain negative values"
             )
+        # Path/file identity for file-backed accumulators (in-memory doubles
+        # have no ``.filename`` and skip this).  A swapped/wrong-path handle
+        # must fail before manifest publication.
+        w1_fn = getattr(w1, "filename", None)
+        w2_fn = getattr(w2, "filename", None)
+        if w1_fn is not None or w2_fn is not None:
+            memdir = Path(self.output_folder) / "memmap_accumulators"
+            for mm, fname in (
+                (w1, _SUPPORT_W1_FILENAME),
+                (w2, _SUPPORT_W2_FILENAME),
+            ):
+                fn = getattr(mm, "filename", None)
+                if fn is None or os.path.basename(os.fspath(fn)) != fname:
+                    raise _ResumeCheckpointError(
+                        f"support accumulator path identity mismatch for {fname}"
+                    )
+                if not (memdir / fname).exists():
+                    raise _ResumeCheckpointError(
+                        f"support accumulator file missing: {fname}"
+                    )
         return {
             "schema": _SUPPORT_STATE_SCHEMA,
             "dtype": _SUPPORT_DTYPE.name,
@@ -11390,6 +11454,19 @@ class SeestarQueuedStacker:
                     "support state is available but the support payload is "
                     "missing or malformed (fail closed before mutation)"
                 )
+            # Full preflight: validate every entry against the live support
+            # shape and the accepted original-exposure count BEFORE any
+            # close/resize/dirty/SUM-WHT/SUP/counter mutation.
+            sup = getattr(self, "coverage_sup_w1_memmap", None)
+            if sup is None:
+                raise _ResumeCheckpointError(
+                    "support state is available but support accumulators are "
+                    "missing (fail closed before mutation)"
+                )
+            expected_count = int(stack_info_header.get("NIMAGES", 1) or 1)
+            self._validate_support_payload(
+                support_payload, tuple(sup.shape), expected_count
+            )
         else:
             support_payload = getattr(
                 stack_info_header, "_coverage_support_payload", None

@@ -418,3 +418,110 @@ def test_failed_fresh_cleanup_removes_support_artifacts(tmp_path):
     stack._remove_attempt_created_state()
     assert not w1_path.exists()
     assert not w2_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# REWORK R3: preflight / manifest identity / dirty / cleanup / quality / no-SCI-change
+# ---------------------------------------------------------------------------
+
+def _combine_harness(tmp_path, name, nimages=1):
+    from astropy.io import fits as _fits
+    stack = _prod_stack(tmp_path, name, shape=(4, 5, 3))
+    hdr = _fits.Header()
+    hdr["NIMAGES"] = nimages
+    cov = np.ones((4, 5, 3), np.float32)
+    v = np.ones((4, 5, 3), np.float32)
+    return stack, v, hdr, cov
+
+
+@pytest.mark.parametrize("bad", [
+    [(np.ones((4, 5), bool), 1.0), (np.ones((4, 5), bool), 1.0)],  # cardinality 2 vs 1
+    [("not-a-pair",)],
+    [(np.ones((4, 5), np.float32), 1.0)],  # non-bool mask
+    [(np.ones((3, 5), bool), 1.0)],  # wrong shape mask
+    [(np.ones((4, 5), bool), np.nan)],  # NaN scalar
+    [(np.ones((4, 5), bool), -1.0)],  # negative scalar
+])
+def test_combine_preflight_rejects_malformed_payload(tmp_path, bad):
+    stack, v, hdr, cov = _combine_harness(tmp_path, "pre")
+    hdr._coverage_support_payload = bad
+    w1_before = stack.coverage_sup_w1_memmap.copy()
+    w2_before = stack.coverage_sup_w2_memmap.copy()
+    sum_before = stack.cumulative_sum_memmap.copy()
+    wht_before = stack.cumulative_wht_memmap.copy()
+    with pytest.raises(_ResumeCheckpointError):
+        stack._combine_batch_result(v, hdr, cov)
+    assert np.array_equal(stack.coverage_sup_w1_memmap, w1_before)
+    assert np.array_equal(stack.coverage_sup_w2_memmap, w2_before)
+    assert np.array_equal(stack.cumulative_sum_memmap, sum_before)
+    assert np.array_equal(stack.cumulative_wht_memmap, wht_before)
+
+
+def test_manifest_metadata_rejects_missing_file(tmp_path):
+    import pathlib
+    import os as _os
+    stack = _prod_stack(tmp_path, "missing", shape=(4, 5, 3))
+    memdir = pathlib.Path(stack.output_folder) / "memmap_accumulators"
+    _os.remove(memdir / "coverage_SUP_W1.npy")
+    with pytest.raises(_ResumeCheckpointError):
+        stack._support_manifest_metadata()
+
+
+def test_support_apply_failure_keeps_dirty(tmp_path, monkeypatch):
+    from astropy.io import fits as _fits
+    stack, v, hdr, cov = _combine_harness(tmp_path, "dirty")
+    stack._checkpointing_enabled = True
+    # finite scalar that passes preflight but whose square overflows float64
+    hdr._coverage_support_payload = [(np.ones((4, 5), bool), 1e200)]
+    states = []
+    monkeypatch.setattr(
+        stack, "_write_resume_manifest",
+        lambda *a, **k: states.append(k.get("state")),
+    )
+    stack._combine_batch_result(v, hdr, cov)
+    assert "dirty" in states
+    assert "clean" not in states
+
+
+def test_cleanup_failed_start_removes_support(tmp_path):
+    import pathlib
+    stack = _prod_stack(tmp_path, "cleanup", shape=(4, 5, 3))
+    memdir = pathlib.Path(stack.output_folder) / "memmap_accumulators"
+    stack._attempt_preexisting_state = set()
+    stack._cleanup_failed_start()
+    assert stack.coverage_sup_w1_memmap is None
+    assert stack.coverage_sup_w2_memmap is None
+    assert not (memdir / "coverage_SUP_W1.npy").exists()
+    assert not (memdir / "coverage_SUP_W2.npy").exists()
+
+
+def test_legacy_resume_preserves_sumwht(tmp_path):
+    import pathlib
+    stack = _prod_stack(tmp_path, "legacy2", shape=(4, 5, 3))
+    memdir = pathlib.Path(stack.output_folder) / "memmap_accumulators"
+    # accumulate some SUM/WHT, then simulate a legacy (support-less) resume
+    stack.cumulative_sum_memmap[:] = 7.0
+    stack.cumulative_wht_memmap[:] = 3.0
+    sum_before = stack.cumulative_sum_memmap.copy()
+    wht_before = stack.cumulative_wht_memmap.copy()
+    stack._load_support_on_resume({"support": None}, memdir)
+    assert stack._support_state_available is False
+    assert stack._support_unavailable_reason is not None
+    # SUM/WHT are preserved (not touched by legacy resume)
+    assert np.array_equal(stack.cumulative_sum_memmap, sum_before)
+    assert np.array_equal(stack.cumulative_wht_memmap, wht_before)
+
+
+def test_support_tracking_no_sci_change(tmp_path):
+    rng = np.random.default_rng(21)
+    shape = (4, 5, 3)
+    mask = np.ones((4, 5), dtype=bool)
+    imgs = _make_images(rng, 3, shape)
+    items = [_item(im, mask) for im in imgs]
+    with_sup = _prod_stack(tmp_path, "ws", shape, "mean", "none")
+    _run_batch(with_sup, items)
+    without = _prod_stack(tmp_path, "wo", shape, "mean", "none")
+    without._support_state_available = False
+    _run_batch(without, items)
+    assert np.array_equal(with_sup.cumulative_sum_memmap, without.cumulative_sum_memmap)
+    assert np.array_equal(with_sup.cumulative_wht_memmap, without.cumulative_wht_memmap)
