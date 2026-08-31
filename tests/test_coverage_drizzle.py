@@ -4,13 +4,25 @@ Proves native SCI/out_img and native out_wht are byte-identical with and
 without support tracking; signed Lanczos negative WHT lobes are preserved
 while the separate support domain stays non-negative; per-original-exposure
 decomposition invariance; derived N_eff; and legacy support-less reopen.
+The native checkpoint witnesses additionally prove one SCI/WHT/support commit
+point, Stop→Resume equivalence, and cleanup after support-stage failures.
 """
+
+import json
+import os
+import pathlib
 
 import numpy as np
 import pytest
 from astropy.wcs import WCS
 from astropy.io import fits
 
+from seestar.core.drizzle_checkpoint import (
+    DrizzleCheckpointError,
+    DrizzleCheckpointWriter,
+    build_drizzle_canonical_config,
+    read_drizzle_checkpoint,
+)
 from seestar.core.drizzle_core import DrizzleAccumulator
 from seestar.queuep.queue_manager import SeestarQueuedStacker
 
@@ -149,98 +161,311 @@ def test_support_decomposition_invariance(tmp_path):
     assert np.array_equal(all_at_once.drizzle_sup_w2.wht, again.drizzle_sup_w2.wht)
 
 
-def test_support_n_eff_and_legacy_load(tmp_path):
+def _checkpoint_writer(output_dir, shape):
+    class _ConfigSource:
+        pass
+
+    source = _ConfigSource()
+    source.weighting_method = "none"
+    source.use_quality_weighting = False
+    source.weight_by_snr = True
+    source.weight_by_stars = True
+    source.snr_exponent = 1.0
+    source.stars_exponent = 0.5
+    source.min_weight = 0.01
+    source.correct_hot_pixels = True
+    source.hot_pixel_threshold = 3.0
+    source.neighborhood_size = 5
+    source.bayer_pattern = "GRBG"
+    source.drizzle_scale = 1.0
+    source.drizzle_kernel = "square"
+    source.drizzle_pixfrac = 1.0
+    source.drizzle_wht_threshold_effective = 0.0
+    source.drizzle_fillval = "0.0"
+    cfg = build_drizzle_canonical_config(source, product_version="8.2.0")
+    return DrizzleCheckpointWriter(
+        str(output_dir), "8.2.0", cfg, make_wcs(shape), shape
+    )
+
+
+def _identity(path):
+    stat = os.stat(path)
+    return {
+        "path": os.path.normcase(str(path)),
+        "name": os.path.basename(str(path)),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _checkpoint_inputs(output_dir, count):
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sources = []
+    for index in range(count):
+        path = output_dir / f"source_{index}.fit"
+        path.write_bytes(f"source-{index}".encode("ascii"))
+        sources.append(_identity(path))
+    return sources, {
+        "input_roots": [str(output_dir)],
+        "reference": sources[0],
+        "plan": {"sources": sources, "decomposition": [count]},
+    }
+
+
+def _checkpoint_counters(frame_count):
+    return {
+        "frame_count": frame_count,
+        "stacked_batches_count": frame_count,
+        "total_exposure_seconds": float(frame_count),
+        "exposure_unknown_count": 0,
+        "exposure_min": 1.0,
+        "exposure_max": 1.0,
+    }
+
+
+def _commit(writer, stack, binding, sources, frame_count, *, support=True):
+    support_accumulators = None
+    if support:
+        support_accumulators = (stack.drizzle_sup_w1, stack.drizzle_sup_w2)
+    return writer.commit(
+        stack.drizzle_accumulators,
+        session_binding=binding,
+        counters=_checkpoint_counters(frame_count),
+        completed_sources=sources[:frame_count],
+        support_accumulators=support_accumulators,
+    )
+
+
+def test_support_n_eff_and_legacy_native_checkpoint(tmp_path):
     shape = (4, 4)
-    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    stack = _drizzle_stack(tmp_path / "legacy", shape, "square", support=True)
     _add_frames(stack, shape, 3, seed=5)
     neff = stack._drizzle_support_n_eff()
     assert neff is not None
     assert neff.shape == shape
     assert np.all(np.isfinite(neff))
     assert np.all(neff >= 0.0)
-    # legacy: no sidecar manifest -> (None, None)
-    w1, w2 = stack._load_drizzle_support(1, 3, shape)
-    assert w1 is None and w2 is None
+
+    # A schema-v1 native checkpoint with no additive support field is legacy.
+    output_dir = tmp_path / "legacy"
+    sources, binding = _checkpoint_inputs(output_dir, 3)
+    writer = _checkpoint_writer(output_dir, shape)
+    _commit(writer, stack, binding, sources, 3, support=False)
+    restored = read_drizzle_checkpoint(output_dir)
+    assert restored.support_accumulators is None
+    assert "support" not in restored.manifest
 
 
-# ---------------------------------------------------------------------------
-# REWORK R1: persistence / Stop-Resume / stale / cleanup witnesses
-# ---------------------------------------------------------------------------
-
-import pathlib
-import os as _os
-
-from seestar.core.drizzle_checkpoint import DrizzleCheckpointError
-
-
-def test_support_persist_reopen_no_orphan(tmp_path):
+def test_support_commits_in_native_manifest_and_roundtrips(tmp_path):
     shape = (6, 7)
-    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    output_dir = tmp_path / "native"
+    stack = _drizzle_stack(output_dir, shape, "square", support=True)
     _add_frames(stack, shape, 3, seed=9)
-    w1_before = np.asarray(stack.drizzle_sup_w1.wht, dtype=np.float64).copy()
-    w2_before = np.asarray(stack.drizzle_sup_w2.wht, dtype=np.float64).copy()
-    stack._persist_drizzle_support(1, 3)
-    sup_dir = pathlib.Path(tmp_path) / "drizzle_support"
-    assert (sup_dir / "sup_w1.npy").exists()
-    assert (sup_dir / "sup_w2.npy").exists()
-    assert (sup_dir / "manifest.json").exists()
-    # no temp orphan files remain
-    orphans = [n for n in _os.listdir(sup_dir) if ".tmp" in n or n.startswith(".sup-")]
-    assert orphans == []
-    # reopen via the actual load path -> exact equivalence
-    w1, w2 = stack._load_drizzle_support(1, 3, shape)
-    assert w1 is not None and w2 is not None
-    assert np.array_equal(np.asarray(w1.wht, dtype=np.float64), w1_before)
-    assert np.array_equal(np.asarray(w2.wht, dtype=np.float64), w2_before)
+    before = (
+        stack.drizzle_sup_w1.wht.copy(),
+        stack.drizzle_sup_w2.wht.copy(),
+    )
+    sources, binding = _checkpoint_inputs(output_dir, 3)
+    writer = _checkpoint_writer(output_dir, shape)
+    assert _commit(writer, stack, binding, sources, 3) == 1
+
+    manifest_path = output_dir / ".m3d_checkpoint" / "checkpoint.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["support"]["schema_version"] == 1
+    assert manifest["support"]["total_exptime"] == 3.0
+    for field in ("sup_w1", "sup_w2"):
+        artifact = output_dir / ".m3d_checkpoint" / manifest["support"][field]["file"]
+        assert artifact.is_file()
+    assert not (output_dir / "drizzle_support").exists()
+
+    restored = read_drizzle_checkpoint(output_dir)
+    assert restored.support_accumulators is not None
+    for actual, expected in zip(restored.support_accumulators, before):
+        assert np.array_equal(actual.wht, expected)
 
 
-def test_support_stale_generation_fails(tmp_path):
+def test_queue_commit_passes_support_to_native_writer(tmp_path):
+    stack = _drizzle_stack(tmp_path, (4, 4), "square", support=True)
+    _add_frames(stack, (4, 4), 1, seed=8)
+    captured = {}
+
+    class _Writer:
+        def commit(self, accumulators, **kwargs):
+            captured["accumulators"] = accumulators
+            captured.update(kwargs)
+            return 7
+
+    stack._drizzle_checkpoint_writer = _Writer()
+    stack._drizzle_frame_count = 1
+    stack._drizzle_completed_sources = [{"path": "source"}]
+    stack._drizzle_checkpoint_session_binding = lambda: {"session": True}
+    stack._drizzle_checkpoint_counters = lambda: {"frame_count": 1}
+    stack._drizzle_checkpoint_commit()
+
+    assert captured["accumulators"] is stack.drizzle_accumulators
+    assert captured["support_accumulators"] == (
+        stack.drizzle_sup_w1,
+        stack.drizzle_sup_w2,
+    )
+    assert stack._drizzle_checkpoint_last_committed_frames == 1
+
+
+def test_support_write_failure_preserves_prior_native_generation(
+    tmp_path, monkeypatch
+):
     shape = (6, 7)
-    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    output_dir = tmp_path / "failure"
+    stack = _drizzle_stack(output_dir, shape, "square", support=True)
     _add_frames(stack, shape, 2, seed=10)
-    stack._persist_drizzle_support(1, 2)
-    with pytest.raises(DrizzleCheckpointError):
-        stack._load_drizzle_support(2, 2, shape)
+    sources, binding = _checkpoint_inputs(output_dir, 3)
+    writer = _checkpoint_writer(output_dir, shape)
+    _commit(writer, stack, binding, sources, 2)
+
+    checkpoint_dir = output_dir / ".m3d_checkpoint"
+    manifest_before = (checkpoint_dir / "checkpoint.json").read_bytes()
+    generation_one = {
+        path.name: path.read_bytes()
+        for path in checkpoint_dir.glob("gen-00000001-*.npy")
+    }
+    _add_frames(stack, shape, 1, seed=11)
+    original = writer._write_array_artifact
+
+    def fail_support_w2(array, final_name):
+        if final_name == "gen-00000002-support_w2.npy":
+            raise OSError("injected support write failure")
+        return original(array, final_name)
+
+    monkeypatch.setattr(writer, "_write_array_artifact", fail_support_w2)
+    with pytest.raises(DrizzleCheckpointError, match="support write failure"):
+        _commit(writer, stack, binding, sources, 3)
+
+    assert (checkpoint_dir / "checkpoint.json").read_bytes() == manifest_before
+    for name, payload in generation_one.items():
+        assert (checkpoint_dir / name).read_bytes() == payload
+    assert not list(checkpoint_dir.glob("gen-00000002-*.npy"))
+    restored = read_drizzle_checkpoint(output_dir)
+    assert restored.generation == 1
+    assert restored.counters["frame_count"] == 2
 
 
-def test_support_frame_count_mismatch_fails(tmp_path):
+def test_support_preflight_failure_writes_no_native_generation(tmp_path):
     shape = (6, 7)
-    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
-    _add_frames(stack, shape, 2, seed=11)
-    stack._persist_drizzle_support(1, 2)
-    with pytest.raises(DrizzleCheckpointError):
-        stack._load_drizzle_support(1, 3, shape)
-
-
-def test_support_corrupt_manifest_fails(tmp_path):
-    shape = (6, 7)
-    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    output_dir = tmp_path / "preflight"
+    stack = _drizzle_stack(output_dir, shape, "square", support=True)
     _add_frames(stack, shape, 2, seed=12)
-    stack._persist_drizzle_support(1, 2)
-    mp = pathlib.Path(tmp_path) / "drizzle_support" / "manifest.json"
-    mp.write_text("{corrupt json", encoding="utf-8")
+    sources, binding = _checkpoint_inputs(output_dir, 3)
+    writer = _checkpoint_writer(output_dir, shape)
+    _commit(writer, stack, binding, sources, 2)
+    checkpoint_dir = output_dir / ".m3d_checkpoint"
+    manifest_before = (checkpoint_dir / "checkpoint.json").read_bytes()
+
+    _add_frames(stack, shape, 1, seed=13)
+    stack.drizzle_sup_w1._out_wht[0, 0] = -1.0
+    with pytest.raises(DrizzleCheckpointError, match="negative samples"):
+        _commit(writer, stack, binding, sources, 3)
+
+    assert (checkpoint_dir / "checkpoint.json").read_bytes() == manifest_before
+    assert not list(checkpoint_dir.glob("gen-00000002-*.npy"))
+
+
+@pytest.mark.parametrize("damage", ["missing_descriptor", "corrupt_artifact"])
+def test_support_reader_corruption_fails_closed_without_mutation(tmp_path, damage):
+    shape = (6, 7)
+    output_dir = tmp_path / damage
+    stack = _drizzle_stack(output_dir, shape, "square", support=True)
+    _add_frames(stack, shape, 2, seed=14)
+    sources, binding = _checkpoint_inputs(output_dir, 2)
+    writer = _checkpoint_writer(output_dir, shape)
+    _commit(writer, stack, binding, sources, 2)
+    checkpoint_dir = output_dir / ".m3d_checkpoint"
+    manifest_path = checkpoint_dir / "checkpoint.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if damage == "missing_descriptor":
+        del manifest["support"]["sup_w2"]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        artifact = checkpoint_dir / manifest["support"]["sup_w1"]["file"]
+        artifact.write_bytes(b"corrupt")
+    before = {
+        path.name: path.read_bytes()
+        for path in checkpoint_dir.iterdir()
+        if path.is_file()
+    }
+
     with pytest.raises(DrizzleCheckpointError):
-        stack._load_drizzle_support(1, 2, shape)
+        read_drizzle_checkpoint(output_dir)
+
+    after = {
+        path.name: path.read_bytes()
+        for path in checkpoint_dir.iterdir()
+        if path.is_file()
+    }
+    assert after == before
 
 
-def test_support_cleanup_preserves_pre_existing(tmp_path):
-    out = pathlib.Path(tmp_path) / "out"
-    sup_dir = out / "drizzle_support"
-    sup_dir.mkdir(parents=True)
-    sentinel = sup_dir / "user_sentinel.txt"
-    sentinel.write_text("keep", encoding="utf-8")
-    stack = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
-    stack.output_folder = str(out)
-    # snapshot the pre-existing dir + sentinel, then simulate an attempt-created file
-    stack._attempt_preexisting_state = set()
-    stack._attempt_preexisting_state.add(_os.path.normcase(_os.path.abspath(str(sup_dir))))
-    stack._attempt_preexisting_state.add(_os.path.normcase(_os.path.abspath(str(sentinel))))
-    (sup_dir / "sup_w1.npy").write_bytes(b"attempt")
-    (sup_dir / "sup_w2.npy").write_bytes(b"attempt")
-    (sup_dir / "manifest.json").write_bytes(b"{}")
-    stack._remove_attempt_created_state()
-    # attempt-created files removed; pre-existing sentinel preserved
-    assert sentinel.exists()
-    assert not (sup_dir / "sup_w1.npy").exists()
-    assert not (sup_dir / "sup_w2.npy").exists()
-    assert not (sup_dir / "manifest.json").exists()
+def test_support_stop_resume_matches_continuous_and_neff(tmp_path):
+    shape = (6, 7)
+    output_dir = tmp_path / "resume"
+    first = _drizzle_stack(output_dir, shape, "square", support=True)
+    _add_frames(first, shape, 2, seed=20)
+    sources, binding = _checkpoint_inputs(output_dir, 3)
+    writer = _checkpoint_writer(output_dir, shape)
+    _commit(writer, first, binding, sources, 2)
+
+    loaded = read_drizzle_checkpoint(output_dir)
+    continuation = DrizzleCheckpointWriter.from_validated_result(loaded)
+    resumed = _drizzle_stack(output_dir, shape, "square", support=True)
+    resumed.drizzle_accumulators = continuation.accumulators
+    resumed.drizzle_sup_w1, resumed.drizzle_sup_w2 = (
+        continuation.support_accumulators
+    )
+    _add_frames(resumed, shape, 1, seed=21)
+    _commit(continuation.writer, resumed, binding, sources, 3)
+    final = read_drizzle_checkpoint(output_dir)
+
+    continuous = _drizzle_stack(
+        tmp_path / "continuous", shape, "square", support=True
+    )
+    _add_frames(continuous, shape, 2, seed=20)
+    _add_frames(continuous, shape, 1, seed=21)
+
+    for actual, expected in zip(
+        final.support_accumulators,
+        (continuous.drizzle_sup_w1, continuous.drizzle_sup_w2),
+    ):
+        assert np.array_equal(actual.wht, expected.wht)
+    for actual, expected in zip(
+        final.accumulators, continuous.drizzle_accumulators
+    ):
+        assert np.array_equal(actual._out_img, expected._out_img)
+        assert np.array_equal(actual._out_wht, expected._out_wht)
+
+    resumed.drizzle_sup_w1, resumed.drizzle_sup_w2 = final.support_accumulators
+    assert np.array_equal(
+        resumed._drizzle_support_n_eff(), continuous._drizzle_support_n_eff()
+    )
+
+
+def test_legacy_continuation_cannot_fabricate_support(tmp_path):
+    shape = (6, 7)
+    output_dir = tmp_path / "legacy-continuation"
+    stack = _drizzle_stack(output_dir, shape, "square", support=True)
+    _add_frames(stack, shape, 2, seed=30)
+    sources, binding = _checkpoint_inputs(output_dir, 3)
+    writer = _checkpoint_writer(output_dir, shape)
+    _commit(writer, stack, binding, sources, 2, support=False)
+    continuation = DrizzleCheckpointWriter.from_validated_result(
+        read_drizzle_checkpoint(output_dir)
+    )
+    assert continuation.support_accumulators is None
+
+    resumed = _drizzle_stack(output_dir, shape, "square", support=True)
+    resumed.drizzle_accumulators = continuation.accumulators
+    _add_frames(resumed, shape, 1, seed=31)
+    # Even a caller that forges superficially plausible cumulative metadata
+    # cannot introduce support after a legacy support-less generation.
+    resumed.drizzle_sup_w1._total_exptime = 3.0
+    resumed.drizzle_sup_w2._total_exptime = 3.0
+    with pytest.raises(DrizzleCheckpointError, match="availability changed"):
+        _commit(continuation.writer, resumed, binding, sources, 3)

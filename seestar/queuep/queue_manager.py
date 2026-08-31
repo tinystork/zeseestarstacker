@@ -2642,16 +2642,6 @@ class SeestarQueuedStacker:
         dckpt = os.path.join(out, ".m3d_checkpoint")
         if os.path.isdir(dckpt):
             snapshot.add(os.path.normcase(os.path.abspath(dckpt)))
-        sup = os.path.join(out, "drizzle_support")
-        if os.path.isdir(sup):
-            snapshot.add(os.path.normcase(os.path.abspath(sup)))
-            try:
-                for name in os.listdir(sup):
-                    snapshot.add(
-                        os.path.normcase(os.path.abspath(os.path.join(sup, name)))
-                    )
-            except OSError:
-                pass
         return snapshot
 
     def _remove_attempt_created_state(self):
@@ -2730,27 +2720,6 @@ class SeestarQueuedStacker:
                 shutil.rmtree(dckpt)
             except OSError:
                 pass
-        sup = os.path.join(out, "drizzle_support")
-        if os.path.isdir(sup):
-            for name in ("sup_w1.npy", "sup_w2.npy", "manifest.json", "manifest.json.tmp"):
-                p = os.path.abspath(os.path.join(sup, name))
-                if os.path.normcase(p) in snapshot:
-                    continue
-                try:
-                    if os.path.isdir(p):
-                        shutil.rmtree(p)
-                    else:
-                        os.remove(p)
-                except OSError:
-                    pass
-            # Remove the directory only if this attempt created it and it is now
-            # empty (mirrors the memmap_accumulators policy).
-            if os.path.normcase(os.path.abspath(sup)) not in snapshot:
-                try:
-                    if not os.listdir(sup):
-                        os.rmdir(sup)
-                except OSError:
-                    pass
 
     def _start_autotuner_for_attempt(self):
         """Start the autotuner and record that this attempt owns it.
@@ -4363,12 +4332,10 @@ class SeestarQueuedStacker:
                 # accumulators (square kernel, channel-invariant 2-D), never the
                 # native (possibly signed) WHT.
                 if resume_result is not None:
-                    frame_count = int(resume_result.counters.get("frame_count", 0) or 0)
-                    gen = int(resume_result.generation)
-                    self.drizzle_sup_w1, self.drizzle_sup_w2 = self._load_drizzle_support(
-                        gen, frame_count, out_shape_hw
-                    )
-                    if self.drizzle_sup_w1 is None:
+                    restored_support = resume_result.support_accumulators
+                    if restored_support is None:
+                        self.drizzle_sup_w1 = None
+                        self.drizzle_sup_w2 = None
                         self._drizzle_support_available = False
                         self._drizzle_support_unavailable_reason = (
                             "legacy Drizzle checkpoint has no support state"
@@ -4378,6 +4345,7 @@ class SeestarQueuedStacker:
                             "state; confidence unavailable (never fabricated)."
                         )
                     else:
+                        self.drizzle_sup_w1, self.drizzle_sup_w2 = restored_support
                         self._drizzle_support_available = True
                         self._drizzle_support_unavailable_reason = None
                 else:
@@ -14272,6 +14240,18 @@ class SeestarQueuedStacker:
         """
         counters = restored.counters
         self.drizzle_accumulators = restored.accumulators
+        support = restored.support_accumulators
+        if support is None:
+            self.drizzle_sup_w1 = None
+            self.drizzle_sup_w2 = None
+            self._drizzle_support_available = False
+            self._drizzle_support_unavailable_reason = (
+                "legacy Drizzle checkpoint has no support state"
+            )
+        else:
+            self.drizzle_sup_w1, self.drizzle_sup_w2 = support
+            self._drizzle_support_available = True
+            self._drizzle_support_unavailable_reason = None
         self._drizzle_frame_count = int(counters["frame_count"])
         group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
         self._drizzle_group_index = self._drizzle_frame_count // group_size
@@ -20948,6 +20928,12 @@ class SeestarQueuedStacker:
         writer = getattr(self, "_drizzle_checkpoint_writer", None)
         if writer is None:
             raise DrizzleCheckpointError("drizzle checkpoint writer not initialized")
+        support_accumulators = None
+        if getattr(self, "_drizzle_support_available", False):
+            support_accumulators = (
+                getattr(self, "drizzle_sup_w1", None),
+                getattr(self, "drizzle_sup_w2", None),
+            )
         generation = writer.commit(
             self.drizzle_accumulators,
             session_binding=self._drizzle_checkpoint_session_binding(),
@@ -20955,16 +20941,10 @@ class SeestarQueuedStacker:
             completed_sources=list(
                 getattr(self, "_drizzle_completed_sources", []) or []
             ),
+            support_accumulators=support_accumulators,
         )
         self._drizzle_checkpoint_last_committed_frames = int(
             getattr(self, "_drizzle_frame_count", 0) or 0
-        )
-        # COV-01C: persist the positive-support sidecar after the native
-        # checkpoint commits (never before; a failed native commit leaves both
-        # unchanged).  Bound to the just-committed generation + frame count.
-        self._persist_drizzle_support(
-            generation,
-            int(getattr(self, "_drizzle_frame_count", 0) or 0),
         )
         logger.info(
             "DRIZZLE CHECKPOINT: generation %d committed (frames=%d)",
@@ -21021,126 +21001,6 @@ class SeestarQueuedStacker:
         ):
             return
         self._drizzle_checkpoint_commit()
-
-    # ------------------------------------------------------------------
-    # COV-01C: Drizzle positive-support sidecar persistence (isolated, additive)
-    # ------------------------------------------------------------------
-
-    def _drizzle_support_dir(self):
-        return os.path.join(self.output_folder, "drizzle_support")
-
-    def _drizzle_support_sidecar_paths(self):
-        d = self._drizzle_support_dir()
-        return (
-            os.path.join(d, "sup_w1.npy"),
-            os.path.join(d, "sup_w2.npy"),
-        )
-
-    def _drizzle_support_manifest_path(self):
-        return os.path.join(self._drizzle_support_dir(), "manifest.json")
-
-    @staticmethod
-    def _atomic_npy_save(path, arr):
-        """Atomically write one float array to ``path`` (no temp orphan)."""
-        import tempfile
-        d = os.path.dirname(path) or "."
-        fd, tmp = tempfile.mkstemp(prefix=".sup-", suffix=".npy", dir=d)
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                np.save(fh, arr)
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            raise
-
-    def _persist_drizzle_support(self, generation, frame_count):
-        """Persist SUP_W1/SUP_W2 + a generation/frame_count-bound manifest.
-
-        The manifest is the commit point (written last, atomically).  The two
-        arrays are written first (each atomic), so a crash can leave at most a
-        missing/older manifest — which load treats as legacy/mismatch, never a
-        silently mixed state.  ``generation``/``frame_count`` bind the sidecar
-        to the exact native checkpoint generation it accompanies.
-        """
-        w1 = getattr(self, "drizzle_sup_w1", None)
-        w2 = getattr(self, "drizzle_sup_w2", None)
-        if not getattr(self, "_drizzle_support_available", False) or w1 is None or w2 is None:
-            return
-        d = self._drizzle_support_dir()
-        os.makedirs(d, exist_ok=True)
-        p1, p2 = self._drizzle_support_sidecar_paths()
-        self._atomic_npy_save(p1, np.asarray(w1.wht, dtype=np.float64))
-        self._atomic_npy_save(p2, np.asarray(w2.wht, dtype=np.float64))
-        manifest = {
-            "schema": "driz_sup_v1",
-            "generation": int(generation),
-            "frame_count": int(frame_count),
-        }
-        mp = self._drizzle_support_manifest_path()
-        mtmp = mp + ".tmp"
-        with open(mtmp, "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, sort_keys=True)
-        os.replace(mtmp, mp)
-
-    def _load_drizzle_support(self, generation, frame_count, out_shape_hw):
-        """Reopen the support accumulators, or ``(None, None)`` for legacy.
-
-        A missing manifest is the ONLY legacy signal (no support sidecar was
-        ever written).  A present-but-mismatched generation/frame_count, a
-        missing/corrupt array, or a bad schema fails closed (never silently
-        mixes new native SCI/WHT with stale/partial support, never fabricates).
-        """
-        mp = self._drizzle_support_manifest_path()
-        if not os.path.exists(mp):
-            return None, None
-        try:
-            with open(mp, "r", encoding="utf-8") as fh:
-                manifest = json.load(fh)
-        except Exception as exc:
-            raise DrizzleCheckpointError(f"corrupt Drizzle support manifest: {exc}")
-        if not isinstance(manifest, dict) or manifest.get("schema") != "driz_sup_v1":
-            raise DrizzleCheckpointError("unsupported Drizzle support manifest schema")
-        if int(manifest.get("generation", -1)) != int(generation):
-            raise DrizzleCheckpointError(
-                f"Drizzle support generation {manifest.get('generation')!r} != "
-                f"native checkpoint generation {generation}"
-            )
-        if int(manifest.get("frame_count", -1)) != int(frame_count):
-            raise DrizzleCheckpointError(
-                f"Drizzle support frame_count {manifest.get('frame_count')!r} != "
-                f"native checkpoint frame_count {frame_count}"
-            )
-        p1, p2 = self._drizzle_support_sidecar_paths()
-        if not (os.path.exists(p1) and os.path.exists(p2)):
-            raise DrizzleCheckpointError("Drizzle support sidecar arrays missing")
-        try:
-            arr1 = np.load(p1).astype(np.float32)
-            arr2 = np.load(p2).astype(np.float32)
-        except Exception as exc:
-            raise DrizzleCheckpointError(f"cannot load Drizzle support sidecar: {exc}")
-        shape = tuple(int(v) for v in out_shape_hw)
-        if arr1.shape != shape or arr2.shape != shape:
-            raise DrizzleCheckpointError(
-                f"Drizzle support sidecar shape mismatch: {arr1.shape}/{arr2.shape} "
-                f"!= {shape}"
-            )
-        if not (np.all(np.isfinite(arr1)) and np.all(np.isfinite(arr2))):
-            raise DrizzleCheckpointError("Drizzle support sidecar non-finite")
-        if np.any(arr1 < 0) or np.any(arr2 < 0):
-            raise DrizzleCheckpointError("Drizzle support sidecar negative")
-        te = float(max(0, int(frame_count or 0)))
-        w1 = DrizzleAccumulator.from_native_state(
-            shape, np.zeros(shape, dtype=np.float32), arr1,
-            kernel="square", pixfrac=1.0, fillval="0.0", total_exptime=te,
-        )
-        w2 = DrizzleAccumulator.from_native_state(
-            shape, np.zeros(shape, dtype=np.float32), arr2,
-            kernel="square", pixfrac=1.0, fillval="0.0", total_exptime=te,
-        )
-        return w1, w2
 
     def _update_preview_drizzle_accumulator(self):
         """Derive a DISPLAY-ONLY preview from ``self.drizzle_accumulators``.

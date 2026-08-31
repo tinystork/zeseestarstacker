@@ -88,6 +88,8 @@ Layout
         gen-00000001-ch1-out_wht.npy
         gen-00000001-ch2-out_img.npy
         gen-00000001-ch2-out_wht.npy
+        gen-00000001-support_w1.npy     # optional additive positive support
+        gen-00000001-support_w2.npy
     <output>/run_config.cfg              # canonical schema-v2 run config (stable)
 
 This namespace is **dedicated** to Drizzle and never reuses the classic
@@ -112,9 +114,10 @@ pre-existing path).
 Copy-on-write / commit protocol
 -------------------------------
 
-Every generation writes its six array artifacts under generation-unique final
-names claimed **exclusively** (``O_CREAT | O_EXCL`` + in-place write + fsync),
-computes a SHA-256 and exact byte size for each, then writes
+Every generation writes its six native array artifacts and optional two-array
+positive support under generation-unique final names claimed **exclusively**
+(``O_CREAT | O_EXCL`` + in-place write + fsync), computes a SHA-256 and exact
+byte size for each, then writes
 a per-attempt **owned** manifest temp
 ``checkpoint.json.tmp.<pid>.<seq>.<nonce>`` (claimed exclusively with
 ``open(..., "x")``, fsync) and ``os.replace``-s it to ``checkpoint.json``
@@ -203,8 +206,18 @@ _REGISTRATION_CONTRACT = "m3_tf_registration_v1"
 _REGISTRATION_CONTRACT_VERSION = 1
 
 # Explicit allowlist for generation-unique array artifacts.  Garbage collection
-# and failure cleanup may only ever touch names matching this pattern.
-_ARTIFACT_RE = re.compile(r"^gen-(\d{8})-ch([0-2])-out_(img|wht)\.npy$")
+# and failure cleanup may only ever touch names matching these patterns.  The
+# positive-support artifacts are additive to schema v1: a legacy manifest may
+# omit them, but a manifest that advertises support must reference both.
+_CHANNEL_ARTIFACT_RE = re.compile(
+    r"^gen-(\d{8})-ch([0-2])-out_(img|wht)\.npy$"
+)
+_SUPPORT_ARTIFACT_RE = re.compile(
+    r"^gen-(\d{8})-support_(w1|w2)\.npy$"
+)
+_ARTIFACT_RE = re.compile(
+    r"^gen-(\d{8})-(?:ch[0-2]-out_(?:img|wht)|support_(?:w1|w2))\.npy$"
+)
 
 # A ``_dup_<timestamp>`` collision name (produced by
 # ``tools.file_ops.move_to_stacked`` when the deterministic destination already
@@ -702,6 +715,7 @@ class DrizzleCheckpointWriter:
         return DrizzleContinuation(
             writer=writer,
             accumulators=fresh.accumulators,
+            support_accumulators=fresh.support_accumulators,
             session=copy.deepcopy(fresh.session),
             counters=copy.deepcopy(fresh.counters),
             completed_sources=copy.deepcopy(fresh.completed_sources),
@@ -737,12 +751,20 @@ class DrizzleCheckpointWriter:
             float(getattr(acc, "_total_exptime", 0.0))
             for acc in fresh.accumulators
         ]
+        support = fresh.support_accumulators
+        support_wht = None
+        if support is not None:
+            support_wht = tuple(
+                np.array(acc._out_wht, dtype=np.float32, copy=True)
+                for acc in support
+            )
         return {
             "generation": int(fresh.generation),
             "session": copy.deepcopy(fresh.session),
             "counters": copy.deepcopy(fresh.counters),
             "completed": copy.deepcopy(fresh.completed_sources),
             "channel_total_exptime": per_channel_total,
+            "support_wht": support_wht,
         }
 
     # ------------------------------------------------------------------ state
@@ -760,6 +782,9 @@ class DrizzleCheckpointWriter:
 
     def _artifact_name(self, generation: int, channel: int, kind: str) -> str:
         return f"gen-{int(generation):08d}-ch{int(channel)}-out_{kind}.npy"
+
+    def _support_artifact_name(self, generation: int, kind: str) -> str:
+        return f"gen-{int(generation):08d}-support_{kind}.npy"
 
     # ------------------------------------------------------------ restart
     def _refuse_existing_checkpoint(self):
@@ -889,6 +914,95 @@ class DrizzleCheckpointWriter:
             "accumulator",
         )
         return snapshots
+
+    def _snapshot_support(self, support_accumulators, frame_count):
+        """Own and validate optional positive-support accumulator state.
+
+        ``None`` is the explicit legacy/no-support state.  Otherwise exactly
+        two square-kernel accumulators are required, representing SUP_W1 and
+        SUP_W2 through their native WHT buffers.  Both buffers are snapshotted
+        before any generation artifact is written.
+        """
+        if support_accumulators is None:
+            return None
+        if not isinstance(support_accumulators, (list, tuple)):
+            raise DrizzleCheckpointError(
+                "support_accumulators must be a two-element list/tuple or None"
+            )
+        support = list(support_accumulators)
+        if len(support) != 2:
+            raise DrizzleCheckpointError(
+                f"expected 2 support accumulators, got {len(support)}"
+            )
+        snapshots = {}
+        total_exptime = None
+        fillval = None
+        for kind, acc in zip(("w1", "w2"), support):
+            if acc is None:
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} is None"
+                )
+            shape = tuple(getattr(acc, "out_shape_hw", None) or ())
+            if shape != self.output_shape_hw:
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} shape {shape} != "
+                    f"output_shape_hw {self.output_shape_hw}"
+                )
+            if getattr(acc, "kernel", None) != "square":
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} must use square kernel"
+                )
+            pixfrac = _strict_float(
+                getattr(acc, "pixfrac", None),
+                f"support accumulator {kind} pixfrac",
+            )
+            if pixfrac != 1.0:
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} pixfrac {pixfrac} != 1.0"
+                )
+            current_fillval = _validate_fillval(
+                getattr(acc, "fillval", None),
+                f"support accumulator {kind} fillval",
+            )
+            current_total = _strict_float(
+                getattr(acc, "_total_exptime", None),
+                f"support accumulator {kind} total_exptime",
+            )
+            if current_total != float(frame_count):
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} total_exptime {current_total} "
+                    f"!= frame_count {frame_count}"
+                )
+            if total_exptime is None:
+                total_exptime = current_total
+                fillval = current_fillval
+            elif current_total != total_exptime or current_fillval != fillval:
+                raise DrizzleCheckpointError(
+                    "inconsistent support accumulator configuration"
+                )
+            arr = self._owned_float32_buffer(
+                getattr(acc, "_out_wht", None),
+                f"support accumulator {kind} out_wht",
+            )
+            if tuple(arr.shape) != self.output_shape_hw:
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} array shape {arr.shape} != "
+                    f"output_shape_hw {self.output_shape_hw}"
+                )
+            if np.any(arr < 0.0):
+                raise DrizzleCheckpointError(
+                    f"support accumulator {kind} contains negative samples"
+                )
+            snapshots[kind] = arr
+        return {
+            "schema_version": 1,
+            "kernel": "square",
+            "pixfrac": 1.0,
+            "fillval": fillval,
+            "total_exptime": total_exptime,
+            "w1": snapshots["w1"],
+            "w2": snapshots["w2"],
+        }
 
     @staticmethod
     def _owned_float32_buffer(buf, name):
@@ -1090,7 +1204,7 @@ class DrizzleCheckpointWriter:
             )
 
     def _check_monotonic_extension(self, counters_clean, session_clean,
-                                   ledger_clean, snapshots):
+                                   ledger_clean, snapshots, support_snapshot):
         """Enforce monotonic continuation for a re-armed writer.
 
         No-op for a fresh-run writer (``_continuation_state is None``).  For a
@@ -1111,6 +1225,8 @@ class DrizzleCheckpointWriter:
           arrive);
         * every channel's native ``total_exptime`` must strictly increase (frame
           count grows) and never roll back;
+        * positive support must remain either present or legacy-absent for the
+          whole run, and present SUP_W1/SUP_W2 must never decrease;
         * the completed ledger must keep the loaded ledger as its exact prefix.
 
         This runs *before* any write, inside the commit try-block, so a
@@ -1135,6 +1251,7 @@ class DrizzleCheckpointWriter:
             )
         self._check_cumulative_counters(loaded_counters, counters_clean)
         self._check_channel_total_monotonic(loaded, snapshots)
+        self._check_support_monotonic(loaded, support_snapshot)
 
         loaded_ledger = loaded["completed"]
         if ledger_clean[: len(loaded_ledger)] != loaded_ledger:
@@ -1277,8 +1394,28 @@ class DrizzleCheckpointWriter:
                     f"increase (got {new_t} <= loaded {loaded_t})"
                 )
 
+    @staticmethod
+    def _check_support_monotonic(loaded, support_snapshot):
+        """Refuse support loss, fabrication, or cumulative rollback."""
+        loaded_wht = loaded.get("support_wht")
+        if (loaded_wht is None) != (support_snapshot is None):
+            raise DrizzleCheckpointError(
+                "continuation positive-support availability changed; legacy "
+                "support cannot be fabricated and committed support cannot be "
+                "dropped"
+            )
+        if loaded_wht is None:
+            return
+        for kind, previous in zip(("w1", "w2"), loaded_wht):
+            current = support_snapshot[kind]
+            if np.any(current < previous):
+                raise DrizzleCheckpointError(
+                    f"continuation support {kind} must not decrease"
+                )
+
     def _build_next_continuation_state(self, generation, counters_clean,
-                                       session_clean, ledger_clean, snapshots):
+                                       session_clean, ledger_clean, snapshots,
+                                       support_snapshot):
         """Build (deep-copied) the continuation baseline for the next commit.
 
         Pure and fallible: the deep copies and the per-channel total-exposure
@@ -1287,6 +1424,12 @@ class DrizzleCheckpointWriter:
         commit.  Returns the exact next ``_continuation_state`` dict, which the
         caller assigns by reference **only after** the manifest commits.
         """
+        support_wht = None
+        if support_snapshot is not None:
+            support_wht = (
+                np.array(support_snapshot["w1"], dtype=np.float32, copy=True),
+                np.array(support_snapshot["w2"], dtype=np.float32, copy=True),
+            )
         return {
             "generation": int(generation),
             "session": copy.deepcopy(session_clean),
@@ -1295,6 +1438,7 @@ class DrizzleCheckpointWriter:
             "channel_total_exptime": [
                 float(s["total_exptime"]) for s in snapshots
             ],
+            "support_wht": support_wht,
         }
 
     def _preflight_json_payload(self, counters_clean, session_clean, ledger_clean):
@@ -1498,7 +1642,8 @@ class DrizzleCheckpointWriter:
                 pass
 
     # ------------------------------------------------------------------ commit
-    def commit(self, accumulators, *, session_binding, counters, completed_sources):
+    def commit(self, accumulators, *, session_binding, counters,
+               completed_sources, support_accumulators=None):
         """Persist one generation and atomically commit the manifest.
 
         Parameters
@@ -1514,6 +1659,11 @@ class DrizzleCheckpointWriter:
         completed_sources :
             Ordered ledger of accepted source identities (must equal the exact
             ordered plan prefix of length ``frame_count``).
+        support_accumulators :
+            Optional ``(SUP_W1, SUP_W2)`` positive-support accumulators.  When
+            present their WHT buffers are committed by the same manifest as
+            the native SCI/WHT generation.  ``None`` preserves an explicit
+            legacy support-less run.
 
         Returns
         -------
@@ -1546,6 +1696,9 @@ class DrizzleCheckpointWriter:
             session_clean = self._validate_session_binding(session_binding)
             ledger_clean = self._validate_ledger(completed_sources)
             snapshots = self._snapshot_channels(accumulators)
+            support_snapshot = self._snapshot_support(
+                support_accumulators, counters_clean["frame_count"]
+            )
 
             # 2. Manifest self-consistency invariants (truthful
             #    ledger/plan/counter).
@@ -1558,7 +1711,8 @@ class DrizzleCheckpointWriter:
             #     diverge / roll back cumulative counters or native per-channel
             #     total exposure).  No-op for a fresh-run writer.
             self._check_monotonic_extension(
-                counters_clean, session_clean, ledger_clean, snapshots
+                counters_clean, session_clean, ledger_clean, snapshots,
+                support_snapshot,
             )
 
             # 3. Preflight strict-JSON serialization of the non-artifact payload.
@@ -1574,12 +1728,14 @@ class DrizzleCheckpointWriter:
             if self._continuation_state is not None:
                 next_continuation_state = self._build_next_continuation_state(
                     generation, counters_clean, session_clean, ledger_clean,
-                    snapshots,
+                    snapshots, support_snapshot,
                 )
 
             os.makedirs(self._dir, exist_ok=True)
-            # 4. Write the six generation-unique array artifacts (exclusive
-            #    claim, never overwrite a pre-existing path).
+            # 4. Write the six native generation artifacts plus the optional
+            #    positive-support pair (exclusive claims, never overwrite a
+            #    pre-existing path).  Every artifact is durable before the one
+            #    manifest commit point can reference it.
             written = []  # (channel, short, name, digest, size)
             for snap in snapshots:
                 for kind in ("out_img", "out_wht"):
@@ -1597,6 +1753,19 @@ class DrizzleCheckpointWriter:
                             digest,
                             int(len(file_bytes)),
                         )
+                    )
+            support_written = {}
+            if support_snapshot is not None:
+                for kind in ("w1", "w2"):
+                    name = self._support_artifact_name(generation, kind)
+                    file_bytes = self._write_array_artifact(
+                        support_snapshot[kind], name
+                    )
+                    created_final_names.append(name)
+                    support_written[kind] = (
+                        name,
+                        hashlib.sha256(file_bytes).hexdigest(),
+                        int(len(file_bytes)),
                     )
             _fsync_dir(self._dir)
 
@@ -1663,6 +1832,28 @@ class DrizzleCheckpointWriter:
                 "completed_sources": ledger_clean,
                 "channels": channels,
             }
+            if support_snapshot is not None:
+                manifest["support"] = {
+                    "schema_version": support_snapshot["schema_version"],
+                    "kernel": support_snapshot["kernel"],
+                    "pixfrac": support_snapshot["pixfrac"],
+                    "fillval": support_snapshot["fillval"],
+                    "total_exptime": support_snapshot["total_exptime"],
+                    "sup_w1": {
+                        "file": support_written["w1"][0],
+                        "dtype": "float32",
+                        "shape": list(self.output_shape_hw),
+                        "size": support_written["w1"][2],
+                        "sha256": support_written["w1"][1],
+                    },
+                    "sup_w2": {
+                        "file": support_written["w2"][0],
+                        "dtype": "float32",
+                        "shape": list(self.output_shape_hw),
+                        "size": support_written["w2"][2],
+                        "sha256": support_written["w2"][1],
+                    },
+                }
 
             # 7. Commit the manifest LAST (single commit point).  Once
             #    `_write_manifest` returns, `manifest_committed` is set and a
@@ -1738,6 +1929,7 @@ class DrizzleCheckpointResult:
     wcs: object             # astropy.wcs.WCS (array_shape attached)
     output_shape_hw: tuple
     accumulators: list      # [DrizzleAccumulator x3]
+    support_accumulators: object  # (SUP_W1, SUP_W2) | None for legacy
     next_source_index: int
     generation: int
     source_output_dir: str
@@ -1798,6 +1990,7 @@ class DrizzleContinuation:
 
     writer: DrizzleCheckpointWriter
     accumulators: list          # [DrizzleAccumulator x3] fresh from disk
+    support_accumulators: object  # (SUP_W1, SUP_W2) | None for legacy
     session: dict               # fresh loaded session binding (baseline)
     counters: dict              # fresh loaded counters (baseline)
     completed_sources: list     # fresh loaded ledger (baseline)
@@ -2140,12 +2333,15 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
     resolved_reference, resolved_plan_paths = _resolve_sources(
         session, counters, resolver, output_dir
     )
-    channels = _validate_channels(manifest, generation, ckpt_dir, output_shape_hw)
+    channels, support = _validate_channels(
+        manifest, generation, ckpt_dir, output_shape_hw
+    )
     _validate_channel_vs_canonical(config, channels)
     _validate_versions(manifest, require_exact_versions)
 
     # Reconstruct only after the entire checkpoint validated.
     accumulators = _reconstruct_accumulators(channels, output_shape_hw)
+    support_accumulators = _reconstruct_support(support, output_shape_hw)
 
     # Only the exact shipped immutable policy *type* is carried as re-arm
     # provenance.  ``isinstance`` would admit subclasses that can add mutable
@@ -2166,6 +2362,7 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
         wcs=wcs,
         output_shape_hw=output_shape_hw,
         accumulators=accumulators,
+        support_accumulators=support_accumulators,
         next_source_index=counters["frame_count"],
         generation=generation,
         source_output_dir=output_dir,
@@ -2508,7 +2705,7 @@ def _validate_ledger(manifest, session, counters):
 
 
 def _validate_channels(manifest, generation, ckpt_dir, output_shape_hw):
-    """Validate the channel table and load every artifact (fail closed).
+    """Validate native channels plus optional support (fail closed).
 
     Also verifies the checkpoint directory contains *exactly* the referenced
     generation artifacts (no missing / extra / mixed-generation artifacts, no
@@ -2593,6 +2790,11 @@ def _validate_channels(manifest, generation, ckpt_dir, output_shape_hw):
             }
         )
 
+    support_clean, support_files = _validate_support(
+        manifest, generation, ckpt_dir, output_shape_hw
+    )
+    expected_files.update(support_files)
+
     # Exactly the referenced artifacts; no extra / mixed-generation artifacts
     # and no unexpected (temp / foreign) entry in the namespace.
     actual_gen_files = set()
@@ -2613,7 +2815,169 @@ def _validate_channels(manifest, generation, ckpt_dir, output_shape_hw):
             f"missing {missing}, extra {extra}"
         )
 
-    return channels_clean
+    return channels_clean, support_clean
+
+
+def _validate_support(manifest, generation, ckpt_dir, output_shape_hw):
+    """Validate optional additive SUP_W1/SUP_W2 manifest state.
+
+    Absence of the top-level field is the sole legacy signal.  Once present,
+    the support object and both generation-bound artifacts are mandatory and
+    validated with the same size/digest/dtype/shape rules as native channels.
+    """
+    if "support" not in manifest:
+        return None, set()
+    support = manifest["support"]
+    if not isinstance(support, dict):
+        raise DrizzleCheckpointError("support entry is not a JSON object")
+    if support.get("schema_version") != 1:
+        raise DrizzleCheckpointError(
+            f"unsupported support schema_version "
+            f"{support.get('schema_version')!r}"
+        )
+    if support.get("kernel") != "square":
+        raise DrizzleCheckpointError("support kernel must be 'square'")
+    pixfrac = _strict_float(support.get("pixfrac"), "support pixfrac")
+    if pixfrac != 1.0:
+        raise DrizzleCheckpointError(
+            f"support pixfrac {pixfrac} != 1.0"
+        )
+    fillval = _validate_fillval(support.get("fillval"), "support fillval")
+    total_exptime = _strict_float(
+        support.get("total_exptime"), "support total_exptime"
+    )
+    frame_count = _strict_int(manifest.get("frame_count"), "frame_count")
+    if total_exptime != float(frame_count):
+        raise DrizzleCheckpointError(
+            f"support total_exptime {total_exptime} != frame_count "
+            f"{frame_count}"
+        )
+
+    loaded = {}
+    expected_files = set()
+    for field, kind in (("sup_w1", "w1"), ("sup_w2", "w2")):
+        desc = support.get(field)
+        if not isinstance(desc, dict):
+            raise DrizzleCheckpointError(
+                f"support {field} descriptor missing"
+            )
+        loaded[kind] = _validate_support_artifact(
+            desc, generation, kind, ckpt_dir, output_shape_hw
+        )
+        expected_files.add(desc["file"])
+
+    return {
+        "kernel": "square",
+        "pixfrac": pixfrac,
+        "fillval": fillval,
+        "total_exptime": total_exptime,
+        "w1": loaded["w1"],
+        "w2": loaded["w2"],
+    }, expected_files
+
+
+def _validate_support_artifact(desc, generation, kind, ckpt_dir,
+                               output_shape_hw):
+    """Validate and load one generation-bound positive-support array."""
+    what = f"support {kind}"
+    file_name = desc.get("file")
+    if not isinstance(file_name, str) or not file_name:
+        raise DrizzleCheckpointError(f"{what} has invalid file name")
+    if (
+        file_name != os.path.basename(file_name)
+        or file_name.startswith(("/", "\\"))
+        or ".." in file_name
+    ):
+        raise DrizzleCheckpointError(
+            f"{what} has unsafe file name {file_name!r}"
+        )
+    match = _SUPPORT_ARTIFACT_RE.match(file_name)
+    if not match:
+        raise DrizzleCheckpointError(
+            f"{what} has non-allowlisted file name {file_name!r}"
+        )
+    if int(match.group(1)) != generation:
+        raise DrizzleCheckpointError(
+            f"{what} file generation {match.group(1)} != manifest generation "
+            f"{generation}"
+        )
+    if match.group(2) != kind:
+        raise DrizzleCheckpointError(
+            f"{what} file kind {match.group(2)!r} != {kind!r}"
+        )
+    if desc.get("dtype") != "float32":
+        raise DrizzleCheckpointError(
+            f"{what} dtype {desc.get('dtype')!r} != 'float32'"
+        )
+    shape = desc.get("shape")
+    if not isinstance(shape, list) or len(shape) != 2:
+        raise DrizzleCheckpointError(
+            f"{what} shape must be a 2-element list"
+        )
+    parsed_shape = (
+        _strict_int(shape[0], f"{what} shape[0]"),
+        _strict_int(shape[1], f"{what} shape[1]"),
+    )
+    if parsed_shape != tuple(output_shape_hw):
+        raise DrizzleCheckpointError(
+            f"{what} shape {parsed_shape} != output_shape_hw "
+            f"{tuple(output_shape_hw)}"
+        )
+    size = desc.get("size")
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise DrizzleCheckpointError(f"{what} size must be a strict integer")
+    sha = desc.get("sha256")
+    if (
+        not isinstance(sha, str)
+        or len(sha) != 64
+        or any(ch not in "0123456789abcdef" for ch in sha)
+    ):
+        raise DrizzleCheckpointError(
+            f"{what} sha256 must be a 64-char hex string"
+        )
+
+    path = os.path.join(ckpt_dir, file_name)
+    if os.path.islink(path):
+        raise DrizzleCheckpointError(
+            f"{what} artifact {file_name!r} is a symlink"
+        )
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise DrizzleCheckpointError(
+            f"{what} artifact missing/unreadable: {exc}"
+        ) from exc
+    if len(raw) != size:
+        raise DrizzleCheckpointError(
+            f"{what} size mismatch: manifest {size} vs disk {len(raw)}"
+        )
+    if hashlib.sha256(raw).hexdigest() != sha:
+        raise DrizzleCheckpointError(f"{what} SHA-256 mismatch")
+    try:
+        arr = np.load(io.BytesIO(raw), allow_pickle=False)
+    except (ValueError, OSError) as exc:
+        raise DrizzleCheckpointError(
+            f"{what} cannot load array: {exc}"
+        ) from exc
+    arr = np.asarray(arr)
+    if arr.dtype != np.float32:
+        raise DrizzleCheckpointError(
+            f"{what} array dtype {arr.dtype} != float32"
+        )
+    if arr.ndim != 2 or tuple(arr.shape) != tuple(output_shape_hw):
+        raise DrizzleCheckpointError(
+            f"{what} array shape {arr.shape} != {tuple(output_shape_hw)}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise DrizzleCheckpointError(
+            f"{what} array contains non-finite samples"
+        )
+    if np.any(arr < 0.0):
+        raise DrizzleCheckpointError(
+            f"{what} array contains negative samples"
+        )
+    return np.array(arr, dtype=np.float32, copy=True)
 
 
 def _validate_channel_vs_canonical(config, channels):
@@ -2649,7 +3013,7 @@ def _validate_artifact(desc, generation, channel, kind, ckpt_dir, output_shape_h
         raise DrizzleCheckpointError(
             f"channel {channel} {kind} has unsafe file name {file_name!r}"
         )
-    m = _ARTIFACT_RE.match(file_name)
+    m = _CHANNEL_ARTIFACT_RE.match(file_name)
     if not m:
         raise DrizzleCheckpointError(
             f"channel {channel} {kind} has non-allowlisted file name "
@@ -2792,3 +3156,28 @@ def _reconstruct_accumulators(channels, output_shape_hw):
             ) from exc
         accs.append(acc)
     return accs
+
+
+def _reconstruct_support(support, output_shape_hw):
+    """Reconstruct optional SUP_W1/SUP_W2 only after full validation."""
+    if support is None:
+        return None
+    accumulators = []
+    zeros = np.zeros(output_shape_hw, dtype=np.float32)
+    for kind in ("w1", "w2"):
+        try:
+            acc = DrizzleAccumulator.from_native_state(
+                output_shape_hw,
+                zeros,
+                support[kind],
+                kernel=support["kernel"],
+                pixfrac=support["pixfrac"],
+                fillval=support["fillval"],
+                total_exptime=support["total_exptime"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise DrizzleCheckpointError(
+                f"cannot reconstruct support accumulator {kind}: {exc}"
+            ) from exc
+        accumulators.append(acc)
+    return tuple(accumulators)

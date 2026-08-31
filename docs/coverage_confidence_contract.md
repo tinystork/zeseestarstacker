@@ -158,23 +158,30 @@ independent of the native (possibly signed Lanczos) WHT:
 * `N_eff_support = SUP_W1² / SUP_W2` (overflow-resistant), never the native
   estimator N_eff and never the signed WHT.
 
-Persistence is an **isolated additive sidecar** (`<output>/drizzle_support/`
-`sup_w1.npy` + `sup_w2.npy` + a `manifest.json` carrying `schema`,
-`generation`, `frame_count`), written atomically (arrays first, manifest last
-as the commit point) after a native checkpoint commit, reopened via
-`DrizzleAccumulator.from_native_state` on resume.  The sidecar is bound to the
-exact native checkpoint generation/frame_count; a missing manifest is the only
-legacy signal, while a generation/frame_count mismatch or a corrupt/partial
-sidecar fails closed (never mixes new native SCI/WHT with stale support).  The
-native `.m3d_checkpoint` format/contract is unchanged.  A legacy Drizzle
-checkpoint without the sidecar resumes native SCI/WHT unchanged and marks
-confidence unavailable (diagnostic logged, never fabricated).  Failed-start
-cleanup and orphan detection include the `drizzle_support` directory (both
-freshly-created and pre-existing directories).
+Persistence belongs to the **native Drizzle checkpoint transaction**.  The
+optional additive schema-v1 `support` field in `.m3d_checkpoint/checkpoint.json`
+references generation-unique `support_w1` / `support_w2` float32 artifacts with
+the same shape, size and SHA-256 descriptors as native channel artifacts.  The
+writer snapshots and validates both positive arrays before writing anything,
+writes native SCI/WHT and support artifacts under the same generation, then
+publishes all of them through the existing `checkpoint.json` atomic replace —
+the sole commit point.  A support write/validation failure removes only that
+attempt's generation files and leaves the previous manifest and generation
+authoritative and resumable.
+
+The reader validates both support descriptors and artifacts before exposing any
+reconstructed state, then rebuilds the two square-kernel accumulators with
+`DrizzleAccumulator.from_native_state`.  Missing top-level `support` is the only
+legacy signal: native SCI/WHT resumes unchanged with confidence unavailable.
+Present-but-partial/corrupt/mixed-generation support fails closed.  Continuation
+cannot drop committed support or fabricate support for a legacy run, and
+SUP_W1/SUP_W2 cannot roll back.  No separate `drizzle_support` directory or
+second commit point exists.
 
 Tests: `tests/test_coverage_drizzle.py` (kernel parity incl. signed Lanczos,
-decomposition determinism, N_eff, legacy reopen).
+decomposition determinism, N_eff, native transaction roundtrip, exact
+Stop→Resume, legacy reopen, support preflight/write failure and orphan cleanup).
 
-*Prepared by Coco (COV-01A + COV-01C). No production code changes outside the
-isolated core module, the classic/drizzle backend wiring, and their focused
-tests + this contract doc.*
+*Prepared for COV-01A/COV-01C and closed transactionally in COV-01C REWORK R2.
+No production code changes outside the isolated core module, the
+classic/drizzle backend wiring, and their focused tests + this contract doc.*
