@@ -3126,3 +3126,151 @@ def test_canonical_run_config_captures_execution_context(tmp_path):
     assert cfg.execution.get("input_folder") == "/tmp/in"
     assert cfg.execution.get("output_folder") == str(out)
     assert cfg.execution.get("output_filename") == "final.fit"
+
+
+# ---------------------------------------------------------------------------
+# COV-01B R4: real support Stop->Resume equivalence + quality-on decomposition
+# ---------------------------------------------------------------------------
+
+def _run_support_batch(stack, img, scores, mask, src):
+    item = (img, fits.Header(), scores, None, mask)
+    stacked, hdr, cov = stack._stack_batch([item], 1, 1)
+    assert stacked is not None
+    stack._current_batch_paths = [src]
+    stack._combine_batch_result(stacked, hdr, cov)
+
+
+def test_support_stop_resume_equivalence(tmp_path):
+    shape = (4, 5, 3)
+    rng = np.random.default_rng(42)
+    imgs = [(rng.random(shape) * 100.0).astype(np.float32) for _ in range(3)]
+    mask = np.ones((4, 5), dtype=bool)
+    scores = {"snr": 1.0, "stars": 0.0}
+
+    src_files = []
+    for i in range(3):
+        f = tmp_path / f"src_{i}.fits"
+        _write_file(f, i + 1)
+        src_files.append(str(f))
+    session = build_session(tmp_path, n_sources=0)
+    session["sources"] = [_stat_identity(f) for f in src_files]
+    session["plan"] = {"sources": session["sources"], "decomposition": [1, 1, 1]}
+
+    # uninterrupted: 3 singleton batches
+    full = make_resume_stack(tmp_path / "full", stacking_mode="mean")
+    bind_session(full, session)
+    assert full._initialize_classic_sumw_accumulators(shape) is True
+    assert full._support_state_available is True
+    for i in range(3):
+        _run_support_batch(full, imgs[i], scores, mask, src_files[i])
+    full_sum = np.array(full.cumulative_sum_memmap, copy=True)
+    full_wht = np.array(full.cumulative_wht_memmap, copy=True)
+    full_sup1 = np.array(full.coverage_sup_w1_memmap, copy=True)
+    full_sup2 = np.array(full.coverage_sup_w2_memmap, copy=True)
+
+    # checkpoint after 2 exposures, then reopen and add the third
+    part = make_resume_stack(tmp_path / "part", stacking_mode="mean")
+    bind_session(part, session)
+    assert part._initialize_classic_sumw_accumulators(shape) is True
+    for i in (0, 1):
+        _run_support_batch(part, imgs[i], scores, mask, src_files[i])
+
+    reopened = make_resume_stack(tmp_path / "part", stacking_mode="mean")
+    bind_session(reopened, session)
+    ok, reason = reopened._validate_and_open_resume(shape)
+    assert ok is True, reason
+    assert reopened._support_state_available is True
+    # the reopened support arrays are the persisted arrays (non-zero prefix)
+    assert np.any(reopened.coverage_sup_w1_memmap != 0)
+    assert np.any(reopened.coverage_sup_w2_memmap != 0)
+    assert np.array_equal(reopened.coverage_sup_w1_memmap, part.coverage_sup_w1_memmap)
+    assert np.array_equal(reopened.coverage_sup_w2_memmap, part.coverage_sup_w2_memmap)
+
+    reopened.stacked_batches_count = reopened._resume_pending_count
+    _run_support_batch(reopened, imgs[2], scores, mask, src_files[2])
+
+    reopened_sum = np.array(reopened.cumulative_sum_memmap, copy=True)
+    reopened_wht = np.array(reopened.cumulative_wht_memmap, copy=True)
+    reopened_sup1 = np.array(reopened.coverage_sup_w1_memmap, copy=True)
+    reopened_sup2 = np.array(reopened.coverage_sup_w2_memmap, copy=True)
+
+    # exact equivalence (same ordered per-exposure accumulation, float64)
+    assert np.array_equal(reopened_sum, full_sum)
+    assert np.array_equal(reopened_wht, full_wht)
+    assert np.array_equal(reopened_sup1, full_sup1)
+    assert np.array_equal(reopened_sup2, full_sup2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        full_neff = full_sup1 * full_sup1 / full_sup2
+        reopened_neff = reopened_sup1 * reopened_sup1 / reopened_sup2
+    assert np.allclose(reopened_neff, full_neff, rtol=1e-6, atol=1e-6)
+
+    for s in (full, part, reopened):
+        close_mm(s.cumulative_sum_memmap)
+        close_mm(s.cumulative_wht_memmap)
+        close_mm(s.coverage_sup_w1_memmap)
+        close_mm(s.coverage_sup_w2_memmap)
+
+
+@pytest.mark.parametrize("weighting_method", ["none", "variance", "fwhm"])
+def test_quality_weighted_singleton_vs_multi_decomposition(tmp_path, weighting_method):
+    shape = (4, 5, 3)
+    rng = np.random.default_rng(7)
+    imgs = [(rng.random(shape) * 100.0).astype(np.float32) for _ in range(3)]
+    mask = np.ones((4, 5), dtype=bool)
+    scores = [
+        {"snr": 5.0, "stars": 2.0},
+        {"snr": 1.0, "stars": 10.0},
+        {"snr": 3.0, "stars": 1.0},
+    ]
+
+    def make_stack(name):
+        s = make_resume_stack(
+            tmp_path / name,
+            stacking_mode="mean",
+            use_quality_weighting=True,
+            weighting_method=weighting_method,
+            max_hq_mem=1_000_000_000,
+            max_stack_workers=1,
+            reference_header_for_wcs=None,
+            reference_wcs_object=None,
+        )
+        s._quality_reference_scale = 1.0  # pinned finite positive q_ref
+        return s
+
+    def item(i):
+        return (imgs[i], fits.Header(), scores[i], None, mask)
+
+    multi = make_stack("multi")
+    assert multi._initialize_classic_sumw_accumulators(shape) is True
+    stacked, hdr, cov = multi._stack_batch([item(0), item(1), item(2)], 1, 1)
+    assert stacked is not None
+    multi._current_batch_paths = []
+    multi._combine_batch_result(stacked, hdr, cov)
+
+    sgl = make_stack("sgl")
+    assert sgl._initialize_classic_sumw_accumulators(shape) is True
+    for i in range(3):
+        st2, h2, c2 = sgl._stack_batch([item(i)], 1, 1)
+        assert st2 is not None
+        sgl._current_batch_paths = []
+        sgl._combine_batch_result(st2, h2, c2)
+
+    assert np.array_equal(multi.coverage_sup_w1_memmap, sgl.coverage_sup_w1_memmap)
+    assert np.array_equal(multi.coverage_sup_w2_memmap, sgl.coverage_sup_w2_memmap)
+
+    # SCI/WHT unchanged by support tracking: support-off run on identical inputs
+    off = make_stack("off")
+    assert off._initialize_classic_sumw_accumulators(shape) is True
+    off._support_state_available = False
+    st3, h3, c3 = off._stack_batch([item(0), item(1), item(2)], 1, 1)
+    assert st3 is not None
+    off._current_batch_paths = []
+    off._combine_batch_result(st3, h3, c3)
+    assert np.array_equal(multi.cumulative_sum_memmap, off.cumulative_sum_memmap)
+    assert np.array_equal(multi.cumulative_wht_memmap, off.cumulative_wht_memmap)
+
+    for s in (multi, sgl, off):
+        close_mm(s.cumulative_sum_memmap)
+        close_mm(s.cumulative_wht_memmap)
+        close_mm(s.coverage_sup_w1_memmap)
+        close_mm(s.coverage_sup_w2_memmap)
