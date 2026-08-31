@@ -11310,14 +11310,43 @@ class SeestarQueuedStacker:
         self._support_unavailable_reason = None
 
     def _support_manifest_metadata(self):
-        """Canonical support-state metadata for the resume manifest, or None."""
+        """Canonical support-state metadata for the resume manifest, or None.
+
+        While support is available, validates both accumulators (existence,
+        identical 2-D shape matching the scientific memmap shape, float64 dtype,
+        finiteness/non-negativity) before publishing metadata; any mismatch
+        raises (never publishes internally inconsistent / legacy metadata).
+        """
         w1 = getattr(self, "coverage_sup_w1_memmap", None)
+        w2 = getattr(self, "coverage_sup_w2_memmap", None)
         if not getattr(self, "_support_state_available", False):
             return None
-        if w1 is None or getattr(self, "coverage_sup_w2_memmap", None) is None:
+        if w1 is None or w2 is None:
             raise _ResumeCheckpointError(
                 "support state is available but support accumulators are missing "
                 "(refusing to publish a legacy/no-confidence manifest)"
+            )
+        if w1.ndim != 2 or w2.ndim != 2 or w1.shape != w2.shape:
+            raise _ResumeCheckpointError(
+                f"support accumulator shape mismatch: w1={w1.shape} w2={w2.shape}"
+            )
+        mem_shape = getattr(self, "memmap_shape", None)
+        if mem_shape is not None and tuple(w1.shape) != tuple(mem_shape[:2]):
+            raise _ResumeCheckpointError(
+                f"support shape {w1.shape} != scientific shape "
+                f"{tuple(mem_shape[:2])}"
+            )
+        if w1.dtype != _SUPPORT_DTYPE or w2.dtype != _SUPPORT_DTYPE:
+            raise _ResumeCheckpointError(
+                f"support dtype mismatch: {w1.dtype}/{w2.dtype} != {_SUPPORT_DTYPE}"
+            )
+        if not (np.all(np.isfinite(w1)) and np.all(np.isfinite(w2))):
+            raise _ResumeCheckpointError(
+                "support accumulators contain non-finite values"
+            )
+        if np.any(w1 < 0) or np.any(w2 < 0):
+            raise _ResumeCheckpointError(
+                "support accumulators contain negative values"
             )
         return {
             "schema": _SUPPORT_STATE_SCHEMA,
@@ -11344,21 +11373,26 @@ class SeestarQueuedStacker:
                                                 pour ce lot spécifique.
         """
         # COV-01B: the support payload travels bound to this exact batch result
-        # (attached to ``stack_info_header`` by ``_stack_batch``).
-        support_payload = getattr(stack_info_header, "_coverage_support_payload", None)
-        # COV-01B fail-closed: a batch produced by _stack_batch must carry a
-        # support payload when support is being tracked.  (Direct
-        # _combine_batch_result callers — legacy/test paths — have no
-        # ``_coverage_support_payload`` attribute and are not subject to this
-        # gate.)
-        if (
-            self._support_state_available
-            and hasattr(stack_info_header, "_coverage_support_payload")
-            and support_payload is None
-        ):
-            raise _ResumeCheckpointError(
-                "support state is available but this batch carries no support "
-                "payload (fail closed before any scientific mutation)"
+        # (attached to ``stack_info_header`` by ``_stack_batch``).  When support
+        # is being tracked, a missing or malformed payload fails closed before
+        # any close/resize/dirty/SUM-WHT/SUP/counter mutation.
+        if self._support_state_available:
+            if not hasattr(stack_info_header, "_coverage_support_payload"):
+                raise _ResumeCheckpointError(
+                    "support state is available but this batch carries no "
+                    "support payload attribute (fail closed before mutation)"
+                )
+            support_payload = stack_info_header._coverage_support_payload
+            if support_payload is None or not isinstance(
+                support_payload, (list, tuple)
+            ):
+                raise _ResumeCheckpointError(
+                    "support state is available but the support payload is "
+                    "missing or malformed (fail closed before mutation)"
+                )
+        else:
+            support_payload = getattr(
+                stack_info_header, "_coverage_support_payload", None
             )
         logger.debug(
             f"DEBUG QM [_combine_batch_result SUM/W]: Début accumulation lot classique avec carte de couverture 2D."
@@ -11427,6 +11461,13 @@ class SeestarQueuedStacker:
             logger.debug(
                 "DEBUG QM [_combine_batch_result]: incoming image larger than memmap, reallocating"
             )
+            # COV-01B: reject a resize while support is being tracked BEFORE
+            # closing any live handle (support accumulators would be orphaned).
+            if self._support_state_available:
+                raise _ResumeCheckpointError(
+                    "refusing to resize SUM/WHT memmaps while positive support "
+                    "is being tracked (support would be orphaned)"
+                )
             self._close_memmaps()
             self._create_sum_wht_memmaps(incoming_shape_hw)
 

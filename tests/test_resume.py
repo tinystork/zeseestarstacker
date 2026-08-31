@@ -655,6 +655,9 @@ def test_ledger_matching_identity_is_skipped(tmp_path):
 def _do_batch(stack, idx, v, w, src_file, nimages=1, totexp=1.0):
     stack.stacked_batches_count += 1
     stack._current_batch_paths = [src_file]
+    # Direct-call unit fixture: SUM/WHT accumulation only; mark support
+    # unavailable so the fail-closed support gate does not apply.
+    stack._support_state_available = False
     hdr = fits.Header()
     hdr["NIMAGES"] = nimages
     hdr["TOTEXP"] = totexp
@@ -1163,6 +1166,7 @@ def test_dirty_write_failure_aborts_before_mutation(tmp_path, monkeypatch):
         stack._checkpoint_mark_dirty()
 
     # _combine_batch_result aborts before either accumulator mutates.
+    stack._support_state_available = False
     stack._combine_batch_result(v, hdr, w)
 
     assert stack.stop_processing is True
@@ -1202,6 +1206,7 @@ def test_clean_commit_failure_leaves_dirty(tmp_path, monkeypatch):
     hdr["TOTEXP"] = 1.0
     # _combine_batch_result surfaces the checkpoint failure (stops processing);
     # the exception is already exercised at the _checkpoint_mark_dirty level.
+    stack._support_state_available = False
     stack._combine_batch_result(v, hdr, w)
     assert stack.stop_processing is True
 
