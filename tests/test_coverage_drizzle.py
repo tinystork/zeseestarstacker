@@ -158,6 +158,89 @@ def test_support_n_eff_and_legacy_load(tmp_path):
     assert neff.shape == shape
     assert np.all(np.isfinite(neff))
     assert np.all(neff >= 0.0)
-    # legacy: no sidecar -> (None, None)
-    w1, w2 = stack._load_drizzle_support(shape, 3)
+    # legacy: no sidecar manifest -> (None, None)
+    w1, w2 = stack._load_drizzle_support(1, 3, shape)
     assert w1 is None and w2 is None
+
+
+# ---------------------------------------------------------------------------
+# REWORK R1: persistence / Stop-Resume / stale / cleanup witnesses
+# ---------------------------------------------------------------------------
+
+import pathlib
+import os as _os
+
+from seestar.core.drizzle_checkpoint import DrizzleCheckpointError
+
+
+def test_support_persist_reopen_no_orphan(tmp_path):
+    shape = (6, 7)
+    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    _add_frames(stack, shape, 3, seed=9)
+    w1_before = np.asarray(stack.drizzle_sup_w1.wht, dtype=np.float64).copy()
+    w2_before = np.asarray(stack.drizzle_sup_w2.wht, dtype=np.float64).copy()
+    stack._persist_drizzle_support(1, 3)
+    sup_dir = pathlib.Path(tmp_path) / "drizzle_support"
+    assert (sup_dir / "sup_w1.npy").exists()
+    assert (sup_dir / "sup_w2.npy").exists()
+    assert (sup_dir / "manifest.json").exists()
+    # no temp orphan files remain
+    orphans = [n for n in _os.listdir(sup_dir) if ".tmp" in n or n.startswith(".sup-")]
+    assert orphans == []
+    # reopen via the actual load path -> exact equivalence
+    w1, w2 = stack._load_drizzle_support(1, 3, shape)
+    assert w1 is not None and w2 is not None
+    assert np.array_equal(np.asarray(w1.wht, dtype=np.float64), w1_before)
+    assert np.array_equal(np.asarray(w2.wht, dtype=np.float64), w2_before)
+
+
+def test_support_stale_generation_fails(tmp_path):
+    shape = (6, 7)
+    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    _add_frames(stack, shape, 2, seed=10)
+    stack._persist_drizzle_support(1, 2)
+    with pytest.raises(DrizzleCheckpointError):
+        stack._load_drizzle_support(2, 2, shape)
+
+
+def test_support_frame_count_mismatch_fails(tmp_path):
+    shape = (6, 7)
+    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    _add_frames(stack, shape, 2, seed=11)
+    stack._persist_drizzle_support(1, 2)
+    with pytest.raises(DrizzleCheckpointError):
+        stack._load_drizzle_support(1, 3, shape)
+
+
+def test_support_corrupt_manifest_fails(tmp_path):
+    shape = (6, 7)
+    stack = _drizzle_stack(tmp_path, shape, "square", support=True)
+    _add_frames(stack, shape, 2, seed=12)
+    stack._persist_drizzle_support(1, 2)
+    mp = pathlib.Path(tmp_path) / "drizzle_support" / "manifest.json"
+    mp.write_text("{corrupt json", encoding="utf-8")
+    with pytest.raises(DrizzleCheckpointError):
+        stack._load_drizzle_support(1, 2, shape)
+
+
+def test_support_cleanup_preserves_pre_existing(tmp_path):
+    out = pathlib.Path(tmp_path) / "out"
+    sup_dir = out / "drizzle_support"
+    sup_dir.mkdir(parents=True)
+    sentinel = sup_dir / "user_sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    stack = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    stack.output_folder = str(out)
+    # snapshot the pre-existing dir + sentinel, then simulate an attempt-created file
+    stack._attempt_preexisting_state = set()
+    stack._attempt_preexisting_state.add(_os.path.normcase(_os.path.abspath(str(sup_dir))))
+    stack._attempt_preexisting_state.add(_os.path.normcase(_os.path.abspath(str(sentinel))))
+    (sup_dir / "sup_w1.npy").write_bytes(b"attempt")
+    (sup_dir / "sup_w2.npy").write_bytes(b"attempt")
+    (sup_dir / "manifest.json").write_bytes(b"{}")
+    stack._remove_attempt_created_state()
+    # attempt-created files removed; pre-existing sentinel preserved
+    assert sentinel.exists()
+    assert not (sup_dir / "sup_w1.npy").exists()
+    assert not (sup_dir / "sup_w2.npy").exists()
+    assert not (sup_dir / "manifest.json").exists()

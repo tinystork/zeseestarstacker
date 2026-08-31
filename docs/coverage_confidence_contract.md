@@ -159,12 +159,18 @@ independent of the native (possibly signed Lanczos) WHT:
   estimator N_eff and never the signed WHT.
 
 Persistence is an **isolated additive sidecar** (`<output>/drizzle_support/`
-`sup_w1.npy` + `sup_w2.npy`), written atomically after a native checkpoint
-commit, reopened via `DrizzleAccumulator.from_native_state` on resume.  The
+`sup_w1.npy` + `sup_w2.npy` + a `manifest.json` carrying `schema`,
+`generation`, `frame_count`), written atomically (arrays first, manifest last
+as the commit point) after a native checkpoint commit, reopened via
+`DrizzleAccumulator.from_native_state` on resume.  The sidecar is bound to the
+exact native checkpoint generation/frame_count; a missing manifest is the only
+legacy signal, while a generation/frame_count mismatch or a corrupt/partial
+sidecar fails closed (never mixes new native SCI/WHT with stale support).  The
 native `.m3d_checkpoint` format/contract is unchanged.  A legacy Drizzle
 checkpoint without the sidecar resumes native SCI/WHT unchanged and marks
 confidence unavailable (diagnostic logged, never fabricated).  Failed-start
-cleanup and orphan detection include the `drizzle_support` directory.
+cleanup and orphan detection include the `drizzle_support` directory (both
+freshly-created and pre-existing directories).
 
 Tests: `tests/test_coverage_drizzle.py` (kernel parity incl. signed Lanczos,
 decomposition determinism, N_eff, legacy reopen).
