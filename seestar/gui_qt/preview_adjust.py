@@ -19,10 +19,15 @@ numpy so the Qt shell never imports the engine or the Tk tooling.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Dict, Optional
 
 from PySide6.QtGui import QImage
+
+from seestar.utils.phi_trace import phi_trace_enabled, phi_trace_stage
+
+logger = logging.getLogger(__name__)
 
 # Display-stretch modes (UI vocabulary, backend-agnostic).  ``auto`` is a
 # Qt-only convenience mode (Tk has an "Auto Stretch" *button* that computes
@@ -382,6 +387,16 @@ def apply_preview_adjustments(
         return source.copy()
 
     f = arr.astype(np.float64) / 255.0
+    if phi_trace_enabled():
+        phi_trace_stage(
+            logger,
+            route="qt",
+            stage="stretch_input",
+            arr=f,
+            stretch=stretch,
+            bp=f"{black_point:g}",
+            wp=f"{white_point:g}",
+        )
     f = _apply_wb(np, f, wb)
     f = _apply_stretch(np, f, stretch, black_point, white_point)
     f = np.clip(f, 0.0, 1.0)
@@ -389,6 +404,14 @@ def apply_preview_adjustments(
     f = np.clip(f, 0.0, 1.0)
     f = _apply_brightness_contrast_saturation(np, f, brightness, contrast, saturation)
     out = np.clip(np.rint(f * 255.0), 0, 255).astype(np.uint8)
+    if phi_trace_enabled():
+        phi_trace_stage(
+            logger,
+            route="qt",
+            stage="stretch_output",
+            arr=out,
+            stretch=stretch,
+        )
     return _array_to_qimage(np, out)
 
 

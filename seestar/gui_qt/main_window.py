@@ -47,6 +47,7 @@ real activation stays explicit via ``backend_mode``/``backend_factory``.
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import threading
 import time
@@ -188,6 +189,9 @@ from .summary_payload import SummaryPayload, derive_terminal_status
 from .resources import load_empty_preview_pixmap, load_window_icon
 
 from seestar import resume_locator
+from seestar.utils.phi_trace import phi_trace_enabled, phi_trace_stage
+
+logger = logging.getLogger(__name__)
 
 # Real product window-title *name* (the Tk ``localization`` "title" key, en/fr
 # identical).  The full default window title appends the lazily-read package
@@ -924,6 +928,7 @@ class MainWindow(QMainWindow):
         self._anchor_hi = None
         self._analysis_generation: int = 0
         self._wb_only_revision: int = 0
+        self._phi_trace_ctx = None
         # Preview-resolution cycle factor (Tk ``preview_res_button`` parity,
         # M17).  Display-only GUI state; never touches the engine or
         # ``_preview_source``.  Default 1 (native) — see the module comment.
@@ -3042,6 +3047,37 @@ class MainWindow(QMainWindow):
         identity = self._derive_preview_identity(payload)
         preview_mode = self._derive_preview_mode(payload)
 
+        if phi_trace_enabled():
+            src_label = self._payload_preview_source(payload) or ""
+            identity_label = (
+                f"{identity[0]}:{identity[1]}" if identity else "none"
+            )
+            res_label = f"x1/{self._effective_preview_downsample_factor()}"
+            seq = getattr(payload, "image_count", None)
+            if seq is None:
+                seq = getattr(payload, "current_batch", None)
+            arr0 = payload.data
+            if isinstance(arr0, (tuple, list)) and len(arr0) >= 1:
+                arr0 = arr0[0]
+            shape = getattr(arr0, "shape", None)
+            shape_label = "x".join(str(s) for s in shape) if shape else "-"
+            self._phi_trace_ctx = {
+                "src": src_label,
+                "identity": identity_label,
+                "res": res_label,
+                "shape": shape_label,
+            }
+            phi_trace_stage(
+                logger,
+                route=preview_mode,
+                stage="payload_arrive",
+                arr=None,
+                **self._phi_trace_ctx,
+                seq=int(seq) if seq is not None else -1,
+            )
+        else:
+            self._phi_trace_ctx = None
+
         option_a = _is_option_a_preview_payload(payload.data)
         if option_a:
             # Option-A: derive the display source from the adaptive-anchor mapped
@@ -3298,6 +3334,16 @@ class MainWindow(QMainWindow):
         self._wb_only_float = apply_wb_float(self._pristine_float, self._wb)
         self._wb_only_wb = self._wb
         self._wb_only_revision += 1
+        if phi_trace_enabled():
+            ctx = self._phi_trace_ctx or {}
+            phi_trace_stage(
+                logger,
+                route="qt",
+                stage="wb_only",
+                arr=self._wb_only_float,
+                wb=f"{self._wb[0]:g},{self._wb[1]:g},{self._wb[2]:g}",
+                **ctx,
+            )
         return self._wb_only_float
 
     def _ingest_option_a_preview(self, data):
@@ -3315,6 +3361,15 @@ class MainWindow(QMainWindow):
         raw = extract_raw_linear(data)
         if raw is None:
             return None
+        if phi_trace_enabled():
+            ctx = self._phi_trace_ctx or {}
+            phi_trace_stage(
+                logger,
+                route="qt",
+                stage="raw_source",
+                arr=raw,
+                **ctx,
+            )
         if self._anchor_lo is None or self._anchor_hi is None:
             self._anchor_lo, self._anchor_hi = compute_anchors(raw)
         else:
@@ -3324,6 +3379,17 @@ class MainWindow(QMainWindow):
         mapped = map_raw_linear(raw, self._anchor_lo, self._anchor_hi)
         if mapped is None:
             return None
+        if phi_trace_enabled():
+            ctx = self._phi_trace_ctx or {}
+            phi_trace_stage(
+                logger,
+                route="qt",
+                stage="anchor_mapped",
+                arr=mapped,
+                lo=f"{self._anchor_lo:.6g}",
+                hi=f"{self._anchor_hi:.6g}",
+                **ctx,
+            )
         self._raw_linear = raw
         self._pristine_float = mapped
         # New mapped source: the WB-only buffer is stale until re-derived.
@@ -4223,6 +4289,24 @@ class MainWindow(QMainWindow):
             return
         self._histogram_model = result
         self._histogram_model_revision = revision
+        if phi_trace_enabled():
+            ctx = self._phi_trace_ctx or {}
+            stats = result.get("stats") or {}
+            extra = {}
+            for ch in result.get("channels") or []:
+                ch_stats = stats.get(ch) or {}
+                if ch_stats:
+                    extra[f"{ch}_max"] = f"{float(ch_stats.get('max', float('nan'))):.6g}"
+                    extra[f"{ch}_med"] = f"{float(ch_stats.get('median', float('nan'))):.6g}"
+            phi_trace_stage(
+                logger,
+                route="qt",
+                stage="histogram_output",
+                arr=None,
+                bins=int(result.get("bins", 0) or 0),
+                **extra,
+                **ctx,
+            )
         for view in self._histogram_views():
             # Both surfaces receive the exact same authoritative model object.
             view.set_model(result)

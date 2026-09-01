@@ -66,6 +66,7 @@ from seestar.utils.wcs_utils import (
     write_wcs_to_fits_inplace,
     _sanitize_continue_as_string,
 )
+from seestar.utils.phi_trace import phi_trace_stage
 try:
     from ..enhancement.reproject_utils import (
         ensure_wcs_pixel_shape,
@@ -5299,6 +5300,16 @@ class SeestarQueuedStacker:
             # min/max normalization.  It travels as the second element of the
             # preview tuple and is display-analysis data only (never science).
             raw_linear_fullres = avg_img_fullres.astype(np.float32)
+            phi_trace_stage(
+                logger,
+                route="classic",
+                stage="source",
+                arr=avg_img_fullres,
+                factor=1,
+                src="SUM/W",
+                src_id=id(self.cumulative_sum_memmap),
+                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+            )
             min_val_final = np.nanmin(avg_img_fullres)
             max_val_final = np.nanmax(avg_img_fullres)
             preview_data_normalized = avg_img_fullres  # Par défaut si déjà 0-1
@@ -5333,6 +5344,17 @@ class SeestarQueuedStacker:
             if eff_factor > 4:
                 eff_factor = 4
 
+            phi_trace_stage(
+                logger,
+                route="classic",
+                stage="pre_resize",
+                arr=raw_linear_fullres,
+                factor=eff_factor,
+                src="SUM/W",
+                src_id=id(self.cumulative_sum_memmap),
+                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+            )
+
             if eff_factor > 1:
                 try:
                     h, w = preview_data_normalized.shape[
@@ -5362,6 +5384,17 @@ class SeestarQueuedStacker:
                         f"ERREUR QM [_update_preview_sum_w]: Échec réduction taille APERÇU: {e_resize}"
                     )
                     # Continuer avec l'image pleine résolution si le resize échoue
+
+            phi_trace_stage(
+                logger,
+                route="classic",
+                stage="post_resize",
+                arr=raw_linear_to_send,
+                factor=eff_factor,
+                src="SUM/W",
+                src_id=id(self.cumulative_sum_memmap),
+                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+            )
 
             # Préparation du header et du nom pour le callback
             header_copy = (
@@ -5449,6 +5482,16 @@ class SeestarQueuedStacker:
             return
 
         try:
+            phi_trace_stage(
+                logger,
+                route="legacy_drizzle",
+                stage="source",
+                arr=self.cumulative_drizzle_data,
+                factor=int(getattr(self, "preview_downsample_factor", 2) or 2),
+                src="LegacyDrizzle",
+                src_id=id(self.cumulative_drizzle_data),
+                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+            )
             # Utiliser les données et le header cumulatifs Drizzle
             data_to_send = (
                 self.cumulative_drizzle_data.copy(),
@@ -21869,6 +21912,16 @@ class SeestarQueuedStacker:
             # of the Drizzle ``finalize("divide")`` HWC stack BEFORE the 1%/99%
             # percentile normalization.  Display-analysis data only.
             raw_linear = preview_hwc.copy()
+            phi_trace_stage(
+                logger,
+                route="drizzle",
+                stage="source",
+                arr=preview_hwc,
+                factor=1,
+                src="Drizzle",
+                src_id=id(self.drizzle_accumulators),
+                seq=int(getattr(self, "_drizzle_frame_count", 0) or 0),
+            )
 
             # Percentile stretch to [0,1] for display.
             with np.errstate(all="ignore"):
@@ -21903,6 +21956,16 @@ class SeestarQueuedStacker:
             except Exception:
                 eff_factor = 2
             eff_factor = max(1, min(4, eff_factor))
+            phi_trace_stage(
+                logger,
+                route="drizzle",
+                stage="pre_resize",
+                arr=raw_linear_to_send,
+                factor=eff_factor,
+                src="Drizzle",
+                src_id=id(self.drizzle_accumulators),
+                seq=int(getattr(self, "_drizzle_frame_count", 0) or 0),
+            )
             if eff_factor > 1:
                 h, w = preview_to_send.shape[:2]
                 new_size = (max(1, w // eff_factor), max(1, h // eff_factor))
@@ -21912,6 +21975,17 @@ class SeestarQueuedStacker:
                 raw_linear_to_send = cv2.resize(
                     raw_linear_to_send, new_size, interpolation=cv2.INTER_AREA
                 )
+
+            phi_trace_stage(
+                logger,
+                route="drizzle",
+                stage="post_resize",
+                arr=raw_linear_to_send,
+                factor=eff_factor,
+                src="Drizzle",
+                src_id=id(self.drizzle_accumulators),
+                seq=int(getattr(self, "_drizzle_frame_count", 0) or 0),
+            )
 
             # Store the DISPLAY artifact so ``refresh_preview`` can serve it.
             self.cumulative_drizzle_data = preview_to_send
