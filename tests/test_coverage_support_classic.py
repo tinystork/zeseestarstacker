@@ -528,3 +528,32 @@ def test_support_tracking_no_sci_change(tmp_path):
     _run_batch(without, items)
     assert np.array_equal(with_sup.cumulative_sum_memmap, without.cumulative_sum_memmap)
     assert np.array_equal(with_sup.cumulative_wht_memmap, without.cumulative_wht_memmap)
+
+
+def test_singleton_vs_multi_decomposition_with_taper(tmp_path):
+    """COV-06 BLOCKER C: singleton and multi share identical footprint taper."""
+    rng = np.random.default_rng(13)
+    shape = (8, 8, 3)
+    mask = np.ones((8, 8), dtype=bool)
+    imgs = _make_images(rng, 3, shape)
+    items = [_item(im, mask) for im in imgs]
+
+    one = _prod_stack(tmp_path, "one_t", shape, "mean", "none")
+    one.apply_batch_feathering = True
+    _run_batch(one, items)
+
+    sgl = _prod_stack(tmp_path, "sgl_t", shape, "mean", "none")
+    sgl.apply_batch_feathering = True
+    for it in items:
+        _run_batch(sgl, [it])
+
+    # support invariant
+    assert np.array_equal(one.coverage_sup_w1_memmap, sgl.coverage_sup_w1_memmap)
+    assert np.array_equal(one.coverage_sup_w2_memmap, sgl.coverage_sup_w2_memmap)
+    # scientific SUM/WHT invariant (same taper applied to num+denom in both)
+    assert np.allclose(
+        one.cumulative_sum_memmap, sgl.cumulative_sum_memmap, rtol=1e-5, atol=1e-5
+    )
+    assert np.allclose(
+        one.cumulative_wht_memmap, sgl.cumulative_wht_memmap, rtol=1e-5, atol=1e-5
+    )

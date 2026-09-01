@@ -587,7 +587,7 @@ class SettingsManager:
                 gui_instance,
                 "apply_feathering_var",
                 tk.BooleanVar(
-                    value=default_values_from_code.get("apply_feathering", True)
+                    value=default_values_from_code.get("apply_feathering", False)
                 ),
             ).get()
             self.apply_batch_feathering = getattr(
@@ -1345,7 +1345,7 @@ class SettingsManager:
         defaults_dict["photutils_bn_filter_size"] = 11
         defaults_dict["photutils_bn_sigma_clip"] = 3.0
         defaults_dict["photutils_bn_exclude_percentile"] = 95.0
-        defaults_dict["apply_feathering"] = True
+        defaults_dict["apply_feathering"] = False  # COV-06: legacy inverse-WHT feather OFF by default
         defaults_dict["feather_blur_px"] = 256
         defaults_dict["apply_batch_feathering"] = True
         defaults_dict["apply_low_wht_mask"] = False

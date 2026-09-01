@@ -376,6 +376,14 @@ def apply_edge_crop(img_data, crop_percent_decimal):
 ######################################################################################################################################################
 
 def feather_by_weight_map(img, wht, blur_px=256, eps=1e-6, min_gain=0.5, max_gain=2.0): # Ajout min/max_gain
+    """DEPRECATED (COV-06): WHT-derived brightness gain [min_gain, max_gain].
+
+    This legacy inverse-WHT feather brightens low-WHT regions up to max_gain,
+    which the frozen COV invariants forbid.  It is now OFF by default
+    (apply_feathering=False) and retained only for backward compatibility.
+    Prefer the confidence-aware render in
+    ``seestar.enhancement.coverage_render.coverage_aware_render``.
+    """
     print(f"DEBUG [feather_by_weight_map]: Début. ImgS: {img.shape}, WHTS: {wht.shape}, blur: {blur_px}, minG: {min_gain}, maxG: {max_gain}")
     # ... (vérifications initiales img, wht, etc. inchangées) ...
     if img is None or wht is None: return img

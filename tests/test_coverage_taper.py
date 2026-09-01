@@ -178,3 +178,87 @@ def test_mean_flat_field_invariance_with_taper(tmp_path):
     valid = m0 | m1
     # flat field: where support > 0 the mean stays ~const (no centre/edge gain)
     assert np.allclose(stacked[valid], const, rtol=1e-3, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# COV-06 BLOCKER A: symmetric boundary feathering
+# ---------------------------------------------------------------------------
+
+
+def test_all_valid_rect_symmetric_boundaries():
+    m = np.ones((32, 32), bool)
+    t = make_footprint_taper(m, feather_px=5.0, floor=0.0)
+    # four corners equivalent
+    assert abs(t[0, 0] - t[0, 31]) < 1e-6
+    assert abs(t[0, 0] - t[31, 0]) < 1e-6
+    assert abs(t[0, 0] - t[31, 31]) < 1e-6
+    # top == bottom, left == right edge midpoints
+    assert abs(t[0, 16] - t[31, 16]) < 1e-6
+    assert abs(t[16, 0] - t[16, 31]) < 1e-6
+    # centre is interior (unity)
+    assert t[16, 16] == 1.0
+    # boundary is low, not unity
+    assert 0.0 < t[0, 0] < 1.0
+
+
+def test_all_valid_rect_each_edge_low():
+    m = np.ones((40, 40), bool)
+    t = make_footprint_taper(m, feather_px=6.0, floor=0.0)
+    for idx in (0, 20, 39):
+        assert t[0, idx] < 1.0     # top
+        assert t[39, idx] < 1.0    # bottom
+        assert t[idx, 0] < 1.0     # left
+        assert t[idx, 39] < 1.0    # right
+
+
+def test_mask_touching_one_boundary():
+    # footprint touches only the left edge of the image
+    m = np.zeros((40, 40), bool)
+    m[10:30, 0:20] = True
+    t = make_footprint_taper(m, feather_px=4.0, floor=0.0)
+    # left boundary (image edge) feathers, interior right side reaches 1.0
+    assert t[20, 0] < 1.0          # on left image edge -> low
+    assert t[20, 10] == 1.0        # interior -> unity
+    # top and bottom of the footprint also feather (they are true boundaries)
+    assert t[10, 10] < 1.0
+    assert t[29, 10] < 1.0
+
+
+def test_mask_touching_several_boundaries():
+    # footprint touches top and left edges
+    m = np.zeros((40, 40), bool)
+    m[0:20, 0:20] = True
+    t = make_footprint_taper(m, feather_px=4.0, floor=0.0)
+    assert t[0, 0] < 1.0      # corner
+    assert t[0, 10] < 1.0     # top edge
+    assert t[10, 0] < 1.0     # left edge
+    assert t[10, 10] == 1.0   # interior -> unity
+
+
+def test_internal_invalid_island_feathers_inward():
+    m = np.ones((32, 32), bool)
+    m[14:18, 14:18] = False   # internal invalid island
+    t = make_footprint_taper(m, feather_px=4.0, floor=0.0)
+    # pixels adjacent to the island are low (distance 1 -> 1/4)
+    assert t[13, 15] <= 0.26
+    assert t[18, 15] <= 0.26
+    assert t[15, 13] <= 0.26
+    assert t[15, 18] <= 0.26
+    # far interior stays unity
+    assert t[4, 4] == 1.0
+    # the island itself is 0
+    assert t[15, 15] == 0.0
+
+
+def test_fallback_matches_primary_convention(monkeypatch):
+    # ensure the fallback uses the same symmetric boundary convention
+    import seestar.enhancement.weight_utils as wu
+    m = np.ones((24, 24), bool)
+    primary = make_footprint_taper(m, feather_px=4.0, floor=0.0)
+    fallback = wu._footprint_distance_fallback(m)
+    frac = np.clip(fallback / 4.0, 0.0, 1.0)
+    fb_taper = np.where(m, frac, np.float32(0.0)).astype(np.float32)
+    # fallback symmetric at boundaries
+    assert abs(fb_taper[0, 0] - fb_taper[0, 23]) < 1e-4
+    assert abs(fb_taper[0, 0] - fb_taper[23, 0]) < 1e-4
+    assert abs(fb_taper[0, 0] - fb_taper[23, 23]) < 1e-4

@@ -21,11 +21,13 @@ def _footprint_distance_fallback(mask):
 
     Fallback only: scipy.ndimage.distance_transform_edt is the primary path.
     Chamfer 3-4 (two-pass) so the taper still follows the real footprint
-    (never a radial distance from the image centre).
+    (never a radial distance from the image centre).  The mask is padded with
+    invalid support so the array boundary feathers symmetrically on all sides.
     """
-    h, w = mask.shape
+    m = np.pad(mask, 1, constant_values=False)
+    h, w = m.shape
     INF = 1 << 20
-    d = np.where(mask, INF, 0).astype(np.int32)
+    d = np.where(m, INF, 0).astype(np.int32)
     for i in range(1, h):
         up = d[i - 1]
         d[i] = np.minimum(d[i], up + 2)
@@ -40,8 +42,8 @@ def _footprint_distance_fallback(mask):
         d[:, j] = np.minimum(d[:, j], d[:, j - 1] + 2)
     for j in range(w - 2, -1, -1):
         d[:, j] = np.minimum(d[:, j], d[:, j + 1] + 2)
-    d = np.where(mask, d, 0).astype(np.float32) / 2.0
-    return d
+    d = np.where(m, d, 0).astype(np.float32) / 2.0
+    return d[1:-1, 1:-1]
 
 
 def make_footprint_taper(mask, feather_px=8.0, floor=0.0):
@@ -52,6 +54,10 @@ def make_footprint_taper(mask, feather_px=8.0, floor=0.0):
     feather_px pixels near the actual transformed support boundary, and 0.0
     outside.  Translation/rotation invariant; never a radial distance from the
     image centre.
+
+    The mask is padded with invalid (False) support before the distance
+    transform, so a footprint that fills the array feathers symmetrically from
+    all four boundaries (the array exterior is a support boundary).
     """
     m = np.asarray(mask)
     if m.dtype != np.bool_:
@@ -72,7 +78,8 @@ def make_footprint_taper(mask, feather_px=8.0, floor=0.0):
     try:
         from scipy.ndimage import distance_transform_edt
 
-        dist = distance_transform_edt(m)
+        padded = np.pad(m, 1, constant_values=False)
+        dist = distance_transform_edt(padded)[1:-1, 1:-1]
     except Exception:
         dist = _footprint_distance_fallback(m)
 

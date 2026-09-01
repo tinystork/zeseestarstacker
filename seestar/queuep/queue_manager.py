@@ -250,7 +250,8 @@ except Exception:
             return np.zeros(m.shape, dtype=np.float32)
         from scipy.ndimage import distance_transform_edt
 
-        dist = distance_transform_edt(m)
+        padded = np.pad(m, 1, constant_values=False)
+        dist = distance_transform_edt(padded)[1:-1, 1:-1]
         frac = np.clip(dist.astype(np.float32) / float(feather_px), 0.0, 1.0)
         return np.where(m, floor + (1.0 - floor) * frac, np.float32(0.0)).astype(
             np.float32
@@ -11895,28 +11896,51 @@ class SeestarQueuedStacker:
 
     def _footprint_taper_map(self, mask):
         # COV-02: per-exposure footprint-following taper.
-        return make_footprint_taper(
-            np.asarray(mask, dtype=bool),
-            feather_px=float(getattr(self, 'support_taper_px', 8.0)),
-            floor=float(getattr(self, 'support_taper_floor', 0.0)),
-        )
+        # COV-06 CONDITION F: cache by mask identity within one batch so the
+        # same exposure's taper is computed once and reused by both scientific
+        # weighting and support accumulation (no duplicate per-frame EDT).
+        cache = getattr(self, "_taper_cache", None)
+        if cache is None:
+            cache = {}
+            self._taper_cache = cache
+        m = np.asarray(mask, dtype=bool)
+        key = (id(m), m.shape)
+        taper = cache.get(key)
+        if taper is None:
+            taper = make_footprint_taper(
+                m,
+                feather_px=float(getattr(self, 'support_taper_px', 8.0)),
+                floor=float(getattr(self, 'support_taper_floor', 0.0)),
+            )
+            cache[key] = taper
+        return taper
 
     def _derive_neff_support_for_render(self):
-        """Return N_eff_support (2-D float32) for the final render, or None."""
+        """Return N_eff_support (2-D float32) for the final render, or None.
+
+        Uses Classic positive-support memmaps when available, otherwise the
+        Drizzle positive-support accumulator pair (never the signed native
+        Lanczos WHT).  Returns None when no positive support exists.
+        """
         w1 = getattr(self, "coverage_sup_w1_memmap", None)
         w2 = getattr(self, "coverage_sup_w2_memmap", None)
-        if w1 is None or w2 is None:
-            return None
-        w1 = np.asarray(w1, dtype=np.float32)
-        w2 = np.asarray(w2, dtype=np.float32)
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            denom = np.sqrt(np.maximum(w2, 0.0))
-            ratio = np.divide(
-                w1, denom, out=np.zeros_like(w1, dtype=np.float32), where=denom > 0
-            )
-            neff = ratio * ratio
-        neff = np.nan_to_num(neff, nan=0.0, posinf=0.0, neginf=0.0)
-        return np.maximum(neff, 0.0).astype(np.float32)
+        if w1 is not None and w2 is not None:
+            w1 = np.asarray(w1, dtype=np.float32)
+            w2 = np.asarray(w2, dtype=np.float32)
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                denom = np.sqrt(np.maximum(w2, 0.0))
+                ratio = np.divide(
+                    w1, denom, out=np.zeros_like(w1, dtype=np.float32), where=denom > 0
+                )
+                neff = ratio * ratio
+            neff = np.nan_to_num(neff, nan=0.0, posinf=0.0, neginf=0.0)
+            return np.maximum(neff, 0.0).astype(np.float32)
+        # COV-06 CONDITION E: Drizzle positive support reaches the render path.
+        if getattr(self, "_drizzle_support_available", False):
+            neff = self._drizzle_support_n_eff()
+            if neff is not None:
+                return np.asarray(neff, dtype=np.float32)
+        return None
 
     def _create_support_memmaps(self, shape_hw):
         """Create zeroed 2-D float64 support accumulators (fresh run only).
@@ -13084,6 +13108,7 @@ class SeestarQueuedStacker:
                    ou (None, None, None) en cas d'échec.
                    batch_coverage_map_2d: Carte HxW float32 des poids/couverture pour ce lot.
         """
+        self._taper_cache = {}
         if not batch_items_with_masks:
             self.update_progress(
                 f"❌ Erreur interne: _stack_batch reçu un lot vide (batch_items_with_masks)."
@@ -13315,11 +13340,14 @@ class SeestarQueuedStacker:
                     single_q = float(
                         np.float32(single_q) * np.float32(np.nanmean(_wm[0]))
                     )
+            # COV-06 BLOCKER C: singleton mean uses the SAME footprint-aware
+            # taper as the multi-image path (never the historical radial), so
+            # a singleton batch and the same exposure inside a multi batch
+            # share identical geometric support semantics.
             if getattr(self, "apply_batch_feathering", True):
-                h, w = batch_coverage_map_2d.shape
-                if not hasattr(self, "_radial_w_base") or self._radial_w_base.shape != (h, w):
-                    self._radial_w_base = make_radial_weight_map(h, w)
-                batch_coverage_map_2d *= self._radial_w_base
+                batch_coverage_map_2d *= self._footprint_taper_map(
+                    valid_pixel_masks_for_coverage[0]
+                )
 
             stack_info_header = valid_headers_for_ccdproc[0].copy()
             stack_info_header["NIMAGES"] = (1, "Images in this batch stack")
@@ -13711,7 +13739,7 @@ class SeestarQueuedStacker:
                     img, cov, w = arg
                     cov_b = cov[..., None] if is_color else cov
                     if getattr(self, 'apply_batch_feathering', True):
-                        taper = self._footprint_taper_map(cov.astype(bool))
+                        taper = self._footprint_taper_map(cov)
                         w_eff = (cov * w * taper).astype(np.float32)
                     else:
                         w_eff = (cov * w).astype(np.float32)

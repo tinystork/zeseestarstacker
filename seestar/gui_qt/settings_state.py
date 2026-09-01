@@ -256,7 +256,7 @@ class QtSettingsState:
     photutils_bn_exclude_percentile: float = 95.0
 
     # --- Feathering / low-weight mask ---
-    apply_feathering: bool = True
+    apply_feathering: bool = False  # COV-06: legacy inverse-WHT feather OFF by default
     feather_blur_px: int = 256
     apply_batch_feathering: bool = True
     apply_low_wht_mask: bool = False
