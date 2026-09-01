@@ -662,6 +662,10 @@ def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
     monkeypatch.setattr(obj, "_prepare_global_reprojection_grid", fake_prepare)
 
     obj._worker = lambda: None
+    lifecycle_events = []
+    obj.set_lifecycle_callback(
+        lambda event, fields: lifecycle_events.append((event, fields))
+    )
 
     ok = obj.start_processing(
         str(tmp_path),
@@ -669,11 +673,28 @@ def test_start_processing_prepares_grid_on_freeze(monkeypatch, tmp_path):
         reference_path_ui=str(ref_path),
         batch_size=0,
         reproject_coadd_final=True,
+        apply_batch_feathering=True,
+        apply_coverage_render=True,
+        apply_low_wht_mask=False,
     )
 
     assert ok
     assert called["grid"]
     assert obj.stack_final_combine == "reproject_coadd"
+    # The production start_processing -> initialize lifecycle keeps the same
+    # configured instance flag all the way through worker creation.
+    assert obj.apply_coverage_render is True
+    assert obj.processing_thread is not None
+    assert lifecycle_events.count(
+        (
+            "COVERAGE_CONFIG",
+            {
+                "support_taper": True,
+                "coverage_render": True,
+                "low_wht_mask": False,
+            },
+        )
+    ) == 1
 
 
 def test_start_processing_bs0_defaults_to_reproject_coadd(monkeypatch, tmp_path):

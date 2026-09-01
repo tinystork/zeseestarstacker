@@ -582,6 +582,9 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             "input_dir",
             "output_dir",
             "reference_path_ui",
+            "apply_batch_feathering",
+            "apply_coverage_render",
+            "apply_low_wht_mask",
         )
         return {
             key: start_kwargs[key]

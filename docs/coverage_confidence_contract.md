@@ -334,3 +334,35 @@ labelled Legacy / Deprecated, defaults it OFF, and applies the same migration.
 OFF and ON write exactly equal scientific FITS SCI/header data, leave source
 WHT, SUP_W1, SUP_W2 and WCS unchanged, and differ only in the downstream
 cosmetic preview product.
+
+## COV-06C — runtime activation and observable outcomes
+
+The effective backend settings are recorded once per accepted run in both
+`RUN_METADATA` and the structured event:
+
+```text
+COVERAGE_CONFIG support_taper=true coverage_render=true low_wht_mask=false
+```
+
+This event is emitted from `start_processing` after argument normalization, so
+it reports values stored on the processing instance rather than a widget
+snapshot.  The canonical `run_config.cfg` also persists
+`apply_coverage_render` as an execution setting.
+
+At final save, a requested render derives `N_eff_support` while Classic
+`SUP_W1`/`SUP_W2` are still live, before the finalizer closes accumulator
+memmaps.  One bounded support event reports Classic state, SUP_W1/SUP_W2 handle
+presence, Drizzle state and unavailable reasons.  The final decision is always
+machine-searchable as `COVERAGE_RENDER_RESULT` with one of:
+
+* `NOT_REQUESTED`
+* `APPLIED` (including compact N_eff min/median/max and positive fraction)
+* `SKIPPED_NO_SUPPORT`
+* `SKIPPED_RENDER_UNAVAILABLE`
+* `ERROR`
+
+Coverage-aware final reconstruction is optional cosmetic rendering. If
+requested but positive support is unavailable, the scientific output is
+preserved and the render skip is explicitly reported. Renderer or support
+derivation errors are likewise fail-open for SCI/FITS and are logged as
+`ERROR`; the renderer never depends on the independent Low-weight mask path.

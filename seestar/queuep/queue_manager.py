@@ -431,6 +431,117 @@ def _emit_lifecycle_failopen(obj, event, **fields) -> None:
         pass
 
 
+def _emit_coverage_render_result(obj, status, *, reason=None, **fields) -> None:
+    """Publish one bounded, machine-searchable final render decision.
+
+    Coverage reconstruction is cosmetic and fail-open.  Keeping the status on
+    the instance makes the decision directly inspectable in tests while the
+    lifecycle event makes every real Qt run self-describing.
+    """
+    requested = bool(getattr(obj, "apply_coverage_render", False))
+    obj.coverage_render_status = str(status)
+    obj.coverage_render_reason = None if reason is None else str(reason)
+    payload = {"requested": requested, "status": str(status)}
+    if reason:
+        payload["reason"] = str(reason)
+    payload.update(fields)
+    _emit_lifecycle_failopen(obj, "COVERAGE_RENDER_RESULT", **payload)
+
+
+def _prepare_coverage_render(obj):
+    """Resolve the final-render request before finalizers close support state.
+
+    Classic finalization historically closed SUM/WHT *and* SUP_W1/SUP_W2
+    before reaching the cosmetic pipeline.  Derive the already-required
+    ``N_eff`` render input while positive support is still live, after all
+    accumulation has completed.  The returned array is read-only render state;
+    scientific arrays and support accumulators are never mutated.
+    """
+    requested = bool(getattr(obj, "apply_coverage_render", False))
+    obj.coverage_render_applied_in_session = False
+    if not requested:
+        _emit_coverage_render_result(obj, "NOT_REQUESTED")
+        return None, "NOT_REQUESTED"
+
+    classic_available = bool(getattr(obj, "_support_state_available", False))
+    sup_w1_present = getattr(obj, "coverage_sup_w1_memmap", None) is not None
+    sup_w2_present = getattr(obj, "coverage_sup_w2_memmap", None) is not None
+    drizzle_available = bool(getattr(obj, "_drizzle_support_available", False))
+    classic_reason = getattr(obj, "_support_unavailable_reason", None)
+    drizzle_reason = getattr(obj, "_drizzle_support_unavailable_reason", None)
+    usable_classic = classic_available and sup_w1_present and sup_w2_present
+    reason = None if (usable_classic or drizzle_available) else (
+        classic_reason or drizzle_reason
+    )
+    _emit_lifecycle_failopen(
+        obj,
+        "COVERAGE_RENDER_SUPPORT",
+        classic_available=classic_available,
+        sup_w1_present=sup_w1_present,
+        sup_w2_present=sup_w2_present,
+        drizzle_available=drizzle_available,
+        classic_reason=classic_reason,
+        drizzle_reason=drizzle_reason,
+        reason=reason,
+    )
+
+    support_line = (
+        "[CoverageRender] support_state: classic=%s SUP_W1=%s SUP_W2=%s "
+        "drizzle=%s classic_reason=%s drizzle_reason=%s"
+        % (
+            classic_available,
+            sup_w1_present,
+            sup_w2_present,
+            drizzle_available,
+            classic_reason or "none",
+            drizzle_reason or "none",
+        )
+    )
+    obj.update_progress(support_line)
+
+    if not _COVERAGE_RENDER_AVAILABLE:
+        reason = "coverage renderer module is unavailable"
+        obj.update_progress(
+            f"   [CoverageRender] SKIPPED_RENDER_UNAVAILABLE: {reason}", "WARN"
+        )
+        _emit_coverage_render_result(
+            obj, "SKIPPED_RENDER_UNAVAILABLE", reason=reason
+        )
+        return None, "SKIPPED_RENDER_UNAVAILABLE"
+
+    derive = getattr(obj, "_derive_neff_support_for_render", None)
+    if not callable(derive):
+        reason = "N_eff support derivation is unavailable"
+        obj.update_progress(f"   [CoverageRender] SKIPPED_NO_SUPPORT: {reason}", "WARN")
+        _emit_coverage_render_result(obj, "SKIPPED_NO_SUPPORT", reason=reason)
+        return None, "SKIPPED_NO_SUPPORT"
+    try:
+        neff = derive()
+    except Exception as exc:
+        reason = f"N_eff support derivation failed: {exc}"
+        obj.update_progress(f"   [CoverageRender] ERROR: {reason}", "WARN")
+        _emit_coverage_render_result(obj, "ERROR", reason=reason)
+        return None, "ERROR"
+    if neff is None:
+        if not reason:
+            if classic_available and not (sup_w1_present and sup_w2_present):
+                reason = "classic support state is available but SUP_W1/SUP_W2 are missing"
+            else:
+                reason = "no positive Classic or Drizzle support is available"
+        obj.update_progress(f"   [CoverageRender] SKIPPED_NO_SUPPORT: {reason}", "WARN")
+        _emit_coverage_render_result(obj, "SKIPPED_NO_SUPPORT", reason=reason)
+        return None, "SKIPPED_NO_SUPPORT"
+
+    neff = np.asarray(neff, dtype=np.float32)
+    positive = np.isfinite(neff) & (neff > 0.0)
+    if neff.ndim != 2 or not np.any(positive):
+        reason = "derived N_eff has no finite positive pixels"
+        obj.update_progress(f"   [CoverageRender] SKIPPED_NO_SUPPORT: {reason}", "WARN")
+        _emit_coverage_render_result(obj, "SKIPPED_NO_SUPPORT", reason=reason)
+        return None, "SKIPPED_NO_SUPPORT"
+    return neff, "READY"
+
+
 def _save_final_preview_png(obj, data_after_postproc, preview_path) -> None:
     """Save the final preview PNG and emit truthful FINAL_PREVIEW_SAVE_* events.
 
@@ -3896,6 +4007,9 @@ class SeestarQueuedStacker:
         self.cb_applied_in_session = False
         self.feathering_applied_in_session = False
         self.low_wht_mask_applied_in_session = False
+        self.coverage_render_applied_in_session = False
+        self.coverage_render_status = None
+        self.coverage_render_reason = None
         self.scnr_applied_in_session = False
         self.crop_applied_in_session = False
         self.photutils_params_used_in_session = {}
@@ -4591,6 +4705,9 @@ class SeestarQueuedStacker:
             self.cb_applied_in_session = False
             self.feathering_applied_in_session = False
             self.low_wht_mask_applied_in_session = False
+            self.coverage_render_applied_in_session = False
+            self.coverage_render_status = None
+            self.coverage_render_reason = None
             self.scnr_applied_in_session = False
             self.crop_applied_in_session = False
             self.photutils_params_used_in_session = {}
@@ -14618,6 +14735,11 @@ class SeestarQueuedStacker:
         for name, value in execution.items():
             if value is not None and value != "":
                 cfg.execution[name] = str(value)
+        # COV-06C: cosmetic activation is not resume-scientific, but the
+        # durable run recipe must still prove the effective backend value.
+        cfg.execution["apply_coverage_render"] = bool(
+            getattr(self, "apply_coverage_render", False)
+        )
         self._run_config_canonical = cfg
         return cfg
 
@@ -17859,6 +17981,13 @@ class SeestarQueuedStacker:
         # Ensure all background drizzle processes have completed before finalising
         getattr(self, "_wait_drizzle_processes", lambda: None)()
 
+        # COV-06C: after every contributor is complete, resolve positive
+        # support before mode finalizers close their memmaps.  This is
+        # render-only state and cannot affect SCI/WHT/FITS.
+        coverage_neff_for_render, coverage_render_status = _prepare_coverage_render(
+            self
+        )
+
         save_as_float32_setting = getattr(self, "save_final_as_float32", False)
         preserve_linear_output_setting = getattr(self, "preserve_linear_output", False)
         # Retro-compatibilité : certaines versions utilisaient le nom
@@ -18281,6 +18410,10 @@ class SeestarQueuedStacker:
                 # final science output (M3 DPIC-01).
                 if final_wht_hwc is not None:
                     final_wht_hwc = final_wht_hwc[y0:y1, x0:x1, :]
+                if coverage_neff_for_render is not None:
+                    coverage_neff_for_render = coverage_neff_for_render[
+                        y0:y1, x0:x1
+                    ]
                 if self.current_stack_header:
                     if "CRPIX1" in self.current_stack_header:
                         self.current_stack_header["CRPIX1"] -= x0
@@ -18496,23 +18629,59 @@ class SeestarQueuedStacker:
                     "   [LowWHTMask] Fonction non disponible.",
                     None,
                 )
-        if hasattr(self, "apply_coverage_render") and self.apply_coverage_render:
-            if _COVERAGE_RENDER_AVAILABLE:
-                neff = self._derive_neff_support_for_render()
-                if neff is not None:
-                    self.update_progress(
-                        "   [CoverageRender] Régularisation finale coverage-aware..."
+        if coverage_render_status == "READY":
+            try:
+                if coverage_neff_for_render.shape != data_after_postproc.shape[:2]:
+                    raise ValueError(
+                        "N_eff shape %s does not match render shape %s"
+                        % (
+                            coverage_neff_for_render.shape,
+                            data_after_postproc.shape[:2],
+                        )
                     )
-                    data_after_postproc = coverage_aware_render(
-                        data_after_postproc,
-                        neff,
-                        n_ref=getattr(self, "coverage_render_n_ref", 32.0),
-                    )
-                    self.coverage_render_applied_in_session = True
-            else:
                 self.update_progress(
-                    "   [CoverageRender] Fonction non disponible.", None
+                    "   [CoverageRender] Régularisation finale coverage-aware..."
                 )
+                data_after_postproc = coverage_aware_render(
+                    data_after_postproc,
+                    coverage_neff_for_render,
+                    n_ref=getattr(self, "coverage_render_n_ref", 32.0),
+                )
+                self.coverage_render_applied_in_session = True
+                finite_neff = coverage_neff_for_render[
+                    np.isfinite(coverage_neff_for_render)
+                ]
+                neff_min = float(np.min(finite_neff))
+                neff_median = float(np.median(finite_neff))
+                neff_max = float(np.max(finite_neff))
+                positive_fraction = float(
+                    np.count_nonzero(finite_neff > 0.0) / finite_neff.size
+                )
+                n_ref = float(getattr(self, "coverage_render_n_ref", 32.0))
+                self.update_progress(
+                    "   [CoverageRender] APPLIED: n_ref=%.4g N_eff min=%.4g "
+                    "median=%.4g max=%.4g positive_fraction=%.6f"
+                    % (
+                        n_ref,
+                        neff_min,
+                        neff_median,
+                        neff_max,
+                        positive_fraction,
+                    )
+                )
+                _emit_coverage_render_result(
+                    self,
+                    "APPLIED",
+                    n_ref=n_ref,
+                    neff_min=neff_min,
+                    neff_median=neff_median,
+                    neff_max=neff_max,
+                    positive_fraction=positive_fraction,
+                )
+            except Exception as exc:
+                reason = f"coverage render failed: {exc}"
+                self.update_progress(f"   [CoverageRender] ERROR: {reason}", "WARN")
+                _emit_coverage_render_result(self, "ERROR", reason=reason)
 
         # --- Fin du Pipeline de Post-Traitement ---
         self.update_progress(
@@ -20363,6 +20532,12 @@ class SeestarQueuedStacker:
             mode=stacking_mode,
             use_drizzle=bool(use_drizzle),
             **self._run_started_input_fields(),
+        )
+        self._emit_lifecycle(
+            "COVERAGE_CONFIG",
+            support_taper=bool(self.apply_batch_feathering),
+            coverage_render=bool(self.apply_coverage_render),
+            low_wht_mask=bool(self.apply_low_wht_mask),
         )
 
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---

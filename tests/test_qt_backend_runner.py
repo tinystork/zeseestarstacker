@@ -332,12 +332,28 @@ def test_seestar_backend_maps_request_to_stackers():
     expected_start_kwargs["resume_source"] = request.resume_source
     assert stacker.start_kwargs == expected_start_kwargs
     assert stacker.start_kwargs["apply_coverage_render"] is True
+    assert backend._stacker is stacker
     assert stacker.stack_final_combine == request.backend_kwargs["stack_final_combine"]
     assert stacker.start_count == 1
     # progress callback was installed and is callable.
     assert callable(stacker.progress_cb)
     # init kwargs forwarded (settings).
     assert stacker.init_kwargs.get("settings") == "FAKE_SETTINGS"
+
+
+def test_run_metadata_records_effective_coverage_backend_values():
+    metadata = SeestarQueuedStackerBackend._allowlisted_metadata(
+        {
+            "stacking_mode": "winsorized-sigma-clip",
+            "apply_batch_feathering": True,
+            "apply_coverage_render": True,
+            "apply_low_wht_mask": False,
+        }
+    )
+
+    assert metadata["apply_batch_feathering"] is True
+    assert metadata["apply_coverage_render"] is True
+    assert metadata["apply_low_wht_mask"] is False
 
 
 def test_seestar_backend_applies_stack_final_combine_to_settings():
