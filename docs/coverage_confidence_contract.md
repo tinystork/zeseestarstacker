@@ -278,3 +278,30 @@ define the photometric scale/offset.  Scientific SCI/WHT values are untouched.
 Focused proof: `tests/test_coverage_overlap.py` covers the reliable-overlap
 exclusion of a contaminated periphery, backward compatibility of
 `reliable_fraction=0.0`, and the no-weight no-op path.
+
+## COV-04 — Final-only coverage-aware render
+
+A separate **render** path (never scientific accumulation) regularizes
+high-frequency noise in low-support regions, gated OFF by default
+(`apply_coverage_render`).
+
+* `seestar/enhancement/coverage_render.py::coverage_aware_render(sci,
+  neff_support, n_ref, sigma_denoise, sigma_low)` decomposes SCI = B + D
+  (low-frequency background + detail residual) and blends
+  `RENDER = B + (1-alpha)*D + alpha*D_denoised` with
+  `alpha = clip(1 - N_eff_support / n_ref, 0, 1)`.
+* High-confidence regions (`N_eff_support >= n_ref`) are untouched;
+  low-confidence outskirts get progressively stronger noise regularization
+  of the detail residual only.
+* Non-negotiable: no brightness gain for low coverage (flat fields stay
+  flat), no generative inpainting, no invented stars/nebulosity, no
+  low-frequency modification driven by WHT.
+* Wired into `_save_final_stack` **once, after the final scientific stack**,
+  feeding only `data_after_postproc` (preview/PNG).  The scientific FITS pixels
+  (`raw_adu_data_for_ui_histogram`) are never touched.  `N_eff_support` is
+  derived from the positive support accumulators (classic memmaps); if no
+  support state is available the render is skipped with a diagnostic.
+
+Focused proof: `tests/test_coverage_render.py` covers flat-field invariance,
+high-support no-op, low-support denoising with preserved mean, no-support
+no-op, shape validation, and colour shape preservation.

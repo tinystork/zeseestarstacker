@@ -1856,6 +1856,19 @@ if not _FEATHERING_AVAILABLE:
         return img  # Retourner l'image originale
 
 
+try:
+    from ..enhancement.coverage_render import coverage_aware_render  # COV-04
+
+    _COVERAGE_RENDER_AVAILABLE = True
+except ImportError:
+    _COVERAGE_RENDER_AVAILABLE = False
+
+
+if not _COVERAGE_RENDER_AVAILABLE:
+    def coverage_aware_render(sci, neff_support, **kwargs):
+        return sci
+
+
 def renormalize_fits(
     fits_path: str,
     method: Literal["none", "max", "n_images"],
@@ -3577,6 +3590,9 @@ class SeestarQueuedStacker:
         self.support_taper_floor = 0.0
         # COV-03: coverage-aware reliable-overlap fraction for IBN scale/offset.
         self._ibn_reliable_fraction = 0.02
+        # COV-04: final-only coverage-aware render (OFF by default).
+        self.apply_coverage_render = False
+        self.coverage_render_n_ref = 32.0
         # COV-01D: non-resumable Reproject modes stage support per original
         # exposure.  Between-batch Reproject accumulates directly on the
         # frozen reference grid; final-coadd Reproject persists compact source
@@ -11885,6 +11901,23 @@ class SeestarQueuedStacker:
             floor=float(getattr(self, 'support_taper_floor', 0.0)),
         )
 
+    def _derive_neff_support_for_render(self):
+        """Return N_eff_support (2-D float32) for the final render, or None."""
+        w1 = getattr(self, "coverage_sup_w1_memmap", None)
+        w2 = getattr(self, "coverage_sup_w2_memmap", None)
+        if w1 is None or w2 is None:
+            return None
+        w1 = np.asarray(w1, dtype=np.float32)
+        w2 = np.asarray(w2, dtype=np.float32)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            denom = np.sqrt(np.maximum(w2, 0.0))
+            ratio = np.divide(
+                w1, denom, out=np.zeros_like(w1, dtype=np.float32), where=denom > 0
+            )
+            neff = ratio * ratio
+        neff = np.nan_to_num(neff, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.maximum(neff, 0.0).astype(np.float32)
+
     def _create_support_memmaps(self, shape_hw):
         """Create zeroed 2-D float64 support accumulators (fresh run only).
 
@@ -18435,6 +18468,24 @@ class SeestarQueuedStacker:
                     "   [LowWHTMask] Fonction non disponible.",
                     None,
                 )
+        if hasattr(self, "apply_coverage_render") and self.apply_coverage_render:
+            if _COVERAGE_RENDER_AVAILABLE:
+                neff = self._derive_neff_support_for_render()
+                if neff is not None:
+                    self.update_progress(
+                        "   [CoverageRender] Régularisation finale coverage-aware..."
+                    )
+                    data_after_postproc = coverage_aware_render(
+                        data_after_postproc,
+                        neff,
+                        n_ref=getattr(self, "coverage_render_n_ref", 32.0),
+                    )
+                    self.coverage_render_applied_in_session = True
+            else:
+                self.update_progress(
+                    "   [CoverageRender] Fonction non disponible.", None
+                )
+
         # --- Fin du Pipeline de Post-Traitement ---
         self.update_progress(
             f"  DEBUG QM [SaveFinalStack] data_after_postproc (APRES post-traitements, si activés) - Range: [{np.nanmin(data_after_postproc):.4f}, {np.nanmax(data_after_postproc):.4f}], Dtype: {data_after_postproc.dtype}"
