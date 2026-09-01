@@ -230,6 +230,33 @@ except Exception:
         return w_map
 
 
+try:
+    from seestar.enhancement.weight_utils import make_footprint_taper
+except Exception:
+
+    def make_footprint_taper(mask, feather_px=8.0, floor=0.0):
+        m = np.asarray(mask)
+        if m.dtype != np.bool_:
+            raise ValueError('make_footprint_taper: mask must be boolean')
+        if m.ndim != 2:
+            raise ValueError('make_footprint_taper: mask must be 2-D')
+        floor = float(floor)
+        if not np.isfinite(floor) or not (0.0 <= floor < 1.0):
+            raise ValueError('make_footprint_taper: floor must be in [0, 1)')
+        feather_px = float(feather_px)
+        if not np.isfinite(feather_px) or feather_px <= 0.0:
+            raise ValueError('make_footprint_taper: feather_px must be > 0')
+        if not np.any(m):
+            return np.zeros(m.shape, dtype=np.float32)
+        from scipy.ndimage import distance_transform_edt
+
+        dist = distance_transform_edt(m)
+        frac = np.clip(dist.astype(np.float32) / float(feather_px), 0.0, 1.0)
+        return np.where(m, floor + (1.0 - floor) * frac, np.float32(0.0)).astype(
+            np.float32
+        )
+
+
 from astropy import units as u
 from astropy.coordinates import Angle, SkyCoord
 from astropy.coordinates import concatenate as skycoord_concatenate
@@ -3542,6 +3569,9 @@ class SeestarQueuedStacker:
         self.coverage_sup_w2_memmap = None
         self._support_state_available = False
         self._support_unavailable_reason = None
+        # COV-02: footprint-aware support taper (per original exposure).
+        self.support_taper_px = 8.0
+        self.support_taper_floor = 0.0
         # COV-01D: non-resumable Reproject modes stage support per original
         # exposure.  Between-batch Reproject accumulates directly on the
         # frozen reference grid; final-coadd Reproject persists compact source
@@ -11838,7 +11868,17 @@ class SeestarQueuedStacker:
                 )
             qf = float(q)
             support_map = m.astype(np.float64) * qf
+            if getattr(self, 'apply_batch_feathering', True):
+                support_map *= self._footprint_taper_map(m).astype(np.float64)
             accumulate_support_pair(w1, w2, support_map, dtype=np.float64)
+
+    def _footprint_taper_map(self, mask):
+        # COV-02: per-exposure footprint-following taper.
+        return make_footprint_taper(
+            np.asarray(mask, dtype=bool),
+            feather_px=float(getattr(self, 'support_taper_px', 8.0)),
+            floor=float(getattr(self, 'support_taper_floor', 0.0)),
+        )
 
     def _create_support_memmaps(self, shape_hw):
         """Create zeroed 2-D float64 support accumulators (fresh run only).
@@ -13632,8 +13672,14 @@ class SeestarQueuedStacker:
                     """Calcule (signal × poids, poids) pour une image."""
                     img, cov, w = arg
                     cov_b = cov[..., None] if is_color else cov
-                    weighted = img * (cov_b * w)
-                    return weighted.astype(np.float32), (cov_b * w).astype(np.float32)
+                    if getattr(self, 'apply_batch_feathering', True):
+                        taper = self._footprint_taper_map(cov.astype(bool))
+                        w_eff = (cov * w * taper).astype(np.float32)
+                    else:
+                        w_eff = (cov * w).astype(np.float32)
+                    w_eff_b = w_eff[..., None] if is_color else w_eff
+                    weighted = img * w_eff_b
+                    return weighted.astype(np.float32), w_eff_b.astype(np.float32)
 
                 max_workers = min(8, os.cpu_count() or 2)
                 with ThreadPoolExecutor(max_workers=max_workers) as exe:
@@ -13651,9 +13697,10 @@ class SeestarQueuedStacker:
                     where=sum_weights > 1e-9,
                 ).astype(np.float32)
 
-                batch_coverage_map_2d = self._feather_batch_coverage(
-                    sum_weights.squeeze().astype(np.float32)
-                )
+                # COV-02: footprint taper is applied per-exposure inside
+                # weigh_one (consistent numerator + denominator); the historical
+                # radial denominator-only feathering is no longer applied here.
+                batch_coverage_map_2d = sum_weights.squeeze().astype(np.float32)
 
                 stack_note = f"mean ({max_workers} threads)"
             if (

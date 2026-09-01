@@ -215,3 +215,42 @@ Focused proof: `tests/test_coverage_support_reproject.py` covers fractional-WCS
 transforms, post-transform squaring, exact partition invariance, quality
 scalars, fail-closed WCS/cardinality/sidecar handling, final-grid replay, and
 rollback of an injected half-publication failure.
+
+## COV-02 — Real footprint-aware support taper
+
+The historical radial batch feathering (a radial falloff applied to the batch
+denominator AFTER the numerator was divided) is replaced, for the
+coverage-aware domain, by a real footprint-following support taper.
+
+* `make_footprint_taper(mask, feather_px, floor)` computes a per-exposure
+  `a_i(x, y) ∈ [0, 1]` from the Euclidean distance transform of the real
+  transformed valid mask: `1.0` in the interior, ramping toward `floor` over
+  `feather_px` pixels near the actual support boundary, and `0.0` outside.
+  It is translation/rotation invariant and never a radial distance from the
+  image centre.
+* **Support-confidence domain** (Classic, and by construction the reproject /
+  drizzle support paths already footprint-gated): the per-exposure support is
+  `s_i = valid_mask_i * quality_i * a_i`, so `SUP_W1 += s_i` and
+  `SUP_W2 += s_i²` now describe footprint-aware positive support.
+* **Scientific use** (mean, the fractional-weighting estimator): the same taper
+  acts consistently on numerator and denominator —
+  `w_i^eff = q_i * m_i * a_i`, `SUM += x_i w_i^eff`, `WHT += w_i^eff` — so a
+  constant field stays constant (no centre/edge photometric gain) and low
+  coverage never brightens a pixel.  No `SCI *= taper` or `SCI *= 1/coverage`
+  is performed after normalisation.
+* Median and the rejection reducers keep their scientific estimators unchanged;
+  their coverage maps are no longer radially distorted in the mean path.  The
+  historical radial falloff remains gated by `apply_batch_feathering`
+  (default on in production) and is the explicit COV-05 cleanup target for the
+  remaining reducer paths.
+
+Taper settings are `support_taper_px` (default `8.0` px) and
+`support_taper_floor` (default `0.0`).  The taper is applied only when
+`apply_batch_feathering` is enabled, so the exact `mask * quality` accumulation
+contract and the existing HSI closure suites (which disable feathering) are
+unchanged.
+
+Focused proof: `tests/test_coverage_taper.py` covers interior/boundary/outside
+behaviour, translation invariance, the radial-mask failure witness, validation
+of `feather_px`/`floor`, the taper folded into the support domain, and mean
+flat-field invariance.

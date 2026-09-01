@@ -22,6 +22,9 @@ def _fresh(tmp_path, name, shape=(4, 5)):
     qm.coverage_sup_w2_memmap = None
     qm._support_state_available = True
     qm._support_unavailable_reason = None
+    # COV-02: disable the footprint taper so the pure mask*q accumulation
+    # contract is tested exactly (the taper is covered separately).
+    qm.apply_batch_feathering = False
     qm._create_support_memmaps(shape)
     return qm
 
