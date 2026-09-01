@@ -254,3 +254,27 @@ Focused proof: `tests/test_coverage_taper.py` covers interior/boundary/outside
 behaviour, translation invariance, the radial-mask failure witness, validation
 of `feather_px`/`floor`, the taper folded into the support domain, and mean
 flat-field invariance.
+
+## COV-03 — Coverage-aware reliable-overlap normalization
+
+The photometric scale/offset estimated between the inter-batch normalization
+master and a batch is now computed from the *reliable* (high-support) overlap,
+instead of every pixel with merely positive weight:
+
+* `compute_overlap_median_ratio` gains a `reliable_fraction` argument.  When
+  `> 0`, the overlap mask is restricted to pixels whose weight exceeds
+  `reliable_fraction * max(weight)`, so low-support peripheral pixels (close
+  to unreliable footprint boundaries) do not contaminate the median ratio.
+* `_interbatch_compute_scales` passes `_ibn_reliable_fraction` (default
+  `0.02`) through to both the per-channel and monochrome ratio estimates.
+* `reliable_fraction=0.0` is the exact legacy behaviour, so existing IBN
+  gating and non-plain normalization contracts are unchanged when the
+  coverage-aware default is not desired.
+
+This is a normalization-statistics change only: it does not brighten or
+darken any pixel because its coverage is low; it only decides *which* pixels
+define the photometric scale/offset.  Scientific SCI/WHT values are untouched.
+
+Focused proof: `tests/test_coverage_overlap.py` covers the reliable-overlap
+exclusion of a contaminated periphery, backward compatibility of
+`reliable_fraction=0.0`, and the no-weight no-op path.

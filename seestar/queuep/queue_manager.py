@@ -3324,6 +3324,7 @@ class SeestarQueuedStacker:
         min_overlap = getattr(self, "_ibn_min_overlap", 10000)
         use_percentile = getattr(self, "_ibn_use_percentile_ratio", True)
         percentile = getattr(self, "_ibn_percentile_value", 90.0)
+        reliable_fraction = getattr(self, "_ibn_reliable_fraction", 0.02)
 
         if master.ndim == 3 and batch_data.ndim == 3 and master.shape[2] >= 3 and batch_data.shape[2] >= 3:
             scales = []
@@ -3340,6 +3341,7 @@ class SeestarQueuedStacker:
                     min_overlap=min_overlap,
                     use_percentile_ratio=use_percentile,
                     percentile=percentile,
+                    reliable_fraction=reliable_fraction,
                 )
                 if scale is None or offset is None:
                     self._ibn_last_failure_info = {
@@ -3364,6 +3366,7 @@ class SeestarQueuedStacker:
             min_overlap=min_overlap,
             use_percentile_ratio=use_percentile,
             percentile=percentile,
+            reliable_fraction=reliable_fraction,
         )
         if scale is None or offset is None:
             self._ibn_last_failure_info = {
@@ -3572,6 +3575,8 @@ class SeestarQueuedStacker:
         # COV-02: footprint-aware support taper (per original exposure).
         self.support_taper_px = 8.0
         self.support_taper_floor = 0.0
+        # COV-03: coverage-aware reliable-overlap fraction for IBN scale/offset.
+        self._ibn_reliable_fraction = 0.02
         # COV-01D: non-resumable Reproject modes stage support per original
         # exposure.  Between-batch Reproject accumulates directly on the
         # frozen reference grid; final-coadd Reproject persists compact source

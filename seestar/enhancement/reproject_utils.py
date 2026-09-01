@@ -276,6 +276,7 @@ def compute_overlap_median_ratio(
     maxiters: int = 5,
     use_percentile_ratio: bool = True,
     percentile: float = 90.0,
+    reliable_fraction: float = 0.0,
 ) -> Tuple[Optional[float], Optional[float], int, float, float]:
     """Estimate multiplicative scale so ``new_img`` matches ``ref_img``."""
     ref_lum = _luminance_view(ref_img)
@@ -290,11 +291,19 @@ def compute_overlap_median_ratio(
         if ref_w.ndim == 3:
             ref_w = np.mean(ref_w, axis=2)
         mask &= ref_w > 0
+        if reliable_fraction > 0 and np.any(mask):
+            ref_max = float(np.max(ref_w))
+            if ref_max > 0:
+                mask &= ref_w > reliable_fraction * ref_max
     if new_wht is not None:
         new_w = np.asarray(new_wht, dtype=np.float32)
         if new_w.ndim == 3:
             new_w = np.mean(new_w, axis=2)
         mask &= new_w > 0
+        if reliable_fraction > 0 and np.any(mask):
+            new_max = float(np.max(new_w))
+            if new_max > 0:
+                mask &= new_w > reliable_fraction * new_max
 
     overlap = int(np.count_nonzero(mask))
     if overlap < int(min_overlap):
