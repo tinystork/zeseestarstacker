@@ -185,3 +185,33 @@ Stop→Resume, legacy reopen, support preflight/write failure and orphan cleanup
 *Prepared for COV-01A/COV-01C and closed transactionally in COV-01C REWORK R2.
 No production code changes outside the isolated core module, the
 classic/drizzle backend wiring, and their focused tests + this contract doc.*
+
+
+## COV-01D — Reproject positive-support domain
+
+Both non-resumable Reproject routes now preserve the original-exposure
+decomposition of positive support:
+
+* **Reproject between batches:** each accepted exposure's boolean geometric
+  mask is multiplied by its exact effective scalar quality weight, transformed
+  independently onto the frozen reference grid, then committed in original
+  exposure order as `SUP_W1 += R(s_i)` and `SUP_W2 += R(s_i)**2`.
+* **Reproject + Coadd final:** because the final output grid may not exist while
+  mini-stacks are produced, each batch writes a versioned, non-pickle NPZ
+  sidecar containing the original ordered masks, scalar weights and celestial
+  WCS headers.  After the scientific final grid and crop are known, these
+  records are replayed per exposure directly onto that grid.  Temporary
+  float64 memmaps are published as the canonical support pair only after the
+  complete replay succeeds; a half-publication is rolled back.
+
+In both routes the reprojection footprint gates support outside the real input
+domain, output support is finite and non-negative, and squaring happens only
+after each individual transform.  No batch aggregate, batch count, scientific
+WHT, rejection-survivor mask, radial feather, or cosmetic gain enters the
+support domain.  SCI/WHT reducers and their documented `R(V) * R(W)`
+approximation remain unchanged.  Reproject Resume remains unsupported.
+
+Focused proof: `tests/test_coverage_support_reproject.py` covers fractional-WCS
+transforms, post-transform squaring, exact partition invariance, quality
+scalars, fail-closed WCS/cardinality/sidecar handling, final-grid replay, and
+rollback of an injected half-publication failure.

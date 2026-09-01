@@ -667,6 +667,7 @@ _SUPPORT_W1_FILENAME = "coverage_SUP_W1.npy"
 _SUPPORT_W2_FILENAME = "coverage_SUP_W2.npy"
 _SUPPORT_DTYPE = np.dtype(np.float64)
 _SUPPORT_STATE_SCHEMA = "sup_v1"
+_REPROJECT_SUPPORT_SIDECAR_SCHEMA = "reproject_sup_v1"
 
 # Bounded, explicit allowlist of the checkpoint artifacts ZSSS itself writes
 # during *synchronous* startup (fresh initialize).  Failed-start cleanup may
@@ -3541,6 +3542,12 @@ class SeestarQueuedStacker:
         self.coverage_sup_w2_memmap = None
         self._support_state_available = False
         self._support_unavailable_reason = None
+        # COV-01D: non-resumable Reproject modes stage support per original
+        # exposure.  Between-batch Reproject accumulates directly on the
+        # frozen reference grid; final-coadd Reproject persists compact source
+        # records until its final output grid is known.
+        self._reproject_support_tracking_enabled = False
+        self._reproject_support_sidecars = {}
         self._resume_pending_count = 0
         self._checkpointing_enabled = False
         # RSM2-D1: native Drizzle checkpoint (write-only, no resume/reader).
@@ -4446,6 +4453,18 @@ class SeestarQueuedStacker:
             else:
                 # Non-resumable modes (mosaic, drizzle-final-standard,
                 # reproject). Fail closed if resume artifacts are present.
+                for _support_attr in (
+                    "coverage_sup_w1_memmap",
+                    "coverage_sup_w2_memmap",
+                ):
+                    _support_handle = getattr(self, _support_attr, None)
+                    if _support_handle is not None:
+                        self._close_memmap_handle(_support_handle)
+                    setattr(self, _support_attr, None)
+                self._support_state_available = False
+                self._support_unavailable_reason = None
+                self._reproject_support_tracking_enabled = False
+                self._reproject_support_sidecars = {}
                 if self._resume_artifacts_present(self.output_folder):
                     self.update_progress(
                         "❌ Reprise impossible: le mode sélectionné "
@@ -4464,6 +4483,14 @@ class SeestarQueuedStacker:
                 )
                 self.cumulative_wht_memmap[:] = 0.0
                 self.memmap_shape = (H, W, C)
+                self._reproject_support_tracking_enabled = bool(
+                    self.reproject_between_batches or self.reproject_coadd_final
+                )
+                self._reproject_support_sidecars = {}
+                if self.reproject_between_batches:
+                    # The between-batch output grid is frozen at startup, so
+                    # transformed per-exposure support can be committed live.
+                    self._create_support_memmaps((H, W))
 
             if self.enable_preview:
                 self.preview_H = 256
@@ -11283,6 +11310,418 @@ class SeestarQueuedStacker:
             payload.append((mask_ref, q))
         return payload
 
+    def _validate_reproject_support_inputs(self, masks, scalars, input_wcs_list):
+        """Validate ordered per-exposure Reproject support source records."""
+        masks = [] if masks is None else list(masks)
+        scalars = [] if scalars is None else list(scalars)
+        input_wcs_list = [] if input_wcs_list is None else list(input_wcs_list)
+        if not (len(masks) == len(scalars) == len(input_wcs_list)):
+            raise _ResumeCheckpointError(
+                "reproject support mask/scalar/WCS cardinality mismatch: "
+                f"{len(masks)}/{len(scalars)}/{len(input_wcs_list)}"
+            )
+        records = []
+        for i, (mask_ref, q_raw, input_wcs) in enumerate(
+            zip(masks, scalars, input_wcs_list)
+        ):
+            mask = np.asarray(mask_ref)
+            if mask.dtype != np.bool_ or mask.ndim != 2:
+                raise _ResumeCheckpointError(
+                    f"reproject support source {i} mask must be 2-D boolean"
+                )
+            try:
+                q = float(q_raw)
+            except (TypeError, ValueError):
+                raise _ResumeCheckpointError(
+                    f"reproject support source {i} scalar is not numeric"
+                )
+            if not np.isfinite(q) or q < 0.0:
+                raise _ResumeCheckpointError(
+                    f"reproject support source {i} scalar must be finite >= 0"
+                )
+            if not isinstance(input_wcs, WCS) or not input_wcs.has_celestial:
+                raise _ResumeCheckpointError(
+                    f"reproject support source {i} has no valid celestial WCS"
+                )
+            try:
+                header_text = input_wcs.celestial.to_header(relax=True).tostring(
+                    sep="\n", endcard=False, padding=False
+                )
+            except Exception as exc:
+                raise _ResumeCheckpointError(
+                    f"reproject support source {i} WCS serialization failed: {exc}"
+                ) from exc
+            records.append((mask_ref, q, input_wcs, header_text))
+        return records
+
+    def _reproject_positive_support(
+        self, mask_ref, q, input_wcs, target_wcs, target_shape
+    ):
+        """Transform one original exposure's positive support onto a grid.
+
+        The transform happens before squaring.  The returned map is finite,
+        non-negative float64 and zero outside the real reprojection footprint.
+        No scientific image/WHT array is read or mutated here.
+        """
+        from seestar.enhancement.reproject_utils import reproject_interp
+
+        mask = np.asarray(mask_ref)
+        shape = tuple(int(v) for v in target_shape)
+        if mask.dtype != np.bool_ or mask.ndim != 2:
+            raise _ResumeCheckpointError(
+                "reproject support mask must be 2-D boolean"
+            )
+        if len(shape) != 2 or min(shape) <= 0:
+            raise _ResumeCheckpointError(
+                f"invalid reproject support target shape {shape}"
+            )
+        if not isinstance(input_wcs, WCS) or not input_wcs.has_celestial:
+            raise _ResumeCheckpointError("invalid reproject support input WCS")
+        if not isinstance(target_wcs, WCS) or not target_wcs.has_celestial:
+            raise _ResumeCheckpointError("invalid reproject support target WCS")
+        qf = float(q)
+        if not np.isfinite(qf) or qf < 0.0:
+            raise _ResumeCheckpointError(
+                "reproject support scalar must be finite >= 0"
+            )
+        source = mask.astype(np.float64) * qf
+        try:
+            transformed, footprint = reproject_interp(
+                (source, input_wcs.celestial),
+                target_wcs.celestial,
+                shape_out=shape,
+            )
+        except Exception as exc:
+            raise _ResumeCheckpointError(
+                f"positive support reprojection failed: {exc}"
+            ) from exc
+        transformed = np.asarray(transformed, dtype=np.float64)
+        footprint = np.asarray(footprint, dtype=np.float64)
+        if transformed.shape != shape or footprint.shape != shape:
+            raise _ResumeCheckpointError(
+                "positive support reprojection returned an unexpected shape"
+            )
+        if not np.all(np.isfinite(footprint)) or np.any(footprint < 0.0):
+            raise _ResumeCheckpointError(
+                "positive support reprojection returned an invalid footprint"
+            )
+        inside = footprint > 0.0
+        if np.any(~np.isfinite(transformed[inside])):
+            raise _ResumeCheckpointError(
+                "positive support reprojection returned non-finite in-footprint values"
+            )
+        # Bilinear interpolation of a [0,q] source should remain in [0,q].
+        # Clipping tiny numerical excursions preserves the positive-domain
+        # contract while footprint gating prevents extrapolated support.
+        out = np.zeros(shape, dtype=np.float64)
+        if qf > 0.0:
+            out[inside] = np.clip(transformed[inside], 0.0, qf)
+        return out
+
+    def _build_reproject_support_payload(
+        self, masks, scalars, input_wcs_list, target_wcs, target_shape
+    ):
+        """Build ordered source payload for between-batch Reproject.
+
+        Maps are transformed once during the complete preflight and again at
+        commit, one exposure at a time.  This bounded two-pass design avoids
+        retaining N full-frame float64 maps while still proving every transform
+        before SCI/WHT mutation.
+        """
+        records = self._validate_reproject_support_inputs(
+            masks, scalars, input_wcs_list
+        )
+        return [
+            {
+                "kind": "reproject_support_source",
+                "mask": mask,
+                "scalar": q,
+                "input_wcs": input_wcs,
+                "target_wcs": target_wcs,
+                "target_shape": tuple(int(v) for v in target_shape),
+            }
+            for mask, q, input_wcs, _header_text in records
+        ]
+
+    def _build_reproject_support_source_payload(
+        self, masks, scalars, input_wcs_list
+    ):
+        """Build serializable source records for final-coadd Reproject."""
+        records = self._validate_reproject_support_inputs(
+            masks, scalars, input_wcs_list
+        )
+        return [
+            {"mask": mask, "scalar": q, "wcs_header": header_text}
+            for mask, q, _input_wcs, header_text in records
+        ]
+
+    def _stage_batch_support(self, masks, scalars, input_wcs_list):
+        """Return (commit_payload, final-coadd source payload) for this mode."""
+        if getattr(self, "reproject_between_batches", False):
+            if not getattr(self, "_reproject_support_tracking_enabled", False):
+                return None, None
+            target_wcs = getattr(self, "reference_wcs_object", None)
+            target_shape = tuple(getattr(self, "memmap_shape", ())[:2])
+            return (
+                self._build_reproject_support_payload(
+                    masks, scalars, input_wcs_list, target_wcs, target_shape
+                ),
+                None,
+            )
+        if getattr(self, "reproject_coadd_final", False):
+            if not getattr(self, "_reproject_support_tracking_enabled", False):
+                return None, None
+            return None, self._build_reproject_support_source_payload(
+                masks, scalars, input_wcs_list
+            )
+        return self._build_support_payload(masks, scalars), None
+
+    def _persist_reproject_support_sidecar(
+        self, sci_path, source_payload, expected_count
+    ):
+        """Persist final-coadd support sources without pickle/object arrays."""
+        if not getattr(self, "_reproject_support_tracking_enabled", False):
+            return None
+        if not getattr(self, "reproject_coadd_final", False):
+            return None
+        if not isinstance(source_payload, (list, tuple)):
+            raise _ResumeCheckpointError(
+                "final-coadd batch carries no reproject support source payload"
+            )
+        if len(source_payload) != int(expected_count):
+            raise _ResumeCheckpointError(
+                "final-coadd support source cardinality does not match NIMAGES"
+            )
+        masks = []
+        scalars = []
+        headers = []
+        shape = None
+        for i, entry in enumerate(source_payload):
+            if not isinstance(entry, dict) or set(entry) != {
+                "mask",
+                "scalar",
+                "wcs_header",
+            }:
+                raise _ResumeCheckpointError(
+                    f"final-coadd support source {i} has an invalid schema"
+                )
+            mask = np.asarray(entry["mask"])
+            if mask.dtype != np.bool_ or mask.ndim != 2:
+                raise _ResumeCheckpointError(
+                    f"final-coadd support source {i} mask must be 2-D boolean"
+                )
+            if shape is None:
+                shape = mask.shape
+            elif mask.shape != shape:
+                raise _ResumeCheckpointError(
+                    "final-coadd support source masks have inconsistent shapes"
+                )
+            q = float(entry["scalar"])
+            if not np.isfinite(q) or q < 0.0:
+                raise _ResumeCheckpointError(
+                    f"final-coadd support source {i} scalar must be finite >= 0"
+                )
+            header_text = entry["wcs_header"]
+            if not isinstance(header_text, str) or not header_text:
+                raise _ResumeCheckpointError(
+                    f"final-coadd support source {i} WCS header is invalid"
+                )
+            try:
+                parsed_wcs = WCS(
+                    fits.Header.fromstring(header_text, sep="\n"), naxis=2
+                )
+                if not parsed_wcs.has_celestial:
+                    raise ValueError("not celestial")
+            except Exception as exc:
+                raise _ResumeCheckpointError(
+                    f"final-coadd support source {i} WCS header is invalid: {exc}"
+                ) from exc
+            masks.append(mask)
+            scalars.append(q)
+            headers.append(header_text)
+
+        sidecar = str(Path(sci_path).with_name(Path(sci_path).stem + "_support.npz"))
+        tmp_path = sidecar + ".tmp"
+        try:
+            with open(tmp_path, "wb") as fh:
+                np.savez_compressed(
+                    fh,
+                    schema=np.asarray(_REPROJECT_SUPPORT_SIDECAR_SCHEMA),
+                    masks=np.stack(masks, axis=0).astype(np.bool_, copy=False),
+                    scalars=np.asarray(scalars, dtype=np.float64),
+                    wcs_headers=np.asarray(headers, dtype=np.str_),
+                )
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, sidecar)
+        except Exception as exc:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise _ResumeCheckpointError(
+                f"failed to persist final-coadd support sidecar: {exc}"
+            ) from exc
+        sidecars = getattr(self, "_reproject_support_sidecars", None)
+        if sidecars is None:
+            sidecars = {}
+            self._reproject_support_sidecars = sidecars
+        sidecars[os.path.abspath(sci_path)] = sidecar
+        return sidecar
+
+    def _load_reproject_support_sidecar(self, sci_path):
+        """Read and fully validate one final-coadd support sidecar."""
+        sidecar = str(Path(sci_path).with_name(Path(sci_path).stem + "_support.npz"))
+        try:
+            with np.load(sidecar, allow_pickle=False) as state:
+                if set(state.files) != {"schema", "masks", "scalars", "wcs_headers"}:
+                    raise ValueError("unexpected sidecar fields")
+                if str(np.asarray(state["schema"]).item()) != (
+                    _REPROJECT_SUPPORT_SIDECAR_SCHEMA
+                ):
+                    raise ValueError("unsupported sidecar schema")
+                masks = np.array(state["masks"], copy=True)
+                scalars = np.array(state["scalars"], copy=True)
+                headers = np.array(state["wcs_headers"], copy=True)
+        except Exception as exc:
+            raise _ResumeCheckpointError(
+                f"cannot read final-coadd support sidecar for {sci_path}: {exc}"
+            ) from exc
+        if masks.dtype != np.bool_:
+            raise _ResumeCheckpointError(
+                f"invalid final-coadd support mask dtype {masks.dtype}"
+            )
+        if scalars.dtype != _SUPPORT_DTYPE:
+            raise _ResumeCheckpointError(
+                f"invalid final-coadd support scalar dtype {scalars.dtype}"
+            )
+        if headers.dtype.kind != "U":
+            raise _ResumeCheckpointError(
+                f"invalid final-coadd support WCS-header dtype {headers.dtype}"
+            )
+        if masks.ndim != 3 or scalars.ndim != 1 or headers.ndim != 1:
+            raise _ResumeCheckpointError("invalid final-coadd support sidecar ranks")
+        if not (masks.shape[0] == scalars.size == headers.size) or not masks.shape[0]:
+            raise _ResumeCheckpointError(
+                "invalid final-coadd support sidecar cardinality"
+            )
+        if not np.all(np.isfinite(scalars)) or np.any(scalars < 0.0):
+            raise _ResumeCheckpointError(
+                "invalid final-coadd support sidecar scalars"
+            )
+        parsed = []
+        for i, header_text in enumerate(headers.tolist()):
+            try:
+                input_wcs = WCS(
+                    fits.Header.fromstring(str(header_text), sep="\n"), naxis=2
+                )
+                if not input_wcs.has_celestial:
+                    raise ValueError("not celestial")
+                input_wcs.pixel_shape = (int(masks.shape[2]), int(masks.shape[1]))
+            except Exception as exc:
+                raise _ResumeCheckpointError(
+                    f"invalid final-coadd support sidecar WCS {i}: {exc}"
+                ) from exc
+            parsed.append((masks[i], float(scalars[i]), input_wcs))
+        return parsed
+
+    def _finalize_reproject_support(self, batch_files, target_wcs, target_shape):
+        """Publish final-coadd SUP_W1/W2 on the actual final output grid.
+
+        Every original exposure is transformed independently and squared only
+        after that transform.  Temporary memmaps keep partially accumulated
+        support invisible if any source/transform fails.
+        """
+        if not getattr(self, "_reproject_support_tracking_enabled", False):
+            return
+        shape = tuple(int(v) for v in target_shape)
+        sci_paths = [str(pair[0]) for pair in batch_files]
+        if not sci_paths:
+            raise _ResumeCheckpointError("no final-coadd batches for support")
+        # Complete read-only preflight of every accepted batch before creating
+        # any canonical support state.
+        for sci_path in sci_paths:
+            self._load_reproject_support_sidecar(sci_path)
+
+        if (
+            getattr(self, "coverage_sup_w1_memmap", None) is not None
+            or getattr(self, "coverage_sup_w2_memmap", None) is not None
+        ):
+            raise _ResumeCheckpointError(
+                "final-coadd support accumulators already exist"
+            )
+        memdir = Path(self.output_folder) / "memmap_accumulators"
+        memdir.mkdir(parents=True, exist_ok=True)
+        w1_final = memdir / _SUPPORT_W1_FILENAME
+        w2_final = memdir / _SUPPORT_W2_FILENAME
+        if w1_final.exists() or w2_final.exists():
+            raise _ResumeCheckpointError(
+                "refusing to overwrite existing final-coadd support state"
+            )
+        fd1, tmp1 = tempfile.mkstemp(prefix=".coverage_w1_", suffix=".npy", dir=memdir)
+        fd2, tmp2 = tempfile.mkstemp(prefix=".coverage_w2_", suffix=".npy", dir=memdir)
+        os.close(fd1)
+        os.close(fd2)
+        w1 = w2 = None
+        published = []
+        try:
+            w1 = np.lib.format.open_memmap(
+                tmp1, mode="w+", dtype=_SUPPORT_DTYPE, shape=shape
+            )
+            w2 = np.lib.format.open_memmap(
+                tmp2, mode="w+", dtype=_SUPPORT_DTYPE, shape=shape
+            )
+            w1[:] = 0.0
+            w2[:] = 0.0
+            for sci_path in sci_paths:
+                for mask, q, input_wcs in self._load_reproject_support_sidecar(
+                    sci_path
+                ):
+                    support = self._reproject_positive_support(
+                        mask, q, input_wcs, target_wcs, shape
+                    )
+                    accumulate_support_pair(w1, w2, support, dtype=np.float64)
+            w1.flush()
+            w2.flush()
+            self._close_memmap_handle(w1)
+            self._close_memmap_handle(w2)
+            w1 = w2 = None
+            os.replace(tmp1, w1_final)
+            published.append(w1_final)
+            os.replace(tmp2, w2_final)
+            published.append(w2_final)
+            self.coverage_sup_w1_memmap = np.lib.format.open_memmap(
+                w1_final, mode="r+"
+            )
+            self.coverage_sup_w2_memmap = np.lib.format.open_memmap(
+                w2_final, mode="r+"
+            )
+            self._support_state_available = True
+            self._support_unavailable_reason = None
+        except Exception:
+            if w1 is not None:
+                self._close_memmap_handle(w1)
+            if w2 is not None:
+                self._close_memmap_handle(w2)
+            for attr in ("coverage_sup_w1_memmap", "coverage_sup_w2_memmap"):
+                handle = getattr(self, attr, None)
+                if handle is not None:
+                    self._close_memmap_handle(handle)
+                    setattr(self, attr, None)
+            for path in (tmp1, tmp2):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            # No pre-existing canonical files were allowed above, so removing
+            # a half-published pair here cannot destroy user state.
+            for path in published:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise
+
     def _validate_support_payload(self, payload, expect_shape, expected_count):
         """Fail-closed preflight of the complete support payload.
 
@@ -11300,6 +11739,40 @@ class SeestarQueuedStacker:
                 f"{expected_count}"
             )
         for i, entry in enumerate(payload):
+            if isinstance(entry, dict):
+                if entry.get("kind") != "reproject_support_source" or set(entry) != {
+                    "kind",
+                    "mask",
+                    "scalar",
+                    "input_wcs",
+                    "target_wcs",
+                    "target_shape",
+                }:
+                    raise _ResumeCheckpointError(
+                        f"support payload entry {i} has an invalid reproject schema"
+                    )
+                support = self._reproject_positive_support(
+                    entry["mask"],
+                    entry["scalar"],
+                    entry["input_wcs"],
+                    entry["target_wcs"],
+                    entry["target_shape"],
+                )
+                if support.shape != tuple(expect_shape):
+                    raise _ResumeCheckpointError(
+                        f"support payload entry {i} transformed map shape mismatch"
+                    )
+                if not np.all(np.isfinite(support)) or np.any(support < 0.0):
+                    raise _ResumeCheckpointError(
+                        f"support payload entry {i} transformed map must be finite >= 0"
+                    )
+                with np.errstate(over="ignore", invalid="ignore"):
+                    squared = support * support
+                if not np.all(np.isfinite(squared)):
+                    raise _ResumeCheckpointError(
+                        f"support payload entry {i} square is non-finite"
+                    )
+                continue
             if not isinstance(entry, (list, tuple)) or len(entry) != 2:
                 raise _ResumeCheckpointError(
                     f"support payload entry {i} must be a 2-item (mask, scalar) "
@@ -11342,7 +11815,18 @@ class SeestarQueuedStacker:
         if w1 is None or w2 is None:
             raise _ResumeCheckpointError("support accumulators not initialised")
         expect = tuple(w1.shape)
-        for mask_ref, q in payload:
+        for entry in payload:
+            if isinstance(entry, dict):
+                support_map = self._reproject_positive_support(
+                    entry["mask"],
+                    entry["scalar"],
+                    entry["input_wcs"],
+                    entry["target_wcs"],
+                    entry["target_shape"],
+                )
+                accumulate_support_pair(w1, w2, support_map, dtype=np.float64)
+                continue
+            mask_ref, q = entry
             m = np.asarray(mask_ref)
             if m.dtype != np.bool_:
                 raise _ResumeCheckpointError(
@@ -11476,7 +11960,7 @@ class SeestarQueuedStacker:
         # (attached to ``stack_info_header`` by ``_stack_batch``).  When support
         # is being tracked, a missing or malformed payload fails closed before
         # any close/resize/dirty/SUM-WHT/SUP/counter mutation.
-        if self._support_state_available:
+        if getattr(self, "_support_state_available", False):
             if not hasattr(stack_info_header, "_coverage_support_payload"):
                 raise _ResumeCheckpointError(
                     "support state is available but this batch carries no "
@@ -11576,7 +12060,7 @@ class SeestarQueuedStacker:
             )
             # COV-01B: reject a resize while support is being tracked BEFORE
             # closing any live handle (support accumulators would be orphaned).
-            if self._support_state_available:
+            if getattr(self, "_support_state_available", False):
                 raise _ResumeCheckpointError(
                     "refusing to resize SUM/WHT memmaps while positive support "
                     "is being tracked (support would be orphaned)"
@@ -11859,7 +12343,9 @@ class SeestarQueuedStacker:
             # original exposure at a time in order (dirty already marked above).
             # A failure here propagates as _ResumeCheckpointError and leaves the
             # manifest dirty (never publishes clean with mismatched support).
-            if support_payload is not None and self._support_state_available:
+            if support_payload is not None and getattr(
+                self, "_support_state_available", False
+            ):
                 self._apply_support_payload(support_payload)
                 if hasattr(self.coverage_sup_w1_memmap, "flush"):
                     self.coverage_sup_w1_memmap.flush()
@@ -12800,10 +13286,15 @@ class SeestarQueuedStacker:
                     "Max accepted exposure [s]",
                 )
             _log_mem("after_stack")
-            support_payload = self._build_support_payload(
-                [valid_pixel_masks_for_coverage[0]], [single_q]
+            support_payload, reproject_source_payload = self._stage_batch_support(
+                [valid_pixel_masks_for_coverage[0]],
+                [single_q],
+                [valid_wcs_objs_for_ccdproc[0]],
             )
             stack_info_header._coverage_support_payload = support_payload
+            stack_info_header._coverage_reproject_support_payload = (
+                reproject_source_payload
+            )
             return single_img, stack_info_header, batch_coverage_map_2d
 
         # --- Vérification WCS seulement si nécessaire ---
@@ -12926,12 +13417,14 @@ class SeestarQueuedStacker:
             if extra_w is not None and extra_w.size == quality_weights.size:
                 quality_weights = quality_weights * extra_w
 
-            # COV-01B: stage the ordered per-exposure support payload (mask
-            # references + effective scalars, NOT a pre-summed batch delta).  It
-            # is committed in _combine_batch_result only after all acceptance
-            # gates pass, one original exposure at a time in order.
-            support_payload = self._build_support_payload(
-                coverage_maps_list, quality_weights
+            # COV-01B/COV-01D: stage ordered support per original exposure.
+            # Reproject transforms each exposure independently before W2 is
+            # squared; final-coadd keeps source records until its output grid
+            # is known.  No mini-stack aggregate enters this domain.
+            support_payload, reproject_source_payload = self._stage_batch_support(
+                coverage_maps_list,
+                quality_weights,
+                valid_wcs_objs_for_ccdproc,
             )
 
             mode = getattr(self, "stacking_mode", "")
@@ -13271,6 +13764,9 @@ class SeestarQueuedStacker:
                     batch_num=current_batch_num,
                 )
         stack_info_header._coverage_support_payload = support_payload
+        stack_info_header._coverage_reproject_support_payload = (
+            reproject_source_payload
+        )
         return stacked_batch_data_np, stack_info_header, batch_coverage_map_2d
 
     #########################################################################################################################################
@@ -15492,6 +15988,10 @@ class SeestarQueuedStacker:
 
     def _save_and_solve_classic_batch(self, stacked_np, wht_2d, header, batch_idx):
         """Save a classic batch and optionally solve/reproject it."""
+        reproject_support_sources = getattr(
+            header, "_coverage_reproject_support_payload", None
+        )
+        support_expected_count = int(header.get("NIMAGES", 1) or 1)
         out_dir = os.path.join(self.output_folder, "classic_batch_outputs")
         os.makedirs(out_dir, exist_ok=True)
 
@@ -15752,6 +16252,13 @@ class SeestarQueuedStacker:
 
         self._last_classic_batch_solved = solved_ok
 
+        if self.reproject_coadd_final and getattr(
+            self, "_reproject_support_tracking_enabled", False
+        ):
+            self._persist_reproject_support_sidecar(
+                sci_fits, reproject_support_sources, support_expected_count
+            )
+
         if self.reproject_coadd_final:
             # Simply store the batch for the final reproject+coadd pass
             self.intermediate_classic_batch_files.append((sci_fits, wht_paths))
@@ -15800,6 +16307,7 @@ class SeestarQueuedStacker:
         channel_footprints = [[] for _ in range(3)]  # per‑channel weight maps
         wcs_for_grid: List[WCS] = []
         headers_for_grid = []
+        accepted_support_batches = []
         ref_p1 = None
         ref_p99 = None
 
@@ -15912,6 +16420,7 @@ class SeestarQueuedStacker:
             for ch in range(n_ch):
                 channel_arrays_wcs[ch].append((img_hwc[:, :, ch], batch_wcs))
                 channel_footprints[ch].append(channel_covs[ch])
+            accepted_support_batches.append((sci_path, wht_paths))
 
         # --- 3. Sanity checks ----------------------------------------------------
         if len(wcs_for_grid) < 2:
@@ -15968,6 +16477,9 @@ class SeestarQueuedStacker:
         data_hwc = np.stack(final_channels, axis=-1)
         cov_hw = final_cov
         data_hwc, cov_hw, out_wcs = self._crop_to_wht_bbox(data_hwc, cov_hw, out_wcs)
+        self._finalize_reproject_support(
+            accepted_support_batches, out_wcs, data_hwc.shape[:2]
+        )
         apply_white_fix = (
             int(getattr(self, "batch_size", 0) or 0) == 0
             and getattr(self, "reproject_coadd_final", False)
@@ -16685,6 +17197,7 @@ class SeestarQueuedStacker:
         weight_maps = []
         wcs_list = []
         headers = []
+        accepted_support_batches = []
         # Reference dynamic range (percentiles) from the first valid classic batch
         ref_p1 = None
         ref_p99 = None
@@ -16826,6 +17339,7 @@ class SeestarQueuedStacker:
                 weight_maps.append(channel_covs)
                 wcs_list.append(wcs)
                 headers.append(hdr)
+                accepted_support_batches.append((sci_path, _wht_paths))
             except Exception as e:
                 self.update_progress(f"   -> Batch ignoré {sci_path}: {e}", "WARN")
 
@@ -17081,6 +17595,10 @@ class SeestarQueuedStacker:
                     "WARN",
                 )
 
+        self._finalize_reproject_support(
+            accepted_support_batches, out_wcs, data_hwc.shape[:2]
+        )
+
         self.current_stack_header = fits.Header()
         self.current_stack_header.update(out_wcs.to_header(relax=True))
 
@@ -17112,6 +17630,18 @@ class SeestarQueuedStacker:
             cov = np.mean(channel_covs, axis=0).astype(np.float32)
         except Exception:
             cov = np.ones(data.shape[:2], dtype=np.float32)
+        try:
+            final_wcs = WCS(hdr, naxis=2)
+            ensure_wcs_pixel_shape(final_wcs, data.shape[0], data.shape[1])
+            self._finalize_reproject_support(
+                [batch_file_tuple], final_wcs, data.shape[:2]
+            )
+        except _ResumeCheckpointError:
+            raise
+        except Exception as exc:
+            raise _ResumeCheckpointError(
+                f"single-batch final support WCS is invalid: {exc}"
+            ) from exc
         self.current_stack_header = hdr.copy()
         # Exposure metadata truthfulness (ZSSS-OTPUX-A-01): the accepted
         # population for a single-classic-batch finalization is exactly this
