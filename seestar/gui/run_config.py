@@ -246,6 +246,7 @@ def build_backend_kwargs(
         "apply_feathering": settings.apply_feathering,
         "feather_blur_px": settings.feather_blur_px,
         "apply_batch_feathering": settings.apply_batch_feathering,
+        "apply_coverage_render": getattr(settings, "apply_coverage_render", False),
         "apply_low_wht_mask": settings.apply_low_wht_mask,
         "low_wht_percentile": settings.low_wht_percentile,
         "low_wht_soften_px": settings.low_wht_soften_px,

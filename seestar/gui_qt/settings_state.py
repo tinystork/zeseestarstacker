@@ -255,10 +255,11 @@ class QtSettingsState:
     photutils_bn_sigma_clip: float = 3.0
     photutils_bn_exclude_percentile: float = 95.0
 
-    # --- Feathering / low-weight mask ---
+    # --- Coverage / edge reconstruction ---
     apply_feathering: bool = False  # COV-06: legacy inverse-WHT feather OFF by default
     feather_blur_px: int = 256
     apply_batch_feathering: bool = True
+    apply_coverage_render: bool = False
     apply_low_wht_mask: bool = False
     low_wht_percentile: int = 5
     low_wht_soften_px: int = 128

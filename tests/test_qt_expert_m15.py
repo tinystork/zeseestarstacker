@@ -4,7 +4,7 @@ Offscreen tests for the Expert-tab closure and the M14 leftovers:
 
 * every Expert-tab control (Tk ``tab_expert`` parity) exists as a real widget
   with the correct type, Tk range and ``QtSettingsState`` default,
-* the BN / CB / final-crop / Photutils / feathering / low-weight enabler
+* the BN / CB / final-crop / Photutils / coverage / low-weight enabler
   checkboxes gate their sub-option widgets exactly like the Tk
   ``_update_*_options_state`` / ``_update_master_tile_crop_state`` methods,
 * the "Reset Expert Settings" button restores every Expert-tab setting to its
@@ -23,6 +23,7 @@ defensively before any ``QApplication`` is created.
 
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QGroupBox,
     QLabel,
     QSpinBox,
 )
@@ -43,6 +45,10 @@ from seestar.gui_qt import localization
 from seestar.gui_qt.histogram_view import HistogramView
 from seestar.gui_qt.preview_render import render_preview_image
 from seestar.gui_qt.settings_state import QtSettingsState
+from seestar.settings_migration import (
+    CURRENT_SETTINGS_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION_KEY,
+)
 
 
 @pytest.fixture(scope="session")
@@ -106,7 +112,6 @@ INT_FIELDS = {
     "cb_blur_radius": (QSpinBox, (0, 50)),
     "photutils_bn_box_size": (QSpinBox, (16, 1024)),
     "photutils_bn_filter_size": (QSpinBox, (1, 15)),
-    "feather_blur_px": (QSpinBox, (32, 512)),
     "low_wht_percentile": (QSpinBox, (1, 100)),
     "low_wht_soften_px": (QSpinBox, (32, 512)),
 }
@@ -127,8 +132,8 @@ BOOL_FIELDS = {
     "apply_final_crop": QCheckBox,
     "apply_master_tile_crop": QCheckBox,
     "apply_photutils_bn": QCheckBox,
-    "apply_feathering": QCheckBox,
     "apply_batch_feathering": QCheckBox,
+    "apply_coverage_render": QCheckBox,
     "apply_low_wht_mask": QCheckBox,
 }
 COMBO_FIELDS = {
@@ -180,6 +185,56 @@ def test_expert_chrome_exists(window):
     assert window.reset_expert_button is not None
     assert window.expert_warning_label.text() == "Expert Settings!"
     assert window.reset_expert_button.text() == "Reset Expert Settings"
+
+
+def test_cov06b_modern_coverage_surface_and_backend_wiring(window):
+    widgets = window._settings_widgets
+    titles = [g.title() for g in window._settings_tab.findChildren(QGroupBox)]
+
+    assert "Coverage / Edge Reconstruction" in titles
+    assert "apply_feathering" not in widgets
+    assert "feather_blur_px" not in widgets
+    assert isinstance(widgets["apply_batch_feathering"], QCheckBox)
+    assert widgets["apply_batch_feathering"].isChecked() is True
+    assert isinstance(widgets["apply_coverage_render"], QCheckBox)
+    assert widgets["apply_coverage_render"].isChecked() is False
+    assert _find_label(window, "Coverage support taper") is not None
+    assert _find_label(window, "Coverage-aware final reconstruction") is not None
+
+    widgets["apply_coverage_render"].setChecked(True)
+    state = window.collect_settings_state()
+    request = window.build_run_request()
+    assert state.apply_coverage_render is True
+    assert request.backend_kwargs["apply_coverage_render"] is True
+
+
+def test_cov06b_qt_old_config_migrates_once_and_round_trips(qapp, tmp_path):
+    path = tmp_path / "seestar_settings.json"
+    path.write_text(
+        json.dumps({"apply_feathering": True, "batch_size": 7}),
+        encoding="utf-8",
+    )
+
+    first = MainWindow(settings_path=str(path))
+    try:
+        assert first.settings_state.apply_feathering is False
+        migrated = json.loads(path.read_text(encoding="utf-8"))
+        assert migrated["apply_feathering"] is False
+        assert migrated[SETTINGS_SCHEMA_VERSION_KEY] == CURRENT_SETTINGS_SCHEMA_VERSION
+
+        first._settings_widgets["apply_coverage_render"].setChecked(True)
+        first._save_persisted_settings()
+    finally:
+        first.shutdown()
+
+    saved_once = json.loads(path.read_text(encoding="utf-8"))
+    second = MainWindow(settings_path=str(path))
+    try:
+        assert second.settings_state.apply_feathering is False
+        assert second.settings_state.apply_coverage_render is True
+        assert json.loads(path.read_text(encoding="utf-8")) == saved_once
+    finally:
+        second.shutdown()
 
 
 # --------------------------------------------------------------------------
@@ -248,7 +303,7 @@ def test_reset_expert_settings_restores_defaults(window):
     state = window.collect_settings_state()
     assert state.bn_perc_low == defaults["bn_perc_low"]
     assert state.apply_bn is True
-    assert state.feather_blur_px == 256
+    assert state.apply_coverage_render is False
     assert state.cb_max_b_factor == pytest.approx(1.5)
 
 
@@ -291,7 +346,8 @@ def test_expert_localization_keys_have_full_parity():
         "field_apply_cb",
         "field_apply_final_crop",
         "field_apply_photutils_bn",
-        "field_apply_feathering",
+        "field_apply_batch_feathering",
+        "field_apply_coverage_render",
         "field_apply_low_wht_mask",
         "reset_expert_button",
         "expert_warning_text",

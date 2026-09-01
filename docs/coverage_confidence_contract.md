@@ -305,3 +305,32 @@ high-frequency noise in low-support regions, gated OFF by default
 Focused proof: `tests/test_coverage_render.py` covers flat-field invariance,
 high-support no-op, low-support denoising with preserved mean, no-support
 no-op, shape validation, and colour shape preservation.
+
+## COV-06B — product exposure and legacy migration
+
+The Qt Expert surface exposes the render as **Coverage-aware final
+reconstruction**, OFF by default.  Its stable path is
+`Qt checkbox -> QtSettingsState -> JSON round-trip -> RunRequest backend kwargs
+-> SeestarQueuedStacker.start_processing -> apply_coverage_render -> final
+preview/PNG render`.  No renderer tuning parameters are exposed at this beta
+stage.
+
+The validated `apply_batch_feathering` serialized key remains for compatibility
+and is labelled **Coverage support taper** in Qt.  This is a terminology-only
+product change: COV-06B does not alter its reducer-specific mathematics.  In
+particular, the COV-02 footprint taper for mean science and positive support is
+unchanged, while the documented radial coverage behavior of remaining legacy
+reducers is still a separate cleanup candidate.
+
+The historical inverse-WHT `apply_feathering` and `feather_blur_px` controls are
+absent from the normal Qt Expert surface.  Settings schema v1 migrates every
+pre-versioned persisted configuration exactly once by forcing
+`apply_feathering=false`, recording `settings_schema_version=1`, and saving the
+modern state.  Reloading schema-v1 settings does not repeat or flip the
+migration.  The Tk compatibility shell keeps the internal path explicitly
+labelled Legacy / Deprecated, defaults it OFF, and applies the same migration.
+
+`tests/test_cov06b_render_ab.py` is the deterministic product witness: render
+OFF and ON write exactly equal scientific FITS SCI/header data, leave source
+WHT, SUP_W1, SUP_W2 and WCS unchanged, and differ only in the downstream
+cosmetic preview product.

@@ -192,9 +192,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     },
     "section_cropping": {"en": "Cropping", "fr": "Rognage"},
     "section_photutils_bn": {"en": "Photutils BN", "fr": "Photutils BN"},
-    "section_feathering": {
-        "en": "Feathering / Low-weight Mask",
-        "fr": "Feathering / Masque bas poids",
+    "section_coverage_reconstruction": {
+        "en": "Coverage / Edge Reconstruction",
+        "fr": "Couverture / Reconstruction des bords",
     },
     "section_mosaic": {"en": "Mosaic", "fr": "Mosaïque"},
     "section_solver": {"en": "Solver", "fr": "Solveur"},
@@ -359,14 +359,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Exclude percentile",
         "fr": "Percentile exclu",
     },
-    "field_apply_feathering": {"en": "Feathering", "fr": "Feathering"},
-    "field_feather_blur_px": {
-        "en": "Feather blur (px)",
-        "fr": "Flou feathering (px)",
-    },
     "field_apply_batch_feathering": {
-        "en": "Batch feathering",
-        "fr": "Feathering inter-lots",
+        "en": "Coverage support taper",
+        "fr": "Adoucissement du support de couverture",
+    },
+    "field_apply_coverage_render": {
+        "en": "Coverage-aware final reconstruction",
+        "fr": "Reconstruction finale adaptative à la couverture",
     },
     "field_apply_low_wht_mask": {
         "en": "Low-weight mask",

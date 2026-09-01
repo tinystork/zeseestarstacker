@@ -102,7 +102,7 @@ def test_drizzle_advanced_section_removed_from_expert(window):
 
 def test_settings_surface_has_real_controls(window):
     assert isinstance(window._settings_widgets, dict)
-    assert len(window._settings_widgets) >= 58
+    assert len(window._settings_widgets) >= 57
     assert len(window._mosaic_widgets) == 14
 
 
@@ -115,7 +115,7 @@ def test_representative_control_per_section(window):
         "apply_chroma_correction": QCheckBox,     # Colour / Post-processing
         "apply_master_tile_crop": QCheckBox,      # Cropping
         "apply_photutils_bn": QCheckBox,          # Photutils BN
-        "apply_feathering": QCheckBox,            # Feathering / Low-weight Mask
+        "apply_coverage_render": QCheckBox,       # Coverage / Edge Reconstruction
         "mosaic_mode_active": QCheckBox,          # Mosaic
         "astap_path": QLineEdit,                  # Solver
         "save_final_as_float32": QCheckBox,       # Output / Reprojection

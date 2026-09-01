@@ -145,9 +145,9 @@ EN_TRANSLATIONS = {
     "tooltip_apply_final_scnr": "SCNR: Applies Subtle Color Noise Reduction to the final stack, targeting Green by default to reduce green/magenta casts.",
     "tooltip_final_scnr_amount": "SCNR Amount: Strength of Green reduction (0.0=none, 1.0=full replacement by R/B reference). Typical: 0.6-0.9. Default: 0.8.",
     "tooltip_final_scnr_preserve_lum": "SCNR Preserve Luminosity: If checked, attempts to restore original pixel luminance after color correction, preventing excessive darkening.",
-    "tooltip_apply_feathering": "Feathering: If enabled, smooths the stacked image based on a blurred version of the total weight map. Can help reduce sharp transitions or artifacts at combined data edges or where weights change abruptly. Acts before Photutils background subtraction.",
-    "tooltip_feather_blur_px": "Feather Blur Radius (px): Controls the extent of blur applied to the weight map for feathering. Larger values result in smoother, more gradual transitions. Typical range: 64-512. Default: 256.",
-    "feather_inter_batch_tooltip": "Blend the edge of each batch with a gentle radial weight map to avoid visible seams.",
+    "tooltip_apply_feathering": "Legacy / Deprecated inverse-WHT Feathering. Retained only for compatibility and forensic comparison; modern settings migration forces it OFF.",
+    "tooltip_feather_blur_px": "Legacy / Deprecated blur radius for inverse-WHT Feathering. It is not a coverage-reconstruction control.",
+    "feather_inter_batch_tooltip": "Taper coverage support near valid-footprint edges. The exact reducer-specific mathematics is unchanged.",
     # Tooltips for Photutils BN
     "tooltip_apply_photutils_bn": "PB2D: Enables subtraction of a 2D background model computed by Photutils. Acts before global Background Neutralization. Useful for complex gradients.",
     "tooltip_photutils_bn_box_size": "PB2D: Size of the boxes (px) for local background estimation. Should be large enough to avoid stars, but small enough to follow the gradient. Default: 128.",
@@ -389,10 +389,10 @@ EN_TRANSLATIONS = {
     "feather_blur_px_label": "Feather Blur Radius (px):",
     # ---  ---
     # --- Expert Tab - Feathering / Low WHT Mask Section ---
-    "feathering_frame_title": "Feathering / Low WHT Mask",  # Title for the combined frame
-    "apply_feathering_label": "Enable Feathering (Weighted Smoothing)",  # Existing text, maybe adjust
-    "feather_blur_px_label": "Feather Blur (px):",  # Existing text
-    "feather_inter_batch_label": "Feather inter-batch (radial blend)",
+    "feathering_frame_title": "Legacy / Deprecated Feathering and Low WHT Mask",
+    "apply_feathering_label": "Legacy / Deprecated inverse-WHT Feathering",
+    "feather_blur_px_label": "Legacy Feather Blur (px):",
+    "feather_inter_batch_label": "Coverage support taper",
     "apply_low_wht_mask_label": "Apply Low WHT Mask (Anti-Banding)",
     "low_wht_percentile_label": "Low WHT Percentile:",
     "low_wht_soften_px_label": "Soften Mask (px):",

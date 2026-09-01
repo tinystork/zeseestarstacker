@@ -479,11 +479,10 @@ SETTINGS_SECTIONS = [
         ],
     ),
     (
-        "Feathering / Low-weight Mask",
+        "Coverage / Edge Reconstruction",
         [
-            _field("apply_feathering", "Feathering", "bool"),
-            _field("feather_blur_px", "Feather blur (px)", "int", 32, 512, 16),
-            _field("apply_batch_feathering", "Batch feathering", "bool"),
+            _field("apply_batch_feathering", "Coverage support taper", "bool"),
+            _field("apply_coverage_render", "Coverage-aware final reconstruction", "bool"),
             _field("apply_low_wht_mask", "Low-weight mask", "bool"),
             _field("low_wht_percentile", "Low-weight percentile", "int", 1, 100, 1),
             _field("low_wht_soften_px", "Low-weight soften (px)", "int", 32, 512, 16),
@@ -545,14 +544,14 @@ SECTION_TITLE_KEYS = {
     "Colour / Post-processing": "section_colour_post",
     "Cropping": "section_cropping",
     "Photutils BN": "section_photutils_bn",
-    "Feathering / Low-weight Mask": "section_feathering",
+    "Coverage / Edge Reconstruction": "section_coverage_reconstruction",
     "Solver": "section_solver",
     "Output / Reprojection": "section_output_reprojection",
     "Final Background Matching": "section_final_bg_matching",
 }
 
 # attr -> translation key for Settings field labels (M9).  The Expert-tab
-# (BN / CB / cropping / Photutils / feathering / low-weight) labels were added
+# (BN / CB / cropping / Photutils / coverage / low-weight) labels were added
 # in M15 so every Expert-tab control localizes to FR/EN.
 LOCALIZED_SETTINGS_FIELD_KEYS = {
     "kappa": "field_kappa",
@@ -585,9 +584,8 @@ LOCALIZED_SETTINGS_FIELD_KEYS = {
     "photutils_bn_filter_size": "field_photutils_bn_filter_size",
     "photutils_bn_sigma_clip": "field_photutils_bn_sigma_clip",
     "photutils_bn_exclude_percentile": "field_photutils_bn_exclude_percentile",
-    "apply_feathering": "field_apply_feathering",
-    "feather_blur_px": "field_feather_blur_px",
     "apply_batch_feathering": "field_apply_batch_feathering",
+    "apply_coverage_render": "field_apply_coverage_render",
     "apply_low_wht_mask": "field_apply_low_wht_mask",
     "low_wht_percentile": "field_low_wht_percentile",
     "low_wht_soften_px": "field_low_wht_soften_px",
@@ -641,7 +639,6 @@ EXPERT_ENABLER_GATES = {
         "photutils_bn_sigma_clip",
         "photutils_bn_exclude_percentile",
     ],
-    "apply_feathering": ["feather_blur_px"],
     "apply_low_wht_mask": ["low_wht_percentile", "low_wht_soften_px"],
     # Final SCNR (Tk Stacking-tab ``_update_final_scnr_options_state``): the
     # "Apply Final SCNR" checkbox gates the target-channel / amount /
@@ -656,12 +653,12 @@ EXPERT_ENABLER_GATES = {
 
 # The set of Expert-tab attributes the "Reset Expert Settings" button restores
 # to ``QtSettingsState`` defaults.  This mirrors the Tk ``_reset_expert_settings``
-# reset set (BN / CB / master-tile crop / final crop / feathering / batch
-# feathering / Photutils BN) and additionally resets the Low WHT Mask group
+# reset set (BN / CB / master-tile crop / final crop / coverage support /
+# Photutils BN) and additionally resets the Low WHT Mask group
 # (``apply_low_wht_mask`` / ``low_wht_percentile`` / ``low_wht_soften_px``),
 # which the Tk button omits (a Tk oversight) — see the M15 checklist note.
-# ``apply_batch_feathering`` has no gated widgets but is still a reset target
-# (Tk parity).  Output-format fields (``save_final_as_float32`` /
+# ``apply_batch_feathering`` and ``apply_coverage_render`` have no gated
+# widgets but are still reset targets. Output-format fields (``save_final_as_float32`` /
 # ``preserve_linear_output``) are deliberately NOT reset, matching the Tk
 # button which leaves them untouched.
 EXPERT_RESET_ATTRS = [
@@ -681,9 +678,8 @@ EXPERT_RESET_ATTRS = [
     "master_tile_crop_percent",
     "apply_final_crop",
     "final_edge_crop_percent",
-    "apply_feathering",
-    "feather_blur_px",
     "apply_batch_feathering",
+    "apply_coverage_render",
     "apply_low_wht_mask",
     "low_wht_percentile",
     "low_wht_soften_px",
@@ -1957,8 +1953,8 @@ class MainWindow(QMainWindow):
         """Reset every Expert-tab setting to its ``QtSettingsState`` default.
 
         Mirrors the Tk ``reset_expert_settings`` button: it restores the BN /
-        CB / master-tile-crop / final-crop / feathering / batch-feathering /
-        low-weight-mask / Photutils-BN widgets to their model defaults and
+        CB / master-tile-crop / final-crop / coverage-support /
+        coverage-render / low-weight-mask / Photutils-BN widgets to defaults and
         re-applies the enabler gating.  This is display/settings-only: it
         mutates GUI state (widgets + the shared model), never writes FITS/PNG,
         never touches the engine or the settings file, and never touches
@@ -4785,6 +4781,13 @@ class MainWindow(QMainWindow):
         combo choice degrades to the widget's current value.  Never raises.
         """
         data = settings_persistence.load_settings_json(self._settings_path)
+        data, migrated = settings_persistence.migrate_settings_data(data)
+        if migrated and self._settings_path:
+            if not settings_persistence.save_settings_json(self._settings_path, data):
+                self.log(
+                    "Could not persist the legacy Feathering settings migration "
+                    f"to {self._settings_path}"
+                )
         state = QtSettingsState.from_dict(data)
         self._apply_state_to_controls(state)
         # Tk parity: a folder restored from settings auto-loads its first FITS
@@ -4805,6 +4808,9 @@ class MainWindow(QMainWindow):
             return
         self._sync_state_from_controls()
         data = self.settings_state.to_dict()
+        data[settings_persistence.SETTINGS_SCHEMA_VERSION_KEY] = (
+            settings_persistence.CURRENT_SETTINGS_SCHEMA_VERSION
+        )
         data["window_geometry"] = self._geometry_to_key()
         if not settings_persistence.save_settings_json(self._settings_path, data):
             self.log(f"Could not save settings to {self._settings_path}")

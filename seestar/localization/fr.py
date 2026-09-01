@@ -146,10 +146,10 @@ FR_TRANSLATIONS = {
     "photutils_bn_sigma_clip_label": "Sigma Clip :",
     "photutils_bn_exclude_percentile_label": "Exclure Plus Brillants (%) :",
     # ---  Section Feathering / Low WHT Mask ---
-    "feathering_frame_title": "Feathering / Masque Bas WHT",  # Titre du cadre regroupant les deux
-    "apply_feathering_label": "Activer Feathering (Lissage Pondéré)",  # Texte existant, peut-être à ajuster
-    "feather_blur_px_label": "Flou Feathering (px) :",  # Texte existant
-    "feather_inter_batch_label": "Adoucir entre lots (fondu radial)",
+    "feathering_frame_title": "Feathering historique / obsolète et masque bas WHT",
+    "apply_feathering_label": "Feathering inverse-WHT historique / obsolète",
+    "feather_blur_px_label": "Flou Feathering historique (px) :",
+    "feather_inter_batch_label": "Adoucissement du support de couverture",
     "apply_low_wht_mask_label": "Appliquer Masque Bas WHT (Anti-Bandes)",
     "low_wht_percentile_label": "Percentile Bas WHT :",
     "low_wht_soften_px_label": "Adoucir Masque (px) :",
@@ -390,9 +390,9 @@ FR_TRANSLATIONS = {
     "solver_gate_reason_astap_not_configured": "ASTAP n'est pas configuré (chemin de l'exécutable manquant).",
     "solver_gate_reason_no_solver_configured": "Aucun solveur astrométrique n'est configuré (préférence du solveur sur « aucun »).",
     # --- Tooltips pour Feathering ---
-    "tooltip_apply_feathering": "Feathering : Si activé, adoucit l'image empilée en se basant sur une version floutée de la carte de poids totale. Peut aider à réduire les transitions brusques ou les artefacts aux bords des données combinées ou là où les poids changent abruptement. Agit avant la soustraction de fond Photutils.",
-    "tooltip_feather_blur_px": "Rayon de Flou Feathering (px) : Contrôle l'étendue du flou appliqué à la carte de poids pour le feathering. Des valeurs plus grandes donnent des transitions plus douces et graduelles. Plage typique : 64-512. Défaut : 256.",
-    "feather_inter_batch_tooltip": "Estompe le bord de chaque lot par un poids radial progressif pour supprimer les bandes.",
+    "tooltip_apply_feathering": "Feathering inverse-WHT historique / obsolète. Conservé uniquement pour compatibilité et comparaison forensique ; la migration moderne le force à OFF.",
+    "tooltip_feather_blur_px": "Rayon historique / obsolète du Feathering inverse-WHT. Ce n'est pas un contrôle de reconstruction de couverture.",
+    "feather_inter_batch_tooltip": "Adoucit le support de couverture près des bords d'empreinte valides. Les mathématiques propres à chaque réducteur restent inchangées.",
     # ---  ---
     # ---  Textes pour Avertissement Drizzle ---
     "drizzle_warning_title": "Avertissement Drizzle",

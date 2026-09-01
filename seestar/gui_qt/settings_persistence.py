@@ -31,6 +31,12 @@ import os
 import platform
 from typing import Any, Dict, Optional
 
+from seestar.settings_migration import (
+    CURRENT_SETTINGS_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION_KEY,
+    migrate_settings_data,
+)
+
 DEFAULT_SETTINGS_FILENAME = "seestar_settings.json"
 
 # Per-user platform-aware directory name.  Mirrors the engine config convention

@@ -69,10 +69,14 @@ so the scientific weighting and support accumulation share one distance
 transform per exposure.  Cache cleared at the start of each `_stack_batch`.
 
 Benchmark (scipy EDT + pad, this machine):
-* 1080x1920: ~309 ms/exposure -> ~0.3s/1k, ~3.1s/10k, ~30.9s/100k (per this
-  machine's EDT cost; a downsampled EDT is a future optimization if 100k
-  full-res runs are required).
+* 1080x1920: ~309 ms/exposure -> ~309 s / 1k (~5.15 min), ~3,090 s / 10k
+  (~51.5 min), ~30,900 s / 100k (~8.58 h).  COV-06B corrects the previous
+  report's erroneous x1000 scaling; the real cost is intentionally not hidden.
 * 2160x3840: ~2.0s/exposure.
+
+No new EDT optimization is part of COV-06B.  A future candidate is to compute
+the taper once in source space and transport it with the already-established
+registration geometry, subject to an independent scientific-equivalence gate.
 
 ## Boring verification — SUPPORT_FULLY_TRACKED
 
@@ -85,8 +89,31 @@ through the classic SUM/W path that accumulates positive support in COV-01B.
 
 * `apply_feathering` (legacy inverse-WHT): **OFF**
 * `apply_coverage_render` (new confidence render): **OFF**
-* `apply_batch_feathering` (footprint taper gate): unchanged (True)
+* `apply_batch_feathering` (coverage-support taper gate): unchanged (True).
+  It gates the COV footprint taper in mean/support paths while retaining the
+  established radial behavior in other reducers; COV-06B changes only the GUI
+  terminology, not those reducer-specific mathematics.
 * Scientific FITS never receives any cosmetic treatment.
+
+## Real Linux witness (evidence, not renderer validation)
+
+A real `winsorized-sigma-clip` run completed successfully with 160 input
+entries in 54 batches (`RUN_SUCCEEDED`), writing a float32 scientific FITS and
+a preview PNG.  The observed final WHT range was approximately 0.60 to 158.95,
+which demonstrates a substantial centre/periphery coverage disparity and the
+original product problem: central noise improves much faster than poorly
+covered peripheral noise.
+
+The Expert GUI still showed legacy `Feathering=ON`, `Batch feathering=ON`, and
+`Low-weight mask=OFF` for that run.  It therefore proves only that the COV
+branch did not break this real 160-entry winsorized run.  It does **not** prove
+the efficacy of the new coverage-aware final reconstruction.
+
+Many input names used the `image.fit` / `image_dup_....fit` pattern.  The 160
+entries are consequently acceptable as a smoke/stress witness but must not be
+treated as 160 statistically independent noise realizations.
+`N_eff_support` remains the **support effective exposure count**, never a claim
+of true independent-sample N_eff for a duplicated dataset.
 
 ## Tests run (this machine)
 

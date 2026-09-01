@@ -11,6 +11,12 @@ import traceback
 
 import numpy as np
 
+from seestar.settings_migration import (
+    CURRENT_SETTINGS_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION_KEY,
+    migrate_settings_data,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default tile height used when stacking with disk-backed memmaps.
@@ -1348,6 +1354,7 @@ class SettingsManager:
         defaults_dict["apply_feathering"] = False  # COV-06: legacy inverse-WHT feather OFF by default
         defaults_dict["feather_blur_px"] = 256
         defaults_dict["apply_batch_feathering"] = True
+        defaults_dict["apply_coverage_render"] = False
         defaults_dict["apply_low_wht_mask"] = False
         defaults_dict["low_wht_percentile"] = 5
         defaults_dict["low_wht_soften_px"] = 128
@@ -2470,6 +2477,7 @@ class SettingsManager:
         """
         settings_data = {
             "version": _product_display_version(),  # current product display version (seestar.__version__ + __codename__)
+            SETTINGS_SCHEMA_VERSION_KEY: CURRENT_SETTINGS_SCHEMA_VERSION,
             # ... (tous les autres paramètres à sauvegarder restent ici, inchangés) ...
             "input_folder": str(self.input_folder),
             "output_folder": str(self.output_folder),
@@ -2556,6 +2564,9 @@ class SettingsManager:
             "apply_feathering": bool(self.apply_feathering),
             "feather_blur_px": int(self.feather_blur_px),
             "apply_batch_feathering": bool(self.apply_batch_feathering),
+            "apply_coverage_render": bool(
+                getattr(self, "apply_coverage_render", False)
+            ),
             "apply_low_wht_mask": bool(self.apply_low_wht_mask),
             "low_wht_percentile": int(self.low_wht_percentile),
             "low_wht_soften_px": int(self.low_wht_soften_px),
@@ -2676,6 +2687,8 @@ class SettingsManager:
             _ = self.validate_settings()
             return False
 
+        settings_data, settings_migrated = migrate_settings_data(settings_data)
+
         logger.debug(
             "DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Application des valeurs du JSON (avec fallback sur défauts)..."
         )
@@ -2788,7 +2801,7 @@ class SettingsManager:
         )
 
         validation_messages = self.validate_settings()
-        if validation_messages:
+        if validation_messages or settings_migrated:
             logger.debug(
                 "DEBUG (SettingsManager load_settings V_SaveAsFloat32_1): Settings chargés/fusionnés ont été ajustés après validation:"
             )

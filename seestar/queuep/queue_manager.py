@@ -19809,6 +19809,7 @@ class SeestarQueuedStacker:
         partial_save_interval=1,
         temp_folder=None,
         *,
+        apply_coverage_render=False,
         save_as_float32=False,
         preserve_linear_output=False,
         reproject_between_batches=None,
@@ -20132,6 +20133,7 @@ class SeestarQueuedStacker:
         self.photutils_bn_sigma_clip = float(photutils_bn_sigma_clip)
         self.photutils_bn_exclude_percentile = float(photutils_bn_exclude_percentile)
         self.apply_batch_feathering = bool(apply_batch_feathering)
+        self.apply_coverage_render = bool(apply_coverage_render)
         self.apply_feathering = bool(apply_feathering)
         self.feather_blur_px = int(feather_blur_px)
         self.apply_low_wht_mask = bool(apply_low_wht_mask)

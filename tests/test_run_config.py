@@ -100,6 +100,7 @@ DIRECT_MAP = {
     "apply_feathering": "apply_feathering",
     "feather_blur_px": "feather_blur_px",
     "apply_batch_feathering": "apply_batch_feathering",
+    "apply_coverage_render": "apply_coverage_render",
     "apply_low_wht_mask": "apply_low_wht_mask",
     "low_wht_percentile": "low_wht_percentile",
     "low_wht_soften_px": "low_wht_soften_px",

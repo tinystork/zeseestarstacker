@@ -305,7 +305,12 @@ def test_seestar_backend_maps_request_to_stackers():
         poll_interval=0.001,
         settings="FAKE_SETTINGS",
     )
-    request = _make_request(batch_size=4, input_folder="/in", output_folder="/out")
+    request = _make_request(
+        batch_size=4,
+        input_folder="/in",
+        output_folder="/out",
+        apply_coverage_render=True,
+    )
 
     progress = []
     logs = []
@@ -326,6 +331,7 @@ def test_seestar_backend_maps_request_to_stackers():
     expected_start_kwargs["resume_intent"] = request.resume_intent
     expected_start_kwargs["resume_source"] = request.resume_source
     assert stacker.start_kwargs == expected_start_kwargs
+    assert stacker.start_kwargs["apply_coverage_render"] is True
     assert stacker.stack_final_combine == request.backend_kwargs["stack_final_combine"]
     assert stacker.start_count == 1
     # progress callback was installed and is callable.
