@@ -542,6 +542,11 @@ class HistogramView(QWidget):
           pre-PHI-R3 behaviour.
         """
         if not self.has_data:
+            # Empty surface (``set_model(None)`` / ``set_data(None)`` /
+            # ``set_legacy_data(None)`` clears): report the clean default
+            # window, never a stale zoom window from before the clear.
+            self._view_min = 0.0
+            self._view_max = 1.0
             return
         if self.auto_zoom_enabled:
             self._view_mode = "auto"

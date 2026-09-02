@@ -461,9 +461,11 @@ def test_histogram_view_dense_bars_inside_visible_window_paint(qapp):
 
 
 def test_histogram_view_overflow_marker_and_reset_coherence(qapp):
-    """Reset reveals the full analysis range; when the view shows the plot-top
-    boundary, the overflow marker is painted there; without overflow no marker
-    is painted."""
+    """FRP-H1 marker coherence: FULL mode (reset) genuinely shows the full
+    distribution — the tail bars are painted and NO overflow marker is drawn
+    (nothing is un-binned); a non-FULL window that exposes the plot-top
+    boundary paints the overflow marker there; without overflow no marker is
+    painted in any mode."""
     buf_sparse = _sparse_extreme_mono(seed=5)
     model = _model_from(buf_sparse)
 
@@ -472,20 +474,53 @@ def test_histogram_view_overflow_marker_and_reset_coherence(qapp):
     dense = _model_from(buf_dense)
     assert int(dense["overflow_total"]) == 0
 
+    upper = float(model["range"][1])
+    bin_hi = float(model["bin_range"][1])
+    assert bin_hi < upper  # genuine sparse extreme tail
+
     view = HistogramView()
+    view2 = HistogramView()
     try:
         view.resize(420, 120)
-        # Sparse model: marker present once the full analysis range is shown.
+        # FULL mode (reset): window = the full analysis range, the full-domain
+        # tail bars ARE painted near the true extreme, and the overflow marker
+        # is NOT drawn anywhere in the plot (the tail is genuinely binned).
         view.set_model(model)
-        upper = float(model["range"][1])
         view.reset_histogram_view()
         assert view.view_range == (0.0, pytest.approx(upper))
         assert view.overflow_total > 0
-        assert float(model["bin_range"][1]) <= view.view_range[1]
+        assert bin_hi <= view.view_range[1]
         img = _render_view_to_image(view)
-        x_boundary = int(round(view._level_to_x(float(model["bin_range"][1]))))
-        color = img.pixelColor(x_boundary, int(view._plot_rect().top()) + 1)
-        assert color == _marker_color() or abs(color.red() - 255) > 100, color
+        rect = view._plot_rect()
+        assert not _image_contains_marker(img, rect), (
+            "FULL mode must not paint the overflow marker"
+        )
+        # The full-domain bar at the true analysis maximum (right edge of the
+        # domain) is genuinely lit near the plot bottom.
+        bins = int(model["bins"])
+        tail_center = (bins - 0.5) / bins * upper
+        tail_x = int(round(view._level_to_x(tail_center)))
+        bottom_y = int(rect.bottom()) - 2
+        assert any(
+            img.pixelColor(x, bottom_y).red() > 150
+            for x in range(tail_x - 4, tail_x + 5)
+        ), "FULL-mode tail bar at the true max is not painted"
+
+        # Non-FULL mode: a view window that exposes the plot-top boundary
+        # (robust bars still placed in ``bin_range``, no reset — the mode
+        # stays ``default``) paints the overflow marker exactly at ``bin_hi``.
+        view2.resize(420, 120)
+        view2.set_model(model)
+        assert view2.view_range == (0.0, 1.0)  # default window (no reset)
+        view2.set_view_range(0.0, upper)  # widen the window, NOT the mode
+        heights, lo, hi, draw_overflow = view2._bars_for_current_mode()
+        assert draw_overflow is True
+        assert (lo, hi) == pytest.approx((0.0, bin_hi))
+        assert view2.view_range == (0.0, pytest.approx(upper))
+        img3 = _render_view_to_image(view2)
+        x_boundary = int(round(view2._level_to_x(bin_hi)))
+        color = img3.pixelColor(x_boundary, int(view2._plot_rect().top()) + 1)
+        assert color == _marker_color(), color
 
         # Dense model: no overflow -> no marker anywhere.
         view.set_model(dense)
@@ -503,6 +538,26 @@ def test_histogram_view_overflow_marker_and_reset_coherence(qapp):
         assert not found, "overflow marker must not be painted without overflow"
     finally:
         view.deleteLater()
+        view2.deleteLater()
+
+
+def _image_contains_marker(img: QImage, rect) -> bool:
+    """True when an exact overflow-marker-colour pixel is painted in the plot.
+
+    The marker is a full-height vertical line, so a handful of rows across the
+    whole plot width is a complete presence probe.
+    """
+    rows = {
+        int(rect.top()),
+        int(rect.top()) + 8,
+        int(rect.top() + rect.height() * 0.5),
+        int(rect.bottom()) - 8,
+    }
+    for y in rows:
+        for x in range(int(rect.left()), int(rect.right()) + 1):
+            if img.pixelColor(x, y) == _marker_color():
+                return True
+    return False
 
 
 def _marker_color():
