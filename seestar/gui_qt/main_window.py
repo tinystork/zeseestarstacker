@@ -273,6 +273,51 @@ THEME_CHOICE_KEYS = {
 }
 
 
+def _complete_disabled_group(p: QPalette, disabled_text: QColor) -> None:
+    """Complete a theme palette's Disabled color group (FRP-L1).
+
+    A palette whose Disabled group is incomplete renders disabled widgets with
+    the Active group's full-contrast colors (or with style/platform defaults on
+    native themes) — a disabled QLabel / group-box title / tab label / input is
+    then indistinguishable from an enabled one, and unset roles can leak dark
+    colors into the light theme.  This helper explicitly completes the Disabled
+    group for the roles the theme defines:
+
+    * **Text roles** (``WindowText``, ``Text``, ``ButtonText``,
+      ``PlaceholderText``) use the theme's dimmed ``disabled_text`` gray — the
+      shared dimming fix (readable, visibly disabled);
+    * **Structural roles** (``Window``, ``Base``, ``AlternateBase``,
+      ``Button``, ``Highlight``, ``HighlightedText``, ``ToolTipBase``,
+      ``ToolTipText``) mirror their Active-group values so a disabled surface
+      never falls back to a color that clashes with the selected theme.
+
+    Only the Disabled group is touched — every Active (and Inactive) color
+    stays byte-identical, so the normal appearance is unchanged.
+    """
+    for role in (
+        QPalette.ColorRole.Window,
+        QPalette.ColorRole.Base,
+        QPalette.ColorRole.AlternateBase,
+        QPalette.ColorRole.Button,
+        QPalette.ColorRole.ToolTipBase,
+        QPalette.ColorRole.ToolTipText,
+        QPalette.ColorRole.Highlight,
+        QPalette.ColorRole.HighlightedText,
+    ):
+        p.setColor(
+            QPalette.ColorGroup.Disabled,
+            role,
+            p.color(QPalette.ColorGroup.Active, role),
+        )
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+        QPalette.ColorRole.PlaceholderText,
+    ):
+        p.setColor(QPalette.ColorGroup.Disabled, role, disabled_text)
+
+
 def _dark_palette() -> QPalette:
     """Return a compact dark ``QPalette`` (no stylesheet, presentation-only)."""
     p = QPalette()
@@ -293,8 +338,7 @@ def _dark_palette() -> QPalette:
     p.setColor(QPalette.ColorRole.BrightText, QColor(255, 80, 80))
     p.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
     p.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
-    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
-    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+    _complete_disabled_group(p, disabled_text)
     return p
 
 
@@ -318,8 +362,7 @@ def _light_palette() -> QPalette:
     p.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
     p.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
     p.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
-    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
-    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+    _complete_disabled_group(p, disabled_text)
     return p
 
 # Minimal visible subset of stacking modes, drizzle modes and local-solver

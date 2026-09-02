@@ -282,6 +282,130 @@ def test_theme_state_round_trip_model():
 
 
 # --------------------------------------------------------------------------
+# FRP-L1 — Disabled palette group: complete and dimmed (dark + light)
+# --------------------------------------------------------------------------
+
+_DISABLED_TEXT_ROLES = (
+    QPalette.ColorRole.WindowText,
+    QPalette.ColorRole.Text,
+    QPalette.ColorRole.ButtonText,
+)
+
+_STRUCTURAL_MIRROR_ROLES = (
+    QPalette.ColorRole.Window,
+    QPalette.ColorRole.Base,
+    QPalette.ColorRole.AlternateBase,
+    QPalette.ColorRole.Button,
+    QPalette.ColorRole.ToolTipBase,
+    QPalette.ColorRole.ToolTipText,
+    QPalette.ColorRole.Highlight,
+    QPalette.ColorRole.HighlightedText,
+)
+
+_THEME_WINDOWS = {
+    "dark": QColor(53, 53, 53),
+    "light": QColor(240, 240, 240),
+}
+
+
+def _relative_luminance(color: QColor) -> float:
+    """WCAG relative luminance of an sRGB colour (0..1)."""
+    def _lin(channel: int) -> float:
+        v = channel / 255.0
+        if v <= 0.03928:
+            return v / 12.92
+        return ((v + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * _lin(color.red())
+        + 0.7152 * _lin(color.green())
+        + 0.0722 * _lin(color.blue())
+    )
+
+
+def _contrast_ratio(a: QColor, b: QColor) -> float:
+    """WCAG contrast ratio between two colours (>= 1.0)."""
+    la, lb = _relative_luminance(a), _relative_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _theme_palettes(app, window):
+    """Yield ``(mode, palette)`` after applying Dark then Light."""
+    for idx, mode in ((1, "dark"), (2, "light")):
+        window.theme_combo.setCurrentIndex(idx)
+        assert window.theme_mode == mode
+        yield mode, app.palette()
+
+
+def test_theme_disabled_windowtext_dimmed_and_readable(window):
+    """FRP-L1: Disabled ``WindowText`` must never fall back to the Active
+    full-contrast color (black-on-white / white-on-dark is the release-blocking
+    readability defect) — it is dimmed, distinct from Active, and stays
+    readable (>= 3.0:1) against the theme ``Window`` in both dark and light.
+    The Active ``Window`` colors themselves stay byte-identical."""
+    app = QApplication.instance()
+    for mode, palette in _theme_palettes(app, window):
+        active_wt = palette.color(
+            QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText
+        )
+        disabled_wt = palette.color(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText
+        )
+        bg = palette.color(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.Window
+        )
+        # The defect: disabled == active full-contrast text.  Fixed: dimmed.
+        assert disabled_wt != active_wt, mode
+        assert _contrast_ratio(disabled_wt, bg) >= 3.0, (
+            mode, disabled_wt.name(), bg.name(),
+            _contrast_ratio(disabled_wt, bg),
+        )
+        # Active-group guard: the normal appearance is unchanged.
+        assert palette.color(
+            QPalette.ColorGroup.Active, QPalette.ColorRole.Window
+        ) == _THEME_WINDOWS[mode], mode
+
+
+def test_theme_disabled_text_and_buttontext_dimmed_and_readable(window):
+    """FRP-L1: Disabled ``Text`` / ``ButtonText`` are dimmed (distinct from
+    their Active values) and readable (>= 3.0:1) against ``Base`` / ``Button``
+    in both themes (light at minimum)."""
+    app = QApplication.instance()
+    pairs = (
+        (QPalette.ColorRole.Text, QPalette.ColorRole.Base),
+        (QPalette.ColorRole.ButtonText, QPalette.ColorRole.Button),
+    )
+    for mode, palette in _theme_palettes(app, window):
+        for text_role, bg_role in pairs:
+            active = palette.color(QPalette.ColorGroup.Active, text_role)
+            disabled = palette.color(QPalette.ColorGroup.Disabled, text_role)
+            bg = palette.color(QPalette.ColorGroup.Disabled, bg_role)
+            assert disabled != active, (mode, text_role)
+            assert _contrast_ratio(disabled, bg) >= 3.0, (
+                mode, text_role, disabled.name(), bg.name(),
+                _contrast_ratio(disabled, bg),
+            )
+
+
+def test_theme_disabled_structural_roles_mirror_active(window):
+    """FRP-L1: the Disabled STRUCTURAL roles mirror their Active values in
+    both themes (a disabled surface never falls back to a platform/style
+    default that clashes with the theme), and the Disabled text roles are
+    dimmed away from the Active full-contrast values."""
+    app = QApplication.instance()
+    for mode, palette in _theme_palettes(app, window):
+        for role in _STRUCTURAL_MIRROR_ROLES:
+            assert palette.color(
+                QPalette.ColorGroup.Disabled, role
+            ) == palette.color(QPalette.ColorGroup.Active, role), (mode, role)
+        for role in _DISABLED_TEXT_ROLES:
+            assert palette.color(
+                QPalette.ColorGroup.Disabled, role
+            ) != palette.color(QPalette.ColorGroup.Active, role), (mode, role)
+
+
+# --------------------------------------------------------------------------
 # Import hygiene / GPU status label decision
 # --------------------------------------------------------------------------
 def test_no_zealfie_token_anywhere_in_gui_qt_source():
