@@ -2,6 +2,20 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.2.3] — Phoenix consedit
+
+- histogram: preserve the complete HDR tail distribution with a dual-domain
+  model — Reset/Full now shows the full sampled range (sparse extreme tails
+  genuinely binned) instead of widening the axis around robust-only bars
+- histogram: explicit persistent view state (auto / full / manual) so a
+  Reset/Full choice survives successive previews and a manual zoom reconciles
+  safely when the analysis domain shrinks
+- histogram: documented the end-of-run lifecycle (the final histogram is the
+  last live preview, never a silent FITS readback)
+- retire the abandoned LiveStack mode (no production reachability)
+- restore Light-theme readability by completing the disabled palette so
+  disabled controls render dimmed and legible in both Light and Dark themes
+
 ## [8.2.2] — Phoenix consedit
 
 - fix ZeSolver RGB reference WCS: canonicalize the transported WCS to its
