@@ -4888,6 +4888,17 @@ class MainWindow(QMainWindow):
         self._mark_time_terminal("failed")
 
     def _on_run_finished(self) -> None:
+        """Run-end GUI completion slot (summary dialog only — histogram lifecycle).
+
+        FRP-H1 end-of-run lifecycle: this handler only shows the textual
+        processing summary via :meth:`_show_pending_summary` →
+        :meth:`_show_summary_dialog` (a pure text dialog that never reads the
+        saved FITS or the engine).  It does NOT load a final reconstructed
+        image into ``_preview_source``/``_pristine_float`` and no histogram is
+        re-derived here — so the final visible histogram represents the **last
+        accepted live preview**, not the saved FITS on disk (no FITS readback,
+        by design).
+        """
         self._run_log_emit("QT_COMPLETION_HANDLER_ENTERED", outcome="finished")
         terminal_status = derive_terminal_status(self._last_summary_payload)
         self._running = False

@@ -65,7 +65,12 @@ the anchor mapping (PHI-R3):
   :func:`_plot_bin_high`), so a sparse extreme finite tail is never binned
   into isolated spikes; in-domain values above the plotted top are counted
   per channel as ``overflow`` and stay visible through ``full_range`` and the
-  per-channel stats ``max``.  The display-level window ``[0, 1]`` keeps full
+  per-channel stats ``max``.  FRP-H1 adds the **dual-domain** complement: the
+  same 512-bin resolution also spans the **full domain** ``(0, upper)``
+  (``full_counts``/``full_log_counts`` over ``full_hist_range``) from the
+  *exact same* in-domain sample, so a Reset/Full view shows the complete
+  sampled distribution — the sparse tail genuinely binned, never an empty
+  widened axis.  The display-level window ``[0, 1]`` keeps full
   bin resolution whenever no headroom exists (bit-identical to the pre-R3
   ``[0, 1]`` model), and dense HDR headroom extends ``bin_hi`` so the bins
   and the per-channel stats describe the real preserved analysis values
@@ -689,6 +694,20 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
     * ``channels`` — ``["L"]`` (mono) or ``["R", "G", "B"]``;
     * ``counts`` — per-channel ``int64`` bin counts over ``bin_range``;
     * ``log_counts`` — ``log1p(counts)`` visualization counts (empty bin == 0);
+    * ``full_counts`` / ``full_log_counts`` — per-channel ``int64`` bin counts
+      (resp. ``log1p`` visualization counts) of the **full-domain histogram**
+      (FRP-H1): 512 bins over the full analysis range ``(0.0, upper)``, i.e.
+      the *complete* sampled distribution including any sparse extreme tail
+      (the tail that ``counts`` leaves as overflow is genuinely binned here, so
+      a Reset/Full view shows the real tail population, not an empty widened
+      axis).  They are computed from the **exact same** deterministic
+      in-domain sample as ``counts``/``overflow`` (same arrays, no second
+      image traversal), so per channel ``sum(full_counts) == sampled_count``
+      while ``sum(counts) + overflow == sampled_count``.  Degenerate-identical
+      to ``counts``/``log_counts`` when ``bin_hi == upper`` (no sparse tail:
+      both histograms bin the same domain — documented, harmless);
+    * ``full_hist_range`` — the X domain the full-domain bars live in:
+      ``(0.0, upper)``, identical to ``range``/``full_range``;
     * ``stats`` — per-channel ``{min, max, median, mean, std}`` computed on the
       *exact same* deterministic in-domain sample as ``counts`` + overflow
       (so with headroom the per-channel ``max`` truthfully reports the
@@ -697,11 +716,11 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
       sample; always at or below the bin high, so auto zoom stays inside the
       binned domain; can exceed ``1.0`` when headroom is dense).
 
-    The histogram counts, the overflow counts and all five stats are computed
-    over the *exact same* finite non-negative analysis sample (non-finite
-    values and sub-black values are excluded from all of them).  When a
-    required channel has no usable sample the analysis fails closed and
-    returns ``None`` — it never fabricates synthetic pixels.
+    The histogram counts, the overflow counts, the full-domain counts and all
+    five stats are computed over the *exact same* finite non-negative analysis
+    sample (non-finite values and sub-black values are excluded from all of
+    them).  When a required channel has no usable sample the analysis fails
+    closed and returns ``None`` — it never fabricates synthetic pixels.
 
     Returns ``None`` for missing / unusable input.
     """
@@ -733,6 +752,8 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
     bin_range = (ANALYSIS_DOMAIN_FLOOR, bin_hi)
     counts: Dict[str, Any] = {}
     log_counts: Dict[str, Any] = {}
+    full_counts: Dict[str, Any] = {}
+    full_log_counts: Dict[str, Any] = {}
     stats: Dict[str, Dict[str, float]] = {}
     overflow: Dict[str, int] = {}
     overflow_total = 0
@@ -744,6 +765,21 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
         hist = hist.astype(np.int64)
         counts[name] = hist
         log_counts[name] = np.log1p(hist.astype(np.float64))
+        # FRP-H1 full-domain histogram: 512 bins over the true analysis
+        # maximum (0.0, upper), from the *exact same* in-domain array as the
+        # robust ``counts`` above (no second image traversal / sample).  This
+        # keeps the complete sampled distribution binned — the sparse extreme
+        # tail that ``counts`` leaves as overflow is a real population here —
+        # so a Reset/Full view displays genuine tail bars over the full domain
+        # instead of an empty widened axis.  When ``bin_hi == upper`` (dense
+        # top / small sample / no headroom) the two histograms are
+        # degenerate-identical (same bins over the same range) — fine.
+        full_hist, _ = np.histogram(
+            in_domain, bins=HISTOGRAM_BINS, range=analysis_range
+        )
+        full_hist = full_hist.astype(np.int64)
+        full_counts[name] = full_hist
+        full_log_counts[name] = np.log1p(full_hist.astype(np.float64))
         stats[name] = _sample_stats(np, in_domain)
         n_overflow = _histogram_overflow(np, in_domain, bin_hi)
         overflow[name] = n_overflow
@@ -754,6 +790,9 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
         "channels": [name for name, _ in channels],
         "counts": counts,
         "log_counts": log_counts,
+        "full_counts": full_counts,
+        "full_log_counts": full_log_counts,
+        "full_hist_range": analysis_range,
         "stats": stats,
         "x_range": _robust_x_range_from_samples(np, channels, upper),
         "full_range": analysis_range,

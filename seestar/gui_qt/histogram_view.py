@@ -43,11 +43,18 @@ display-level window).  Model bars are placed in the model's **bin range**
 whenever the top is dense or the sample small: the plotted curve therefore
 stays dense inside the auto/default visible windows even when a sparse extreme
 tail exists, the overflow is drawn as an explicit plot-top marker with the
-count available as :attr:`overflow_total`, and ``reset_histogram_view`` /
-``reset_zoom`` reveal the full bin/plot range (identical to the full analysis
-range when no sparse tail exists); the *analysis/control* extent stays the
-marker domain and the stats truth.  Auto/manual zoom uses the robust plotted
-range inside the binned domain.  BP/WP line dragging emits ``rangeChanged``
+count available as :attr:`overflow_total`, and auto/manual zoom uses the robust
+plotted range inside the binned domain.  Since FRP-H1 the model also carries a
+**full-domain histogram** (``full_log_counts`` over ``full_hist_range`` == the
+full analysis range ``(0, upper)`` — the complete sampled distribution, tail
+included), and the view owns an explicit **persistent view mode**
+(``_view_mode``: ``"default"`` / ``"auto"`` / ``"full"`` / ``"manual"``):
+``reset_histogram_view`` / ``reset_zoom`` select the FULL mode, which shows the
+real full-domain bars over the true analysis maximum *and persists across new
+models* (a new model keeps FULL semantics: view + bars follow the new model's
+full domain), while the legacy ``auto_zoom_enabled`` bool and ``_frozen_range``
+remain the public/back-compat surface.  The *analysis/control* extent stays the
+marker domain and the stats truth.  BP/WP line dragging emits ``rangeChanged``
 **live/coalesced** at ~25 ms during the drag and an exact final emission on
 release (the Qt equivalent of Tk's ``update_stretch_from_histogram``).
 
@@ -313,6 +320,14 @@ class HistogramView(QWidget):
         # ``None`` while the view tracks the full data range.  Cleared by
         # ``reset_histogram_view`` / ``reset_zoom`` and when data is cleared.
         self._frozen_range: Optional[tuple] = None
+        # Explicit persistent view semantics (FRP-H1): ``"default"``
+        # (display-level window ``(0, 1)``), ``"auto"`` (robust zoom window,
+        # never frozen), ``"full"`` (complete full-domain distribution over the
+        # true analysis maximum — persistent across new models) or
+        # ``"manual"`` (frozen zoom window).  ``auto_zoom_enabled`` (bool) and
+        # ``_frozen_range`` stay the public/back-compat surface, but behaviour
+        # is driven from this mode.
+        self._view_mode: str = "default"
         self.auto_zoom_enabled: bool = False
         self._drag_line: Optional[str] = None
         # Live-drag coalescing (single-shot, ~25 ms).  A pending intermediate
@@ -331,27 +346,32 @@ class HistogramView(QWidget):
         ``model`` is the immutable result of
         :func:`~seestar.gui_qt.preview_analysis.compute_histogram_float`
         (``bins``/``range``/``channels``/``counts``/``log_counts``/``stats``/
-        ``x_range``/``full_range``/``bin_range``/``overflow_total``).  The
+        ``x_range``/``full_range``/``bin_range``/``overflow_total`` and, since
+        FRP-H1, ``full_counts``/``full_log_counts``/``full_hist_range``).  The
         model ``range`` is the preserved analysis/control domain ``(0, upper)``
         (PHI-R3): zoom bounds, marker-domain fallback and the F2 frozen-range
         reconcile operate against it, and ``zoom_histogram`` validates the
         robust X range against its upper bound.  The model ``bin_range`` is
         where the 512 plotted bins actually live (PHI-AUTO-HISTOGRAM-UX-V1):
         bars are placed in that domain, so a sparse extreme tail never
-        stretches them into a few widely spaced spikes; ``reset_histogram_view``
-        / ``reset_zoom`` reveal the full bin/plot range (identical to the full
-        analysis range when no sparse tail exists).  ``overflow_total`` counts
-        the in-domain values above the plotted bin high (their full extent
-        stays truthful in ``full_range`` and the per-channel stats ``max``).
-        When the analysis domain changes, any frozen/manual view range is
-        revalidated against the new upper (PHI-R3.2): a still-valid manual
-        range is preserved verbatim, an out-of-domain one is clamped into the
-        new domain, and only a degenerate result falls back to the full range
-        — the painted axis never extends beyond the data domain and the
-        inline/detached surfaces reconcile identically (they receive the same
-        model).  Passing the same model object again only repaints (cheap), so
-        a refresh that merely moves the BP/WP markers does not reset a manual
-        zoom.
+        stretches them into a few widely spaced spikes.  ``overflow_total``
+        counts the in-domain values above the plotted bin high (their full
+        extent stays truthful in ``full_range`` and the per-channel stats
+        ``max``).  FRP-H1: when the view is in FULL mode (a previous
+        ``reset_histogram_view`` / ``reset_zoom``), a new model keeps FULL
+        semantics — the view follows the new model's full domain and paints the
+        new model's complete full-domain distribution
+        (``full_log_counts``/``full_hist_range``), so the user's "show the full
+        distribution" choice persists instead of silently falling back to the
+        auto/default window.  When the analysis domain changes, any
+        frozen/manual view range is revalidated against the new upper
+        (PHI-R3.2): a still-valid manual range is preserved verbatim, an
+        out-of-domain one is clamped into the new domain, and only a degenerate
+        result falls back to the full range — the painted axis never extends
+        beyond the data domain and the inline/detached surfaces reconcile
+        identically (they receive the same model).  Passing the same model
+        object again only repaints (cheap), so a refresh that merely moves the
+        BP/WP markers does not reset a manual zoom.
         """
         if model is not None and model is self._model:
             # Same model object: cheap repaint (no frozen-zoom reset).  A
@@ -365,6 +385,7 @@ class HistogramView(QWidget):
             self._percentile_99_5 = 1.0
             self._x_range = None
             self._frozen_range = None
+            self._view_mode = "default"
             self._model_range = (0.0, 1.0)
             self._bin_range = (0.0, 1.0)
             self._overflow_total = 0
@@ -423,7 +444,12 @@ class HistogramView(QWidget):
         self._bin_range = (0.0, 1.0)
         self._overflow_total = 0
         if had_model:
+            # FRP-H1 / PHI-R3.3 (F3): a model→legacy transition drops the
+            # float view policy (frozen window AND explicit mode) — the legacy
+            # axis always corresponds to the legacy [0, 1] data, and a later
+            # float model starts from the clean default window again.
             self._frozen_range = None
+            self._view_mode = "default"
         if image is None or image.isNull():
             self._histogram = None
             self._percentile_99_5 = 1.0
@@ -459,7 +485,9 @@ class HistogramView(QWidget):
         self._bin_range = (0.0, 1.0)
         self._overflow_total = 0
         if had_model:
+            # FRP-H1 / PHI-R3.3 (F3): see :meth:`set_data`.
             self._frozen_range = None
+            self._view_mode = "default"
         self._histogram = histogram
         self._percentile_99_5 = float(percentile_99_5)
         self._x_range = None
@@ -495,20 +523,36 @@ class HistogramView(QWidget):
         self.update()
 
     def _apply_view_after_data(self) -> None:
-        """Re-apply auto/manual zoom state after a data (model) change.
+        """Re-apply the persistent view mode after a data (model) change.
 
-        The default window stays the display-level ``[0, 1]`` window (BP/WP
-        live there); auto-zoom zooms to the robust plotted range and a manual
-        zoom is preserved (``_frozen_range``).  When no headroom exists the
-        display window equals the full analysis range, so this is identical to
-        the pre-PHI-R3 behaviour.
+        FRP-H1 view-mode dispatch (drive behaviour from ``_view_mode``, with
+        the back-compat ``auto_zoom_enabled`` bool taking priority so the
+        legacy wiring keeps working):
+
+        * ``auto`` (``auto_zoom_enabled``) — zoom to the robust plotted window
+          of the current data, never frozen;
+        * ``full`` — view = the full-domain window of the current data (the
+          true analysis maximum for a float model, ``[0, 1]`` for legacy), so
+          a user Reset/Full choice persists across new models;
+        * ``manual`` — preserve the frozen window (already reconciled to the
+          current data domain via ``_reconcile_range_to_upper`` on shrink);
+        * ``default`` (and the legacy path) — the display-level ``(0, 1)``
+          window (BP/WP live there).  When no headroom exists the display
+          window equals the full analysis range, so this is identical to the
+          pre-PHI-R3 behaviour.
         """
-        if self.auto_zoom_enabled and self.has_data:
-            self.zoom_histogram()
-        elif self._frozen_range is not None:
+        if not self.has_data:
+            return
+        if self.auto_zoom_enabled:
+            self._view_mode = "auto"
+            self._view_min, self._view_max = self._zoom_window()
+        elif self._view_mode == "full":
+            self._view_min, self._view_max = self._full_range()
+        elif self._view_mode == "manual" and self._frozen_range is not None:
             # Preserve a manual zoom across the refresh (Tk freeze_x_range).
             self._view_min, self._view_max = self._frozen_range
         else:
+            self._view_mode = "default"
             self._view_min = 0.0
             self._view_max = 1.0
 
@@ -608,11 +652,20 @@ class HistogramView(QWidget):
         the historical ``[0, max(0.02, p99.5)]`` window.  Invalid/degenerate
         model metadata already fell back to the full analysis range in
         :meth:`set_model`.
+
+        FRP-H1 view semantics: with auto-zoom enabled the view enters AUTO
+        mode (robust zoom window, never frozen); otherwise it enters MANUAL
+        mode and the zoom window is frozen (``_frozen_range``) so it survives
+        data refreshes (Tk stores ``_stored_xlim`` only while ``freeze_x_range``
+        is set).
         """
         self._view_min, self._view_max = self._zoom_window()
-        # A manual zoom is frozen across refreshes unless auto-zoom is active
-        # (Tk stores ``_stored_xlim`` only while ``freeze_x_range`` is set).
-        if not self.auto_zoom_enabled:
+        if self.auto_zoom_enabled:
+            # AUTO: unfrozen robust zoom (do not freeze across refreshes).
+            self._view_mode = "auto"
+        else:
+            # MANUAL: a manual zoom is frozen across refreshes.
+            self._view_mode = "manual"
             self._frozen_range = (self._view_min, self._view_max)
         self.update()
 
@@ -627,13 +680,14 @@ class HistogramView(QWidget):
         return (0.0, max(0.02, self._percentile_99_5))
 
     def _full_range(self) -> tuple:
-        """Full X window for the current data (analysis range or ``[0, 1]``).
+        """Full X window for the current data (full analysis or ``[0, 1]``).
 
-        Float model: the explicit full **analysis/control** range ``(0, upper)``
+        Float model: the explicit full **analysis** range ``(0, upper)``
         declared by the model (PHI-R3) — identical to the display window
-        ``[0, 1]`` when no headroom exists.  The plotted bins may end earlier
-        (the model ``bin_range``, drawn with an overflow marker at its high
-        end when values exist above it).  Legacy data: the historical ``[0, 1]``
+        ``[0, 1]`` when no headroom exists.  FRP-H1: this is also the domain
+        the full-domain bars live in (``full_hist_range`` == ``range`` == the
+        true sampled maximum), so the FULL-mode view window always matches the
+        painted full distribution.  Legacy data: the historical ``[0, 1]``
         display-level window.
         """
         if self._model is not None:
@@ -641,21 +695,32 @@ class HistogramView(QWidget):
         return (0.0, 1.0)
 
     def reset_histogram_view(self) -> None:
-        """Reset the X axis to the full data range (Tk ``reset_histogram_view``).
+        """Reset the X axis to the FULL distribution (Tk ``reset_histogram_view``).
 
-        For a float model this reveals the full preserved analysis range
-        (including HDR headroom above the display window when present); the
-        legacy path returns to ``[0, 1]`` as before.
+        FRP-H1: enters the persistent FULL view mode — the view window is set
+        to the complete full-domain range (``full_hist_range`` hi, i.e. the
+        true analysis maximum ``_model_range[1]``) and the surface paints the
+        model's **full-domain bars** (``full_log_counts`` over the full
+        domain, no overflow marker): Reset/Full genuinely displays the whole
+        sampled distribution, tail included, not just a widened axis around
+        the robust-only bars.  The FULL mode is *persistent*: each subsequent
+        ``set_model`` with a new model keeps FULL semantics (view + bars follow
+        the new model's full domain) instead of silently falling back to the
+        auto/default window.  Any frozen/manual window is cleared.  The legacy
+        path returns to ``[0, 1]`` as before (its full domain).
         """
-        self._view_min, self._view_max = self._full_range()
+        self._view_mode = "full"
         self._frozen_range = None
+        self._view_min, self._view_max = self._full_range()
         self.update()
 
     def reset_zoom(self) -> None:
-        """Reset the X axis to the full data range (Tk ``reset_zoom``)."""
-        self._view_min, self._view_max = self._full_range()
-        self._frozen_range = None
-        self.update()
+        """Reset the X axis to the FULL distribution (Tk ``reset_zoom``).
+
+        Identical to :meth:`reset_histogram_view`: enters the persistent FULL
+        view mode (full-domain window + full-domain bars; see there).
+        """
+        self.reset_histogram_view()
 
     def set_view_range(self, view_min: float, view_max: float) -> None:
         """Apply a view-window snapshot supplied by the owning controller.
@@ -682,6 +747,10 @@ class HistogramView(QWidget):
         analysis-domain shrink/grow).  Copies:
 
         * the auto-zoom flag;
+        * the explicit view mode (``_view_mode`` — FRP-H1: ``"default"`` /
+          ``"auto"`` / ``"full"`` / ``"manual"``), so a persistent FULL
+          choice made on the inline surface stays FULL on the detached surface
+          (and both follow the next model's full domain in lockstep);
         * the frozen-vs-unfrozen state: a genuine manual/robust zoom on the
           inline view (``other._frozen_range``) is copied verbatim (validated
           against this surface's model domain, which is the same model); when
@@ -695,6 +764,7 @@ class HistogramView(QWidget):
         or the analysis.
         """
         self.auto_zoom_enabled = bool(getattr(other, "auto_zoom_enabled", False))
+        self._view_mode = str(getattr(other, "_view_mode", "default"))
         upper = self._model_range[1] if self._model is not None else 1.0
         other_upper = (
             other._model_range[1] if other._model is not None else 1.0
@@ -837,27 +907,61 @@ class HistogramView(QWidget):
             painter.end()
             return
 
-        if self._model is not None:
-            # 512-bin RGB overlay / L from log1p counts (readable heights),
-            # placed in the model's explicit plotting/bin range
-            # (PHI-AUTO-HISTOGRAM-UX-V1: at most the analysis range, equal to
-            # it when no sparse extreme tail exists).
-            self._paint_bars(
-                painter,
-                rect,
-                self._model["log_counts"],
-                lo=self._bin_range[0],
-                hi=self._bin_range[1],
-            )
+        heights, lo, hi, draw_overflow = self._bars_for_current_mode()
+        self._paint_bars(painter, rect, heights, lo=lo, hi=hi)
+        if draw_overflow:
             self._draw_overflow_marker(painter, rect)
-        else:
-            # Legacy 256-bin linear counts over the display-level [0, 1].
-            self._paint_bars(painter, rect, self._histogram)
 
         self._draw_line(painter, rect, self._black_point, _BLACK_POINT_COLOR)
         self._draw_line(painter, rect, self._white_point, _WHITE_POINT_COLOR)
         self._paint_axis_labels(painter, rect)
         painter.end()
+
+    def _bars_for_current_mode(self):
+        """Select the bars to draw (and their X domain) for the current mode.
+
+        FRP-H1: in FULL view mode the surface paints the model's **full-domain
+        histogram** — ``full_log_counts`` (fallback: ``log_counts`` for
+        synthetic/legacy-compatible models without the key) spread over
+        ``full_hist_range`` (fallback: the model analysis range ``_model_range``)
+        — so Reset/Full shows the complete sampled distribution, tail included,
+        and the overflow marker is NOT drawn (nothing is un-binned: the bars
+        reach the true analysis maximum).  In every other mode the current
+        behaviour is preserved: ``log_counts`` over the model ``bin_range``
+        with the plot-top overflow marker when values exist above it.  Returns
+        ``(heights, lo, hi, draw_overflow)``; the legacy path returns the
+        historical 256-bin histogram over ``[0, 1]`` (no marker).
+        """
+        if self._model is not None:
+            if self._view_mode == "full":
+                heights = self._model.get("full_log_counts")
+                if heights is None:
+                    heights = self._model["log_counts"]
+                lo, hi = self._full_bin_domain()
+                return heights, lo, hi, False
+            return (
+                self._model["log_counts"],
+                self._bin_range[0],
+                self._bin_range[1],
+                True,
+            )
+        # Legacy 256-bin linear counts over the display-level [0, 1].
+        return self._histogram, 0.0, 1.0, False
+
+    def _full_bin_domain(self) -> tuple:
+        """X domain the full-domain bars live in (FRP-H1).
+
+        The model's ``full_hist_range`` (== the full analysis range
+        ``(0.0, upper)`` — the true maximum of the sampled distribution);
+        synthetic models without the key fall back to the validated model
+        analysis range.  Legacy data (no model) keeps ``[0, 1]``.
+        """
+        if self._model is not None:
+            full_hist_range = self._model.get("full_hist_range")
+            if full_hist_range is not None:
+                return _validated_model_range(full_hist_range)
+            return self._model_range
+        return (0.0, 1.0)
 
     def _draw_overflow_marker(self, painter: QPainter, rect: QRectF) -> None:
         """Draw a truthful "plot top / overflow" marker at the bin-range high.
@@ -868,8 +972,11 @@ class HistogramView(QWidget):
         that level is inside the current view window, so the user sees exactly
         where the binned curve ends; the count of values above it is available
         as :attr:`overflow_total` and in the model metadata (their extent also
-        stays visible through the stats ``max`` / ``full_range``).  A no-op for
-        models without overflow or when the boundary is outside the view.
+        stays visible through the stats ``max`` / ``full_range``).  FULL view
+        mode never invokes this (the full-domain bars reach the true analysis
+        maximum, so nothing is un-binned there — see
+        :meth:`_bars_for_current_mode`).  A no-op for models without overflow
+        or when the boundary is outside the view.
         """
         if self._overflow_total <= 0 or self._model is None:
             return

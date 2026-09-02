@@ -2050,9 +2050,11 @@ def _synthetic_model_wide(x_range, upper=4.0, channels=("R", "G", "B")):
 
 def test_phi_r33_detached_open_after_unfrozen_reset_stays_in_sync(qapp):
     """F2 (Nono repro): opening the detached view from an inline view with NO
-    frozen/manual range must not manufacture a detached frozen range — after a
-    model analysis-upper shrink both surfaces deterministically end with the
-    same unfrozen, in-domain view (inline default display window)."""
+    frozen/manual range must not manufacture a detached frozen range.  FRP-H1:
+    a reset is the persistent FULL view mode — after a model analysis-upper
+    shrink both surfaces deterministically end with the same unfrozen,
+    in-domain FULL view (the new model's full domain), never a stray frozen
+    window or a silent fallback to the display window."""
     win = MainWindow()
     try:
         bright = _hdr_raw_with_stars(size=48, seed=21)
@@ -2101,7 +2103,12 @@ def test_phi_r33_detached_open_after_unfrozen_reset_stays_in_sync(qapp):
         assert detached_view._frozen_range is None
         assert detached_view.view_range == inline.view_range
         lo, hi = inline.view_range
-        assert lo == 0.0 and hi <= 1.0 + 1e-9  # unfrozen display window
+        # FRP-H1: FULL mode is persistent — the unfrozen view follows the new
+        # model's full domain (0, upper_dim), never a [0, 1] display-window
+        # fallback (that silent fallback was the transient-FULL defect).
+        assert lo == 0.0 and hi == pytest.approx(upper_dim), (
+            f"FULL view must track the new full domain: {(lo, hi)}"
+        )
         # Marker domains and markers stay equal and valid.
         assert detached_view._marker_upper == inline._marker_upper
         assert detached_view.white_point == inline.white_point == win._white_point
