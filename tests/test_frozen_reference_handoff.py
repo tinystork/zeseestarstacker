@@ -94,7 +94,6 @@ def _run_lifecycle(monkeypatch, tmp_path, *, explicit_origin=None):
     )
     if stacker.processing_thread is not None:
         stacker.processing_thread.join(timeout=10)
-    stacker.drizzle_executor.shutdown()
     stacker.quality_executor.shutdown()
     assert started is True
     assert worker_started.is_set()

@@ -26,6 +26,7 @@ import concurrent.futures
 import gc
 import glob
 import hashlib
+import itertools
 import json
 import math
 import multiprocessing
@@ -66,7 +67,7 @@ from seestar.utils.wcs_utils import (
     write_wcs_to_fits_inplace,
     _sanitize_continue_as_string,
 )
-from seestar.utils.phi_trace import phi_trace_stage
+from seestar.utils.phi_trace import phi_trace_enabled, phi_trace_stage
 try:
     from ..enhancement.reproject_utils import (
         ensure_wcs_pixel_shape,
@@ -291,7 +292,6 @@ from ..core.background import _PHOTOUTILS_AVAILABLE as _PHOTOUTILS_BG_SUB_AVAILA
 from ..core.background import (
     subtract_background_2d,
 )
-from ..core.drizzle_utils import drizzle_finalize
 from ..core.drizzle_core import (
     DrizzleAccumulator,
     LANCZOS_KERNELS,
@@ -317,11 +317,6 @@ from ..core.drizzle_checkpoint import (
     SafeStackedSourceResolver,
     build_drizzle_canonical_config,
     read_drizzle_checkpoint,
-)
-from ..core.incremental_reprojection import (
-    reproject_and_coadd_batch,
-    reproject_and_combine,
-    initialize_master,
 )
 from ..core.coverage_support import accumulate_support_pair
 from ..core.normalization import (
@@ -354,9 +349,39 @@ logger.debug("Imports tiers (numpy, cv2, astropy, ccdproc) OK.")
 from time import monotonic
 from time import monotonic as _mono
 
-_DRZ_PREV_MIN_DT = 2.0  # secondes
-_last_drz_prev = 0.0
 _MAX_PREVIEW_SIDE_PX = 1000
+
+# PHI-R3.2 production preview identity.  ``PREV_RUN`` (durable producer
+# run/session id) and ``PREV_SEQ`` (per-emission monotonic sequence) are
+# **required display metadata** — emitted on every active-producer payload
+# independently of the ``ZSSS_PHI_TRACE`` debug gate, so the Qt monotonic
+# acceptance gate works in normal production (trace off).  Only the
+# ``PREVIEW_STAGE`` debug records / statistics remain gate-dependent.
+#
+# The producer run/session id is bound once per stacker instance: the Qt run
+# lifecycle assigns a per-run id before the run starts (MainWindow -> backend
+# -> ``stacker._phi_producer_session``); engine-only usage falls back to the
+# process-wide monotonic counter below (never reused within the process).
+_PHI_PRODUCER_SESSION_IDS = itertools.count(1)
+
+
+def _phi_preview_identity(stacker):
+    """Return the stacker's ``(producer_session, preview_seq)`` for one emission.
+
+    Bumps the per-stacker monotonic emission sequence exactly once per preview
+    emission and lazily binds the durable producer session id on first use.
+    Read-only telemetry never runs here: the sequence/run values are payload
+    metadata consumed by the Qt acceptance gate.
+    """
+    session = getattr(stacker, "_phi_producer_session", None)
+    if session is None:
+        session = int(next(_PHI_PRODUCER_SESSION_IDS))
+        stacker._phi_producer_session = session
+    seq = int(getattr(stacker, "_phi_preview_seq", 0)) + 1
+    stacker._phi_preview_seq = seq
+    return int(session), seq
+
+
 _QM_LAST_GUI_PUSH = 0.0  # horodatage du dernier push
 _QM_DEBOUNCE = 0.20  # secondes mini entre deux messages GUI
 _QM_DURABLE_REFERENCE_PREFIXES = (
@@ -1626,26 +1651,6 @@ def _nan_mask_image(img, mask):
     m = mask[..., None] if img.ndim == 3 else mask
     return np.where(m, img, np.nan)
 
-def drizzle_batch_worker(args):
-    """M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
-
-    Wrapper used by the invalidated double-pass incremental-drizzle process
-    pool (``_start_drizzle_process`` -> ``_process_incremental_drizzle_batch``).
-    M3 uses the single per-channel ``drizzle_accumulators`` instead and never
-    submits background drizzle batches, so no live code references this worker.
-    """
-    self = args[0]
-    batch_temp_filepaths_list = args[1]
-    current_batch_num = args[2] if len(args) > 2 else 0
-    total_batches_est = args[3] if len(args) > 3 else 0
-    weight_map_override = args[4] if len(args) > 4 else None
-    return self._process_incremental_drizzle_batch(
-        batch_temp_filepaths_list,
-        current_batch_num,
-        total_batches_est,
-        weight_map_override,
-    )
-
 
 def _quality_metrics_worker(image_data):
     """Compute SNR and star count in a separate process."""
@@ -1799,90 +1804,6 @@ except ImportError as e_cb:
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 logger.debug("Configuration warnings OK.")
 # --- FIN Imports ---
-def _drz_batch_version_string():
-    """Build the DRZ batch debug display string from the single source of truth
-    (``seestar.__version__`` + ``seestar.__codename__``).
-
-    Prefers the live package attributes when importing ``seestar`` is safe
-    (import-light builds). When that import fails — for example because
-    optional dependencies such as OpenCV are missing — or when the attributes
-    are absent, this falls back to AST-parsing ``seestar/__init__.py`` from the
-    source tree without executing the heavy package body. Falls back to
-    ``__version__`` alone when ``__codename__`` is missing or blank.
-    """
-    import ast
-    import importlib.util
-    from pathlib import Path
-
-    version = ""
-    codename = ""
-
-    # 1) Fast path: live package attributes (cheap and safe on import-light
-    #    builds; skipped automatically when the package cannot be imported).
-    try:
-        import seestar as _seestar
-    except Exception:  # pragma: no cover - depends on optional dependencies
-        _seestar = None
-    if _seestar is not None:
-        version = str(getattr(_seestar, "__version__", "") or "").strip()
-        codename = str(getattr(_seestar, "__codename__", "") or "").strip()
-        if version and codename:
-            return f"{version} {codename}"
-
-    # 2) Source-tree fallback: parse seestar/__init__.py without importing it.
-    candidates = []
-    try:
-        spec = importlib.util.find_spec("seestar")
-    except Exception:  # pragma: no cover - defensive
-        spec = None
-    if spec is not None:
-        origin = getattr(spec, "origin", None)
-        if origin and origin.endswith("__init__.py"):
-            candidates.append(origin)
-        submodule_locations = getattr(spec, "submodule_search_locations", None)
-        if submodule_locations:
-            try:
-                candidates.append(
-                    str(Path(list(submodule_locations)[0]) / "__init__.py")
-                )
-            except Exception:  # pragma: no cover - defensive
-                pass
-    # Local source-tree location relative to this module
-    # (seestar/<subpackage>/<module>.py -> seestar/__init__.py).
-    candidates.append(str(Path(__file__).resolve().parents[1] / "__init__.py"))
-
-    for init_file in dict.fromkeys(candidates):
-        try:
-            tree = ast.parse(Path(init_file).read_text(encoding="utf-8"))
-        except Exception:  # pragma: no cover - defensive
-            continue
-        for node in tree.body:
-            if not isinstance(node, ast.Assign):
-                continue
-            for target in node.targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)
-                ):
-                    if target.id == "__version__" and not version:
-                        version = node.value.value.strip()
-                    elif target.id == "__codename__" and not codename:
-                        codename = node.value.value.strip()
-        if version and codename:
-            break
-
-    if version and codename:
-        return f"{version} {codename}"
-    return version or codename
-
-
-# --- NEW GLOBAL VERSION STRING CONSTANT (ajoutée à la fin de queue_manager.py) ---
-# Assurez-vous d'ajouter cette ligne aussi à l'extérieur de la classe, tout en haut du fichier, comme je l'ai suggéré précédemment.
-# Global version string to make sure it's always the same
-# M3-D OBSOLETE LEGACY: only referenced by the invalidated
-# ``_process_incremental_drizzle_batch`` (forensic compatibility).
-GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = _drz_batch_version_string()
 
 # --- Internal Project Imports (Core Modules ABSOLUMENT nécessaires pour la classe/init) ---
 # Core Alignment (Instancié dans __init__)
@@ -2123,6 +2044,64 @@ from ..alignment.astrometry_solver import (  # Déplacé vers _worker/_process_f
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 logger.debug("Configuration warnings OK.")
 # --- FIN Imports ---
+
+
+def _drz_batch_version_string():
+    """Build the version string from the single source of truth
+    (``seestar.__version__`` + ``seestar.__codename__``).
+
+    Supported cross-module display contract: the Tk GUI
+    (``seestar/gui/main_window.py``) imports
+    ``GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG`` as ``APP_VERSION`` for the
+    window title, and ``tests/test_version_consistency.py`` pins the
+    derivation (helper call, never a hardcoded literal).  Prefers the live
+    package attributes when importing ``seestar`` is safe; falls back to
+    AST-parsing ``seestar/__init__.py`` otherwise.
+    """
+    import ast as _ast
+    import importlib.util
+    from pathlib import Path as _Path
+
+    try:
+        import seestar as _pkg
+
+        version = str(getattr(_pkg, "__version__", "") or "")
+        codename = str(getattr(_pkg, "__codename__", "") or "")
+        if version and codename:
+            return f"{version} {codename}"
+        if version:
+            return version
+    except Exception:
+        pass
+    try:
+        init_path = _Path(__file__).resolve().parents[1] / "__init__.py"
+        if not init_path.is_file():
+            return ""
+        tree = _ast.parse(init_path.read_text(encoding="utf-8"))
+        version = ""
+        codename = ""
+        for node in tree.body:
+            if isinstance(node, _ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if not isinstance(target, _ast.Name):
+                    continue
+                if target.id == "__version__" and isinstance(node.value, _ast.Constant):
+                    version = str(node.value.value or "")
+                elif target.id == "__codename__" and isinstance(node.value, _ast.Constant):
+                    codename = str(node.value.value or "")
+        if version and codename:
+            return f"{version} {codename}"
+        return version or codename
+    except Exception:
+        return ""
+
+
+# Supported cross-module display constant (Tk GUI ``APP_VERSION`` /
+# version-consistency contract).  Its original debug-log consumers (the
+# M3-D OBSOLETE LEGACY incremental-drizzle batch method) were retired in
+# PHI-R5; the constant itself remains supported.
+GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG = _drz_batch_version_string()
+
 
 
 # ---------------------------------------------------------------------------
@@ -2392,8 +2371,6 @@ class SeestarQueuedStacker:
             "astrometry_solver",
             "chroma_balancer",
             "autotuner",
-            "drizzle_processes",
-            "drizzle_executor",
         ):
             state[attr] = None
 
@@ -2536,69 +2513,6 @@ class SeestarQueuedStacker:
             self.update_progress(warn_msg, "WARN")
             self.logger.warning("[AutoBatch] %s", warn_msg)
             return 10
-
-    def _start_drizzle_process(
-        self,
-        batch_temp_filepaths_list,
-        current_batch_num=0,
-        total_batches_est=0,
-    ):
-        """M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
-
-        Launched the invalidated double-pass incremental drizzle on the
-        dedicated ``drizzle_executor``. No live code calls this method anymore:
-        M3 accumulates into ``drizzle_accumulators`` directly. ``drizzle_executor``
-        and ``drizzle_processes`` are still created/shut down for lifecycle
-        compatibility (see ``seestar/gui/boring_stack.py``), but this is the
-        only submitter and it is never invoked in M3.
-        """
-
-        fut = self.drizzle_executor.submit(
-            drizzle_batch_worker,
-            (
-                self,
-                batch_temp_filepaths_list,
-                current_batch_num,
-                total_batches_est,
-            ),
-        )
-        self.drizzle_processes.append(fut)
-
-    def _wait_drizzle_processes(self):
-        """Legacy no-op in M3 (kept for the executor shutdown lifecycle).
-
-        ``self.drizzle_processes`` is never populated in M3 (the only submitter
-        was ``_start_drizzle_process``, now OBSOLETE LEGACY), so this wait is
-        effectively empty. Kept because ``_save_final_stack`` still calls it
-        defensively via ``getattr`` and the GUI shutdown path
-        (``seestar/gui/boring_stack.py``) invokes it before draining the
-        executor. The body below only updates the legacy
-        ``incremental_drizzle_objects`` / ``intermediate_drizzle_batch_files``
-        attributes that M3 no longer uses.
-        """
-        for p in self.drizzle_processes:
-            if hasattr(p, "join"):
-                p.join()
-                result = None
-            else:
-                try:
-                    result = p.result()
-                except Exception:
-                    result = None
-            if result and isinstance(result, tuple) and len(result) == 2:
-                sci_path, wht_paths = result
-                if isinstance(sci_path, list) and isinstance(wht_paths, list):
-                    # Result from _process_incremental_drizzle_batch - update
-                    # our persistent drizzle arrays
-                    for idx, driz in enumerate(self.incremental_drizzle_objects or []):
-                        if idx < len(sci_path) and idx < len(wht_paths):
-                            driz.out_img[...] = sci_path[idx]
-                            driz.out_wht[...] = wht_paths[idx]
-                    self.incremental_drizzle_sci_arrays = sci_path
-                    self.incremental_drizzle_wht_arrays = wht_paths
-                elif sci_path and wht_paths:
-                    self.intermediate_drizzle_batch_files.append((sci_path, wht_paths))
-        self.drizzle_processes = []
 
     # ------------------------------------------------------------------
     # Parallel reprojection of a list of FITS files
@@ -3529,19 +3443,6 @@ class SeestarQueuedStacker:
         # the whole run; these fields are observational only.
         self._registration_target_provenance_id = None
         self._registration_session_id = None
-        # Keep track of background drizzle processes
-        self.drizzle_processes = []
-        # Dedicated pool for drizzle tasks.  Instance methods are made
-        # picklable via ``__getstate__``/``__setstate__`` so we can always rely
-        # on a ``ProcessPoolExecutor`` to keep the UI responsive regardless of
-        # platform.
-        Executor = lambda **kw: ProcessPoolExecutor(
-            mp_context=get_context("spawn"), **kw
-        )
-
-        self.drizzle_executor = Executor(
-            max_workers=max(1, self.num_threads // 2),
-        )
         # Persistent pool for quality metric computation
         q_fraction = 0.75
         if hasattr(self, "thread_fraction"):
@@ -3733,7 +3634,11 @@ class SeestarQueuedStacker:
         # effective manifest schema version this session writes.  A fresh run
         # writes v2; a session opened from a v1 manifest keeps v1 write
         # semantics (no run_config.cfg) until a later dedicated upgrade task.
+        # ``_run_config_canonical_fingerprint`` is the engine classic
+        # fingerprint the cached config was collected from (fingerprint-keyed
+        # cache: a legitimate runtime-effective transition invalidates it).
         self._run_config_canonical = None
+        self._run_config_canonical_fingerprint = None
         self._resume_manifest_schema_version = _RESUME_MANIFEST_VERSION
         # HSI-2B C1: scientific-session binding (input roots, classic-alignment
         # reference identity, and the planned observation set/order/decomposition).
@@ -3753,11 +3658,6 @@ class SeestarQueuedStacker:
 
         # Flag indicating the queue was pre-populated externally
         self.queue_prepared = False
-
-        # Master arrays when combining batches with incremental reprojection
-        self.master_sum = None
-        self.master_coverage = None
-        self.reproject_output_wcs = None
 
         # Backward compatibility attributes removed in favour of
         # ``reproject_between_batches``. They may still appear in old settings
@@ -3850,14 +3750,7 @@ class SeestarQueuedStacker:
 
         self.current_batch_data = []
         self.current_stack_header = None
-        self.current_stack_data_raw = None
         self.images_in_cumulative_stack = 0
-        # M3-D: ``cumulative_drizzle_data*`` are DISPLAY-ONLY preview artifacts
-        # derived from ``drizzle_accumulators`` (see
-        # ``_update_preview_drizzle_accumulator``). They are NOT scientific
-        # state and are never re-injected into the accumulation.
-        self.cumulative_drizzle_data = None
-        self.cumulative_drizzle_data_raw = None
         self.total_exposure_seconds = 0.0
         # Exposure metadata truthfulness (ZSSS-OTPUX-A-01): scalar aggregate of
         # the *accepted* contributor population.  ``total_exposure_seconds`` is
@@ -3867,11 +3760,6 @@ class SeestarQueuedStacker:
         self._exposure_unknown_count = 0
         self._exposure_min = None
         self._exposure_max = None
-        # M3-D OBSOLETE LEGACY: intermediate drizzle batch files from the
-        # invalidated double-pass incremental path. Kept empty in M3 (the only
-        # writer was ``_wait_drizzle_processes``).
-        self.intermediate_drizzle_batch_files = []
-
         # When inter-batch reprojection is enabled we may want to keep the
         # reference WCS fixed after the first successful plate-solve to avoid
         # drifting of the solution between batches. This flag controls that
@@ -3894,11 +3782,6 @@ class SeestarQueuedStacker:
         # input size instead of the expanded drizzle size.
         self.keep_input_size_for_reproject = False
 
-        # M3-D OBSOLETE LEGACY: per-channel ``Drizzle`` object list of the
-        # invalidated double-pass incremental path. Kept only for forensic
-        # compatibility (referenced by the legacy
-        # ``_process_incremental_drizzle_batch``). M3 uses ``drizzle_accumulators``.
-        self.incremental_drizzle_objects = []
         # M3: accumulateur drizzle unique par canal (le mode Final/Incremental
         # historique est désormais sans effet — un seul chemin scientifique).
         self.drizzle_accumulators = None
@@ -4531,9 +4414,6 @@ class SeestarQueuedStacker:
                     )
                     self._drizzle_support_available = True
                     self._drizzle_support_unavailable_reason = None
-                # Attribut legacy conservé (plus utilisé) : le mode
-                # Incrémental/Final historique est désormais sans effet.
-                self.incremental_drizzle_objects = []
                 if resume_result is not None:
                     self._restore_drizzle_checkpoint_runtime(resume_result)
                 else:
@@ -4675,7 +4555,6 @@ class SeestarQueuedStacker:
             "DEBUG QM [initialize V_DrizIncr_StrategyA_Init_MemmapDirFix]: Réinitialisation des autres états..."
         )
         # self.reference_wcs_object est conservé s'il a été défini par start_processing (plate-solving de réf)
-        self.intermediate_drizzle_batch_files = []
 
         skip_queue_reset = getattr(self, "queue_prepared", False)
         if not skip_queue_reset:
@@ -4685,7 +4564,6 @@ class SeestarQueuedStacker:
             self.current_batch_data = []
             self.current_stack_header = None
             self.images_in_cumulative_stack = 0
-            self.cumulative_drizzle_data = None
             self.total_exposure_seconds = 0.0
             self._exposure_unknown_count = 0
             self._exposure_min = None
@@ -4896,47 +4774,6 @@ class SeestarQueuedStacker:
     ########################################################################################################################################################
 
     ##########################################################################################################################################################
-
-    def _update_preview(self, force_update=False):
-        """Safely calls the preview callback, including stack count and batch info."""
-        if self.preview_callback is None or self.current_stack_data is None:
-            return
-        try:
-            data_copy = (
-                self.current_stack_data.copy(),
-                (
-                    self.current_stack_data_raw.copy()
-                    if self.current_stack_data_raw is not None
-                    else self.current_stack_data.copy()
-                ),
-            )
-            header_copy = (
-                self.current_stack_header.copy() if self.current_stack_header else None
-            )
-            img_count = self.images_in_cumulative_stack
-            # Use a robust estimate that accounts for queued + processed + pending additional folders
-            try:
-                if hasattr(self, "get_estimated_total_images"):
-                    total_imgs_est = self.get_estimated_total_images()
-                else:
-                    total_imgs_est = self.files_in_queue
-            except Exception:
-                total_imgs_est = self.files_in_queue
-            current_batch = self.stacked_batches_count
-            total_batches_est = self.total_batches_estimated
-            stack_name = f"Stack ({img_count}/{total_imgs_est} Img | Batch {current_batch}/{total_batches_est if total_batches_est > 0 else '?'})"
-            self.preview_callback(
-                data_copy,
-                header_copy,
-                stack_name,
-                img_count,
-                total_imgs_est,
-                current_batch,
-                total_batches_est,
-            )
-        except Exception as e:
-            logger.debug(f"Error in preview callback: {e}")
-            traceback.print_exc(limit=2)
 
     ###########################################################################################################################################################
     # UI helpers
@@ -5300,6 +5137,13 @@ class SeestarQueuedStacker:
             # min/max normalization.  It travels as the second element of the
             # preview tuple and is display-analysis data only (never science).
             raw_linear_fullres = avg_img_fullres.astype(np.float32)
+            # PHI-R3.2 production preview identity (required display metadata,
+            # never debug-gated): per-emission monotonic sequence + durable
+            # producer run/session id, shared by the trace records AND the
+            # payload header so producer traces and payload data always agree.
+            # Only the PREVIEW_STAGE records below are gated by
+            # ``ZSSS_PHI_TRACE``.
+            producer_session, preview_seq = _phi_preview_identity(self)
             phi_trace_stage(
                 logger,
                 route="classic",
@@ -5308,7 +5152,7 @@ class SeestarQueuedStacker:
                 factor=1,
                 src="SUM/W",
                 src_id=id(self.cumulative_sum_memmap),
-                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+                seq=preview_seq,
             )
             min_val_final = np.nanmin(avg_img_fullres)
             max_val_final = np.nanmax(avg_img_fullres)
@@ -5352,9 +5196,13 @@ class SeestarQueuedStacker:
                 factor=eff_factor,
                 src="SUM/W",
                 src_id=id(self.cumulative_sum_memmap),
-                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+                seq=preview_seq,
             )
 
+            # Effective resolution actually applied: 1 when no resize ran
+            # (factor 1, too-small image guard, or resize failure) — the
+            # delivered payload is then full-resolution.
+            effective_factor = 1
             if eff_factor > 1:
                 try:
                     h, w = preview_data_normalized.shape[
@@ -5376,6 +5224,7 @@ class SeestarQueuedStacker:
                             (new_w, new_h),
                             interpolation=cv2.INTER_AREA,
                         )
+                        effective_factor = eff_factor
                         logger.debug(
                             f"DEBUG QM [_update_preview_sum_w]: Aperçu sous-échantillonné (x1/{eff_factor}) à {preview_data_to_send.shape}"
                         )
@@ -5390,10 +5239,11 @@ class SeestarQueuedStacker:
                 route="classic",
                 stage="post_resize",
                 arr=raw_linear_to_send,
-                factor=eff_factor,
+                factor=effective_factor,
+                req=eff_factor,
                 src="SUM/W",
                 src_id=id(self.cumulative_sum_memmap),
-                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
+                seq=preview_seq,
             )
 
             # Préparation du header et du nom pour le callback
@@ -5402,6 +5252,17 @@ class SeestarQueuedStacker:
                 if self.current_stack_header
                 else fits.Header()
             )
+            # PHI-R3.2 production preview identity (required display metadata,
+            # always present on active-producer payloads): PREV_SEQ (per-
+            # emission monotonic sequence), PREV_RUN (durable producer run/
+            # session id — bound per stacker instance by the Qt run lifecycle),
+            # plus PREV_REQ/PREV_RES (requested vs actually-applied resolution).
+            # The payload header is identical whether or not ZSSS_PHI_TRACE is
+            # set; the debug gate only controls the PREVIEW_STAGE records.
+            header_copy["PREV_SEQ"] = (preview_seq, "PHI preview sequence")
+            header_copy["PREV_RUN"] = (producer_session, "PHI producer run/session id")
+            header_copy["PREV_REQ"] = (eff_factor, "PHI requested preview resolution factor")
+            header_copy["PREV_RES"] = (effective_factor, "PHI effective preview resolution factor")
             # Ajouter/Mettre à jour les infos de l'aperçu dans le header
             header_copy["PREV_SRC"] = (
                 "SUM/W Accumulators",
@@ -5462,190 +5323,6 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=2)
 
     #############################################################################################################################################################
-
-    def _update_preview_incremental_drizzle(self):
-        """
-        M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
-
-        Legacy incremental-drizzle preview: sent the cumulative drizzled data
-        built by ``_process_incremental_drizzle_batch``. In M3 the preview is
-        derived from ``drizzle_accumulators`` by
-        ``_update_preview_drizzle_accumulator`` (DISPLAY-ONLY). No live path
-        calls this method.
-        """
-        global _last_drz_prev
-        if _mono() - _last_drz_prev < _DRZ_PREV_MIN_DT:
-            return
-        _last_drz_prev = _mono()
-        if self.preview_callback is None or self.cumulative_drizzle_data is None:
-            # Ne rien faire si pas de callback ou pas de données drizzle cumulatives
-            return
-
-        try:
-            phi_trace_stage(
-                logger,
-                route="legacy_drizzle",
-                stage="source",
-                arr=self.cumulative_drizzle_data,
-                factor=int(getattr(self, "preview_downsample_factor", 2) or 2),
-                src="LegacyDrizzle",
-                src_id=id(self.cumulative_drizzle_data),
-                seq=int(getattr(self, "images_in_cumulative_stack", 0) or 0),
-            )
-            # Utiliser les données et le header cumulatifs Drizzle
-            data_to_send = (
-                self.cumulative_drizzle_data.copy(),
-                (
-                    self.cumulative_drizzle_data_raw.copy()
-                    if self.cumulative_drizzle_data_raw is not None
-                    else self.cumulative_drizzle_data.copy()
-                ),
-            )
-
-            if max(data_to_send[0].shape[:2]) > _MAX_PREVIEW_SIDE_PX:
-                scale = _MAX_PREVIEW_SIDE_PX / max(data_to_send[0].shape[:2])
-                new_size = (
-                    int(data_to_send[0].shape[1] * scale),
-                    int(data_to_send[0].shape[0] * scale),
-                )
-                data_to_send = (
-                    cv2.resize(data_to_send[0], new_size, interpolation=cv2.INTER_AREA),
-                    cv2.resize(data_to_send[1], new_size, interpolation=cv2.INTER_AREA),
-                )
-
-            # Apply GUI-selected downsample factor as a final step (1,2,3,4)
-            try:
-                eff_factor = int(getattr(self, "preview_downsample_factor", 2))
-            except Exception:
-                eff_factor = 2
-            eff_factor = max(1, min(4, eff_factor))
-            if eff_factor > 1:
-                try:
-                    h, w = data_to_send[0].shape[:2]
-                    new_size = (max(1, w // eff_factor), max(1, h // eff_factor))
-                    data_to_send = (
-                        cv2.resize(data_to_send[0], new_size, interpolation=cv2.INTER_AREA),
-                        cv2.resize(data_to_send[1], new_size, interpolation=cv2.INTER_AREA),
-                    )
-                except Exception as _e_ds:
-                    logger.debug(f"WARN: Drizzle preview extra downsample failed: {_e_ds}")
-            header_to_send = (
-                self.current_stack_header.copy()
-                if self.current_stack_header
-                else fits.Header()
-            )
-
-            # Informations pour l'affichage dans l'aperçu
-            img_count = (
-                self.images_in_cumulative_stack
-            )  # Compteur mis à jour dans _process_incremental_drizzle_batch
-            total_imgs_est = self.files_in_queue  # Estimation globale
-            current_batch = self.stacked_batches_count  # Le lot qui vient d'être traité
-            total_batches_est = self.total_batches_estimated
-
-            # Créer un nom pour l'aperçu
-            stack_name = f"Drizzle Incr ({img_count}/{total_imgs_est} Img | Lot {current_batch}/{total_batches_est if total_batches_est > 0 else '?'})"
-
-            # Appeler le callback du GUI
-            self.preview_callback(
-                data_to_send,
-                header_to_send,
-                stack_name,
-                img_count,
-                total_imgs_est,
-                current_batch,
-                total_batches_est,
-            )
-            # logger.debug(f"DEBUG: Preview updated with Incremental Drizzle data (Shape: {data_to_send.shape})") # Optionnel
-
-        except AttributeError:
-            # Cas où cumulative_drizzle_data ou current_stack_header pourrait être None entre-temps
-            logger.debug(
-                "Warning: Attribut manquant pour l'aperçu Drizzle incrémental."
-            )
-        except Exception as e:
-            logger.debug(f"Error in _update_preview_incremental_drizzle: {e}")
-            traceback.print_exc(limit=2)
-
-    def _update_preview_master(self):
-        """Update preview when using incremental reprojection.
-
-        This version dynamically crops the preview to the region that actually
-        contains stacked data to avoid showing large empty borders.
-        """
-        if (
-            self.preview_callback is None
-            or self.master_sum is None
-            or self.master_coverage is None
-        ):
-            return
-
-        try:
-            # Compute mean stack while protecting against divide by zero
-            wht_safe = np.maximum(self.master_coverage, 1e-9)
-            avg = self.master_sum / wht_safe[..., None]
-            avg = np.nan_to_num(avg, nan=0.0, posinf=0.0, neginf=0.0)
-
-            # --- Dynamic cropping to area with data ---
-            rows, cols = np.where(self.master_coverage > 0)
-            if rows.size > 0:
-                top, bottom = np.min(rows), np.max(rows)
-                left, right = np.min(cols), np.max(cols)
-                if top < bottom and left < right:
-                    avg_cropped = avg[top : bottom + 1, left : right + 1]
-                else:
-                    avg_cropped = avg
-            else:
-                avg_cropped = avg
-
-            # Normalise for display
-            mn, mx = np.nanmin(avg_cropped), np.nanmax(avg_cropped)
-            if np.isfinite(mn) and np.isfinite(mx) and mx > mn:
-                norm = (avg_cropped - mn) / (mx - mn)
-            else:
-                norm = np.zeros_like(avg_cropped, dtype=np.float32)
-
-            self.current_stack_data_raw = avg_cropped.astype(np.float32)
-            self.current_stack_data = np.clip(norm, 0.0, 1.0).astype(np.float32)
-            self.current_stack_header = self.current_stack_header or fits.Header()
-            self._update_preview()
-        except Exception as e:
-            logger.debug(f"Error in _update_preview_master: {e}")
-
-    def _incremental_reproject_coadd(self, batch_img, batch_cov, batch_wcs):
-        """Incrementally reproject and co-add a stacked batch."""
-        if (
-            batch_img is None
-            or batch_cov is None
-            or batch_wcs is None
-            or not self.reproject_coadd_final
-        ):
-            return
-
-        ref_wcs = self.reference_wcs_object or batch_wcs
-        if ref_wcs.pixel_shape is None:
-            ref_wcs.pixel_shape = (batch_img.shape[1], batch_img.shape[0])
-
-        if self.reproject_output_wcs is None:
-            self.reproject_output_wcs = ref_wcs
-            self.master_sum, self.master_coverage = initialize_master(
-                batch_img, batch_cov, batch_wcs, ref_wcs
-            )
-        else:
-            self.master_sum, self.master_coverage = reproject_and_combine(
-                self.master_sum,
-                self.master_coverage,
-                batch_img,
-                batch_cov,
-                batch_wcs,
-                self.reproject_output_wcs,
-            )
-
-        self.current_stack_header = fits.Header()
-        self.current_stack_header.update(
-            self.reproject_output_wcs.to_header(relax=True)
-        )
-        self._update_preview_master()
 
     def _downsample_preview(self, data: np.ndarray, wht: np.ndarray) -> None:
         # Preview buffer logic
@@ -6458,7 +6135,6 @@ class SeestarQueuedStacker:
 
         current_batch_items_with_masks_for_stack_batch = []
         self._current_batch_paths = []
-        self.intermediate_drizzle_batch_files = []
         solved_items_for_final_reprojection = []
         all_aligned_files_with_info_for_mosaic = []
 
@@ -7821,10 +7497,6 @@ class SeestarQueuedStacker:
             logger.debug(
                 f"    - self.drizzle_active_session (std): {self.drizzle_active_session}"
             )
-            if self.drizzle_active_session and not self.is_mosaic_run:
-                logger.debug(
-                    f"      - Mode Drizzle (std): '{self.drizzle_mode}', Nb lots Drizzle interm. (legacy, vide en M3): {len(self.intermediate_drizzle_batch_files)}"
-                )
             logger.debug(
                 f"    - self.images_in_cumulative_stack (classique): {self.images_in_cumulative_stack}"
             )
@@ -10505,788 +10177,6 @@ class SeestarQueuedStacker:
 
     ##############################################################################################################################################
 
-    def _process_incremental_drizzle_batch(
-        self,
-        batch_temp_filepaths_list,
-        current_batch_num=0,
-        total_batches_est=0,
-        weight_map_override=None,  # Not used in this version but kept for signature compatibility
-    ):
-        """
-        M3-D OBSOLETE LEGACY: do not call; kept only for forensic compatibility.
-
-        This is the invalidated double-pass incremental drizzle
-        ("V_True_Incremental_Driz"): it drizzled each batch of temporary files
-        onto persistent ``incremental_drizzle_objects`` (``Drizzle`` instances)
-        and re-drizzled batch results, which made the result depend on batch
-        size and fold edge flux. M3 replaces it with a single per-channel
-        ``DrizzleAccumulator`` (``drizzle_accumulators``), so this method is no
-        longer on any live worker path. It remains only because
-        ``tests/test_save_final_stack.py`` exercises its weight-override and
-        accumulation behaviour directly for regression documentation. The
-        "VRAI"/"TRUE incremental" wording inside this method is legacy and must
-        not be read as an active scientific path.
-        """
-        # Log de début de méthode
-        logger.debug(
-            "\n======== DÉBUT MÉTHODE: _process_incremental_drizzle_batch (VERSION: %s) - Lot #%d - Fichiers: %d ========",
-            GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
-            current_batch_num,
-            len(batch_temp_filepaths_list),
-        )
-
-        num_files_in_batch = len(batch_temp_filepaths_list)
-        logger.debug(
-            f"DEBUG QM [_process_incremental_drizzle_batch {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Début Lot Drizzle Incr. VRAI #{current_batch_num} ({num_files_in_batch} fichiers)."
-        )
-
-        if not batch_temp_filepaths_list:
-            self.update_progress(
-                f"⚠️ Lot Drizzle Incrémental VRAI #{current_batch_num} vide. Ignoré."
-            )
-            logger.debug(f"  Sortie: Lot #{current_batch_num} est vide.")
-            return
-
-        progress_info = f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
-        self.update_progress(
-            f"💧 Traitement Drizzle Incrémental VRAI du lot {progress_info}..."
-        )
-
-        # --- VÉRIFICATIONS CRITIQUES ---
-        if (
-            not self.incremental_drizzle_objects
-            or len(self.incremental_drizzle_objects) != 3
-        ):
-            self.update_progress(
-                "❌ Erreur critique: Objets Drizzle persistants non initialisés pour mode Incrémental.",
-                "ERROR",
-            )
-            self.processing_error = "Objets Drizzle Incr. non initialisés"
-            self.stop_processing = True
-            logger.debug(f"  Sortie ERREUR: Objets Drizzle non initialisés.")
-            return
-        if self.drizzle_output_wcs is None or self.drizzle_output_shape_hw is None:
-            self.update_progress(
-                "❌ Erreur critique: Grille de sortie Drizzle (WCS/Shape) non définie pour mode Incrémental VRAI.",
-                "ERROR",
-            )
-            self.processing_error = "Grille Drizzle non définie (Incr VRAI)"
-            self.stop_processing = True
-            logger.debug(
-                f"  Sortie ERREUR: Grille de sortie Drizzle (WCS/Shape) non définie."
-            )
-            return
-        logger.debug(
-            f"  WCS de sortie cible (self.drizzle_output_wcs) : {self.drizzle_output_wcs.wcs.crval if self.drizzle_output_wcs and self.drizzle_output_wcs.wcs else 'Non défini'}"
-        )
-        logger.debug(
-            f"  Shape de sortie cible (self.drizzle_output_shape_hw) : {self.drizzle_output_shape_hw}"
-        )
-        logger.debug(
-            f"  Paramètres Drizzle : Kernel='{self.drizzle_kernel}', Pixfrac={self.drizzle_pixfrac}, Fillval='{self.drizzle_fillval}'"
-        )
-        logger.debug(
-            f"  Reprojection entre lots (self.reproject_between_batches) : {self.reproject_between_batches}"
-        )
-        logger.debug(
-            f"  WCS de référence (self.reference_wcs_object) : {'Défini' if self.reference_wcs_object else 'Non défini'} (utilisé si reproject_between_batches)"
-        )
-
-        num_output_channels = 3
-        files_added_to_drizzle_this_batch = 0
-
-        for i_file, temp_fits_filepath in enumerate(batch_temp_filepaths_list):
-            t0 = monotonic()
-            if self.stop_processing:
-                logger.debug(
-                    f"  Arrêt demandé. Interruption du traitement du lot #{current_batch_num}."
-                )
-                break
-
-            current_filename_for_log = os.path.basename(temp_fits_filepath)
-            if i_file % 5:  # n'envoyer qu'un message sur 5
-                pass
-            else:
-                self.update_progress(
-                    f"   -> DrizIncrVrai: Ajout fichier {i_file+1}/{num_files_in_batch} ('{current_filename_for_log}') au Drizzle cumulatif...",
-                    None,
-                )
-            logger.debug(
-                f"\n    === TRAITEMENT FICHIER: '{current_filename_for_log}' (Fichier {i_file+1}/{num_files_in_batch}) ==="
-            )
-
-            input_image_cxhxw = None
-            input_header = None
-            wcs_input_from_file = None
-            pixmap_for_this_file = None  # Initialisation pour chaque fichier
-
-            try:
-                # --- ÉTAPE 1: Chargement et validation du fichier temporaire ---
-                logger.debug(
-                    f"      [Step  1] Chargement FITS temporaire: '{current_filename_for_log}'"
-                )
-                with fits.open(temp_fits_filepath, memmap=False) as hdul:
-                    if not hdul or len(hdul) == 0 or hdul[0].data is None:
-                        raise IOError(f"FITS temp invalide/vide: {temp_fits_filepath}")
-
-                    data_loaded = hdul[0].data
-                    input_header = hdul[0].header
-                    logger.debug(
-                        f"        Données brutes chargées: Range [{np.min(data_loaded):.4g}, {np.max(data_loaded):.4g}], Shape: {data_loaded.shape}, Dtype: {data_loaded.dtype}"
-                    )
-
-                    if (
-                        data_loaded.ndim == 3
-                        and data_loaded.shape[0] == num_output_channels
-                    ):
-                        input_image_cxhxw = data_loaded.astype(np.float32)
-                        logger.debug(
-                            f"        input_image_cxhxw (après astype float32): Range [{np.min(input_image_cxhxw):.4g}, {np.max(input_image_cxhxw):.4g}]"
-                        )
-                    else:
-                        raise ValueError(
-                            f"Shape FITS temp {data_loaded.shape} non CxHxW comme attendu (attendu {num_output_channels}xHxW)."
-                        )
-
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")  # Ignore FITSFixedWarning
-                        wcs_input_from_file = WCS(input_header, naxis=2)
-                    if not wcs_input_from_file or not wcs_input_from_file.is_celestial:
-                        raise ValueError(
-                            "WCS non céleste ou invalide dans le fichier FITS temporaire."
-                        )
-                    logger.debug(
-                        f"        WCS du fichier temp (Input WCS): CRVAL={wcs_input_from_file.wcs.crval if wcs_input_from_file.wcs else 'N/A'}, CDELT={wcs_input_from_file.wcs.cdelt if wcs_input_from_file.wcs else 'N/A'}"
-                    )
-
-                image_hwc = np.moveaxis(
-                    input_image_cxhxw, 0, -1
-                )  # Convertir CxHxW en HxWxC
-
-                # --- ÉTAPE 2: GESTION DE LA REPROJECTION INTER-BATCH ---
-                target_shape_hw = (
-                    self.drizzle_output_shape_hw
-                )  # La forme finale de la sortie Drizzle
-                wcs_for_pixmap = wcs_input_from_file
-                input_shape_hw_current_file = image_hwc.shape[
-                    :2
-                ]  # La forme HxW de l'image ALIGNÉE (ou reprojetée)
-
-                # Assuming reproject_to_reference_wcs is correctly implemented and imported
-                if (
-                    hasattr(self, "reproject_between_batches")
-                    and self.reproject_between_batches
-                    and hasattr(self, "reference_wcs_object")
-                    and self.reference_wcs_object
-                ):
-                    # Added a check if reproject_to_reference_wcs is actually callable
-                    from seestar.core.reprojection import (
-                        reproject_to_reference_wcs as _reproject_func,
-                    )
-
-                    if _reproject_func:
-                        logger.debug(
-                            f"      [Step 2] Reprojection active. Reprojection de l'image vers WCS de référence..."
-                        )
-                        try:
-                            self.update_progress(
-                                f"➡️ [Reproject] Entrée dans reproject pour le batch {current_batch_num}/{total_batches_est}",
-                                "INFO_DETAIL",
-                            )
-                            # Reprojeter l'image HWC vers le WCS de référence
-                            reprojected_image_hwc = _reproject_func(  # Use the imported function
-                                image_hwc,
-                                wcs_input_from_file,
-                                self.reference_wcs_object,
-                                target_shape_hw,  # La forme de sortie de la reprojection est la forme cible de Drizzle
-                            )
-                            if reprojected_image_hwc is None:
-                                raise RuntimeError(
-                                    "reproject_to_reference_wcs a retourné None."
-                                )
-
-                            image_hwc = reprojected_image_hwc  # L'image à traiter par Drizzle est maintenant reprojetée
-                            wcs_for_pixmap = (
-                                self.reference_wcs_object
-                            )  # Le WCS à utiliser pour le pixmap est celui de la référence
-                            input_shape_hw_current_file = image_hwc.shape[
-                                :2
-                            ]  # La forme de l'image (maintenant reprojetée)
-
-                            self.update_progress(
-                                f"✅ [Reproject] Batch {current_batch_num}/{total_batches_est} reprojecté vers référence (shape {target_shape_hw})",
-                                "INFO_DETAIL",
-                            )
-                            logger.debug(
-                                f"        Image après reprojection: Shape={image_hwc.shape}, Range=[{np.nanmin(image_hwc):.4g}, {np.nanmax(image_hwc):.4g}]"
-                            )
-                            logger.debug(
-                                f"        WCS utilisé pour pixmap (après reproj.): CRVAL={wcs_for_pixmap.wcs.crval if wcs_for_pixmap.wcs else 'N/A'}"
-                            )
-                        except Exception as e:
-                            self.update_progress(
-                                f"⚠️ [Reproject] Batch {current_batch_num} ignoré : {type(e).__name__}: {e}",
-                                "WARN",
-                            )
-                            logger.error(f"ERREUR REPROJECTION: {e}", exc_info=True)
-                            continue  # Passe au fichier suivant si reprojection échoue
-                    else:
-                        logger.warning(
-                            f"        AVERTISSEMENT: reproject_to_reference_wcs n'est pas importé/disponible. Reprojection ignorée."
-                        )
-
-                # --- ÉTAPE 3: Calcul du Pixmap (mapping des pixels d'entrée vers la grille de sortie Drizzle) ---
-                logger.debug(f"      [Step 3] Calcul du Pixmap pour mapping WCS...")
-                get_idx = getattr(self, "_get_indices", None)
-                if get_idx is not None:
-                    y_in_coords_flat, x_in_coords_flat = get_idx(
-                        input_shape_hw_current_file, flat=True
-                    )
-                else:  # Fallback for test stubs
-                    y_in_coords_flat, x_in_coords_flat = np.indices(
-                        input_shape_hw_current_file
-                    ).reshape(2, -1)
-
-                # Convertir les coordonnées pixels de l'image d'entrée en coordonnées célestes
-                sky_ra_deg, sky_dec_deg = wcs_for_pixmap.all_pix2world(
-                    x_in_coords_flat, y_in_coords_flat, 0
-                )
-                logger.debug(
-                    f"        Coordonnées célestes calculées: RA_range=[{np.nanmin(sky_ra_deg):.4g}, {np.nanmax(sky_ra_deg):.4g}], Dec_range=[{np.nanmin(sky_dec_deg):.4g}, {np.nanmax(sky_dec_deg):.4g}]"
-                )
-
-                if not (
-                    np.all(np.isfinite(sky_ra_deg)) and np.all(np.isfinite(sky_dec_deg))
-                ):
-                    raise ValueError(
-                        "Coordonnées célestes non finies obtenues depuis le WCS du fichier temporaire. Pixmap impossible."
-                    )
-
-                # Convertir les coordonnées célestes en coordonnées pixels de la grille de sortie Drizzle (initialement avec origin=0)
-                (
-                    final_x_output_pixels,
-                    final_y_output_pixels,
-                ) = self.drizzle_output_wcs.all_world2pix(sky_ra_deg, sky_dec_deg, 0)
-
-                # Dimensions de la grille de sortie Drizzle
-                height_out, width_out = self.drizzle_output_shape_hw
-
-                # Diagnostic des bornes du pixmap initial (origin=0)
-                min_x_initial, max_x_initial = np.nanmin(
-                    final_x_output_pixels
-                ), np.nanmax(final_x_output_pixels)
-                min_y_initial, max_y_initial = np.nanmin(
-                    final_y_output_pixels
-                ), np.nanmax(final_y_output_pixels)
-                logger.debug(
-                    f"        Pixmap initial (origin=0) X range [{min_x_initial:.2f}, {max_x_initial:.2f}] vs [0,{width_out-1}]; Y range [{min_y_initial:.2f}, {max_y_initial:.2f}] vs [0,{height_out-1})"
-                )
-                logger.debug(
-                    "ULTRA-DEBUG: Pixmap initial (origin=0) X range %.2f-%.2f vs [0,%d]; Y range %.2f-%.2f vs [0,%d)",
-                    min_x_initial,
-                    max_x_initial,
-                    width_out - 1,
-                    min_y_initial,
-                    max_y_initial,
-                    height_out - 1,
-                )
-
-                # RECALCUL AVEC origin=1 SI HORS BORNES (et correction en 0-based)
-                # Cette condition est essentielle pour savoir si l'ajustement -1.0 doit être appliqué.
-                needs_origin1_recalc = (
-                    min_x_initial < 0
-                    or max_x_initial >= width_out
-                    or min_y_initial < 0
-                    or max_y_initial >= height_out
-                )
-
-                if needs_origin1_recalc:
-                    logger.debug(
-                        "      WARN [ProcIncrDrizLoop]: Pixmap initial (origin=0) en dehors de la plage attendue. Recalcul avec origin=1."
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Pixmap initial (origin=0) is OUT OF BOUNDS. Recalculating with origin=1..."
-                    )
-                    (
-                        final_x_output_pixels,
-                        final_y_output_pixels,
-                    ) = self.drizzle_output_wcs.all_world2pix(
-                        sky_ra_deg, sky_dec_deg, 1  # Recalcul avec origin=1
-                    )
-                    # --- FIX CRITIQUE : CONVERSION DE 1-BASED À 0-BASED ---
-                    final_x_output_pixels -= 1.0  # Convertir 1-based en 0-based
-                    final_y_output_pixels -= 1.0  # Convertir 1-based en 0-based
-                    logger.debug(
-                        f"      DEBUG QM [ProcIncrDrizLoop]: Pixmap ajusté (1-based vers 0-based) après recalcul avec origin=1."
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Pixmap ADJUSTED (1-based to 0-based). New min_x=%.2f, min_y=%.2f",
-                        np.nanmin(final_x_output_pixels),
-                        np.nanmin(final_y_output_pixels),
-                    )
-                    # --- FIN FIX CRITIQUE ---
-
-                # --- Vérification et nettoyage des NaN/Inf après tous les calculs ---
-                if not (
-                    np.all(np.isfinite(final_x_output_pixels))
-                    and np.all(np.isfinite(final_y_output_pixels))
-                ):
-                    logger.debug(
-                        f"      WARN [ProcIncrDrizLoop]: Pixmap pour '{current_filename_for_log}' contient NaN/Inf après projection (post-correction). Nettoyage..."
-                    )
-                    logger.debug("ULTRA-DEBUG: Pixmap contains NaN/Inf. Cleaning...")
-                    final_x_output_pixels = np.nan_to_num(
-                        final_x_output_pixels, nan=0.0, posinf=0.0, neginf=0.0
-                    )  # Utilisez 0.0 pour les valeurs numériques
-                    final_y_output_pixels = np.nan_to_num(
-                        final_y_output_pixels, nan=0.0, posinf=0.0, neginf=0.0
-                    )
-
-                # Création du pixmap final après tous les ajustements
-                pixmap_for_this_file = np.dstack(
-                    (
-                        np.clip(
-                            final_x_output_pixels.reshape(input_shape_hw_current_file),
-                            0,
-                            width_out - 1,
-                        ),
-                        np.clip(
-                            final_y_output_pixels.reshape(input_shape_hw_current_file),
-                            0,
-                            height_out - 1,
-                        ),
-                    )
-                ).astype(np.float32)
-
-                # Diagnostic final du pixmap après clipping
-                pix_x_final = pixmap_for_this_file[..., 0]
-                pix_y_final = pixmap_for_this_file[..., 1]
-                min_x_final, max_x_final = np.nanmin(pix_x_final), np.nanmax(
-                    pix_x_final
-                )
-                min_y_final, max_y_final = np.nanmin(pix_y_final), np.nanmax(
-                    pix_y_final
-                )
-                logger.debug(
-                    f"      Final Pixmap X stats (post-clip): min={min_x_final:.2f}, max={max_x_final:.2f}, mean={np.nanmean(pix_x_final):.2f}, std={np.nanstd(pix_x_final):.2f}"
-                )
-                logger.debug(
-                    f"      Final Pixmap Y stats (post-clip): min={min_y_final:.2f}, max={max_y_final:.2f}, mean={np.nanmean(pix_y_final):.2f}, std={np.nanstd(pix_y_final):.2f}"
-                )
-                logger.debug(
-                    f"      Output Grid (width, height) for comparison: ({width_out}, {height_out})"
-                )
-                logger.debug(
-                    "ULTRA-DEBUG: Final Pixmap X stats (post-clip): min=%.2f, max=%.2f, mean=%.2f, std=%.2f",
-                    min_x_final,
-                    max_x_final,
-                    np.nanmean(pix_x_final),
-                    np.nanstd(pix_x_final),
-                )
-                logger.debug(
-                    "ULTRA-DEBUG: Final Pixmap Y stats (post-clip): min=%.2f, max=%.2f, mean=%.2f, std=%.2f",
-                    min_y_final,
-                    max_y_final,
-                    np.nanmean(pix_y_final),
-                    np.nanstd(pix_y_final),
-                )
-
-                # Vérification critique des bornes du pixmap final
-                assert (
-                    min_x_final >= 0
-                    and max_x_final < width_out
-                    and min_y_final >= 0
-                    and max_y_final < height_out
-                ), "ERREUR PIXMAP: Pixmap final (post-clipping) hors bornes attendues!"
-
-                # Détection d'un pixmap "plat" (tous les points mappent au même endroit)
-                if np.allclose(
-                    pixmap_for_this_file[..., 0],
-                    pixmap_for_this_file[0, 0, 0],
-                    atol=1e-3,
-                ) and np.allclose(
-                    pixmap_for_this_file[..., 1],
-                    pixmap_for_this_file[0, 0, 1],
-                    atol=1e-3,
-                ):
-                    logger.warning(
-                        "        WARN: All pixmap points map to (or very close to) a single output pixel! This indicates a severe WCS issue or extreme input image data where all points are projected to the same output pixel. No significant image will be drizzled."
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: WARNING: Pixmap is 'flat' - all points map to a single output pixel!"
-                    )
-
-                logger.debug(
-                    f"      [Step 3] Pixmap calculé et validé pour '{current_filename_for_log}'."
-                )
-
-                # --- ÉTAPE 4: Préparation des paramètres pour add_image ---
-                logger.debug(
-                    f"      [Step 4] Préparation des paramètres pour add_image..."
-                )
-                exptime_for_drizzle_add = 1.0
-                in_units_for_drizzle_add = "cps"  # Par défaut
-
-                if input_header and "EXPTIME" in input_header:
-                    try:
-                        original_exptime = float(input_header["EXPTIME"])
-                        if original_exptime > 1e-6:
-                            exptime_for_drizzle_add = original_exptime
-                            in_units_for_drizzle_add = (
-                                "counts"  # Si EXPTIME valide, on traite en counts
-                            )
-                            logger.debug(
-                                f"        Utilisation EXPTIME={exptime_for_drizzle_add:.2f}s du header original ('{input_header.get('_SRCFILE', 'N/A_SRC')}'), in_units='counts'"
-                            )
-                        else:
-                            logger.debug(
-                                f"        EXPTIME du header original ({original_exptime:.2f}) trop faible. Utilisation exptime=1.0, in_units='cps'."
-                            )
-                    except (ValueError, TypeError):
-                        logger.debug(
-                            f"        AVERTISSEMENT: EXPTIME invalide dans header temp ('{input_header.get('EXPTIME')}' pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'). Utilisation exptime=1.0, in_units='cps'."
-                        )
-                else:
-                    logger.debug(
-                        f"        AVERTISSEMENT: EXPTIME non trouvé dans header temp pour '{input_header.get('_SRCFILE', 'N/A_SRC')}'. Utilisation exptime=1.0, in_units='cps'."
-                    )
-
-                if exptime_for_drizzle_add <= 0:  # Double-vérification de l'exptime
-                    logger.warning(
-                        f"        AVERTISSEMENT: EXPTIME={exptime_for_drizzle_add} non valide. Remplacement par 1.0."
-                    )
-                    exptime_for_drizzle_add = 1.0
-
-                # Préparation du weight_map pour add_image. Utilise weight_map_override si fourni
-                if weight_map_override is not None:
-                    weight_map_param_for_add = np.asarray(
-                        weight_map_override, dtype=np.float32
-                    )
-                    if weight_map_param_for_add.shape != input_shape_hw_current_file:
-                        logger.debug(
-                            "        WARN: weight_map_override shape mismatch; using ones"
-                        )
-                        weight_map_param_for_add = np.ones(
-                            input_shape_hw_current_file, dtype=np.float32
-                        )
-                else:
-                    weight_map_param_for_add = np.ones(
-                        input_shape_hw_current_file, dtype=np.float32
-                    )
-                logger.debug(
-                    f"        Weight_map pour add_image: Shape={weight_map_param_for_add.shape}, Range=[{np.min(weight_map_param_for_add):.3f}, {np.max(weight_map_param_for_add):.3f}], Sum={np.sum(weight_map_param_for_add):.3f}"
-                )
-
-                # Pré-traitement de l'image (nettoyage NaN/Inf et clip > 0) AVANT de la passer à add_image
-                image_hwc_cleaned = np.nan_to_num(
-                    np.clip(image_hwc, 0.0, None), nan=0.0, posinf=0.0, neginf=0.0
-                ).astype(np.float32)
-                logger.debug(
-                    f"        Image HWC nettoyée (pour add_image): Range=[{np.min(image_hwc_cleaned):.4g}, {np.max(image_hwc_cleaned):.4g}], Mean={np.mean(image_hwc_cleaned):.4g}"
-                )
-
-                # --- ÉTAPE 5: Appel à add_image pour chaque canal ---
-                logger.debug(
-                    f"      [Step 5] Appel driz_obj.add_image pour chaque canal..."
-                )
-
-                def _add_one_channel(ch_idx: int):
-                    channel_data_2d = image_hwc_cleaned[..., ch_idx]
-
-                    logger.debug(
-                        f"        Ch{ch_idx} AVANT add_image: data range [{np.min(channel_data_2d):.3g}, {np.max(channel_data_2d):.3g}], mean={np.mean(channel_data_2d):.3g}"
-                    )
-                    logger.debug(
-                        f"                          exptime={exptime_for_drizzle_add}, in_units='{in_units_for_drizzle_add}', pixfrac={self.drizzle_pixfrac}"
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Ch%d CALLING add_image - data range %.3g-%.3g, exptime=%.2f, pixfrac=%.2f, input_shape_hw=%s",
-                        ch_idx,
-                        np.min(channel_data_2d),
-                        np.max(channel_data_2d),
-                        exptime_for_drizzle_add,
-                        self.drizzle_pixfrac,
-                        input_shape_hw_current_file,
-                    )
-
-                    driz_obj = self.incremental_drizzle_objects[ch_idx]
-                    wht_before = float(np.sum(driz_obj.out_wht))
-                    sci_before = float(np.sum(driz_obj.out_img))
-                    nskip, nmiss = driz_obj.add_image(
-                        data=channel_data_2d,
-                        pixmap=pixmap_for_this_file,
-                        exptime=exptime_for_drizzle_add,
-                        in_units=in_units_for_drizzle_add,
-                        pixfrac=self.drizzle_pixfrac,
-                        weight_map=weight_map_param_for_add,
-                    )
-                    wht_after = float(np.sum(driz_obj.out_wht))
-                    sci_after = float(np.sum(driz_obj.out_img))
-                    return (
-                        ch_idx,
-                        nskip,
-                        nmiss,
-                        wht_before,
-                        wht_after,
-                        sci_before,
-                        sci_after,
-                    )
-
-                max_workers = min(
-                    getattr(self, "num_threads", os.cpu_count() or 1),
-                    num_output_channels,
-                )
-                with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    results = list(ex.map(_add_one_channel, range(num_output_channels)))
-
-                for (
-                    ch_idx,
-                    nskip,
-                    nmiss,
-                    wht_before,
-                    wht_after,
-                    sci_before,
-                    sci_after,
-                ) in results:
-                    logger.debug(
-                        f"        Ch{ch_idx} RETURNED from add_image: nskip={nskip}, nmiss={nmiss}"
-                    )
-                    logger.debug(
-                        "ULTRA-DEBUG: Ch%d add_image RETURNED: nskip=%d, nmiss=%d",
-                        ch_idx,
-                        nskip,
-                        nmiss,
-                    )
-                    logger.debug(
-                        f"        Ch{ch_idx} WHT_SUM AFTER add_image: {wht_after:.3f} (Change: {wht_after - wht_before:.3f})"
-                    )
-                    logger.debug(
-                        f"        Ch{ch_idx} SCI_SUM AFTER add_image: {sci_after:.3f} (Change: {sci_after - sci_before:.3f})"
-                    )
-                    assert (
-                        wht_after >= wht_before - 1e-6
-                    ), f"WHT sum decreased for Ch{ch_idx}!"
-                    logger.debug(
-                        f"        Ch{ch_idx} AFTER add_image: out_img range [{np.min(self.incremental_drizzle_objects[ch_idx].out_img):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_img):.3g}]"
-                    )
-                    logger.debug(
-                        f"                             out_wht range [{np.min(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}, {np.max(self.incremental_drizzle_objects[ch_idx].out_wht):.3g}]"
-                    )
-                # Small sleep to yield GIL before processing next file
-                time.sleep(0.001)
-
-                files_added_to_drizzle_this_batch += 1
-                self.images_in_cumulative_stack += 1
-                logger.debug(
-                    f"    === FIN TRAITEMENT FICHIER: '{current_filename_for_log}' (Ajouté. Total files added: {self.images_in_cumulative_stack}) ==="
-                )
-
-            except Exception as e_file:
-                self.update_progress(
-                    f"      -> ERREUR Drizzle Incr. VRAI sur fichier '{current_filename_for_log}': {e_file}",
-                    "WARN",
-                )
-                logger.error(
-                    f"ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Échec fichier '{current_filename_for_log}': {e_file}",
-                    exc_info=True,
-                )
-                logger.debug(
-                    "ULTRA-DEBUG: ERREUR NON-FATALE sur fichier '%s': %s",
-                    current_filename_for_log,
-                    e_file,
-                )
-
-            finally:
-                # Nettoyage des variables locales (essentiel pour la mémoire)
-                del (
-                    input_image_cxhxw,
-                    input_header,
-                    wcs_input_from_file,
-                    pixmap_for_this_file,
-                )
-                if "image_hwc_cleaned" in locals():
-                    del image_hwc_cleaned
-                if "image_hwc" in locals():
-                    del image_hwc  # original HxWxC
-                if "reprojected_image_hwc" in locals():
-                    del reprojected_image_hwc
-
-                # Forcer un garbage collect de temps en temps, surtout si les images sont grandes
-                if (i_file + 1) % 10 == 0:
-                    gc.collect()
-
-            dt = monotonic() - t0
-            print(
-                f"DrizIncrVrai image {i_file+1}/{len(batch_temp_filepaths_list)} en {dt:.2f}s"
-            )
-            # Yield a tiny slice of time back to the interpreter so the GUI
-            # thread can run while heavy drizzle operations proceed.
-            time.sleep(0.001)
-
-        # --- FIN DE LA BOUCLE DE TRAITEMENT DES FICHIERS ---
-        if files_added_to_drizzle_this_batch == 0 and num_files_in_batch > 0:
-            self.update_progress(
-                f"   -> ERREUR: Aucun fichier du lot Drizzle Incr. VRAI #{current_batch_num} n'a pu être ajouté.",
-                "ERROR",
-            )
-            self.failed_stack_count += num_files_in_batch
-            logger.debug(
-                f"  Sortie: Aucun fichier ajouté au Drizzle cumulatif pour le lot #{current_batch_num}."
-            )
-        else:
-            self.update_progress(
-                f"   -> {files_added_to_drizzle_this_batch}/{num_files_in_batch} fichiers du lot Drizzle Incr. VRAI #{current_batch_num} ajoutés aux objets Drizzle."
-            )
-            logger.debug(
-                f"  Total fichiers ajoutés au Drizzle cumulatif jusqu'à présent: {self.images_in_cumulative_stack}."
-            )
-
-        # --- MISE À JOUR DU HEADER DU STACK CUMULATIF ---
-        if self.current_stack_header is None:
-            self.current_stack_header = fits.Header()
-            if self.drizzle_output_wcs:
-                try:
-                    self.current_stack_header.update(
-                        self.drizzle_output_wcs.to_header(relax=True)
-                    )
-                except Exception as e_hdr_wcs:
-                    logger.warning(
-                        f"WARN: Erreur copie WCS au header (DrizIncrVrai init): {e_hdr_wcs}"
-                    )
-            self.current_stack_header["STACKTYP"] = (
-                f"Drizzle_Incremental_True_{self.drizzle_scale:.0f}x",
-                "True Incremental Drizzle",
-            )
-            self.current_stack_header["DRZSCALE"] = (
-                self.drizzle_scale,
-                "Drizzle scale factor",
-            )
-            self.current_stack_header["DRZKERNEL"] = (
-                self.drizzle_kernel,
-                "Drizzle kernel used",
-            )
-            self.current_stack_header["DRZPIXFR"] = (
-                self.drizzle_pixfrac,
-                "Drizzle pixfrac used",
-            )
-            self.current_stack_header["CREATOR"] = (
-                "SeestarStacker_QM",
-                "Processing Software",
-            )
-
-        self.current_stack_header["NIMAGES"] = (
-            self.images_in_cumulative_stack,
-            "Total images drizzled incrementally",
-        )
-
-        # --- MISE À JOUR DE L'APERÇU ---
-        self.update_progress(
-            f"   -> Préparation aperçu Drizzle Incrémental VRAI (Lot #{current_batch_num})..."
-        )
-        try:
-            if self.preview_callback and self.incremental_drizzle_objects:
-                avg_img_channels_preview = []
-                # IMPORTANT: driz_obj.out_img contient SCI*WHT, driz_obj.out_wht contient WHT
-                # Utiliser drizzle_finalize pour obtenir l'image moyennée.
-                for c in range(num_output_channels):
-                    driz_obj = self.incremental_drizzle_objects[c]
-
-                    sci_accum = driz_obj.out_img.astype(np.float32)
-                    wht_accum = driz_obj.out_wht.astype(np.float32)
-
-                    preview_channel_data = drizzle_finalize(
-                        sci_accum,
-                        wht_accum,
-                        use_gpu=getattr(self, "use_gpu", False),
-                    )
-
-                    avg_img_channels_preview.append(
-                        np.nan_to_num(
-                            preview_channel_data, nan=0.0, posinf=0.0, neginf=0.0
-                        )
-                    )
-
-                preview_data_HWC_raw = np.stack(avg_img_channels_preview, axis=-1)
-
-                # Normalisation de l'aperçu à [0,1] pour l'affichage (cosmétique)
-                min_p, max_p = np.nanmin(preview_data_HWC_raw), np.nanmax(
-                    preview_data_HWC_raw
-                )
-                preview_data_HWC_norm = preview_data_HWC_raw
-                if np.isfinite(min_p) and np.isfinite(max_p) and max_p > min_p + 1e-7:
-                    preview_data_HWC_norm = (preview_data_HWC_raw - min_p) / (
-                        max_p - min_p
-                    )
-                elif np.any(
-                    np.isfinite(preview_data_HWC_raw)
-                ):  # Image constante non nulle
-                    preview_data_HWC_norm = np.full_like(preview_data_HWC_raw, 0.5)
-                else:  # Image vide ou tout NaN/Inf
-                    preview_data_HWC_norm = np.zeros_like(preview_data_HWC_raw)
-
-                preview_data_HWC_final = np.clip(
-                    preview_data_HWC_norm, 0.0, 1.0
-                ).astype(np.float32)
-
-                # Stocker l'image de prévisualisation (potentiellement pour usage UI)
-                self.current_stack_data = preview_data_HWC_final
-                self.current_stack_data_raw = preview_data_HWC_raw.astype(np.float32)
-                self.cumulative_drizzle_data = preview_data_HWC_final  # Pour l'aperçu
-                self.cumulative_drizzle_data_raw = preview_data_HWC_raw.astype(
-                    np.float32
-                )
-                self._update_preview_incremental_drizzle()  # Appelle le callback GUI
-                logger.debug(
-                    f"    DEBUG QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Aperçu Driz Incr VRAI mis à jour. Range (0-1): [{np.min(preview_data_HWC_final):.3f}, {np.max(preview_data_HWC_final):.3f}]"
-                )
-                logger.debug(
-                    "ULTRA-DEBUG: Aperçu Driz Incr VRAI mis à jour. Range (0-1): %.3f-%.3f",
-                    np.min(preview_data_HWC_final),
-                    np.max(preview_data_HWC_final),
-                )
-            else:
-                logger.debug(
-                    f"    WARN QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Impossible de mettre à jour l'aperçu Driz Incr VRAI (callback ou objets Drizzle manquants)."
-                )
-                logger.debug(
-                    "ULTRA-DEBUG: WARN: Impossible de mettre à jour l'aperçu Driz Incr VRAI."
-                )
-        except Exception as e_prev:
-            logger.error(
-                f"    ERREUR QM [ProcIncrDrizLoop {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Erreur mise à jour aperçu Driz Incr VRAI: {e_prev}",
-                exc_info=True,
-            )
-            logger.debug(
-                "ULTRA-DEBUG: ERREUR FATALE à l'aperçu Driz Incr VRAI: %s",
-                e_prev,
-            )
-
-        # --- NETTOYAGE DES FICHIERS TEMPORAIRES DU LOT ---
-        if self.perform_cleanup:
-            logger.debug(
-                f"DEBUG QM [_process_incremental_drizzle_batch {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}]: Nettoyage fichiers temp lot #{current_batch_num}..."
-            )
-            logger.debug(
-                "ULTRA-DEBUG: Nettoyage fichiers temp lot #%d...",
-                current_batch_num,
-            )
-            self._cleanup_batch_temp_files(batch_temp_filepaths_list)
-
-        logger.debug(
-            f"======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #{current_batch_num} - {GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG}) ========\n"
-        )
-        logger.debug(
-            "======== FIN MÉTHODE: _process_incremental_drizzle_batch (Lot #%d - %s) ========",
-            current_batch_num,
-            GLOBAL_DRZ_BATCH_VERSION_STRING_ULTRA_DEBUG,
-        )
-
-        # Return updated drizzle arrays so the parent process can sync state
-        return (
-            [d.out_img for d in self.incremental_drizzle_objects],
-            [d.out_wht for d in self.incremental_drizzle_objects],
-        )
-
     #################################################################################################################################################
 
     def _combine_drizzle_chunks(self, chunk_sci_files, chunk_wht_files):
@@ -12818,41 +11708,6 @@ class SeestarQueuedStacker:
             self.failed_stack_count += batch_n_error_acc
 
     ################################################################################################################################################
-    def _save_intermediate_stack(self):
-        if self.current_stack_data is None or self.output_folder is None:
-            return
-        stack_path = os.path.join(self.output_folder, "stack_cumulative.fit")
-        preview_path = os.path.join(self.output_folder, "stack_cumulative.png")
-        try:
-            header_to_save = (
-                self.current_stack_header.copy()
-                if self.current_stack_header
-                else fits.Header()
-            )
-            try:
-                if "HISTORY" in header_to_save:
-                    history_entries = list(header_to_save["HISTORY"])
-                    filtered_history = [
-                        h for h in history_entries if "Intermediate save" not in str(h)
-                    ]
-                    while "HISTORY" in header_to_save:
-                        del header_to_save["HISTORY"]
-                    for entry in filtered_history:
-                        header_to_save.add_history(entry)
-            except Exception:
-                pass
-            header_to_save.add_history(
-                f"Intermediate save after combining {self.images_in_cumulative_stack} images"
-            )
-            save_fits_image(
-                self.current_stack_data, stack_path, header_to_save, overwrite=True
-            )
-            save_preview_image(
-                self.current_stack_data, preview_path, apply_stretch=True
-            )
-        except Exception as e:
-            logger.debug(f"⚠️ Erreur sauvegarde stack intermédiaire: {e}")
-
     def _move_to_stacked(self, paths: list[str]):
         """Déplace chaque fichier vers un sous-dossier 'stacked'.
 
@@ -14755,12 +13610,36 @@ class SeestarQueuedStacker:
 
         Derived from the configured engine state via
         ``run_contract.collect_from_backend`` (FIELD_DEFS-driven; no parallel
-        field list).  Cached on the instance so every manifest write of the
-        same run carries an identical ``scientific_config`` /
-        ``run_config_digest``.  No I/O occurs here.
+        field list).  The cache is keyed by the engine's authoritative classic
+        scientific fingerprint: while the effective classic contract is
+        unchanged, every manifest write of the same run carries an identical
+        ``scientific_config`` / ``run_config_digest`` (no I/O occurs here).
+        The moment a legitimate runtime-effective transition re-binds a
+        fingerprinted engine field between two manifest writes (e.g. queue
+        planning derives the effective ``batch_size`` from a stack plan /
+        single-batch mode between the bootstrap manifest write inside
+        ``_initialize_classic_sumw_accumulators`` and the plan-binding
+        preflight write), the next write recollects the canonical config from
+        the *current* engine state instead of persisting a stale
+        pre-transition snapshot that ``_write_resume_manifest`` would rightly
+        refuse as self-inconsistent.  Genuine canonical-vs-engine divergences
+        are still rejected by that fail-closed fingerprint equality check.
+
+        Duck-typed callers without the engine's ``_scientific_fingerprint``
+        (pure config-assembly helpers) simply skip the fingerprint key and
+        always collect fresh.
         """
+        fingerprint = None
+        fingerprint_fn = getattr(self, "_scientific_fingerprint", None)
+        if callable(fingerprint_fn):
+            fingerprint = fingerprint_fn()
         cached = getattr(self, "_run_config_canonical", None)
-        if cached is not None:
+        if (
+            fingerprint is not None
+            and cached is not None
+            and getattr(self, "_run_config_canonical_fingerprint", None)
+            == fingerprint
+        ):
             return cached
         cfg = run_contract.collect_from_backend(
             self, product_version=self._canonical_product_version()
@@ -14784,6 +13663,8 @@ class SeestarQueuedStacker:
             getattr(self, "apply_coverage_render", False)
         )
         self._run_config_canonical = cfg
+        if fingerprint is not None:
+            self._run_config_canonical_fingerprint = fingerprint
         return cfg
 
     def _write_resume_manifest(
@@ -18021,9 +16902,6 @@ class SeestarQueuedStacker:
             f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Début. Suffixe: '{output_filename_suffix}', Arrêt précoce: {stopped_early}"
         )
 
-        # Ensure all background drizzle processes have completed before finalising
-        getattr(self, "_wait_drizzle_processes", lambda: None)()
-
         # COV-06C: after every contributor is complete, resolve positive
         # support before mode finalizers close their memmaps.  This is
         # render-only state and cannot affect SCI/WHT/FITS.
@@ -19436,10 +18314,6 @@ class SeestarQueuedStacker:
                         self._send_eta_update()
                     except Exception:
                         pass
-                    try:
-                        self._update_preview(force_update=True)
-                    except Exception:
-                        pass
             except Exception:
                 # Échec silencieux: le worker retombera sur le scan normal
                 pass
@@ -20092,6 +18966,7 @@ class SeestarQueuedStacker:
         # attempt (which happens lazily, after the arguments below are
         # configured) reflects this session's classic settings.
         self._run_config_canonical = None
+        self._run_config_canonical_fingerprint = None
         if hasattr(self, "aligner") and self.aligner is not None:
             self.aligner.stop_processing = False
         else:
@@ -20222,10 +19097,6 @@ class SeestarQueuedStacker:
             os.makedirs(self.temp_folder, exist_ok=True)
         except Exception:
             pass
-        # Reset incremental reproject accumulators for a new session
-        self.master_sum = None
-        self.master_coverage = None
-        self.reproject_output_wcs = None
         logger.debug(
             f"    [Paths] Input: '{self.current_folder}', Output: '{self.output_folder}'"
         )
@@ -21889,9 +20760,8 @@ class SeestarQueuedStacker:
         The preview is a per-channel ``finalize("divide")`` (SCI/WHT) stacked
         to HWC, percentile-stretched to [0,1] and downsampled if large.  It
         NEVER mutates the accumulator state (``finalize``/``wht`` return
-        copies).  The result is stored in ``self.cumulative_drizzle_data`` so
-        ``refresh_preview`` keeps working during drizzle, and sent through
-        ``self.preview_callback`` with the same contract as
+        copies).  The result is sent through ``self.preview_callback`` with
+        the same contract as
         ``_update_preview_sum_w``: an Option-A tuple
         ``(legacy_normalized, raw_linear)`` (both HWC float32, same final
         geometry), where the first element is the percentile-stretched [0,1]
@@ -21912,6 +20782,13 @@ class SeestarQueuedStacker:
             # of the Drizzle ``finalize("divide")`` HWC stack BEFORE the 1%/99%
             # percentile normalization.  Display-analysis data only.
             raw_linear = preview_hwc.copy()
+            # PHI-R3.2 production preview identity (required display metadata,
+            # never debug-gated): per-emission monotonic sequence + durable
+            # producer run/session id, shared by the trace records AND the
+            # payload header so producer traces and payload data always agree.
+            # Only the PREVIEW_STAGE records below are gated by
+            # ``ZSSS_PHI_TRACE``.
+            producer_session, preview_seq = _phi_preview_identity(self)
             phi_trace_stage(
                 logger,
                 route="drizzle",
@@ -21920,7 +20797,7 @@ class SeestarQueuedStacker:
                 factor=1,
                 src="Drizzle",
                 src_id=id(self.drizzle_accumulators),
-                seq=int(getattr(self, "_drizzle_frame_count", 0) or 0),
+                seq=preview_seq,
             )
 
             # Percentile stretch to [0,1] for display.
@@ -21934,9 +20811,13 @@ class SeestarQueuedStacker:
                 preview_hwc = np.zeros_like(preview_hwc)
             preview_hwc = np.clip(preview_hwc, 0.0, 1.0).astype(np.float32)
 
-            # Downsample if the preview is large (display-only).
+            # Downsample if the preview is large (display-only).  The max-side
+            # cap is a display-size guard BEFORE the GUI factor: record whether
+            # it fired so the propagated resolution identity is unambiguous
+            # about requested vs actually-applied downsampling.
             preview_to_send = preview_hwc
             raw_linear_to_send = raw_linear
+            cap_applied = False
             if max(preview_hwc.shape[:2]) > _MAX_PREVIEW_SIDE_PX:
                 scale = _MAX_PREVIEW_SIDE_PX / max(preview_hwc.shape[:2])
                 new_size = (
@@ -21949,6 +20830,7 @@ class SeestarQueuedStacker:
                 raw_linear_to_send = cv2.resize(
                     raw_linear, new_size, interpolation=cv2.INTER_AREA
                 )
+                cap_applied = True
 
             # Apply the GUI-selected downsample factor as a final step (1..4).
             try:
@@ -21956,15 +20838,19 @@ class SeestarQueuedStacker:
             except Exception:
                 eff_factor = 2
             eff_factor = max(1, min(4, eff_factor))
+            # Effective factor actually applied by the final GUI downsample
+            # step (always runs when > 1 for Drizzle); 1 otherwise.
+            effective_factor = eff_factor if eff_factor > 1 else 1
             phi_trace_stage(
                 logger,
                 route="drizzle",
                 stage="pre_resize",
                 arr=raw_linear_to_send,
-                factor=eff_factor,
+                factor=effective_factor,
+                req=eff_factor,
                 src="Drizzle",
                 src_id=id(self.drizzle_accumulators),
-                seq=int(getattr(self, "_drizzle_frame_count", 0) or 0),
+                seq=preview_seq,
             )
             if eff_factor > 1:
                 h, w = preview_to_send.shape[:2]
@@ -21981,15 +20867,13 @@ class SeestarQueuedStacker:
                 route="drizzle",
                 stage="post_resize",
                 arr=raw_linear_to_send,
-                factor=eff_factor,
+                factor=effective_factor,
+                req=eff_factor,
+                cap=1 if cap_applied else 0,
                 src="Drizzle",
                 src_id=id(self.drizzle_accumulators),
-                seq=int(getattr(self, "_drizzle_frame_count", 0) or 0),
+                seq=preview_seq,
             )
-
-            # Store the DISPLAY artifact so ``refresh_preview`` can serve it.
-            self.cumulative_drizzle_data = preview_to_send
-            self.cumulative_drizzle_data_raw = preview_hwc
 
             header_copy = (
                 self.current_stack_header.copy()
@@ -22000,6 +20884,18 @@ class SeestarQueuedStacker:
                 "Drizzle Accumulator",
                 "Source data for this preview",
             )
+            # PHI-R3.2 production preview identity (required display metadata,
+            # always present on active-producer payloads): PREV_SEQ (per-
+            # emission monotonic sequence), PREV_RUN (durable producer run/
+            # session id), plus PREV_REQ/PREV_RES/PREV_CAP (requested vs
+            # actually-applied resolution; max-side display guard fired).  The
+            # payload header is identical whether or not ZSSS_PHI_TRACE is set;
+            # the debug gate only controls the PREVIEW_STAGE records.
+            header_copy["PREV_SEQ"] = (preview_seq, "PHI preview sequence")
+            header_copy["PREV_RUN"] = (producer_session, "PHI producer run/session id")
+            header_copy["PREV_REQ"] = (eff_factor, "PHI requested preview resolution factor")
+            header_copy["PREV_RES"] = (effective_factor, "PHI effective preview resolution factor")
+            header_copy["PREV_CAP"] = (1 if cap_applied else 0, "PHI max-side cap applied")
             img_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
             total_imgs_est = int(getattr(self, "files_in_queue", 0) or 0)
             current_batch_num = int(getattr(self, "stacked_batches_count", 0) or 0)

@@ -14,7 +14,27 @@ Instrumentation contract (PHI-R2, ``docs/phi_viewer_archaeology.md`` section 7):
   identity, monotonic sequence, ...).  Numbers use ``%.6g`` formatting;
 * stage statistics are computed on a deterministic fixed-stride subsample
   (at most ``_MAX_STATS_SAMPLE`` elements) so tracing never copies a whole
-  array and never logs per-pixel data;
+  array and never logs per-pixel data.  Counters are computed on that same
+  bounded sample: ``n`` (finite sample size), ``under_n`` / ``over_n`` /
+  ``zero_n`` / ``one_n`` with dtype-aware bounds — for float arrays the
+  canonical *analysis* domain is ``[0, 1]`` for counter purposes (under
+  ``< 0``, over ``> 1``, zero ``== 0``, one ``== 1``); for integer arrays the
+  bounds are the dtype range (unsigned: ``[0, max]``, so for a uint8 display
+  buffer ``one_n`` counts the ``== 255`` saturated pixels and
+  ``over_n``/``under_n`` are always 0);
+
+  PHI-R3 semantics: analysis stages no longer hard-clip to ``[0, 1]`` — the
+  anchor mapping and the WB derivation preserve finite out-of-range float
+  headroom, so ``over_n > 0`` at ``anchor_mapped``/``wb_only``/``raw_source``
+  means **preserved analysis headroom**, not a clip artifact, and ``one_n``
+  counts only *exact* ``== 1.0`` values.  Only the final display-rendering
+  boundary is bounded: the uint8 display stages carry ``one_n`` as the
+  ``== 255`` saturated-pixel count (display saturation), so a witness can
+  always distinguish analysis headroom from display-domain saturation;
+* arrival records carry the PHI-R3 monotonic acceptance outcome: an accepted
+  payload_arrive record has no ``drop`` field, a payload refused by the
+  run-scoped sequence gate carries ``drop=stale`` (older emission) or
+  ``drop=duplicate`` (repeated emission);
 * the helper is deliberately pure and reusable: no science imports, no Qt
   imports, no array mutation — it only reads.  numpy is imported *lazily*,
   inside the functions, and only when the gate is on.
@@ -56,6 +76,22 @@ def _stage_stats(np, arr) -> Optional[Dict[str, str]]:
     ``arr`` is a 2D/3D numeric array; stats are computed on a fixed-stride
     subsample (``arr.flat[::stride]``, at most ``_MAX_STATS_SAMPLE`` elements)
     so no whole-array copy is made for tracing.  Values are compact strings.
+
+    Counters (all on the bounded finite sample, so unambiguous and bounded):
+
+    * ``n``        — number of finite sampled values;
+    * ``under_n``  — count below the domain lower bound (float: ``< 0``;
+      unsigned int: always 0);
+    * ``over_n``   — count above the domain upper bound (float: ``> 1``;
+      integer: ``> dtype max``, i.e. 0 for uint8);
+    * ``zero_n``   — count ``== 0``;
+    * ``one_n``    — count equal to the domain upper bound (float: ``== 1``;
+      uint8: ``== 255`` saturated display pixels).
+
+    For float ``[0, 1]`` analysis stages ``under_n``/``over_n``/``zero_n``/
+    ``one_n`` directly answer the plateau/headroom question: headroom is
+    ``over_n > 0`` at ``raw_source``, and the first stage with ``one_n > 0``
+    (and ``over_n == 0``) is the first clip site.
     """
     if arr is None or not hasattr(arr, "ndim"):
         return None
@@ -68,6 +104,19 @@ def _stage_stats(np, arr) -> Optional[Dict[str, str]]:
         if finite.size == 0:
             return None
         p01, median, p99 = np.percentile(finite, [1.0, 50.0, 99.0])
+        kind = getattr(arr.dtype, "kind", "f")
+        if kind in ("u", "i"):
+            info = np.iinfo(arr.dtype)
+            lo, hi = int(info.min), int(info.max)
+            under_n = int(np.count_nonzero(finite < lo))
+            over_n = int(np.count_nonzero(finite > hi))
+            zero_n = int(np.count_nonzero(finite == 0))
+            one_n = int(np.count_nonzero(finite == hi))
+        else:  # float / complex / bool-ish: canonical [0, 1] domain
+            under_n = int(np.count_nonzero(finite < 0.0))
+            over_n = int(np.count_nonzero(finite > 1.0))
+            zero_n = int(np.count_nonzero(finite == 0.0))
+            one_n = int(np.count_nonzero(finite == 1.0))
         return {
             "dtype": str(arr.dtype),
             "shape": "x".join(str(s) for s in arr.shape),
@@ -76,6 +125,11 @@ def _stage_stats(np, arr) -> Optional[Dict[str, str]]:
             "median": f"{float(median):.6g}",
             "p99": f"{float(p99):.6g}",
             "max": f"{float(np.max(finite)):.6g}",
+            "n": str(int(finite.size)),
+            "under_n": str(under_n),
+            "over_n": str(over_n),
+            "zero_n": str(zero_n),
+            "one_n": str(one_n),
         }
     except Exception:
         return None
@@ -99,7 +153,9 @@ def phi_trace_stage(logger, *, route: str, stage: str, arr: Any = None, **extra)
         Optional array to summarize (sampled, never copied, never mutated).
     extra:
         Additional ``key=value`` fields appended verbatim (e.g. ``factor=2``,
-        ``src=SUM/W``, ``src_id=...``, ``seq=...``, ``identity=...``, ``res=...``).
+        ``req=2``, ``cap=1``, ``src=SUM/W``, ``src_id=...``, ``seq=...``,
+        ``identity=...``, ``res=...``, ``preq=...``, ``pres=...``, ``pcap=...``,
+        ``drop=stale|duplicate`` for gated payload drops).
 
     No-op when the gate is disabled; never raises when enabled.
     """

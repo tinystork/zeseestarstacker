@@ -177,10 +177,17 @@ def test_bp_wp_zoom_and_close_reopen_are_synchronized(qapp):
         win._zoom_histogram()
         assert detached.histogram_view.view_range == win.right_histogram_view.view_range
         win._reset_histogram_view()
-        assert detached.histogram_view.view_range == (0.0, 1.0)
-        assert win.right_histogram_view.view_range == (0.0, 1.0)
-
+        # PHI-R3: "reset view" returns to the model's full *preserved analysis
+        # range* (0, upper); upper = max(1.0, finite max) is the analysis upper
+        # bound declared by the float model (== 1.0 when no HDR headroom
+        # exists).  Both presentation surfaces share the same range.
         model = win._histogram_model
+        assert model is not None
+        upper = float(model["range"][1])
+        assert upper >= 1.0
+        expected_full = (0.0, upper)
+        assert detached.histogram_view.view_range == pytest.approx(expected_full)
+        assert win.right_histogram_view.view_range == pytest.approx(expected_full)
         detached.close()
         qapp.processEvents()
         assert not detached.isVisible()

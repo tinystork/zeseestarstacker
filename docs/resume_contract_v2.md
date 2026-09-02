@@ -33,6 +33,23 @@ Secrets never serialize: the writer recursively rejects secret-like keys
 (`api_key`, `api_token`, `password`, `secret`, `credential`, …) before any
 write; a failed validation leaves no partial file.
 
+### Canonical config freshness (fresh-start lifecycle)
+
+A fresh Classic run writes the manifest twice before the worker launches: a
+bootstrap write inside `_initialize_classic_sumw_accumulators()` (as soon as
+SUM/WHT are allocated) and the authoritative plan-binding write inside
+`_checkpoint_preflight()` (after queue planning).  Queue planning can
+legitimately re-bind the runtime-effective `batch_size` fingerprint field
+(stack-plan `use_plan` → `0`, single-batch CSV → `999999999`, prepared-queue
+single-batch adaptation → `1`) between those two writes.  The canonical
+`run_config.cfg`/`scientific_config` persisted by *every* manifest write is
+collected from the engine state at that write: the instance cache is keyed by
+the engine's authoritative classic scientific fingerprint, so an unchanged
+effective contract reuses one identical model (identical digest on every
+write) while a legitimate runtime-effective transition recollects the model
+before persisting.  Genuine canonical-vs-engine divergences are still refused
+by the fail-closed fingerprint equality check before any write.
+
 ## Scientific fingerprint
 
 Derived from the canonical *scientific* subset only. GUI-only/presentation

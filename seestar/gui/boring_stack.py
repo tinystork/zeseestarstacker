@@ -90,26 +90,19 @@ def _cleanup_stacker(stacker):
     ``drizzle_accumulators`` is never created.  There is no per-group preview
     and no group-size handling in this module.
 
-    ``stacker._wait_drizzle_processes()`` below is a M3-D legacy no-op (its only
-    historical submitter is marked OBSOLETE LEGACY and is never called).  It is
-    kept solely for the executor shutdown lifecycle and must not be read as an
-    active incremental-drizzle feature.  This cleanup only drains the legacy
-    executors and closes the classic ``cumulative_sum_memmap`` /
-    ``cumulative_wht_memmap`` memmaps.
+    This cleanup drains the quality metric executor and closes the classic
+    ``cumulative_sum_memmap`` / ``cumulative_wht_memmap`` memmaps.  (The
+    M3-D OBSOLETE LEGACY incremental-drizzle executor/process machinery was
+    retired in PHI-R5 and no longer exists on the stacker.)
     """
     if stacker is None:
         return
-    # 1. finish async drizzle jobs
-    try:
-        stacker._wait_drizzle_processes()
-    except Exception:
-        pass
-    # 2. shutdown executors
-    for exe_name in ("drizzle_executor", "quality_executor"):
+    # 1. shutdown executors
+    for exe_name in ("quality_executor",):
         exe = getattr(stacker, exe_name, None)
         if exe:
             exe.shutdown(wait=True, cancel_futures=True)
-    # 3. flush / close memmaps and drop references
+    # 2. flush / close memmaps and drop references
     for arr_name in ("cumulative_sum_memmap", "cumulative_wht_memmap"):
         arr = getattr(stacker, arr_name, None)
         if arr is not None:
@@ -122,7 +115,7 @@ def _cleanup_stacker(stacker):
             finally:
                 setattr(stacker, arr_name, None)
                 gc.collect()
-    # 4. close any remaining memmaps via the stacker helper
+    # 3. close any remaining memmaps via the stacker helper
     if hasattr(stacker, "_close_memmaps"):
         try:
             stacker._close_memmaps()
@@ -130,7 +123,7 @@ def _cleanup_stacker(stacker):
             pass
         finally:
             gc.collect()
-    # 5. delete memmap files if requested
+    # 4. delete memmap files if requested
     if getattr(stacker, "perform_cleanup", False):
         for path_name in ("cumulative_sum_path", "cumulative_wht_path"):
             p = getattr(stacker, path_name, None)
@@ -139,7 +132,7 @@ def _cleanup_stacker(stacker):
                     os.remove(p)
                 except Exception:
                     pass
-    # 6. clear caches & run GC
+    # 5. clear caches & run GC
     getattr(stacker, "_indices_cache", {}).clear()
     gc.collect()
     _log_mem("cleanup")

@@ -119,16 +119,14 @@ def _make_worker(tmp_path):
     obj._update_batch_count_file = lambda *a, **k: None
     obj._send_eta_update = lambda *a, **k: None
     obj._save_final_stack = lambda *a, **k: None
-    # Classic / incremental paths must NOT be exercised anymore.
-    obj._process_incremental_drizzle_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("incremental called"))
-    obj._start_drizzle_process = lambda *a, **k: (_ for _ in ()).throw(AssertionError("incremental start called"))
+    # The M3-D OBSOLETE LEGACY incremental-drizzle chain was retired in
+    # PHI-R5; supported non-accumulator batch paths must not be exercised.
     obj._process_and_save_drizzle_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("final batch called"))
     obj._process_completed_batch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("classic called"))
     obj.cleanup_temp_reference = lambda: None
     obj._cleanup_drizzle_temp_files = lambda: None
     obj._cleanup_drizzle_batch_outputs = lambda: None
     obj._cleanup_mosaic_panel_stacks_temp = lambda: None
-    obj._wait_drizzle_processes = lambda: None
 
     return obj, calls
 

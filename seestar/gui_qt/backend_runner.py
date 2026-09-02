@@ -268,6 +268,14 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         self._stacker_kwargs = dict(stacker_kwargs)
         self._stacker: Optional[Any] = None
         self._cancel_requested = False
+        # PHI-R3.2: durable producer run/session id assigned by the Qt run
+        # lifecycle (MainWindow) before the run starts and stamped onto the
+        # stacker at construction, so every preview payload of this run carries
+        # the same ``PREV_RUN`` and the GUI acceptance gate can reject payloads
+        # of any other (e.g. previous) producer session — including queued
+        # stragglers arriving around a run boundary.  ``None`` when no session
+        # was assigned (simulated/legacy backends — unsequenced payloads).
+        self.preview_session: Optional[int] = None
         # Durable per-run lifecycle log carrier (shared with worker/controller/
         # MainWindow via ``backend.run_log``).  ``None`` until a run starts.
         self.run_log: Optional[RunLog] = None
@@ -282,11 +290,38 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             return self._stacker_factory
         return _load_stackers_class()
 
+    def set_preview_session(self, session: Optional[int]) -> None:
+        """Assign the PHI producer run/session id this run must stamp.
+
+        Called by the GUI-thread owner before the run starts (display-only
+        metadata; never touches scientific state).  The id is forwarded to the
+        stacker when it is constructed on the worker thread; when a stacker
+        already exists (backend reuse across runs) it is re-stamped so payloads
+        of the new run always carry the new id.
+        """
+        try:
+            self.preview_session = None if session is None else int(session)
+        except (TypeError, ValueError):
+            self.preview_session = None
+        stacker = self._stacker
+        if stacker is not None and self.preview_session is not None:
+            try:
+                stacker._phi_producer_session = self.preview_session
+            except Exception:
+                pass  # best-effort display metadata, never fatal
+
     def _ensure_stackers(self, request: RunRequest) -> Any:
         stacker = self._stacker
         if stacker is None:
             cls = self._load_stackers_class()
             stacker = cls(**self._stacker_kwargs)
+            # PHI-R3.2: bind the GUI-assigned producer run/session id (when one
+            # was assigned) so all preview payloads of this run carry it.
+            if self.preview_session is not None:
+                try:
+                    stacker._phi_producer_session = int(self.preview_session)
+                except Exception:
+                    pass  # best-effort display metadata, never fatal
             self._stacker = stacker
         stacker.align_on_disk = bool(request.align_on_disk)
         return stacker

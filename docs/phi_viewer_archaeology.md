@@ -5,6 +5,12 @@
 **Working branch:** `fix/live-preview-histogram-v2`  
 **Scope:** display-only live preview / histogram. No behavioural code change is included in this commit.
 
+> **Closure:** this PHI-R1 investigation was completed and its decision gates were executed
+> through PHI-R5.  See `docs/phi_live_preview_integrity_closure.md` (project closure,
+> acceptance matrix, non-blockers) and the living PHI document
+> `docs/phi_preview_instrumentation_r2.md`.  Statements below predate the accepted
+> behavioural corrections and are kept as historical record.
+
 ## 1. Boundary and product split
 
 The scientific sources are read by the preview producers but are not mutated by them:

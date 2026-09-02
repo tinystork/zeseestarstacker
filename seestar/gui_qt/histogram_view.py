@@ -9,22 +9,47 @@ Since H1 the widget has two data inputs:
 
 * ``set_model`` — the *authoritative* immutable result of
   :func:`seestar.gui_qt.preview_analysis.compute_histogram_float`: a 512-bin
-  float-domain model over ``[0, 1]`` with per-channel ``counts`` /
-  ``log_counts`` / ``stats`` and a robust plotted X range plus the explicit
-  full ``[0, 1]`` range.  This is what production Option-A previews feed; no
-  ``QImage`` round-trip is involved for the histogram or its statistics.
+  float-domain model with explicit, distinct roles (PHI-AUTO-HISTOGRAM-UX-V1):
+  the preserved **analysis/control domain** (``range``/``full_range`` =
+  ``(0, upper)``, ``upper = max(1.0, finite max)`` — the stats/BP-WP marker
+  truth), the **bin/plot range** ``bin_range = (0, bin_hi)`` the 512 bins
+  actually live in (robust plot high, so a sparse extreme finite tail can
+  never stretch the bins into a few widely spaced spikes), per-channel
+  ``counts``/``log_counts``/``stats`` on the exact same deterministic sample,
+  a robust plotted X range and per-channel ``overflow`` counts (in-domain
+  values above the plotted bin high — never silently dropped: their extent
+  stays visible through ``full_range`` and the stats ``max``).  This is what
+  production Option-A previews feed; no ``QImage`` round-trip is involved for
+  the histogram or its statistics.  The histogram is **analysis data** (the
+  WB-only float buffer): bins/stats above the display white level ``1.0`` are
+  preserved HDR headroom and are never conflated with the bounded ``uint8``
+  display histogram (the legacy ``set_data`` path).
 * ``set_data`` — the legacy single-array compatibility path, which still takes
   a WB-only ``QImage`` and computes the historical 256-bin ``uint8`` histogram
   via :mod:`seestar.gui_qt.preview_adjust`.  It is retained only so old
   producers keep working; the Option-A model is authoritative.
 
 Rendering draws the model bars from ``log_counts`` (log-space heights) so fine
+
 tonal detail stays readable, overlays the R/G/B (or L) channels on the same
-axes, labels the plotted X domain, and draws the BP/WP lines in the normalised
-``[0, 1]`` level space shared with the stretch sliders.  BP/WP line dragging
-emits ``rangeChanged`` **live/coalesced** at ~25 ms during the drag and an
-exact final emission on release (the Qt equivalent of Tk's
-``update_stretch_from_histogram``).
+axes, labels the plotted X domain, and draws the BP/WP lines in the **current
+analysis units** shared with the stretch sliders (PHI-R3.1: markers and drags
+operate over ``[0, marker_upper]`` with ``marker_upper = max(1.0, finite max)``
+— the grid-ceiling control domain the owning MainWindow pushes via
+:meth:`set_analysis_domain` — so a white point above ``1`` is a first-class
+marker position; the legacy QImage path keeps the historical ``[0, 1]``
+display-level window).  Model bars are placed in the model's **bin range**
+(PHI-AUTO-HISTOGRAM-UX-V1), which is at most the analysis range and equals it
+whenever the top is dense or the sample small: the plotted curve therefore
+stays dense inside the auto/default visible windows even when a sparse extreme
+tail exists, the overflow is drawn as an explicit plot-top marker with the
+count available as :attr:`overflow_total`, and ``reset_histogram_view`` /
+``reset_zoom`` reveal the full bin/plot range (identical to the full analysis
+range when no sparse tail exists); the *analysis/control* extent stays the
+marker domain and the stats truth.  Auto/manual zoom uses the robust plotted
+range inside the binned domain.  BP/WP line dragging emits ``rangeChanged``
+**live/coalesced** at ~25 ms during the drag and an exact final emission on
+release (the Qt equivalent of Tk's ``update_stretch_from_histogram``).
 
 The widget never mutates any image: it only holds a computed model/histogram
 and a percentile level.
@@ -61,6 +86,10 @@ _BLACK_POINT_COLOR = QColor(255, 170, 170)
 _WHITE_POINT_COLOR = QColor(170, 170, 255)
 _EMPTY_TEXT_COLOR = QColor(120, 120, 120)
 _AXIS_TEXT_COLOR = QColor(150, 150, 150)
+# Plot-top / overflow boundary marker (PHI-AUTO-HISTOGRAM-UX-V1): a dashed
+# vertical line drawn at the bin-range high whenever in-domain values exist
+# above the plotted bins.
+_OVERFLOW_MARKER_COLOR = QColor(255, 200, 90)
 
 # Default black/white line positions (Tk stretch defaults).
 _DEFAULT_BLACK_POINT = 0.01
@@ -83,26 +112,51 @@ _AXIS_MARGIN_BOTTOM = 14.0
 _MIN_ZOOM_WIDTH = 0.02
 
 
-def _validated_x_range(x_range) -> tuple:
-    """Return a validated robust plotted X range ``(lo, hi)`` or full ``(0, 1)``.
+def _validated_model_range(model_range) -> tuple:
+    """Return a validated analysis range ``(lo, hi)`` from model metadata.
 
-    Accepts the model ``x_range`` metadata; rejects non-sequence values,
-    non-finite bounds, out-of-domain bounds and degenerate ``hi <= lo`` ranges
-    by falling back to the explicit full ``[0, 1]`` range.  A valid range that
-    is narrower than :data:`_MIN_ZOOM_WIDTH` is widened deterministically
-    (centred, clamped to ``[0, 1]``) so zooming never collapses to a sliver.
+    Accepts a finite ``(lo, hi)`` pair with ``0 <= lo < hi``; everything else
+    falls back to the display-level window ``(0.0, 1.0)``.  The model range is
+    the *preserved analysis domain* ``(0, upper)`` with
+    ``upper = max(1.0, finite max)`` produced by ``compute_histogram_float``
+    (PHI-R3), so ``hi`` may legitimately exceed ``1.0`` when the analysis
+    buffer carries HDR headroom.
     """
-    if not isinstance(x_range, (tuple, list)) or len(x_range) != 2:
+    if not isinstance(model_range, (tuple, list)) or len(model_range) != 2:
         return (0.0, 1.0)
     try:
-        lo = float(x_range[0])
-        hi = float(x_range[1])
+        lo = float(model_range[0])
+        hi = float(model_range[1])
     except (TypeError, ValueError):
         return (0.0, 1.0)
     if not (math.isfinite(lo) and math.isfinite(hi)):
         return (0.0, 1.0)
-    if not (0.0 <= lo < hi <= 1.0):
+    if not (0.0 <= lo < hi):
         return (0.0, 1.0)
+    return (lo, hi)
+
+
+def _validated_x_range(x_range, upper: float = 1.0) -> tuple:
+    """Return a validated robust plotted X range ``(lo, hi)`` or the full range.
+
+    Accepts the model ``x_range`` metadata; rejects non-sequence values,
+    non-finite bounds, out-of-domain bounds and degenerate ``hi <= lo`` ranges
+    by falling back to the explicit full ``(0, upper)`` analysis range.  A
+    valid range that is narrower than :data:`_MIN_ZOOM_WIDTH` is widened
+    deterministically (centred, clamped to ``[0, upper]``) so zooming never
+    collapses to a sliver.
+    """
+    if not isinstance(x_range, (tuple, list)) or len(x_range) != 2:
+        return (0.0, upper)
+    try:
+        lo = float(x_range[0])
+        hi = float(x_range[1])
+    except (TypeError, ValueError):
+        return (0.0, upper)
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return (0.0, upper)
+    if not (0.0 <= lo < hi <= upper):
+        return (0.0, upper)
     if hi - lo < _MIN_ZOOM_WIDTH:
         mid = 0.5 * (lo + hi)
         lo = mid - 0.5 * _MIN_ZOOM_WIDTH
@@ -110,20 +164,54 @@ def _validated_x_range(x_range) -> tuple:
         if lo < 0.0:
             hi += -lo
             lo = 0.0
-        if hi > 1.0:
-            lo -= hi - 1.0
-            hi = 1.0
+        if hi > upper:
+            lo -= hi - upper
+            hi = upper
         lo = max(0.0, lo)
-        hi = min(1.0, hi)
+        hi = min(upper, hi)
+    return (lo, hi)
+
+
+def _reconcile_range_to_upper(frozen, upper: float) -> tuple:
+    """Revalidate a frozen/manual view range against the current data domain.
+
+    PHI-R3.2 (F2): when the model analysis domain changes (a new preview / WB
+    derivation with a different ``upper``), a previously frozen manual zoom
+    window may no longer fit the new domain (e.g. a zoom to ``(0.1, 3.98)``
+    followed by a model whose range ends at ``1.2``).  A window that still
+    fits is preserved verbatim (a valid manual range is kept whenever
+    possible); one whose bounds exceed the new domain is clamped into it;
+    only a window that would become degenerate after clamping (``hi - lo``
+    below the deterministic minimum width) falls back to the full analysis
+    range ``(0, upper)``.  Deterministic, never inverted, never beyond the
+    data domain.
+    """
+    if not isinstance(frozen, (tuple, list)) or len(frozen) != 2:
+        return (0.0, upper)
+    try:
+        lo = float(frozen[0])
+        hi = float(frozen[1])
+    except (TypeError, ValueError):
+        return (0.0, upper)
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return (0.0, upper)
+    lo = min(max(lo, 0.0), upper)
+    hi = min(max(hi, 0.0), upper)
+    if hi - lo < _MIN_ZOOM_WIDTH:
+        return (0.0, upper)
     return (lo, hi)
 
 
 def format_histogram_stats(stats: Optional[Dict[str, Dict[str, float]]]) -> Optional[str]:
-    """Return a deterministic per-channel stats summary in the ``[0, 1]`` domain.
+    """Return a deterministic per-channel stats summary (analysis domain).
 
     Each channel reports ``min``/``max``/``median``/``mean``/``std`` (the five
     ratified stats), labelled ``R``/``G``/``B`` (or ``L`` for mono), joined by
-    "·".  Returns ``None`` when ``stats`` is empty/``None``.
+    "·".  The values are the preserved-analysis-domain stats of the float
+    model (PHI-R3): with HDR headroom the ``max`` may legitimately exceed
+    ``1.0`` (analysis headroom above the display window) — this is analysis
+    data, never the bounded uint8 display histogram.  Returns ``None`` when
+    ``stats`` is empty/``None``.
     """
     if not stats:
         return None
@@ -139,6 +227,31 @@ def format_histogram_stats(stats: Optional[Dict[str, Dict[str, float]]]) -> Opti
     if not parts:
         return None
     return " · ".join(parts)
+
+
+def format_histogram_overflow(model: Optional[Dict[str, Any]]) -> str:
+    """Deterministic overflow annotation for the float model status line.
+
+    PHI-AUTO-HISTOGRAM-UX-V1: when the model reports in-domain values above
+    the plotted bin high (``overflow_total > 0``), a compact truthful suffix
+    exposes them (``+N px above plot top``), so the sparse extreme tail is
+    visible on the UI in *every* zoom state — never silently dropped.  Returns
+    an empty string when the model is absent or has no overflow (legacy QImage
+    histograms and no-tail float models keep their exact previous text).
+    """
+    if not model:
+        return ""
+    total = int(model.get("overflow_total") or 0)
+    if total <= 0:
+        return ""
+    bin_range = model.get("bin_range")
+    top = ""
+    if isinstance(bin_range, (tuple, list)) and len(bin_range) == 2:
+        try:
+            top = f" at {float(bin_range[1]):.3g}"
+        except (TypeError, ValueError):
+            top = ""
+    return f" (+{total} px above plot top{top})"
 
 
 class HistogramView(QWidget):
@@ -163,6 +276,28 @@ class HistogramView(QWidget):
         super().__init__(parent)
         # Authoritative float model (compute_histogram_float result) or None.
         self._model: Optional[Dict[str, Any]] = None
+        # Validated analysis range ``(lo, hi)`` of the current float model
+        # (``hi = max(1.0, finite max)`` — PHI-R3).  Falls back to the
+        # display-level window ``(0, 1)`` for legacy/absent metadata.
+        self._model_range: tuple = (0.0, 1.0)
+        # Validated plotting/bin range ``(lo, hi)`` where the 512 model bars
+        # actually live (PHI-AUTO-HISTOGRAM-UX-V1): ``bin_range`` from the
+        # model when present (``<= model range``; equal to it when no sparse
+        # extreme tail exists), falling back to the model range for
+        # synthetic/legacy models without the key.
+        self._bin_range: tuple = (0.0, 1.0)
+        # Total number of in-domain values above the plotted bin high
+        # (``overflow_total`` model metadata; 0 for no-overflow / legacy).
+        self._overflow_total: int = 0
+        # BP/WP marker domain upper bound (PHI-R3.1).  The black/white point
+        # markers and the drag conversion operate in the current analysis
+        # units: ``[0, _marker_upper]`` with
+        # ``_marker_upper = max(1.0, finite max)`` for Option-A float models,
+        # ``1.0`` for the legacy [0, 1] QImage path.  The owning MainWindow is
+        # authoritative and pushes the synchronous domain via
+        # :meth:`set_analysis_domain`; ``set_model``/``set_data`` adopt the
+        # matching value from their data source so the two always agree.
+        self._marker_upper: float = 1.0
         # Legacy 256-bin counts dict (``{channel: int64 array}``) or None.
         self._histogram: Optional[Dict[str, Any]] = None
         self._percentile_99_5: float = 1.0
@@ -196,9 +331,27 @@ class HistogramView(QWidget):
         ``model`` is the immutable result of
         :func:`~seestar.gui_qt.preview_analysis.compute_histogram_float`
         (``bins``/``range``/``channels``/``counts``/``log_counts``/``stats``/
-        ``x_range``/``full_range``).  Passing the same model object again only
-        repaints (cheap), so a refresh that merely moves the BP/WP markers does
-        not reset a manual zoom.
+        ``x_range``/``full_range``/``bin_range``/``overflow_total``).  The
+        model ``range`` is the preserved analysis/control domain ``(0, upper)``
+        (PHI-R3): zoom bounds, marker-domain fallback and the F2 frozen-range
+        reconcile operate against it, and ``zoom_histogram`` validates the
+        robust X range against its upper bound.  The model ``bin_range`` is
+        where the 512 plotted bins actually live (PHI-AUTO-HISTOGRAM-UX-V1):
+        bars are placed in that domain, so a sparse extreme tail never
+        stretches them into a few widely spaced spikes; ``reset_histogram_view``
+        / ``reset_zoom`` reveal the full bin/plot range (identical to the full
+        analysis range when no sparse tail exists).  ``overflow_total`` counts
+        the in-domain values above the plotted bin high (their full extent
+        stays truthful in ``full_range`` and the per-channel stats ``max``).
+        When the analysis domain changes, any frozen/manual view range is
+        revalidated against the new upper (PHI-R3.2): a still-valid manual
+        range is preserved verbatim, an out-of-domain one is clamped into the
+        new domain, and only a degenerate result falls back to the full range
+        — the painted axis never extends beyond the data domain and the
+        inline/detached surfaces reconcile identically (they receive the same
+        model).  Passing the same model object again only repaints (cheap), so
+        a refresh that merely moves the BP/WP markers does not reset a manual
+        zoom.
         """
         if model is not None and model is self._model:
             # Same model object: cheap repaint (no frozen-zoom reset).  A
@@ -212,10 +365,41 @@ class HistogramView(QWidget):
             self._percentile_99_5 = 1.0
             self._x_range = None
             self._frozen_range = None
+            self._model_range = (0.0, 1.0)
+            self._bin_range = (0.0, 1.0)
+            self._overflow_total = 0
+            self._marker_upper = 1.0
         else:
+            self._model_range = _validated_model_range(model.get("range"))
+            # PHI-AUTO-HISTOGRAM-UX-V1: the plotted bars live in the model's
+            # explicit bin range (fallback: the analysis range for models
+            # without the key — synthetic/legacy-compatible).
+            self._bin_range = _validated_model_range(
+                model.get("bin_range") or model.get("range")
+            )
+            self._overflow_total = int(
+                model.get("overflow_total") or 0
+            )
             x_range = model.get("x_range")
-            self._x_range = _validated_x_range(x_range)
+            self._x_range = _validated_x_range(x_range, self._model_range[1])
             self._percentile_99_5 = self._x_range[1]
+            # The BP/WP marker domain is NOT re-derived from the model range:
+            # the owning MainWindow is authoritative and pushes the synchronous
+            # grid-ceiling control domain via set_analysis_domain() (which is
+            # >= the model's raw upper by construction).  Keeping it here would
+            # shrink the domain below the control grid ceiling on every async
+            # model application.
+            # PHI-R3.2 (F2): a frozen/manual view window from a previous model
+            # (possibly wider than the new domain) must be revalidated against
+            # the new upper *before* ``_apply_view_after_data`` restores it, so
+            # a stale window can never survive a domain shrink (and a valid one
+            # survives a shrink/grow unchanged).
+            if self._frozen_range is not None:
+                reconciled = _reconcile_range_to_upper(
+                    self._frozen_range, self._model_range[1]
+                )
+                self._frozen_range = reconciled
+                self._view_min, self._view_max = reconciled
         self._apply_view_after_data()
         self.update()
 
@@ -223,9 +407,23 @@ class HistogramView(QWidget):
         """Legacy compatibility path: feed a WB-only display ``QImage``.
 
         Keeps the historical 256-bin ``uint8`` histogram for old single-array
-        producers.  Production Option-A previews must use :meth:`set_model`.
+        producers (display-level domain ``[0, 1]``, markers included).
+        Production Option-A previews must use :meth:`set_model`.
+
+        PHI-R3.3 (F3): a model→legacy transition clears any frozen/manual
+        view state left over from the float model and restores a valid legacy
+        ``[0, 1]`` window automatically (via :meth:`_apply_view_after_data`),
+        so legacy bars are never painted on an axis left above ``1``.  A
+        legacy→legacy data refresh (no float model before) keeps the legacy
+        manual-zoom semantics unchanged (a frozen window is preserved).
         """
+        had_model = self._model is not None
         self._model = None
+        self._marker_upper = 1.0
+        self._bin_range = (0.0, 1.0)
+        self._overflow_total = 0
+        if had_model:
+            self._frozen_range = None
         if image is None or image.isNull():
             self._histogram = None
             self._percentile_99_5 = 1.0
@@ -247,16 +445,64 @@ class HistogramView(QWidget):
         refresh without a ``QImage`` round-trip recompute.  Mirrors
         :meth:`set_data` but skips ``compute_histogram`` /
         ``compute_histogram_percentile`` entirely.
+
+        PHI-R3.3 (F3): a model→legacy transition clears any frozen/manual
+        view state left over from the float model and restores a valid legacy
+        ``[0, 1]`` window automatically, so the legacy axis always corresponds
+        to the legacy ``[0, 1]`` data without a manual reset.  A legacy→legacy
+        data refresh (no float model before) keeps the legacy manual-zoom
+        semantics unchanged.
         """
+        had_model = self._model is not None
         self._model = None
+        self._marker_upper = 1.0
+        self._bin_range = (0.0, 1.0)
+        self._overflow_total = 0
+        if had_model:
+            self._frozen_range = None
         self._histogram = histogram
         self._percentile_99_5 = float(percentile_99_5)
         self._x_range = None
         self._apply_view_after_data()
         self.update()
 
+    def set_analysis_domain(self, upper: float) -> None:
+        """Push the synchronous BP/WP marker domain upper (PHI-R3.1).
+
+        The owning MainWindow calls this whenever the Option-A analysis buffer
+        changes so the black/white markers and the drag conversion operate in
+        the current analysis units ``[0, upper]`` (``upper = max(1.0, finite
+        max)``) *before* the async histogram model lands; the model applies
+        the identical value on arrival.  Values below ``1.0`` or non-finite
+        input are ignored (the marker domain never shrinks below the legacy
+        display window).  Current markers are re-normalized into the new
+        domain without inversion.
+        """
+        try:
+            upper = float(upper)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(upper) or upper < 1.0:
+            return
+        if abs(upper - self._marker_upper) < 1e-12:
+            return
+        self._marker_upper = upper
+        self._black_point, self._white_point = normalize_bp_wp(
+            self._black_point,
+            self._white_point,
+            max_value=self._marker_upper,
+        )
+        self.update()
+
     def _apply_view_after_data(self) -> None:
-        """Re-apply auto/manual zoom state after a data (model) change."""
+        """Re-apply auto/manual zoom state after a data (model) change.
+
+        The default window stays the display-level ``[0, 1]`` window (BP/WP
+        live there); auto-zoom zooms to the robust plotted range and a manual
+        zoom is preserved (``_frozen_range``).  When no headroom exists the
+        display window equals the full analysis range, so this is identical to
+        the pre-PHI-R3 behaviour.
+        """
         if self.auto_zoom_enabled and self.has_data:
             self.zoom_histogram()
         elif self._frozen_range is not None:
@@ -294,6 +540,26 @@ class HistogramView(QWidget):
             return None
         return self._model.get("stats")
 
+    @property
+    def bin_range(self) -> tuple:
+        """Validated plotting/bin range the model bars live in (or ``(0, 1)``).
+
+        PHI-AUTO-HISTOGRAM-UX-V1: at most the analysis range and equal to it
+        when no sparse extreme tail exists.  ``None``-model and legacy views
+        report the display-level window ``(0, 1)``.
+        """
+        return self._bin_range
+
+    @property
+    def overflow_total(self) -> int:
+        """In-domain values above the plotted bin high (model truth, or 0).
+
+        PHI-AUTO-HISTOGRAM-UX-V1: values the sparse extreme tail places above
+        the plotting/bin range — never silently dropped (their extent stays
+        visible in the per-channel stats ``max`` and ``full_range``).
+        """
+        return self._overflow_total
+
     # -------------------------------------------------------------- BP/WP
     @property
     def black_point(self) -> float:
@@ -306,19 +572,25 @@ class HistogramView(QWidget):
         return self._white_point
 
     def set_range(self, bp: float, wp: float) -> None:
-        """Position the black/white lines (0-1 UI values, Tk ``set_range``).
+        """Position the black/white lines (analysis-unit values, Tk ``set_range``).
 
-        Enforces ``0 <= BP < WP <= 1`` with the shared deterministic minimum
-        separation via :func:`preview_adjust.normalize_bp_wp` (the same seam
-        used by the MainWindow stretch controls, so the handles always agree
-        with the slider/spin state).  Non-finite inputs fall back to the
-        neutral defaults deterministically.  A no-op while a drag is active so
-        a live-drag echo from the sliders never clobbers the authoritative
-        in-flight line position (avoids jitter / rounding feedback).
+        Enforces ``0 <= BP < WP <= marker_upper`` with the shared deterministic
+        minimum separation via :func:`preview_adjust.normalize_bp_wp` (the same
+        seam used by the MainWindow stretch controls, so the handles always
+        agree with the slider/spin state).  ``marker_upper`` is the current
+        analysis domain upper (``max(1.0, finite max)``, PHI-R3.1) for
+        Option-A float models and ``1.0`` for the legacy QImage path, so a
+        white point above ``1`` is a first-class marker position.  Non-finite
+        inputs fall back to the neutral defaults deterministically.  A no-op
+        while a drag is active so a live-drag echo from the sliders never
+        clobbers the authoritative in-flight line position (avoids jitter /
+        rounding feedback).
         """
         if self._drag_line is not None:
             return
-        self._black_point, self._white_point = normalize_bp_wp(bp, wp)
+        self._black_point, self._white_point = normalize_bp_wp(
+            bp, wp, max_value=self._marker_upper
+        )
         self.update()
 
     # ----------------------------------------------------------- zoom/view
@@ -331,9 +603,11 @@ class HistogramView(QWidget):
         """Zoom the X axis to the authoritative data range (Tk ``zoom_histogram``).
 
         The Option-A float model zooms to its validated robust plotted X range
-        (both ``lo`` and ``hi``); the legacy path keeps the historical
-        ``[0, max(0.02, p99.5)]`` window.  Invalid/degenerate model metadata
-        already fell back to the full ``[0, 1]`` range in :meth:`set_model`.
+        (both ``lo`` and ``hi``; the robust high end can exceed ``1.0`` when
+        the analysis buffer carries dense HDR headroom); the legacy path keeps
+        the historical ``[0, max(0.02, p99.5)]`` window.  Invalid/degenerate
+        model metadata already fell back to the full analysis range in
+        :meth:`set_model`.
         """
         self._view_min, self._view_max = self._zoom_window()
         # A manual zoom is frozen across refreshes unless auto-zoom is active
@@ -352,29 +626,90 @@ class HistogramView(QWidget):
             return self._x_range
         return (0.0, max(0.02, self._percentile_99_5))
 
+    def _full_range(self) -> tuple:
+        """Full X window for the current data (analysis range or ``[0, 1]``).
+
+        Float model: the explicit full **analysis/control** range ``(0, upper)``
+        declared by the model (PHI-R3) — identical to the display window
+        ``[0, 1]`` when no headroom exists.  The plotted bins may end earlier
+        (the model ``bin_range``, drawn with an overflow marker at its high
+        end when values exist above it).  Legacy data: the historical ``[0, 1]``
+        display-level window.
+        """
+        if self._model is not None:
+            return self._model_range
+        return (0.0, 1.0)
+
     def reset_histogram_view(self) -> None:
-        """Reset the X axis to the full ``[0, 1]`` range (Tk ``reset_histogram_view``)."""
-        self._view_min = 0.0
-        self._view_max = 1.0
+        """Reset the X axis to the full data range (Tk ``reset_histogram_view``).
+
+        For a float model this reveals the full preserved analysis range
+        (including HDR headroom above the display window when present); the
+        legacy path returns to ``[0, 1]`` as before.
+        """
+        self._view_min, self._view_max = self._full_range()
         self._frozen_range = None
         self.update()
 
     def reset_zoom(self) -> None:
         """Reset the X axis to the full data range (Tk ``reset_zoom``)."""
-        self._view_min = 0.0
-        self._view_max = 1.0
+        self._view_min, self._view_max = self._full_range()
         self._frozen_range = None
         self.update()
 
     def set_view_range(self, view_min: float, view_max: float) -> None:
-        """Apply a shared/frozen X window supplied by the owning controller.
+        """Apply a view-window snapshot supplied by the owning controller.
 
-        Used only to initialize/synchronize another presentation surface.  It
-        never changes the histogram model or performs analysis.
+        PHI-R3.3 (F2): a coordinate snapshot must NOT manufacture a frozen
+        (manual-zoom) state — this only sets the current view window and
+        leaves the frozen-vs-unfrozen policy untouched.  Surfaces that must
+        share the full policy (window + frozen state + auto-zoom) use
+        :meth:`mirror_state_from`.  Never changes the histogram model, the
+        markers or the analysis.
         """
-        validated = _validated_x_range((view_min, view_max))
+        upper = self._model_range[1] if self._model is not None else 1.0
+        validated = _validated_x_range((view_min, view_max), upper)
         self._view_min, self._view_max = validated
-        self._frozen_range = validated
+        self.update()
+
+    def mirror_state_from(self, other) -> None:
+        """Copy the authoritative inline view policy onto this surface (mirror).
+
+        PHI-R3.3 (F2): MainWindow treats the inline ``HistogramView`` as the
+        single owner of the view policy and calls this on the detached surface
+        whenever it is (re)synchronized and after every model application, so
+        the two surfaces can never diverge (in particular after a model
+        analysis-domain shrink/grow).  Copies:
+
+        * the auto-zoom flag;
+        * the frozen-vs-unfrozen state: a genuine manual/robust zoom on the
+          inline view (``other._frozen_range``) is copied verbatim (validated
+          against this surface's model domain, which is the same model); when
+          the inline view is **unfrozen**, this surface's frozen state is
+          cleared too and only the current view-window coordinates are snapped
+          — a plain snapshot, never a manufactured freeze;
+        * the current view window.
+
+        Requires both surfaces to hold the same model object (MainWindow
+        invariant); never changes the model, the histogram data, the markers
+        or the analysis.
+        """
+        self.auto_zoom_enabled = bool(getattr(other, "auto_zoom_enabled", False))
+        upper = self._model_range[1] if self._model is not None else 1.0
+        other_upper = (
+            other._model_range[1] if other._model is not None else 1.0
+        )
+        limit = max(upper, other_upper)  # same model -> equal (defensive)
+        other_frozen = getattr(other, "_frozen_range", None)
+        if other_frozen is not None:
+            validated = _validated_x_range(other_frozen, limit)
+            self._frozen_range = validated
+            self._view_min, self._view_max = validated
+        else:
+            self._frozen_range = None
+            lo = float(getattr(other, "_view_min", 0.0))
+            hi = float(getattr(other, "_view_max", 1.0))
+            self._view_min, self._view_max = _validated_x_range((lo, hi), limit)
         self.update()
 
     # -------------------------------------------------------- drag plumbing
@@ -426,18 +761,23 @@ class HistogramView(QWidget):
         in-flight handle position is snapped to the shared control-resolution
         grid *before* it is stored/emitted, so the handle, the stretch
         sliders/spins and the authoritative MainWindow state agree exactly
-        during the live drag, not only after release.
+        during the live drag, not only after release.  The drag domain is the
+        current marker domain ``[0, marker_upper]`` (analysis units,
+        PHI-R3.1), so a white point above ``1`` can be dragged/set.
         """
         if not self._drag_line or not self.has_data:
             return
-        level = min(max(self._x_to_level(x), 0.0), 1.0)
+        upper = self._marker_upper
+        level = min(max(self._x_to_level(x), 0.0), upper)
         if self._drag_line == "min":
             self._black_point = quantize_bp_wp(
-                min(level, self._white_point - _MIN_SEPARATION)
+                min(level, self._white_point - _MIN_SEPARATION),
+                max_value=upper,
             )
         else:
             self._white_point = quantize_bp_wp(
-                max(level, self._black_point + _MIN_SEPARATION)
+                max(level, self._black_point + _MIN_SEPARATION),
+                max_value=upper,
             )
         self.update()
         self._schedule_live_drag()
@@ -498,14 +838,20 @@ class HistogramView(QWidget):
             return
 
         if self._model is not None:
-            # 512-bin RGB overlay / L from log1p counts (readable heights).
+            # 512-bin RGB overlay / L from log1p counts (readable heights),
+            # placed in the model's explicit plotting/bin range
+            # (PHI-AUTO-HISTOGRAM-UX-V1: at most the analysis range, equal to
+            # it when no sparse extreme tail exists).
             self._paint_bars(
                 painter,
                 rect,
                 self._model["log_counts"],
+                lo=self._bin_range[0],
+                hi=self._bin_range[1],
             )
+            self._draw_overflow_marker(painter, rect)
         else:
-            # Legacy 256-bin linear counts.
+            # Legacy 256-bin linear counts over the display-level [0, 1].
             self._paint_bars(painter, rect, self._histogram)
 
         self._draw_line(painter, rect, self._black_point, _BLACK_POINT_COLOR)
@@ -513,11 +859,42 @@ class HistogramView(QWidget):
         self._paint_axis_labels(painter, rect)
         painter.end()
 
+    def _draw_overflow_marker(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw a truthful "plot top / overflow" marker at the bin-range high.
+
+        PHI-AUTO-HISTOGRAM-UX-V1 UI indicator: when the model reports values
+        above the plotted bin high (``overflow_total > 0``), a thin vertical
+        marker is drawn at the plot-top level (``bin_range`` high) whenever
+        that level is inside the current view window, so the user sees exactly
+        where the binned curve ends; the count of values above it is available
+        as :attr:`overflow_total` and in the model metadata (their extent also
+        stays visible through the stats ``max`` / ``full_range``).  A no-op for
+        models without overflow or when the boundary is outside the view.
+        """
+        if self._overflow_total <= 0 or self._model is None:
+            return
+        boundary = self._bin_range[1]
+        if boundary < self._view_min or boundary > self._view_max:
+            return
+        x = self._level_to_x(boundary)
+        painter.save()
+        try:
+            pen = QPen(_OVERFLOW_MARKER_COLOR, 1, Qt.PenStyle.SolidLine)
+            painter.setPen(pen)
+            painter.drawLine(
+                QPointF(x, rect.top()),
+                QPointF(x, rect.bottom()),
+            )
+        finally:
+            painter.restore()
+
     def _paint_bars(
         self,
         painter: QPainter,
         rect: QRectF,
         heights_by_name: Dict[str, Any],
+        lo: float = 0.0,
+        hi: float = 1.0,
     ) -> None:
         """Draw per-channel bars, normalising over the *visible* bins.
 
@@ -527,12 +904,25 @@ class HistogramView(QWidget):
         toward white) instead of the last channel masking the earlier ones.
         The painter composition state is saved before the bars and restored
         before the BP/WP markers and axis labels are drawn.
+
+        ``lo``/``hi`` declare the X domain the bin indices live in: the legacy
+        path passes the display-level ``(0, 1)`` window, the float-model path
+        passes the model's preserved analysis range (``hi`` can exceed ``1.0``
+        when the analysis buffer carries HDR headroom — PHI-R3).  Bars whose
+        level lies outside the current view window are not drawn.
         """
+        span = hi - lo
+        if span <= 0.0:
+            span = 1.0
+
+        def _bin_level(n: int, i: int) -> float:
+            return lo + (i + 0.5) / n * span
+
         max_h = 1.0
         for h in heights_by_name.values():
             n = len(h)
             for i in range(n):
-                center = (i + 0.5) / n
+                center = _bin_level(n, i)
                 if self._view_min <= center <= self._view_max:
                     max_h = max(max_h, float(h[i]))
 
@@ -549,7 +939,7 @@ class HistogramView(QWidget):
                     value = float(h[i])
                     if value <= 0.0:
                         continue
-                    center = (i + 0.5) / n
+                    center = _bin_level(n, i)
                     if center < self._view_min or center > self._view_max:
                         continue
                     bar = int(round(value / max_h * (rect.height() - 1.0)))

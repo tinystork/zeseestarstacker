@@ -275,7 +275,7 @@ def test_constructor_default_move_stacked_is_true():
         )
     finally:
         # Avoid leaving background pools alive beyond the test.
-        for attr in ("drizzle_executor", "quality_executor"):
+        for attr in ("quality_executor",):
             ex = getattr(obj, attr, None)
             if ex is not None:
                 try:

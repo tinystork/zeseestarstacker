@@ -319,7 +319,7 @@ def test_constructor_has_no_package_filesystem_side_effect():
         assert stacker.cumulative_wht_memmap is None
         assert not marker.exists()
     finally:
-        for name in ("drizzle_executor", "quality_executor"):
+        for name in ("quality_executor",):
             exe = getattr(stacker, name, None)
             if exe is not None:
                 try:

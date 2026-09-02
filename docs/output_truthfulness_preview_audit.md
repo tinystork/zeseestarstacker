@@ -666,6 +666,59 @@ depends on.
 
 ### 5.3 `HISTOGRAM_CONTRACT` (proposed) `[A5][A7]`
 
+> **PHI-R3 amendment (uncommitted working tree, `fix/live-preview-histogram-v2`):**
+> the analysis domain no longer hard-clips at the anchor mapping or the WB
+> derivation.  Finite out-of-range float headroom is preserved through
+> analysis, and the histogram represents it explicitly: **512 bins over
+> `[0, upper]`** with `upper = max(1.0, finite max)` (per-channel counts/stats
+> on the exact same finite non-negative sample; `full_range`/`range` declare
+> the analysis domain).  When no headroom exists `upper == 1.0` and the model
+> is identical to the ratified `[0, 1]` text below; with HDR/WB headroom the
+> bins and stats above `1.0` are preserved-analysis data, never the bounded
+> uint8 display histogram.  Auto Stretch/Auto WB outputs are unchanged (their
+> samples already exclude the window top).  Only the final display-rendering
+> boundary (QImage/uint8) clamps to the display domain.
+>
+> **PHI-R3.1 amendment:** for Option-A previews the black/white points are
+> expressed in the same analysis units (``[0, upper]``, values above ``1``
+> allowed — the control domain is the 0.001-grid ceiling of ``upper``) and the
+> *visible display* is rendered from the preserved float analysis/WB source
+> with the user BP/WP applied in float before the final uint8 conversion
+> (``render_analysis_display``, fixed-reference analysis-unit stretch curves;
+> the legacy QImage chain keeps its historical ``[0, 1]`` Tk-parity
+> semantics).  Details in ``docs/phi_preview_instrumentation_r2.md`` §8.
+
+> **PHI-AUTO-HISTOGRAM-UX-V1 amendment (same uncommitted working tree;
+> supersedes the R3 wording "512 bins over ``[0, upper]``" above for the
+> *plotted* bins):** the
+> *plotted* histogram domain is separated from the *analysis/control* domain
+> as an explicit, distinct model role (requirement: no sparse extreme finite
+> tail may stretch 512 fixed bins into a few widely spaced spikes):
+>
+> * ``range`` / ``full_range`` stay the **full preserved analysis/control
+>   domain** ``(0, upper)`` (stats, BP/WP marker domain, F2 reconcile upper);
+> * new ``bin_range = (0, bin_hi)`` is the **plotting/bin range** the 512
+>   ``counts``/``log_counts`` bins actually live in.  ``bin_hi`` is the full
+>   analysis upper when the top is dense (the finite max lies within 25 % of
+>   the robust 99.5 % top) or the in-domain sample is small (``<= 512``
+>   values, where a single top value is not a statistically distinguishable
+>   sparse tail) — those cases are bit-identical to the legacy/R3 binning;
+>   otherwise it is the robust top percentile (the same p99.5 as the
+>   auto-zoom viewport high), so a sparse extreme tail (hot pixels at 282
+>   while the bulk ends at ~2.4) never deforms the curve;
+> * new per-channel ``overflow`` (+ ``overflow_total``) counts the in-domain
+>   values above the plotted bin high — the tail is **never silently
+>   dropped**: its extent stays truthful in ``full_range`` and in the stats
+>   ``max``, the widget draws a plot-top marker at ``bin_hi`` when the view
+>   shows it, and the histogram bars stay dense inside the auto/default
+>   visible window;
+> * reset/full-range views reveal the full analysis range (unchanged), while
+>   the dense curve occupies the bin range; auto zoom (``x_range``, p0.5–p99.5
+>   of the same sample) always lies inside the binned domain.
+>
+> No mislabelling: an analysis histogram is never presented as a display
+> histogram (the uint8 QImage path stays a separate legacy role).
+
 > **C2 domain decision (reverses C1):** the analysis domain is **WB-only pre-stretch**, *not*
 > pre-WB. Rationale: the displayed image is WB → stretch → gamma → BCS, and BP/WP are stretch
 > controls that operate on the WB-only image; a pre-WB histogram would plot a domain that never
@@ -738,6 +791,28 @@ depends on.
   "PreviewManager" port (rejected — larger refactor than the truthfulness mission requires).
 
 ### 5.5 `AUTO_STRETCH_CONTRACT` (proposed) `[A4]`
+
+> **PHI-AUTO-HISTOGRAM-UX-V1 amendment (supersedes the pre-UX-V1 wording that
+> Auto Stretch "outputs are unchanged by headroom preservation"):** Auto
+> Stretch operates in the **preserved Option-A analysis units** of the WB-only
+> buffer, and the white point may legitimately be selected **above ``1``**:
+>
+> * the input sample keeps every finite mapped value ``> 0`` including
+>   preserved headroom above the legacy display-window top ``1.0`` (only the
+>   exact legacy clip boundaries ``0.0`` / ``1.0`` stay excluded, so in-window
+>   ``[0, 1]`` buffers are bit-identical to the ratified algorithm below);
+> * the final separation clip bound becomes
+>   ``D = max(1.0, p99.5 of the stretch sample)`` instead of the legacy
+>   ``[0, 1]`` display-window ceiling: with a **meaningful (dense) bright
+>   tail** above 1, ``p99.5 > 1`` and the estimator (p995 / background-MAD)
+>   selects ``wp > 1``, visibly recovering non-saturated highlight structure
+>   through the fixed-reference analysis-unit stretch; with only an
+>   **isolated extreme outlier** (a handful of far pixels), ``p99.5`` stays on
+>   the dense body and the white point is never expanded to the outlier/max;
+> * in-window data keeps ``D == 1.0``, i.e. steps 5–6 below stay bit-identical
+>   to the ratified spec (legacy QImage ``[0, 1]`` auto behavior unchanged);
+> * BP/WP stay ordered and quantized within the current analysis domain and
+>   live/one-shot Auto Stretch agree (both call the same deterministic seam).
 
 1. **Domain:** compute BP/WP **directly in the normalized `[0,1]` control domain** from the §5.3
    **WB-only mapped float** analysis buffer. The current full-image absolute min/max

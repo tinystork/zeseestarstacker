@@ -3274,3 +3274,332 @@ def test_quality_weighted_singleton_vs_multi_decomposition(tmp_path, weighting_m
         close_mm(s.cumulative_wht_memmap)
         close_mm(s.coverage_sup_w1_memmap)
         close_mm(s.coverage_sup_w2_memmap)
+
+
+# ---------------------------------------------------------------------------
+# 39. ZSSS-CHECKPOINT-STARTUP-REGRESSION-01: fresh-start two-write lifecycle
+#     (bootstrap manifest write inside ``_initialize_classic_sumw_accumulators``
+#     -> queue planning re-binds the effective batch decomposition -> the
+#     plan-binding ``_checkpoint_preflight`` write).
+#
+# Regression: the canonical classic run config was cached at the *bootstrap*
+# write; when ``start_processing`` queue planning legitimately transitioned the
+# runtime-effective ``batch_size`` (stack-plan / single-batch / prepared-queue
+# decomposition) between the two fresh writes, the second write compared the
+# stale cached canonical config against the current engine fingerprint and
+# raised a false-positive fail-closed refusal on a legitimate fresh run.
+# Every write must now persist the canonical config of the engine state at
+# that write (fingerprint-keyed canonical cache).
+# ---------------------------------------------------------------------------
+class _LifecycleRefAligner(_SpyReferenceAligner):
+    """Spy aligner that also materializes ``temp_processing/reference_image.fit``
+    exactly like the real ``SeestarAligner`` does, so the real frozen-reference
+    handoff (``_record_materialized_reference``) is satisfied end-to-end."""
+
+    def __init__(self, shape=(4, 5, 3)):
+        super().__init__(shape=shape)
+        self.reference_image_path = None
+
+    def _get_reference_image(self, folder, files, output_folder):
+        out = super()._get_reference_image(folder, files, output_folder)
+        tmpdir = os.path.join(str(output_folder), "temp_processing")
+        os.makedirs(tmpdir, exist_ok=True)
+        path = os.path.join(tmpdir, "reference_image.fit")
+        if not os.path.exists(path):
+            fits.PrimaryHDU(np.zeros(self._shape[:2], dtype=np.float32)).writeto(path)
+        self.reference_image_path = path
+        return out
+
+
+def _make_lifecycle_start_stack(out_dir, input_dir, aligner=None, **overrides):
+    """Bare stacker with enough state for a *real* fresh plain-classic
+    ``start_processing``: real ``initialize`` (memmaps + bootstrap manifest),
+    real queue planning and real ``_checkpoint_preflight``.  Only the aligner
+    reference frame and the worker are faked."""
+    o = _make_start_processing_stack(out_dir, input_dir, aligner=aligner)
+    # initialize()-required state (mirrors make_init_stack / fresh start).
+    o.finalization_mode = None
+    o.enable_preview = False
+    o.aligned_temp_dir = None
+    o.unaligned_folder = None
+    o.drizzle_temp_dir = None
+    o.drizzle_batch_output_dir = None
+    o.classic_batch_output_dir = None
+    o.intermediate_drizzle_batch_files = []
+    o.all_input_filepaths = []
+    o.warned_unaligned_source_folders = set()
+    o.photutils_bn_applied_in_session = False
+    o.bn_globale_applied_in_session = False
+    o.cb_applied_in_session = False
+    o.feathering_applied_in_session = False
+    o.low_wht_mask_applied_in_session = False
+    o.coverage_render_applied_in_session = False
+    o.coverage_render_status = None
+    o.coverage_render_reason = None
+    o.scnr_applied_in_session = False
+    o.crop_applied_in_session = False
+    o.photutils_params_used_in_session = {}
+    o.processed_files_count = 0
+    o.aligned_files_count = 0
+    o.failed_align_count = 0
+    o.failed_stack_count = 0
+    o.skipped_files_count = 0
+    o.final_stacked_path = None
+    o.processing_error = None
+    o._exposure_min = None
+    o._exposure_max = None
+    o._norm_reference = None
+    o._quality_reference_scale = None
+    o._auto_batch_size_zero_mode = None
+    o._interbatch_start_session = lambda: None
+    o._derive_drizzle_processing_policy = lambda: None
+    o._emit_lifecycle = lambda *a, **k: None
+    o.set_progress_callback = lambda *a, **k: None
+    o.set_lifecycle_callback = lambda *a, **k: None
+    o._support_state_available = False
+    o._support_unavailable_reason = None
+    o._reproject_support_tracking_enabled = False
+    o._reproject_support_sidecars = {}
+    o.coverage_sup_w1_memmap = None
+    o.coverage_sup_w2_memmap = None
+    o.resume_intent = "fresh"
+    o._pinned_quality_reference_scale = lambda: None
+    for k, v in overrides.items():
+        setattr(o, k, v)
+    return o
+
+
+def _fresh_lifecycle_run(out_dir, worker_flag, **start_kwargs):
+    """Run one real fresh start_processing with a manifest-write spy.
+
+    Returns ``(stack, result, writes)`` where ``writes`` records, for every
+    manifest write, the engine scientific fingerprint and the canonical
+    classic fingerprint of the config persisted by that write (pre-fix, the
+    second fresh write diverged for the plan-driven transitions below).
+    """
+    start_kwargs = dict(start_kwargs)
+    aligner = _LifecycleRefAligner()
+    s = _make_lifecycle_start_stack(out_dir, start_kwargs["input_dir"], aligner=aligner)
+
+    def fake_worker():
+        worker_flag.append(True)
+
+    s._worker = fake_worker
+    real_write = s._write_resume_manifest
+    writes = []
+
+    def spy_write(state, completed_sources=None, stacked_batches_count=None):
+        writes.append(
+            {
+                "state": state,
+                "engine_fp": s._scientific_fingerprint(),
+                "cfg_fp": rc.classic_fingerprint(s._canonical_run_config()),
+                "batch_size_engine": int(getattr(s, "batch_size", 0) or 0),
+            }
+        )
+        return real_write(
+            state,
+            completed_sources=completed_sources,
+            stacked_batches_count=stacked_batches_count,
+        )
+
+    s._write_resume_manifest = spy_write
+    result = s.start_processing(**start_kwargs)
+    return s, result, writes
+
+
+def _assert_consistent_persisted_contract(s, out_dir):
+    """The final on-disk manifest + run_config.cfg agree with each other and
+    with the engine's effective classic fingerprint (exact digest)."""
+    manifest = _read_manifest(out_dir)
+    report = rc.read_cfg(str(Path(out_dir) / "run_config.cfg"))
+    cfg = report.config
+    assert manifest["fingerprint"] == s._scientific_fingerprint()
+    assert manifest["run_config_digest"] == cfg.full_digest()
+    assert manifest["scientific_config"] == cfg.scientific
+    # The persisted config carries the *effective* runtime contract, i.e. the
+    # engine's own batch_size at the authoritative plan-binding write.
+    assert cfg.scientific["batch_size"] == int(
+        getattr(s, "batch_size", 0) or 0
+    )
+
+
+def _close_lifecycle_memmaps(s):
+    for attr in (
+        "cumulative_sum_memmap",
+        "cumulative_wht_memmap",
+        "coverage_sup_w1_memmap",
+        "coverage_sup_w2_memmap",
+    ):
+        close_mm(getattr(s, attr, None))
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        # Plain classic, no stack plan, explicit batch size (control).
+        "plain_batch10_no_plan",
+        # Persisted batch_size=0 (plain classic, reproject off): the
+        # user-observed settings shape; no queue-planning re-bind.
+        "plain_batch0_no_plan",
+        # GUI "Auto" sentinel (-1) without a plan: engine-estimated batch.
+        "auto_no_plan",
+        # GUI "Auto" (-1) with a stack plan: use_plan re-binds batch_size to 0
+        # after the bootstrap write (pre-fix: refused).
+        "auto_with_plan",
+        # Batch_size=1 single-batch CSV mode with a stack plan: queue planning
+        # sets batch_size=999999999 after the bootstrap write (pre-fix:
+        # refused).
+        "single_batch_csv_with_plan",
+        # Externally prepared queue whose single-batch adaptation sets
+        # batch_size=1 after the bootstrap write (pre-fix: refused).
+        "prepared_queue_single_batch",
+    ],
+)
+def test_fresh_start_two_write_lifecycle_stays_consistent(tmp_path, scenario):
+    """A legitimate fresh classic start writes every manifest with canonical
+    and engine fingerprints in exact agreement, including the runtime-effective
+    batch_size transition applied by queue planning between the bootstrap and
+    the plan-binding writes; the run proceeds to worker launch."""
+    inp = tmp_path / "in"
+    inp.mkdir()
+    ref_path = _write_fits_reference(inp / "reference.fits", 4, 5)
+    obs = [_write_fits_reference(inp / f"obs_{i:03d}.fits", 4, 5) for i in range(7)]
+    plan = "batch_id,file_path\n" + "\n".join(
+        f"1,{inp}/obs_{i:03d}.fits" for i in range(7)
+    )
+    has_plan = scenario in ("auto_with_plan", "single_batch_csv_with_plan")
+    if has_plan:
+        (inp / "stack_plan.csv").write_text(plan, encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    worker_flag = []
+    kwargs = dict(
+        input_dir=str(inp),
+        output_dir=str(out_dir),
+        reference_path_ui=ref_path,
+        resume_intent="fresh",
+    )
+    prepared = False
+    if scenario == "plain_batch10_no_plan":
+        kwargs["batch_size"] = 10
+    elif scenario == "plain_batch0_no_plan":
+        kwargs["batch_size"] = 0
+        kwargs["reproject_coadd_final"] = False
+    elif scenario == "auto_no_plan":
+        kwargs["batch_size"] = -1
+    elif scenario == "auto_with_plan":
+        kwargs["batch_size"] = -1
+    elif scenario == "single_batch_csv_with_plan":
+        kwargs["batch_size"] = 1
+    elif scenario == "prepared_queue_single_batch":
+        kwargs["batch_size"] = 7
+        prepared = True
+    else:  # pragma: no cover - defensive
+        raise AssertionError(scenario)
+
+    if prepared:
+        s0 = _make_lifecycle_start_stack(out_dir, inp, aligner=_LifecycleRefAligner())
+        for i in range(7):
+            s0.queue.put(obs[i])
+        s0.files_in_queue = 7
+        s0.all_input_filepaths = list(obs)
+        s0.total_batches_estimated = 1
+        s0.queue_prepared = True
+        real_write = s0._write_resume_manifest
+        writes = []
+
+        def spy_write0(state, completed_sources=None, stacked_batches_count=None):
+            writes.append(
+                {
+                    "state": state,
+                    "engine_fp": s0._scientific_fingerprint(),
+                    "cfg_fp": rc.classic_fingerprint(s0._canonical_run_config()),
+                    "batch_size_engine": int(getattr(s0, "batch_size", 0) or 0),
+                }
+            )
+            return real_write(
+                state,
+                completed_sources=completed_sources,
+                stacked_batches_count=stacked_batches_count,
+            )
+
+        s0._write_resume_manifest = spy_write0
+        s0._worker = lambda: worker_flag.append(True)
+        s = s0
+        result = s.start_processing(**kwargs)
+    else:
+        s, result, writes = _fresh_lifecycle_run(out_dir, worker_flag, **kwargs)
+
+    assert result is True, f"{scenario}: start_processing refused a legitimate fresh run"
+    # Worker launch: the run proceeded past the checkpoint preflight.
+    assert hasattr(s, "processing_thread")
+    assert s.processing_active is True
+    thread = s.processing_thread
+    thread.join(timeout=5)
+    assert worker_flag == [True]
+
+    # Every manifest write carried canonical == engine fingerprint.
+    assert len(writes) == 2, writes  # bootstrap + plan-binding preflight
+    assert all(w["engine_fp"] == w["cfg_fp"] for w in writes), writes
+    # The effective transition is real: the two writes may differ in
+    # batch_size only when queue planning re-bound it.
+    engine_last = writes[-1]["batch_size_engine"]
+    if scenario == "auto_with_plan":
+        assert writes[0]["batch_size_engine"] == 1 and engine_last == 0
+    elif scenario == "single_batch_csv_with_plan":
+        assert writes[0]["batch_size_engine"] == 1 and engine_last == 999999999
+    elif scenario == "prepared_queue_single_batch":
+        assert writes[0]["batch_size_engine"] == 7 and engine_last == 1
+    elif scenario == "plain_batch0_no_plan":
+        assert engine_last == 0
+
+    # On-disk manifest + run_config.cfg reflect the effective contract.
+    _assert_consistent_persisted_contract(s, out_dir)
+    _close_lifecycle_memmaps(s)
+
+
+def test_fresh_start_genuine_divergence_still_fails_closed(tmp_path):
+    """A genuine canonical-vs-engine divergence (a coercible value that changes
+    the canonical representation: engine holds ``neighborhood_size=5.0``,
+    canonical int coercion yields ``5``) still refuses the fresh start before
+    any inconsistent manifest/run_config.cfg is written."""
+    inp = tmp_path / "in"
+    inp.mkdir()
+    ref_path = _write_fits_reference(inp / "reference.fits", 4, 5)
+    for i in range(3):
+        _write_fits_reference(inp / f"obs_{i:03d}.fits", 4, 5)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    s = _make_lifecycle_start_stack(out_dir, inp, aligner=_LifecycleRefAligner())
+    s._worker = lambda: None
+
+    # Inject the genuine divergence at the effective-state boundary, after
+    # ``start_processing`` bound its (int-coercing) arguments and before the
+    # first real checkpoint write: the engine then carries ``5.0`` in an
+    # int-kind fingerprint field whose canonical int coercion yields ``5``.
+    real_initialize = s.initialize
+
+    def corrupting_initialize(output_dir, shape_hwc, enable_preview=False):
+        s.neighborhood_size = 5.0
+        return real_initialize(output_dir, shape_hwc, enable_preview=enable_preview)
+
+    s.initialize = corrupting_initialize
+    result = s.start_processing(
+        input_dir=str(inp),
+        output_dir=str(out_dir),
+        reference_path_ui=ref_path,
+        batch_size=10,
+        resume_intent="fresh",
+    )
+    assert result is False
+    assert s.processing_active is False
+    assert s.processing_error is not None
+    assert "Checkpoint init failed" in s.processing_error
+    assert "diverges" in s.processing_error
+    # Fail closed *before any write*: no manifest, no run_config.cfg, and the
+    # attempt-created memmaps were unwound.
+    assert not (out_dir / "memmap_accumulators" / "resume_manifest.json").exists()
+    assert not (out_dir / "run_config.cfg").exists()

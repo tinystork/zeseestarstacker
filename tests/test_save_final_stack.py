@@ -152,108 +152,68 @@ def test_save_final_stack_zero_weights_abort(tmp_path):
     assert obj.final_stacked_path is None or not Path(obj.final_stacked_path).exists()
 
 
-def test_incremental_drizzle_batch_weight_override(tmp_path):
-    def run_batch(weight=None):
-        obj = _make_obj(tmp_path, True)
-        obj.drizzle_active_session = True
-        obj.drizzle_mode = "Incremental"
-        obj.preserve_linear_output = True
-        obj.stop_processing = False
-        obj.perform_cleanup = False
-        obj.preview_callback = None
-        obj._update_preview_incremental_drizzle = lambda: None
-        obj.reproject_between_batches = False
-        obj.reference_wcs_object = None
-        obj.drizzle_output_shape_hw = (5, 5)
-        obj.drizzle_output_wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
-        obj.drizzle_scale = 1.0
-        obj.drizzle_pixfrac = 1.0
-        obj.drizzle_kernel = "square"
-        obj.images_in_cumulative_stack = 0
-        obj.failed_stack_count = 0
-        obj.current_stack_header = None
+def test_supported_drizzle_preview_and_final_save_invariants(tmp_path, monkeypatch):
+    """PHI-R5 migration of the retired forensic ``_process_incremental_drizzle_batch``
+    coverage: the double-pass legacy chain is gone, so its weight-override /
+    accumulation regression tests are replaced by positive supported-path
+    invariants — (a) the ACTIVE standard-Drizzle preview producer
+    (``_update_preview_drizzle_accumulator``) emits an Option-A payload with
+    the full PHI identity metadata (trace off) and leaves the per-channel
+    accumulators bit-identical (science isolation), and (b) the supported
+    final FITS save from those accumulators preserves the per-channel
+    scientific data."""
+    import importlib
 
-        from drizzle.resample import Drizzle
+    qm = importlib.import_module("seestar.queuep.queue_manager")
+    monkeypatch.delenv("ZSSS_PHI_TRACE", raising=False)
 
-        obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
-
-        wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
-        data = np.stack([
-            np.full(obj.drizzle_output_shape_hw, c + 1, dtype=np.float32) for c in range(3)
-        ], axis=0)
-        header = wcs.to_header()
-        header["EXPTIME"] = 1.0
-        suffix = "ovr" if weight is not None else "def"
-        path = tmp_path / f"tmp_{suffix}.fits"
-        fits.writeto(path, data, header, overwrite=True)
-
-        wht_before = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
-        qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
-            obj, [str(path)], current_batch_num=1, total_batches_est=1, weight_map_override=weight
-        )
-        wht_after = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
-        for b_val, a_val in zip(wht_before, wht_after):
-            assert a_val >= b_val - 1e-6
-        return wht_after
-
-    baseline = run_batch(None)
-    overridden = run_batch(np.full((5, 5), 0.5, dtype=np.float32))
-
-    for b, o in zip(baseline, overridden):
-        assert o < b and np.isclose(o, b * 0.5, rtol=0.1)
-
-
-def test_incremental_drizzle_batch_weight_accumulates(tmp_path):
+    # (a) Active standard-Drizzle preview: identity metadata + no mutation.
     obj = _make_obj(tmp_path, True)
-    obj.drizzle_active_session = True
-    obj.drizzle_mode = "Incremental"
-    obj.preserve_linear_output = True
-    obj.stop_processing = False
-    obj.perform_cleanup = False
-    obj.preview_callback = None
-    obj._update_preview_incremental_drizzle = lambda: None
-    obj.reproject_between_batches = False
-    obj.reference_wcs_object = None
-    obj.drizzle_output_shape_hw = (5, 5)
-    obj.drizzle_output_wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
-    obj.drizzle_scale = 1.0
-    obj.drizzle_pixfrac = 1.0
-    obj.drizzle_kernel = "square"
-    obj.images_in_cumulative_stack = 0
-    obj.failed_stack_count = 0
-    obj.current_stack_header = None
+    obj.preview_downsample_factor = 1
+    shape = (4, 4)
+    from seestar.core.drizzle_core import DrizzleAccumulator
 
-    from drizzle.resample import Drizzle
+    obj.drizzle_accumulators = [DrizzleAccumulator(shape) for _ in range(3)]
+    for i, acc in enumerate(obj.drizzle_accumulators):
+        acc._out_img[:] = float(i + 1)
+        acc._out_wht[:] = 2.0
+    img_before = [a._out_img.copy() for a in obj.drizzle_accumulators]
+    wht_before = [a._out_wht.copy() for a in obj.drizzle_accumulators]
 
-    obj.incremental_drizzle_objects = [Drizzle(out_shape=obj.drizzle_output_shape_hw) for _ in range(3)]
+    collected = []
+    obj.preview_callback = lambda *a: collected.append(a)
+    qm.SeestarQueuedStacker._update_preview_drizzle_accumulator(obj)
+    assert len(collected) == 1
+    payload = collected[0]
+    data, header = payload[0], payload[1]
+    # Option-A raw-linear carrier with the full trace-independent identity.
+    assert isinstance(data, tuple) and len(data) == 2
+    assert data[1].ndim == 3 and data[1].shape[-1] == 3
+    assert header["PREV_SRC"] == "Drizzle Accumulator"
+    assert int(header["PREV_SEQ"]) == 1
+    assert int(header["PREV_RUN"]) >= 1
+    for key in ("PREV_REQ", "PREV_RES", "PREV_CAP"):
+        assert key in header
+    # Science isolation: the accumulators are bit-identical after the preview.
+    for acc, bi, bw in zip(obj.drizzle_accumulators, img_before, wht_before):
+        assert np.array_equal(acc._out_img, bi)
+        assert np.array_equal(acc._out_wht, bw)
 
-    wcs = make_wcs(shape=obj.drizzle_output_shape_hw)
-    data = np.stack(
-        [np.full(obj.drizzle_output_shape_hw, c + 1, dtype=np.float32) for c in range(3)],
-        axis=0,
+    # (b) Supported final FITS save from the same accumulators preserves the
+    # per-channel science (no double-pass re-drizzle involved).
+    obj.finalization_mode = qm.FINALIZATION_MODE_DRIZZLE
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_drizzle_std",
+        drizzle_final_sci_data=np.stack(img_before, axis=0),
+        drizzle_final_wht_data=np.stack(wht_before, axis=0),
+        preserve_linear_output=True,
     )
-    header = wcs.to_header()
-    header["EXPTIME"] = 1.0
-
-    path1 = tmp_path / "tmp1.fits"
-    path2 = tmp_path / "tmp2.fits"
-    fits.writeto(path1, data, header, overwrite=True)
-    fits.writeto(path2, data, header, overwrite=True)
-
-    wht_before = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
-    qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
-        obj, [str(path1)], current_batch_num=1, total_batches_est=2
-    )
-    wht_mid = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
-    for b_val, a_val in zip(wht_before, wht_mid):
-        assert a_val >= b_val - 1e-6
-
-    qm.SeestarQueuedStacker._process_incremental_drizzle_batch(
-        obj, [str(path2)], current_batch_num=2, total_batches_est=2
-    )
-    wht_after = [np.sum(d.out_wht) for d in obj.incremental_drizzle_objects]
-    for b_val, a_val in zip(wht_mid, wht_after):
-        assert a_val >= b_val - 1e-6
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.shape == (3, 4, 4)
+    # The saved science equals the accumulator content (float32 linear).
+    expected = np.stack([b.astype(np.float32) for b in img_before], axis=0)
+    assert np.allclose(saved.astype(np.float32), expected)
 
 
 def test_save_final_stack_classic_reproject(tmp_path):

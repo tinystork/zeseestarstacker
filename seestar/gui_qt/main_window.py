@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import os
 import threading
 import time
@@ -146,9 +147,11 @@ from .preview_adjust import (
     compute_histogram_percentile,
     compute_histogram_stats,
     normalize_bp_wp,
+    render_analysis_display,
 )
 from .preview_analysis import (
     adapt_anchors_for_drift,
+    analysis_upper_bound,
     apply_wb_float,
     compute_anchors,
     compute_auto_stretch_float,
@@ -156,7 +159,11 @@ from .preview_analysis import (
     extract_raw_linear,
     map_raw_linear,
 )
-from .histogram_view import HistogramView, format_histogram_stats
+from .histogram_view import (
+    HistogramView,
+    format_histogram_overflow,
+    format_histogram_stats,
+)
 from .histogram_window import DetachedHistogramWindow
 from .histogram_worker import HistogramCoordinator
 from .preview_image_view import PreviewImageView
@@ -911,8 +918,10 @@ class MainWindow(QMainWindow):
         # These are *display-only* owned copies and never feed the backend or
         # any scientific output:
         #   _raw_linear     - independent float64 copy of the raw-linear source
-        #   _pristine_float - mapped pre-WB float buffer in [0, 1]
-        #   _wb_only_float  - derived WB-only float buffer in [0, 1]
+        #   _pristine_float - mapped pre-WB float buffer (analysis domain:
+        #                     finite, >= 0; preserved headroom may exceed 1.0)
+        #   _wb_only_float  - derived WB-only float buffer (same analysis
+        #                     domain; WB gains are not clipped)
         #   _anchor_lo/hi   - stable p0.5/p99.5 anchors (hysteretically widened
         #                     for large drift; None until the first preview)
         #   _analysis_generation - explicit context/generation counter,
@@ -978,6 +987,7 @@ class MainWindow(QMainWindow):
         self._histogram_model = None
         self._histogram_model_revision = None
         self._histogram_scheduled_revision = None
+        self._histogram_trace_ctx = None
         self._histogram_source_stale: int = 0
         # Final OTPUX UX addendum: the detached histogram is a lazy, non-modal
         # second presentation surface.  It never owns a model or worker; the
@@ -1007,6 +1017,47 @@ class MainWindow(QMainWindow):
         # ``_live_wp`` record the BP/WP last written by live auto stretch so the
         # witness can compare live vs one-shot Auto Stretch on the same buffer.
         self._run_context_id: int = 0
+        # PHI-R3.2 durable producer run/session identity (closes the cross-run
+        # gate residual).  Each run is stamped with a durable producer session
+        # id that both the GUI and the payloads share:
+        #   _next_preview_run_session  — per-window monotonic allocator;
+        #   _pending_preview_run_session — the id allocated for the run about
+        #       to start (consumed/bound by ``_on_run_started``);
+        #   _preview_run_session       — the producer session id bound to the
+        #       CURRENT run (``None`` = no PHI-bound producer, e.g. simulated/
+        #       legacy backends or idle state).
+        # The GUI assigns the id at Start and hands it to the real backend
+        # (``set_preview_session``), which stamps it onto the stacker so every
+        # active-producer payload of the run carries ``PREV_RUN`` == the bound
+        # id.  A payload carrying any other session id (a late old-run payload
+        # queued across the boundary) is rejected as foreign and can never
+        # poison the current run's sequence high-water mark.
+        self._next_preview_run_session: int = 0
+        self._pending_preview_run_session: Optional[int] = None
+        self._preview_run_session: Optional[int] = None
+        # PHI-R3 monotonic producer-sequence gate.  ``_last_accepted_preview_seq``
+        # is the highest ``PREV_SEQ`` accepted from the current run's producer
+        # (``None`` = no sequenced payload accepted yet in this run).  A payload
+        # carrying a ``PREV_SEQ`` at or below it is a stale or duplicate
+        # producer emission and is dropped before it can replace analysis/
+        # display state or schedule work; payloads without ``PREV_SEQ``
+        # (legacy/unsequenced producers and test payloads) bypass the gate and
+        # keep the historical last-wins acceptance.  The gate resets at run
+        # start (``_on_run_started``) so the first sequenced payload of a new
+        # run is never rejected.
+        self._last_accepted_preview_seq: Optional[int] = None
+        # PHI-R3.1 analysis-domain state for the display controls.  For
+        # Option-A float previews the black/white points (and their sliders /
+        # spins / histogram markers) operate in the preserved analysis units
+        # ``[0, _analysis_upper]`` with
+        # ``_analysis_upper = max(1.0, finite max)`` of the WB-only analysis
+        # buffer (exactly the float-histogram model range upper — the same
+        # deterministic computation).  ``_bp_wp_control_upper`` remembers the
+        # upper the BP/WP controls were last retooled for, so the retool only
+        # runs when the analysis range actually changed.  Legacy QImage-only
+        # previews keep the historical ``[0, 1]`` domain (upper stays ``1.0``).
+        self._analysis_upper: float = 1.0
+        self._bp_wp_control_upper: float = 1.0
         self._preview_mode = None
         self._preview_identity = None
         self._displayed_identity = None
@@ -2167,6 +2218,18 @@ class MainWindow(QMainWindow):
             initial_additional_folders=list(self._additional_folders)
         )
         backend = self.resolve_backend()
+        # PHI-R3.2: allocate the durable producer run/session id for this run
+        # and hand it to the real backend, which stamps it onto the stacker so
+        # every active-producer payload carries PREV_RUN == the id the GUI
+        # binds at run start.  Simulated/legacy backends (``backend is None``
+        # or without the seam) stay unsequenced and keep the legacy fallback.
+        if backend is not None and hasattr(backend, "set_preview_session"):
+            self._next_preview_run_session += 1
+            session = self._next_preview_run_session
+            self._pending_preview_run_session = session
+            backend.set_preview_session(session)
+        else:
+            self._pending_preview_run_session = None
         if backend is None:
             self.controller.start(request)
         else:
@@ -2970,6 +3033,16 @@ class MainWindow(QMainWindow):
         # Live-auto enablement itself is user intent and deliberately survives
         # between runs; only dedupe state and per-run instrumentation reset here.
         self._run_context_id += 1
+        # A new run is a fresh producer sequence domain (each run constructs a
+        # fresh stacker whose PREV_SEQ counter restarts at 1): reset the PHI-R3
+        # monotonic acceptance gate so the first sequenced payload of the new
+        # run is accepted, never rejected as stale/duplicate.  PHI-R3.2: bind
+        # the durable producer run/session identity allocated at Start (the id
+        # handed to the real backend, which stamps it onto the stacker); a
+        # payload carrying any other session id is foreign and dropped.
+        self._preview_run_session = self._pending_preview_run_session
+        self._pending_preview_run_session = None
+        self._last_accepted_preview_seq = None
         self._last_live_auto_batch_token = None
         self._live_auto_stretch_count = 0
         self._live_auto_wb_count = 0
@@ -3013,9 +3086,27 @@ class MainWindow(QMainWindow):
     def _on_preview(self, payload: BackendPreviewPayload) -> None:
         """Update the Preview tab label from a preview payload (GUI thread only).
 
-        The metadata label is updated unconditionally (stack name and counts).
-        Additionally, when ``payload.data`` is image-like, it is converted
-        (strictly display-only, via :func:`preview_render.render_preview_image`)
+        Monotonic acceptance gate (PHI-R3.2): every payload that carries a
+        producer ``PREV_SEQ`` (the active Classic/Drizzle producers emit
+        ``PREV_SEQ`` + ``PREV_RUN`` on **every** payload — required display
+        metadata, independent of the ``ZSSS_PHI_TRACE`` debug gate) is
+        accepted only when (a) its producer run/session id matches the id bound
+        to the current run at start (:meth:`_on_run_started` — a late payload
+        of a previous producer session is *foreign* and dropped without
+        touching the sequence high-water mark) and (b) its sequence strictly
+        advances the run's monotonic gate — a stale (older) or duplicate
+        (equal) emission is dropped *before* it can replace analysis/display
+        state or schedule any work.  Payloads without ``PREV_SEQ``
+        (legacy/unsequenced producers, initial-preview loads, test payloads)
+        bypass the gate and keep the historical unconditional last-wins
+        acceptance, so old producers and callers behave exactly as before.
+        Sequenced payloads without ``PREV_RUN`` (third-party/synthetic) fall
+        back to the run-scoped monotonic gate only.  The gate resets at run
+        start, so the first sequenced payload of a new run is never rejected.
+
+        For accepted payloads, the metadata label is updated (stack name and
+        counts).  Additionally, when ``payload.data`` is image-like, it is
+        converted (strictly display-only, via :func:`preview_render.render_preview_image`)
         and kept as the copied source image for the view transforms (zoom /
         rotation / resolution).  A *valid* preview replaces only the content:
         the user's accumulated rotation, continuous zoom and pan offsets are
@@ -3024,6 +3115,34 @@ class MainWindow(QMainWindow):
         clears the stored source, the image area, the rotation state and the
         view controls, so no stale preview survives a failed render.
         """
+        # PHI-R3.2 monotonic acceptance gate: reject stale/duplicate/foreign
+        # producer emissions before any label/analysis/display/work state
+        # changes.  The gate applies to every payload that carries a producer
+        # ``PREV_SEQ`` (the active producers emit ``PREV_SEQ`` + ``PREV_RUN``
+        # on every payload, trace gate irrelevant).  A payload whose producer
+        # run/session id does not match the id bound to the current run at
+        # start is *foreign* (a late payload of a previous producer session)
+        # and is dropped without touching the sequence high-water mark.
+        # Unsequenced (legacy) payloads are always accepted.
+        producer_seq = self._payload_preview_seq(payload)
+        if producer_seq is not None and not self._accept_preview_payload(
+            self._payload_preview_run(payload), producer_seq
+        ):
+            if phi_trace_enabled():
+                run = self._payload_preview_run(payload)
+                if run is None or run == self._preview_run_session:
+                    # Same (or unverifiable) producer session: the refusal is
+                    # monotonic — stale (older) or duplicate (equal).  A
+                    # refusal implies the high-water mark is already set.
+                    reason = (
+                        "stale"
+                        if producer_seq < self._last_accepted_preview_seq
+                        else "duplicate"
+                    )
+                else:
+                    reason = "foreign"
+                self._phi_payload_drop_record(payload, producer_seq, reason)
+            return
         name = payload.stack_name or "(no stack)"
         detail = name
         if payload.image_count is not None:
@@ -3053,7 +3172,18 @@ class MainWindow(QMainWindow):
                 f"{identity[0]}:{identity[1]}" if identity else "none"
             )
             res_label = f"x1/{self._effective_preview_downsample_factor()}"
-            seq = getattr(payload, "image_count", None)
+            # True producer monotonic preview sequence + requested/effective
+            # producer resolution (written into the payload header by the
+            # producers).  Fall back to the Qt-carried counters only when the
+            # producer metadata is absent (legacy/test payloads).  The
+            # acceptance gate above already read ``producer_seq``; the payload
+            # header is immutable, so this re-read is only for the record.
+            producer_req = self._payload_preview_factor(payload, "PREV_REQ")
+            producer_res = self._payload_preview_factor(payload, "PREV_RES")
+            producer_cap = self._payload_preview_factor(payload, "PREV_CAP")
+            seq = producer_seq
+            if seq is None:
+                seq = getattr(payload, "image_count", None)
             if seq is None:
                 seq = getattr(payload, "current_batch", None)
             arr0 = payload.data
@@ -3061,11 +3191,17 @@ class MainWindow(QMainWindow):
                 arr0 = arr0[0]
             shape = getattr(arr0, "shape", None)
             shape_label = "x".join(str(s) for s in shape) if shape else "-"
+            producer_run = self._payload_preview_run(payload)
             self._phi_trace_ctx = {
                 "src": src_label,
                 "identity": identity_label,
                 "res": res_label,
                 "shape": shape_label,
+                "pseq": str(producer_seq) if producer_seq is not None else "-",
+                "prun": str(producer_run) if producer_run is not None else "-",
+                "preq": str(producer_req) if producer_req is not None else "-",
+                "pres": str(producer_res) if producer_res is not None else "-",
+                "pcap": str(producer_cap) if producer_cap is not None else "-",
             }
             phi_trace_stage(
                 logger,
@@ -3156,6 +3292,171 @@ class MainWindow(QMainWindow):
             return str(header.get("PREV_SRC", "")) if header is not None else ""
         except Exception:
             return ""
+
+    def _payload_preview_seq(self, payload: BackendPreviewPayload) -> Optional[int]:
+        """Return the producer monotonic preview sequence (``PREV_SEQ``), or None.
+
+        This is the true per-emission producer sequence written by
+        ``queue_manager`` (Classic SUM/W and standard Drizzle routes) — not the
+        Qt-derived ``image_count``/``current_batch`` counters, which need not be
+        monotonic across production order.  Display-only.  When present, the
+        value feeds the PHI-R3 monotonic acceptance gate in :meth:`_on_preview`
+        (stale/duplicate emissions are dropped); when absent (legacy/test
+        payloads) the payload is accepted unconditionally.
+        """
+        header = getattr(payload, "header", None)
+        if header is None:
+            return None
+        try:
+            raw = header.get("PREV_SEQ", None)
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, (tuple, list)):
+            raw = raw[0]
+        try:
+            value = int(raw)
+        except Exception:
+            return None
+        return value if value >= 0 else None
+
+    def _payload_preview_run(self, payload: BackendPreviewPayload) -> Optional[int]:
+        """Return the durable producer run/session id (``PREV_RUN``), or None.
+
+        Written by the active Classic/Drizzle producers on every emission
+        (required display metadata, never debug-gated).  The id is bound per
+        stacker instance — the Qt run lifecycle assigns it at Start, the
+        backend stamps it onto the stacker — so all payloads of one run share
+        it and a payload of any other producer session is distinguishable at
+        Qt arrival.  ``None`` for legacy/unsequenced payloads.
+        """
+        header = getattr(payload, "header", None)
+        if header is None:
+            return None
+        try:
+            raw = header.get("PREV_RUN", None)
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, (tuple, list)):
+            raw = raw[0]
+        try:
+            value = int(raw)
+        except Exception:
+            return None
+        return value
+
+    def _accept_preview_payload(self, producer_run: Optional[int], producer_seq: int) -> bool:
+        """Producer acceptance rule (PHI-R3.2 gate, run-scoped).
+
+        Two checks, in order:
+
+        1. *Run/session identity* — when the payload carries a ``PREV_RUN`` and
+           the current run has a bound producer session (set at run start from
+           the id allocated at Start), a payload from any *other* session (a
+           late old-run payload queued across the run boundary) is refused as
+           foreign without touching the sequence high-water mark.  When no
+           session is bound yet (idle state / direct test calls / simulated
+           runs) the first sequenced payload's run is bound lazily.
+        2. *Monotonic sequence* — ``producer_seq`` is accepted (recorded as the
+           run's high-water mark) when it is the first sequenced payload of the
+           run or strictly newer than the last accepted one; an equal sequence
+           is a duplicate and an older one is stale — both refused without
+           touching any state.
+
+        The gate is reset and re-bound at run start (:meth:`_on_run_started`),
+        so a new run's first sequenced payload (the fresh producer restarts
+        its counter at 1 under the new session id) is always accepted.
+        """
+        if producer_run is not None:
+            expected = self._preview_run_session
+            if expected is None:
+                # No run-bound expectation yet: bind lazily to this producer
+                # session (real GUI runs always pre-bind at run start, so this
+                # only covers idle/direct-call/test sequencing).
+                self._preview_run_session = producer_run
+            elif producer_run != expected:
+                return False  # foreign producer session (late old-run payload)
+        last = self._last_accepted_preview_seq
+        if last is None or producer_seq > last:
+            self._last_accepted_preview_seq = producer_seq
+            return True
+        return False
+
+    def _phi_payload_drop_record(self, payload: BackendPreviewPayload, seq: int, reason: str) -> None:
+        """Emit a ``payload_arrive`` trace record for a gated drop (best-effort).
+
+        The record marks the arrival order and the acceptance reason
+        (``drop=stale`` for an older emission, ``drop=duplicate`` for a
+        repeated one, ``drop=foreign`` for a payload of another producer
+        run/session — PHI-R3.2) so the gate's decision is observable and
+        attributable without touching any live state (``_phi_trace_ctx`` keeps
+        describing the last *accepted* payload).  Never raises.
+        """
+        try:
+            src_label = self._payload_preview_source(payload) or ""
+            identity = self._derive_preview_identity(payload)
+            identity_label = f"{identity[0]}:{identity[1]}" if identity else "none"
+            arr0 = payload.data
+            if isinstance(arr0, (tuple, list)) and len(arr0) >= 1:
+                arr0 = arr0[0]
+            shape = getattr(arr0, "shape", None)
+            shape_label = "x".join(str(s) for s in shape) if shape else "-"
+            run = self._payload_preview_run(payload)
+            phi_trace_stage(
+                logger,
+                route=self._derive_preview_mode(payload),
+                stage="payload_arrive",
+                arr=None,
+                src=src_label,
+                identity=identity_label,
+                shape=shape_label,
+                pseq=str(seq),
+                prun=str(run) if run is not None else "-",
+                seq=seq,
+                drop=reason,
+            )
+        except Exception:
+            pass  # tracing is best-effort
+
+    def _payload_preview_factor(self, payload: BackendPreviewPayload, key: str) -> Optional[int]:
+        """Return a producer resolution metadata card (``PREV_REQ``/``PREV_RES``/
+        ``PREV_CAP``) as an int, or ``None`` when absent.
+
+        ``PREV_REQ`` is the requested GUI resolution factor; ``PREV_RES`` is
+        the factor actually applied to the delivered payload (1 when no resize
+        ran — e.g. Classic's small-image guard / failure path); ``PREV_CAP``
+        is 1 when the Drizzle max-side display guard fired before the factor.
+        Tuple-valued FITS cards are unwrapped.  ``None`` for legacy/test
+        payloads without the card — the caller falls back safely.
+        """
+        header = getattr(payload, "header", None)
+        if header is None:
+            return None
+        try:
+            raw = header.get(key, None)
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, (tuple, list)):
+            raw = raw[0]
+        try:
+            value = int(raw)
+        except Exception:
+            return None
+        return value
+
+    def _payload_preview_res(self, payload: BackendPreviewPayload) -> Optional[int]:
+        """Backward-compatible alias: effective producer resolution (``PREV_RES``).
+
+        Deprecated in favour of :meth:`_payload_preview_factor` with an explicit
+        card key; kept so existing callers/tests keep working.  ``None`` when
+        the payload does not carry it (legacy routes / test payloads).
+        """
+        return self._payload_preview_factor(payload, "PREV_RES")
 
     def _derive_preview_identity(self, payload: BackendPreviewPayload):
         """Derive the engine-authoritative scientific-preview identity.
@@ -3267,7 +3568,9 @@ class MainWindow(QMainWindow):
                     self.stretch_combo.blockSignals(False)
                 self._stretch = "asinh"
                 bp, wp = normalize_bp_wp(
-                    round(float(bp), 4), round(float(wp), 4)
+                    round(float(bp), 4),
+                    round(float(wp), 4),
+                    max_value=self._bp_wp_control_upper,
                 )
                 self._write_bp_wp_state(bp, wp)
                 # Witness: record the BP/WP live auto just wrote so tests can
@@ -3295,6 +3598,11 @@ class MainWindow(QMainWindow):
         self._wb_only_wb = None
         self._anchor_lo = None
         self._anchor_hi = None
+        # PHI-R3.1: the Option-A analysis domain is gone — the BP/WP display
+        # controls and histogram markers return to the legacy [0, 1] domain
+        # (spins/sliders are retooled back; markers re-scoped).
+        self._analysis_upper = 1.0
+        self._sync_analysis_domain()
         # A fresh analysis context also drops the scientific-preview identity
         # instrumentation (the displayed preview no longer exists).  The
         # monotonic ``_raw_revision`` and the run-scoped live-auto target state
@@ -3311,11 +3619,67 @@ class MainWindow(QMainWindow):
         self._histogram_model = None
         self._histogram_model_revision = None
         self._histogram_scheduled_revision = None
+        self._histogram_trace_ctx = None
         # Same for the legacy single-array histogram/stats cache.
         self._legacy_hist_key = None
         self._legacy_hist = None
         self._legacy_hist_percentile = 1.0
         self._legacy_hist_stats = None
+
+    def _sync_analysis_domain(self) -> None:
+        """Re-scope the BP/WP controls + histogram markers to the analysis domain.
+
+        PHI-R3.1 unit contract: for Option-A float previews the black/white
+        points operate in the preserved analysis units ``[0, _analysis_upper]``
+        (``upper = max(1.0, finite max)`` of the WB-only buffer — the exact
+        upper the float-histogram model declares), so a white point above ``1``
+        is a first-class control/marker value.  When the upper changes (a new
+        WB-only derivation — new source or WB change) this method:
+
+        1. retools both BP/WP spin ranges (``[0, upper]``) and slider ranges
+           (one 0.001 step per tick) — the legacy QImage path keeps upper ==
+           ``1.0`` and the historical ranges;
+        2. reconciles the current pair deterministically in analysis units
+           without inversion (:func:`preview_adjust.normalize_bp_wp` with
+           ``max_value=upper``): a white point above the new upper is pulled
+           down to it, the black point stays below with the shared minimum
+           separation;
+        3. re-scopes every live histogram view's marker domain
+           (:meth:`HistogramView.set_analysis_domain`) so drags and markers
+           agree with the controls.
+
+        Runs under the BP/WP re-entrancy guard (programmatic writes never
+        trigger a recursive refresh or disable live-auto) and is a no-op when
+        the upper is unchanged.  The *control* domain is the grid ceiling of
+        the raw analysis upper (``ceil(upper / step) * step``): the spin/slider
+        widgets and the quantized markers can only represent 0.001-grid values,
+        so the domain is rounded up to the next grid point (never down — a
+        white point must be able to reach the true data top).
+        """
+        raw_upper = self._analysis_upper
+        factor = int(round(1.0 / BLACK_POINT_STEP))
+        upper = math.ceil(raw_upper * factor) / factor
+        if abs(upper - self._bp_wp_control_upper) < 1e-12:
+            return
+        self._bp_wp_sync_guard = True
+        try:
+            n = max(1, int(round(upper / BLACK_POINT_STEP)))
+            self.stretch_bp_slider.setRange(0, n)
+            self.stretch_wp_slider.setRange(0, n)
+            self.stretch_bp_spin.setRange(0.0, float(upper))
+            self.stretch_wp_spin.setRange(0.0, float(upper))
+            bp, wp = normalize_bp_wp(
+                self._black_point, self._white_point, max_value=upper
+            )
+            self.stretch_bp_spin.setValue(bp)
+            self.stretch_wp_spin.setValue(wp)
+        finally:
+            self._bp_wp_sync_guard = False
+        self._black_point = self.stretch_bp_spin.value()
+        self._white_point = self.stretch_wp_spin.value()
+        self._bp_wp_control_upper = upper
+        for view in self._histogram_views():
+            view.set_analysis_domain(upper)
 
     def _ensure_wb_only_float(self):
         """Return the cached WB-only float buffer, re-deriving it only when stale.
@@ -3334,6 +3698,12 @@ class MainWindow(QMainWindow):
         self._wb_only_float = apply_wb_float(self._pristine_float, self._wb)
         self._wb_only_wb = self._wb
         self._wb_only_revision += 1
+        # PHI-R3.1: the display BP/WP controls operate in the analysis units of
+        # this buffer — recompute the deterministic analysis upper (the exact
+        # same value the float-histogram model will declare) and re-scope the
+        # controls/markers, reconciling a white point that no longer fits.
+        self._analysis_upper = analysis_upper_bound(self._wb_only_float)
+        self._sync_analysis_domain()
         if phi_trace_enabled():
             ctx = self._phi_trace_ctx or {}
             phi_trace_stage(
@@ -3355,8 +3725,14 @@ class MainWindow(QMainWindow):
         drift via a hysteretic monotonic widening of those anchors
         (:func:`preview_analysis.adapt_anchors_for_drift`), then maps through
         the effective anchors into the pristine pre-WB float buffer and returns
-        that buffer as a copied ``QImage`` (or ``None`` when the payload is
-        unusable).  The input payload arrays are never mutated.
+        a neutral ``QImage`` carrier (or ``None`` when the payload is
+        unusable).  PHI-R3: the mapping preserves finite out-of-range float
+        headroom (no premature clip).  PHI-R3.1: the returned ``QImage`` is
+        stored as ``_preview_source`` for geometry / fallback only — the
+        *visible* display is re-rendered from the preserved float analysis
+        source by :meth:`_refresh_preview_view` (float stretch with analysis-
+        unit black/white points, final uint8 conversion last).  The input
+        payload arrays are never mutated.
         """
         raw = extract_raw_linear(data)
         if raw is None:
@@ -3813,15 +4189,19 @@ class MainWindow(QMainWindow):
             else self.stretch_wp_spin.value()
         )
         other = self._white_point if driver == "bp" else self._black_point
-        bp, wp = clamp_bp_wp_edit(driver, value, other)
+        bp, wp = clamp_bp_wp_edit(
+            driver, value, other, max_value=self._bp_wp_control_upper
+        )
         self._write_bp_wp_state(bp, wp)
         self._refresh_preview_view()
 
     def _set_bp_wp_pair(self, bp: float, wp: float) -> None:
         """Set both BP/WP points atomically from a validated pair (histogram
         drag mirror / auto stretch).  Normalizes + quantizes via the shared
-        seam, writes controls/state once and refreshes once."""
-        bp, wp = normalize_bp_wp(bp, wp)
+        seam in the current analysis units (``max_value`` = analysis upper for
+        Option-A float previews, legacy ``[0, 1]`` otherwise), writes
+        controls/state once and refreshes once."""
+        bp, wp = normalize_bp_wp(bp, wp, max_value=self._bp_wp_control_upper)
         self._write_bp_wp_state(bp, wp)
         self._refresh_preview_view()
 
@@ -3922,6 +4302,23 @@ class MainWindow(QMainWindow):
             views.append(detached.histogram_view)
         return views
 
+    def _mirror_detached_view_policy(self) -> None:
+        """Mirror the inline view policy onto the detached surface (PHI-R3.3).
+
+        The inline ``HistogramView`` is the single owner of the view policy
+        (window + frozen-vs-unfrozen + auto-zoom).  Whenever the detached
+        surface is (re)synchronized or a model application changes the view
+        state, this copies the inline policy onto the detached view so the two
+        surfaces deterministically end with the same valid view range — in
+        particular an unfrozen inline view never creates an artificial frozen
+        range on the detached side, and a genuine manual zoom is preserved/
+        reconciled identically on both (see
+        :meth:`HistogramView.mirror_state_from`).
+        """
+        detached = self._detached_histogram_window
+        if detached is not None:
+            detached.histogram_view.mirror_state_from(self.right_histogram_view)
+
     def _zoom_histogram(self, *_ignored) -> None:
         for view in self._histogram_views():
             view.zoom_histogram()
@@ -3965,16 +4362,18 @@ class MainWindow(QMainWindow):
             return
         if self._pristine_float is not None:
             dialog.set_model(self._histogram_model)
+            dialog.histogram_view.set_analysis_domain(
+                self._bp_wp_control_upper
+            )
         else:
             dialog.set_legacy_data(
                 self._legacy_hist, self._legacy_hist_percentile
             )
         dialog.histogram_view.set_range(self._black_point, self._white_point)
-        view_min, view_max = self.right_histogram_view.view_range
-        dialog.histogram_view.set_view_range(view_min, view_max)
-        dialog.histogram_view.auto_zoom_enabled = (
-            self.right_histogram_view.auto_zoom_enabled
-        )
+        # PHI-R3.3 (F2): the detached surface mirrors the inline view *policy*
+        # (window + frozen-vs-unfrozen + auto-zoom) — never a manufactured
+        # freeze from a bare coordinate snapshot.
+        self._mirror_detached_view_policy()
         dialog.auto_zoom_check.blockSignals(True)
         dialog.live_auto_stretch_check.blockSignals(True)
         dialog.live_auto_wb_check.blockSignals(True)
@@ -4047,17 +4446,28 @@ class MainWindow(QMainWindow):
         self.preview_image_label.setPixmap(pixmap)
 
     def _refresh_preview_view(self, *, histogram: bool = True) -> None:
-        """Repaint the preview image + resolution label + histogram from the
-        stored source.
+        """Repaint the preview image + resolution label + histogram.
 
-        The source :class:`QImage` is never mutated: a fully adjusted *derived*
-        image (WB + stretch + black/white/gamma + brightness/contrast/
-        saturation) is produced from it, then ``render_view`` applies the
-        current rotation and zoom to that derived image, so zoom reapplies
-        cleanly after rotation and the original display image stays pristine.
-        The display histogram is computed from the *WB-only* analysis buffer
-        (the Tk ``image_data_wb`` source), so it tracks white balance but not
-        the stretch / gamma / brightness-contrast-saturation (M14 histogram-
+        PHI-R3.1 unit contract: an Option-A preview (float analysis state
+        present) renders the visible display **from the preserved float
+        analysis/WB source** — the user-selected stretch (black/white points in
+        analysis units, possibly above ``1``), gamma and brightness/contrast/
+        saturation are applied in float by
+        :func:`preview_adjust.render_analysis_display` **before** the final
+        uint8/``QImage`` conversion, which is the only clipping boundary.  A
+        white point above ``1`` visibly recovers preserved headroom instead of
+        leaving it white-clipped (no premature clamp at anchor mapping / WB /
+        QImage ingest).  Legacy single-array payloads keep the historical
+        uint8 QImage chain (:func:`preview_adjust.apply_preview_adjustments`)
+        with its ``[0, 1]`` Tk-parity semantics.
+
+        The stored source :class:`QImage` is never mutated: a fully adjusted
+        *derived* image is produced, then ``render_view`` applies the current
+        rotation and zoom to that derived image, so zoom reapplies cleanly
+        after rotation and the original display image stays pristine.  The
+        display histogram is computed from the *WB-only* analysis buffer (the
+        Tk ``image_data_wb`` source), so it tracks white balance but not the
+        stretch / gamma / brightness-contrast-saturation (M14 histogram-
         source alignment).  For an Option-A preview the histogram model is
         derived directly from the cached WB-only float buffer (no QImage
         round-trip) and reused unchanged on every refresh that does not change
@@ -4078,19 +4488,31 @@ class MainWindow(QMainWindow):
             if histogram:
                 self._refresh_histogram()
             return
-        adjusted = apply_preview_adjustments(
-            source,
-            wb=self._wb,
-            stretch=self._stretch,
-            black_point=self._black_point,
-            white_point=self._white_point,
-            gamma=self._gamma,
-            brightness=self._brightness,
-            contrast=self._contrast,
-            saturation=self._saturation,
-        )
-        if adjusted is None or adjusted.isNull():
-            adjusted = source
+        if self._pristine_float is not None:
+            # Option-A float display path (PHI-R3.1): derive the WB-only
+            # analysis buffer (re-derives only when the source or WB changed,
+            # and re-scopes the BP/WP analysis-domain controls), then render
+            # the display from float with the user-selected BP/WP (analysis
+            # units, possibly > 1) applied before the final uint8 conversion.
+            adjusted = self._render_option_a_display()
+            if adjusted is None or adjusted.isNull():
+                # Defensive fallback (float state present but unusable): the
+                # stored neutral QImage render, untouched by the stretch chain.
+                adjusted = source
+        else:
+            adjusted = apply_preview_adjustments(
+                source,
+                wb=self._wb,
+                stretch=self._stretch,
+                black_point=self._black_point,
+                white_point=self._white_point,
+                gamma=self._gamma,
+                brightness=self._brightness,
+                contrast=self._contrast,
+                saturation=self._saturation,
+            )
+            if adjusted is None or adjusted.isNull():
+                adjusted = source
         zoom_text = self.zoom_combo.currentText()
         if zoom_text == "Fit":
             zoom_factor = None
@@ -4130,6 +4552,33 @@ class MainWindow(QMainWindow):
         self.resolution_label.setText(self._resolution_text(source, disp_w, disp_h))
         if histogram:
             self._refresh_histogram()
+
+    def _render_option_a_display(self):
+        """Render the visible Option-A display from the float analysis source.
+
+        PHI-R3.1: derives the current WB-only analysis buffer (re-derives only
+        when the source or the WB gains changed, and re-scopes the BP/WP
+        controls to the analysis domain), then applies the user-selected
+        stretch (black/white points in analysis units, possibly above ``1``),
+        gamma and brightness/contrast/saturation **in float**, with the final
+        uint8/``QImage`` conversion as the only clipping boundary — a white
+        point above ``1`` visibly recovers preserved headroom.  Returns the
+        deep-copied ``QImage`` or ``None`` (unusable float state).  Display-
+        only; never mutates the analysis buffers or any scientific state.
+        """
+        wb_only = self._ensure_wb_only_float()
+        if wb_only is None:
+            return None
+        return render_analysis_display(
+            wb_only,
+            stretch=self._stretch,
+            black_point=self._black_point,
+            white_point=self._white_point,
+            gamma=self._gamma,
+            brightness=self._brightness,
+            contrast=self._contrast,
+            saturation=self._saturation,
+        )
 
     def _resolution_text(self, source: QImage, disp_w: int, disp_h: int) -> str:
         """Build the resolution label: original → displayed size + zoom + rotation."""
@@ -4238,6 +4687,7 @@ class MainWindow(QMainWindow):
             self._histogram_model = None
             self._histogram_model_revision = None
             self._histogram_scheduled_revision = None
+            self._histogram_trace_ctx = None
             for view in self._histogram_views():
                 view.clear()
             self._histogram_stats = None
@@ -4246,6 +4696,10 @@ class MainWindow(QMainWindow):
         revision = self._wb_only_revision
         if self._histogram_scheduled_revision != revision:
             self._histogram_scheduled_revision = revision
+            # Snapshot the trace context at schedule time so an async result
+            # is attributed to the payload that was current when the request
+            # was made — never to an obsolete/newer ``_phi_trace_ctx``.
+            self._histogram_trace_ctx = dict(self._phi_trace_ctx or {})
             # The WB-only buffer is replaced (never mutated) on re-derivation,
             # so it is safe to hand to the worker by reference (read-only).
             self._histogram_coordinator.schedule(
@@ -4290,7 +4744,10 @@ class MainWindow(QMainWindow):
         self._histogram_model = result
         self._histogram_model_revision = revision
         if phi_trace_enabled():
-            ctx = self._phi_trace_ctx or {}
+            # Use the ctx snapshot taken when the request was scheduled, so
+            # the histogram output is attributed to the correct payload even
+            # when a newer preview arrived while the worker was computing.
+            ctx = getattr(self, "_histogram_trace_ctx", None) or {}
             stats = result.get("stats") or {}
             extra = {}
             for ch in result.get("channels") or []:
@@ -4311,7 +4768,18 @@ class MainWindow(QMainWindow):
             # Both surfaces receive the exact same authoritative model object.
             view.set_model(result)
             view.set_range(self._black_point, self._white_point)
-        self._histogram_stats = format_histogram_stats(result.get("stats"))
+        # PHI-R3.3 (F2): after every model application the inline view policy
+        # is mirrored onto the detached surface, so a stale/artificial frozen
+        # range can never survive a model-domain change on only one surface.
+        self._mirror_detached_view_policy()
+        stats_text = format_histogram_stats(result.get("stats"))
+        # PHI-AUTO-HISTOGRAM-UX-V1: expose in-domain values above the plotted
+        # bin high (sparse extreme tail) on the always-visible status line, so
+        # the tail is never silently dropped in any zoom state.
+        overflow_note = format_histogram_overflow(result)
+        self._histogram_stats = (
+            f"{stats_text}{overflow_note}" if stats_text else None
+        )
         self._render_histogram_status()
 
     def _refresh_histogram_legacy(self) -> None:
@@ -4353,6 +4821,11 @@ class MainWindow(QMainWindow):
                 view.set_legacy_data(
                     self._legacy_hist, self._legacy_hist_percentile
                 )
+            # PHI-R3.3 (F3/F2): model→legacy transitions clear any frozen
+            # float-model view state on every surface (set_legacy_data) and the
+            # inline policy is mirrored to the detached view — both end on a
+            # valid legacy [0, 1] window without a manual reset.
+            self._mirror_detached_view_policy()
         for view in self._histogram_views():
             view.set_range(self._black_point, self._white_point)
         self._histogram_stats = self._legacy_hist_stats

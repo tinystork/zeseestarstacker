@@ -123,40 +123,25 @@ class _MinimalStacker:
         self.calls = []
         self._indices_cache = {}
         self.perform_cleanup = False
-        # No drizzle session / no executors populated (classic boring_stack
-        # scenario) and no classic memmaps open.
-        self.drizzle_executor = None
+        # Classic boring_stack scenario: no quality executor populated and no
+        # classic memmaps open (the retired legacy drizzle executor no longer
+        # exists on the stacker — PHI-R5).
         self.quality_executor = None
         self.cumulative_sum_memmap = None
         self.cumulative_wht_memmap = None
 
-    def _wait_drizzle_processes(self):
-        self.calls.append("_wait_drizzle_processes")
-
     def _close_memmaps(self):
         self.calls.append("_close_memmaps")
-
-    # Incremental-drizzle symbols: must NOT be called by _cleanup_stacker.
-    # Defined here only so any accidental call is observable (and the assert
-    # below fails) instead of silently raising AttributeError.
-    def _process_incremental_drizzle_batch(self, *a, **k):
-        self.calls.append("_process_incremental_drizzle_batch")
-
-    def _start_drizzle_process(self, *a, **k):
-        self.calls.append("_start_drizzle_process")
 
 
 def test_cleanup_stacker_no_incremental_side_effects():
     stacker = _MinimalStacker()
     bs._cleanup_stacker(stacker)
 
-    # The legacy no-op wait and the classic memmap closer are the only
-    # lifecycle hooks that may run.
-    assert "_wait_drizzle_processes" in stacker.calls
+    # The classic memmap closer is the only lifecycle hook that may run (the
+    # M3-D legacy drizzle wait/process machinery was retired in PHI-R5).
     assert "_close_memmaps" in stacker.calls
-    # No incremental-drizzle code path may be driven:
-    assert "_process_incremental_drizzle_batch" not in stacker.calls
-    assert "_start_drizzle_process" not in stacker.calls
+    assert not any("drizzle" in c for c in stacker.calls)
     # Classic memmap slots remain dropped/None:
     assert stacker.cumulative_sum_memmap is None
     assert stacker.cumulative_wht_memmap is None
@@ -192,25 +177,27 @@ def test_boring_stack_has_no_incremental_symbols():
         assert sym not in src, f"{sym!r} unexpectedly present in boring_stack.py"
 
 
-def test_wait_drizzle_processes_only_in_cleanup_context():
-    src = _bs_src()
-    lines = src.splitlines()
-    hits = [i for i, ln in enumerate(lines) if "_wait_drizzle_processes" in ln]
-    assert hits, "expected at least one _wait_drizzle_processes reference"
-
-    def_idx = next(
-        i for i, ln in enumerate(lines) if ln.strip().startswith("def _cleanup_stacker")
+def test_retired_legacy_drizzle_machinery_absent_from_boring_and_qm():
+    """PHI-R5 retirement regression: the M3-D obsolete legacy incremental
+    Drizzle preview/process machinery and the dead master preview carrier are
+    gone from both boring_stack.py and queue_manager.py."""
+    bs_src = _bs_src()
+    qm_src = QM_PATH.read_text(encoding="utf-8")
+    retired = (
+        "_update_preview_incremental_drizzle",
+        "_start_drizzle_process",
+        "drizzle_batch_worker",
+        "_process_incremental_drizzle_batch",
+        "_wait_drizzle_processes",
+        "_update_preview_master",
+        "incremental_drizzle_objects",
+        "intermediate_drizzle_batch_files",
+        "cumulative_drizzle_data",
+        "drizzle_executor",
     )
-    # Every reference must live inside the _cleanup_stacker body (docstring or
-    # code) — i.e. before the next module-level def.
-    next_def = next(
-        (i for i in range(def_idx + 1, len(lines)) if lines[i].startswith("def ")),
-        len(lines),
-    )
-    for h in hits:
-        assert def_idx < h < next_def, (
-            "_wait_drizzle_processes must only appear inside _cleanup_stacker"
-        )
+    for sym in retired:
+        assert sym not in bs_src, f"{sym!r} still referenced in boring_stack.py"
+        assert sym not in qm_src, f"{sym!r} still present in queue_manager.py"
 
 
 # --------------------------------------------------------------------------

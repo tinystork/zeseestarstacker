@@ -7,10 +7,24 @@ implements the ratified contracts in ``docs/output_truthfulness_preview_audit.md
   the stable/adaptive anchor mapping (p0.5 / p95, finite min/max fallback only
   when degenerate), so small changes preserve a fixed pixel's mapping while
   genuine photometric drift can widen the display range;
-* §5.3 — 512-bin float histogram over ``[0, 1]`` (RGB overlay or L mono),
-  ``log1p`` visualization counts, per-channel min/max/median/mean/std on the
-  *exact same* deterministic sample, robust plotted X range + explicit full
-  ``[0, 1]`` range metadata;
+* §5.3 (PHI-R3 semantics, PHI-AUTO-HISTOGRAM-UX-V1 correction) — 512-bin
+  float histogram over the **explicit plotting/bin range** ``[0, bin_hi]``
+  (``bin_hi = max(1.0, robust plot high)`` — the full analysis upper when
+  the top is dense or the sample small, otherwise the robust 99.5 %
+  percentile of the sample, so a sparse extreme finite tail can never
+  stretch the bins into a few widely spaced spikes; equals the display-level
+  window ``[0, 1]`` when no headroom exists), ``log1p`` visualization
+  counts, per-channel min/max/median/mean/std on the *exact same*
+  deterministic sample, per-channel overflow counts (in-domain values above
+  the bin high — the sparse tail is *never silently dropped*), robust plotted
+  X range + explicit full analysis range metadata;
+
+  **Model roles are explicit** (never conflated): ``range`` / ``full_range``
+  declare the full preserved **analysis/control domain** ``(0, upper)``;
+  ``bin_range`` declares the domain the 512 plotted bins actually live in;
+  ``x_range`` is the robust **viewport** (auto zoom); ``overflow`` counts, per
+  channel, the analysis values above the plotted bin high (their full extent
+  stays visible in ``full_range`` and in the per-channel stats ``max``).
 * §5.5 — Auto Stretch background-population algorithm (no min/max
   renormalization);
 * §5.6 — Auto WB true-background-band algorithm.
@@ -31,7 +45,31 @@ It is deliberately *pure*:
 
 Inputs are float arrays in one of two layouts: 2D mono ``(H, W)`` or 3D
 channels-last ``(H, W, C)`` (RGB/RGBA uses the first three channels).  All
-algorithms operate on the ``[0, 1]`` domain produced by the anchor mapping.
+analysis algorithms operate on the **preserved analysis domain** produced by
+the anchor mapping (PHI-R3):
+
+* the anchor mapping and the WB derivation **preserve finite out-of-range
+  float headroom** — they never hard-clip the bright tail to ``1.0``.  Only
+  the final display-rendering boundary (the ``QImage``/``uint8`` conversion in
+  :mod:`preview_render` / :mod:`preview_adjust`) bounds values to the display
+  domain.  Sub-black mapped values (a pure anchor-mapping artifact below the
+  display floor) are floored at ``0.0`` exactly as before;
+* non-finite values never propagate: any NaN/Inf input (or an arithmetic
+  overflow) maps to ``0.0`` at the anchor/WB boundaries, so analysis buffers
+  are finite by construction;
+* the float histogram/stats represent that preserved analysis range
+  explicitly, with **distinct roles** (PHI-AUTO-HISTOGRAM-UX-V1): the full
+  analysis range ``(0, upper)`` (``upper = max(1.0, global finite max)``)
+  stays the stats/BP-WP-control truth; the 512 plotted bins live over the
+  **bin/plot range** ``(0, bin_hi)`` (robust plot high, see
+  :func:`_plot_bin_high`), so a sparse extreme finite tail is never binned
+  into isolated spikes; in-domain values above the plotted top are counted
+  per channel as ``overflow`` and stay visible through ``full_range`` and the
+  per-channel stats ``max``.  The display-level window ``[0, 1]`` keeps full
+  bin resolution whenever no headroom exists (bit-identical to the pre-R3
+  ``[0, 1]`` model), and dense HDR headroom extends ``bin_hi`` so the bins
+  and the per-channel stats describe the real preserved analysis values
+  instead of silently dropping them.
 """
 
 from __future__ import annotations
@@ -42,9 +80,38 @@ from typing import Any, Dict, List, Optional, Tuple
 # Ratified constants
 # --------------------------------------------------------------------------
 
-# §5.3: exactly 512 bins over [0, 1] (float domain).
+# §5.3 (PHI-R3 / PHI-AUTO-HISTOGRAM-UX-V1): exactly 512 bins over the
+# plotting/bin range ``[0, bin_hi]`` (see :func:`compute_histogram_float`).
+# ``bin_hi = max(1.0, min(upper, robust plot high))`` where the robust plot
+# high is the 99.5 %-percentile of the concatenated in-domain analysis sample
+# (the same deterministic percentile as the robust ``x_range`` viewport high),
+# extended back to the full analysis upper when the top is *dense* (no sparse
+# far tail — the max lies within ``SPARSE_TAIL_REL_GAP`` of the robust top) or
+# the sample is too small for a 0.5 % tail to be meaningful (bit-identical
+# legacy ``[0, 1]`` binning whenever no headroom exists).  ``HISTOGRAM_RANGE``
+# remains the *display-level reference window* ``[0, 1]``.
 HISTOGRAM_BINS = 512
 HISTOGRAM_RANGE = (0.0, 1.0)
+
+# §5.3 (PHI-AUTO-HISTOGRAM-UX-V1): relative value gap at which the analysis
+# max is treated as a *sparse extreme tail* sitting far above the robust dense
+# top (max > 1.25x the robust top).  When such a tail exists, the plotted bins
+# end at the robust top and every value above it is counted as per-channel
+# ``overflow`` metadata (never silently dropped — full range + stats ``max``
+# stay the truthful analysis truth).
+SPARSE_TAIL_REL_GAP = 0.25
+
+# Analysis-domain floor (PHI-R3).  Mapped values below the display black level
+# are a pure anchor-mapping artifact (they can never be displayed and carry no
+# signal); :func:`map_raw_linear` floors them at exactly ``0.0`` and the
+# histogram/stats sample excludes nothing above the floor, so counts and stats
+# always describe the *same* finite non-negative analysis population.
+ANALYSIS_DOMAIN_FLOOR = 0.0
+
+# Histogram/stats upper-bound floor: the analysis range never ends below the
+# display white level ``1.0``, so the display window keeps full bin resolution
+# when no headroom exists.
+HISTOGRAM_UPPER_FLOOR = 1.0
 
 # §5.2: anchor separation epsilon.
 ANCHOR_SEP = 1e-4
@@ -201,36 +268,175 @@ def _sample_stats(np: Any, sample):
     }
 
 
-def _in_domain_sample(np: Any, sample):
-    """Finite ``[0, 1]`` values of a capped sample.
+def _analysis_sample(np: Any, sample):
+    """Finite non-negative values of a capped sample (PHI-R3 analysis domain).
 
     The histogram counts and the per-channel stats must describe the *exact
-    same* finite in-domain ``[0, 1]`` sample (§5.3 point 5): non-finite values
-    and values outside ``[0, 1]`` are excluded here, so ``np.histogram`` never
-    silently drops a value that the stats would otherwise describe.
+    same* finite analysis sample (§5.3 point 5): non-finite values and values
+    below the analysis floor (``0.0`` — the sub-black display floor) are
+    excluded here, so ``np.histogram`` never silently drops a value that the
+    stats would otherwise describe.  Values **above** ``1.0`` (preserved HDR
+    headroom) are kept: they are part of the analysis population and are
+    represented by the bins above the display window.
     """
-    return sample[np.isfinite(sample) & (sample >= 0.0) & (sample <= 1.0)]
+    return sample[np.isfinite(sample) & (sample >= ANALYSIS_DOMAIN_FLOOR)]
 
 
-def _robust_x_range_from_samples(np: Any, channels) -> Tuple[float, float]:
+def _analysis_upper(np: Any, channels) -> float:
+    """Deterministic analysis upper bound ``upper = max(1.0, finite max)``.
+
+    The global finite maximum over every channel's capped sample, floored at
+    the display white level ``1.0`` so the display window always has full bin
+    resolution when no headroom exists.  Returns ``HISTOGRAM_UPPER_FLOOR``
+    when no usable sample exists (the caller fail-closes anyway).
+    """
+    upper = HISTOGRAM_UPPER_FLOOR
+    for _, sample in channels:
+        in_domain = _analysis_sample(np, sample)
+        if in_domain.size:
+            upper = max(upper, float(np.max(in_domain)))
+    return upper
+
+
+def analysis_upper_bound(mapped) -> float:
+    """Analysis domain upper bound of a buffer: ``max(1.0, finite max)``.
+
+    Public seam (PHI-R3.1) so GUI-thread callers (display BP/WP control
+    domain, marker domain, auto-stretch reconcile) use the *exact same*
+    deterministic value as the histogram model's ``range``/``full_range``
+    upper computed by :func:`compute_histogram_float` (same per-channel capped
+    samples), keeping the analysis axis, the controls and the model in
+    agreement.  Returns ``HISTOGRAM_UPPER_FLOOR`` (``1.0``) for missing /
+    unusable input.
+    """
+    np = _load_numpy()
+    if np is None:
+        return HISTOGRAM_UPPER_FLOOR
+    arr = np.asarray(mapped, dtype=np.float64)
+    if arr.size == 0 or arr.ndim not in (2, 3):
+        return HISTOGRAM_UPPER_FLOOR
+    channels = _analysis_channels(np, arr)
+    if not channels:
+        return HISTOGRAM_UPPER_FLOOR
+    return _analysis_upper(np, channels)
+
+
+def _robust_x_range_from_samples(np: Any, channels, upper: float = HISTOGRAM_UPPER_FLOOR) -> Tuple[float, float]:
     """Robust plotted X range from the *finite* part of the channel samples.
 
-    Guarded against empty / degenerate samples: returns the full ``(0, 1)``
-    range when nothing usable remains.
+    Guarded against empty / degenerate samples: returns the full analysis
+    range ``(0, upper)`` when nothing usable remains.  The percentiles are
+    computed on the analysis sample (finite, ``>= 0``), so with dense HDR
+    headroom the robust high end can legitimately exceed ``1.0``.
     """
     parts = []
     for _, sample in channels:
-        in_domain = _in_domain_sample(np, sample)
+        in_domain = _analysis_sample(np, sample)
         if in_domain.size:
             parts.append(in_domain)
     if not parts:
-        return (0.0, 1.0)
+        return (ANALYSIS_DOMAIN_FLOOR, upper)
     all_vals = np.concatenate(parts)
     lo = float(np.percentile(all_vals, X_RANGE_PCT_LO))
     hi = float(np.percentile(all_vals, X_RANGE_PCT_HI))
     if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
-        return (0.0, 1.0)
+        return (ANALYSIS_DOMAIN_FLOOR, upper)
     return (lo, hi)
+
+
+def _robust_top_value(np: Any, vals, pct: float = X_RANGE_PCT_HI) -> float:
+    """Robust top of a 1D value array: ``max(1.0, percentile(vals, pct))``.
+
+    The percentile is computed with numpy's default linear interpolation over
+    the (finite, non-negative) values; the ``1.0`` floor keeps the
+    display-window top as the minimum robust top (legacy ``[0, 1]`` buffers
+    therefore keep a robust top of exactly ``1.0``, and the caller's clip at
+    that value stays bit-identical).  Deterministic (no RNG); never mutates
+    ``vals``.  Returns ``1.0`` for an empty input.
+    """
+    if vals is None or int(vals.size) == 0:
+        return 1.0
+    return max(1.0, float(np.percentile(vals, pct)))
+
+
+def _plot_bin_high(np: Any, channels, upper: float) -> float:
+    """Deterministic plotting/bin-range high of an analysis buffer.
+
+    PHI-AUTO-HISTOGRAM-UX-V1 semantics — the returned value is the X-axis
+    upper bound the 512 bins are spread over:
+
+    * **No headroom** (``upper == 1.0``) or a **dense top** (the finite max
+      is within ``SPARSE_TAIL_REL_GAP`` above the robust 99.5 % top, e.g. a
+      continuous population that really reaches its max): the full analysis
+      upper is kept, so the model is bit-identical to the legacy/R3
+      full-range binning (zero overflow) — a genuine broad dynamic range
+      keeps every bin dense because the population itself spans it;
+    * **Sparse extreme far tail** (a few values far above the dense body,
+      e.g. hot pixels at 282 while the bulk ends at ~2.4): the plot high is
+      pulled down to the robust top percentile (the same 99.5 % percentile as
+      the auto-zoom viewport high), so the auto/default visible window holds
+      most of the 512 bins instead of ~4 widely spaced spikes.  Values above
+      the plot high are counted per channel as ``overflow`` metadata and stay
+      visible through ``full_range`` and the stats ``max``.
+
+    Small samples (``<= 512`` in-domain values across the channels — fewer
+    than one value per bin) never trigger the sparse-tail cut: with so few
+    samples a single top value is not a statistically distinguishable "sparse
+    tail", so the full analysis range is binned exactly as before
+    (deterministic, documented).  Returns ``upper`` when no usable sample
+    exists.
+    """
+    all_vals = _concat_in_domain(np, channels)
+    n = int(all_vals.size)
+    if n == 0:
+        return float(upper)
+    # A 0.5 % top tail is only meaningful when it represents >= 1 sample.
+    if n <= 512:
+        return float(upper)
+    robust_top = _robust_top_value(np, all_vals, X_RANGE_PCT_HI)
+    finite_max = float(np.max(all_vals))
+    if robust_top >= float(upper) - 1e-12:
+        # Dense/continuous top reaching the analysis upper (or no headroom):
+        # keep the full-range binning (bit-identical legacy behaviour).
+        return float(upper)
+    if finite_max <= robust_top * (1.0 + SPARSE_TAIL_REL_GAP):
+        # The max is at most 25% above the robust top: dense enough to bin.
+        return float(upper)
+    # Sparse extreme far tail: plot up to the robust top percentile; values
+    # above are overflow metadata (truthful via full_range/stats max).
+    return min(float(upper), robust_top)
+
+
+def _histogram_overflow(np: Any, in_domain, bin_upper: float) -> int:
+    """In-domain values strictly above the plotting/bin high (overflow).
+
+    ``np.histogram`` silently drops values outside its ``range``; this count
+    makes the drop explicit and truthful (the values remain visible through
+    the stats ``max`` and the full analysis range metadata).  Returns ``0``
+    whenever the bin high equals the analysis upper (nothing is above it).
+    """
+    if bin_upper >= float(np.max(in_domain)):
+        return 0
+    return int(np.count_nonzero(in_domain > bin_upper))
+
+
+def _concat_in_domain(np: Any, channels) -> Any:
+    """Concatenate the per-channel analysis samples (finite, >= floor).
+
+    The channels' in-domain samples (same deterministic capped samples used
+    for the per-channel counts/stats) are concatenated into one array so the
+    shared X axis (bin range + robust viewport) is derived from the exact
+    same population the counts describe.  Returns an empty array when no
+    channel contributes a usable sample.
+    """
+    parts = []
+    for _, sample in channels:
+        in_domain = _analysis_sample(np, sample)
+        if in_domain.size:
+            parts.append(in_domain)
+    if not parts:
+        return np.asarray([], dtype=np.float64)
+    return np.concatenate(parts)
 
 
 # --------------------------------------------------------------------------
@@ -300,13 +506,30 @@ def compute_anchors(raw_linear, sep: float = ANCHOR_SEP) -> Tuple[float, float]:
 
 
 def map_raw_linear(raw_linear, anchor_lo: float, anchor_hi: float) -> Any:
-    """Map raw-linear values through frozen anchors into ``[0, 1]``.
+    """Map raw-linear values through frozen anchors into the analysis domain.
 
-    ``mapped = clip((raw - lo) / (hi - lo), 0, 1)`` using the same anchors
-    across successive previews (§5.2 regression: a fixed raw pixel maps
-    identically when later-frame extrema change).  Non-mutating.  For drift
-    accommodation, callers re-anchor via :func:`adapt_anchors_for_drift` before
-    calling this mapping.
+    ``mapped = (raw - lo) / (hi - lo)`` using the same anchors across
+    successive previews (§5.2 regression: a fixed raw pixel maps identically
+    when later-frame extrema change).  PHI-R3: the mapping **preserves finite
+    out-of-range float headroom** — values above the display white level
+    ``1.0`` (raw signal beyond the high anchor) are *not* hard-clipped here;
+    only the final display-rendering boundary (the ``QImage``/``uint8``
+    conversion) clamps to the display domain.
+
+    Domain guarantees:
+
+    * finite mapped values ``> 0`` are kept verbatim (including ``> 1``
+      headroom);
+    * mapped values ``<= 0`` (the sub-black tail below the low anchor, which
+      can never be displayed and carries no signal) floor to exactly ``0.0``,
+      bit-identical to the pre-R3 low-side clip;
+    * non-finite results (NaN/Inf input, or a finite input whose mapping
+      overflows float64) become ``0.0`` — **no NaN/Inf ever propagates** into
+      the analysis buffers.
+
+    Non-mutating (always returns a fresh array).  For drift accommodation,
+    callers re-anchor via :func:`adapt_anchors_for_drift` before calling this
+    mapping.
     """
     np = _load_numpy()
     if np is None:
@@ -319,7 +542,9 @@ def map_raw_linear(raw_linear, anchor_lo: float, anchor_hi: float) -> Any:
         denom = ANCHOR_SEP
     with np.errstate(invalid="ignore", divide="ignore"):
         mapped = (arr - lo) / denom
-    return np.clip(mapped, 0.0, 1.0)
+    # Floor sub-black values and sanitize non-finite results; finite positive
+    # values (including headroom > 1) are preserved bit-exactly.
+    return np.where(np.isfinite(mapped) & (mapped > 0.0), mapped, 0.0)
 
 
 def adapt_anchors_for_drift(
@@ -400,10 +625,19 @@ def adapt_anchors_for_drift(
 # --------------------------------------------------------------------------
 
 def apply_wb_float(mapped, wb=NEUTRAL_WB) -> Any:
-    """Apply white-balance gains to a mapped float ``[0, 1]`` buffer.
+    """Apply white-balance gains to a mapped analysis buffer.
 
     Produces the WB-only analysis buffer (§5.3): per-channel multiply by the
-    R/G/B gains, clipped to ``[0, 1]``.  Mono (2D) data is unaffected.  Returns
+    R/G/B gains.  PHI-R3: the gains are **not clipped to ``[0, 1]``** — a
+    strong gain applied to in-range signal (or to preserved anchor headroom)
+    legitimately produces analysis values ``> 1``, which the histogram/stats
+    must see.  Only the final display-rendering boundary bounds values to the
+    display domain.
+
+    Domain guarantees (mirror :func:`map_raw_linear`): finite results are kept
+    verbatim; results ``<= 0`` floor to ``0.0``; non-finite results (NaN/Inf
+    input or overflow) become ``0.0``, so the WB-only buffer stays finite.
+    Mono (2D) data is unaffected and returned as a plain copy.  Always returns
     a fresh array; the input is never mutated.
     """
     np = _load_numpy()
@@ -414,32 +648,60 @@ def apply_wb_float(mapped, wb=NEUTRAL_WB) -> Any:
         return arr.copy()
     r, g, b = (float(wb[0]), float(wb[1]), float(wb[2]))
     out = arr.copy()
-    out[..., 0] = np.clip(arr[..., 0] * r, 0.0, 1.0)
-    out[..., 1] = np.clip(arr[..., 1] * g, 0.0, 1.0)
-    out[..., 2] = np.clip(arr[..., 2] * b, 0.0, 1.0)
+    for i, gain in enumerate((r, g, b)):
+        scaled = arr[..., i] * gain
+        out[..., i] = np.where(
+            np.isfinite(scaled) & (scaled > 0.0), scaled, 0.0
+        )
     return out
 
 
 def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
-    """Compute the §5.3 float histogram + stats from a mapped ``[0, 1]`` buffer.
+    """Compute the §5.3 float histogram + stats from an analysis buffer.
 
-    Returns a dict with:
+    PHI-R3 semantics: the model represents the **preserved analysis float
+    range**, not a pre-clipped ``[0, 1]`` domain.  PHI-AUTO-HISTOGRAM-UX-V1
+    makes the *plot/bin* domain an explicit, distinct role: the 512 bins are
+    spread over a **robust bin range** ``[0, bin_hi]`` so the auto/default
+    visible window keeps dense bins even when a sparse extreme finite tail
+    exists, while the **full analysis range** ``(0, upper)`` and the per-
+    channel stats (including the tail ``max``) remain the truthful full-
+    domain metadata.  Returns a dict with:
 
-    * ``bins`` / ``range`` — ``HISTOGRAM_BINS`` (512) bins over ``[0, 1]``
+    * ``bins`` — ``HISTOGRAM_BINS`` (512) bins over the **bin range**
       (fixed by contract; there is no per-call bin override);
+    * ``range`` / ``full_range`` — the explicit full analysis/control domain
+      ``(0.0, upper)`` where ``upper = max(1.0, finite max)`` over the whole
+      buffer: equal to the display-level window ``(0.0, 1.0)`` when no
+      headroom exists, extended past ``1.0`` when the analysis/WB buffer
+      carries finite HDR headroom — the stats and BP/WP control domain truth
+      (a sparse extreme tail never shrinks it);
+    * ``bin_range`` — the plotting/bin domain ``(0.0, bin_hi)`` the 512
+      ``counts``/``log_counts`` bins actually live in: ``bin_hi`` is the
+      deterministic robust plot high (see :func:`_plot_bin_high` — the full
+      analysis upper when the top is dense or the sample small, otherwise the
+      robust 99.5 % top percentile), so a sparse extreme tail is *not*
+      binned into a few isolated spikes;
+    * ``overflow`` — per-channel count of in-domain values strictly above
+      ``bin_hi`` (their presence/full extent stays truthful via ``stats``
+      ``max`` and ``full_range``; nothing is silently dropped), plus
+      ``overflow_total``;
     * ``channels`` — ``["L"]`` (mono) or ``["R", "G", "B"]``;
-    * ``counts`` — per-channel ``int64`` bin counts;
+    * ``counts`` — per-channel ``int64`` bin counts over ``bin_range``;
     * ``log_counts`` — ``log1p(counts)`` visualization counts (empty bin == 0);
     * ``stats`` — per-channel ``{min, max, median, mean, std}`` computed on the
-      *exact same* deterministic sample as ``counts``;
-    * ``x_range`` — robust plotted X range (percentile-based);
-    * ``full_range`` — explicit ``(0.0, 1.0)`` full-domain metadata.
+      *exact same* deterministic in-domain sample as ``counts`` + overflow
+      (so with headroom the per-channel ``max`` truthfully reports the
+      preserved analysis peak, including values above the plotted top);
+    * ``x_range`` — robust plotted X range (percentile-based on the analysis
+      sample; always at or below the bin high, so auto zoom stays inside the
+      binned domain; can exceed ``1.0`` when headroom is dense).
 
-    The histogram counts and all five stats are computed over the *exact same*
-    finite in-domain ``[0, 1]`` sample (non-finite values and values outside
-    ``[0, 1]`` are excluded from both).  When a required channel has no usable
-    in-domain sample the analysis fails closed and returns ``None`` — it never
-    fabricates synthetic pixels.
+    The histogram counts, the overflow counts and all five stats are computed
+    over the *exact same* finite non-negative analysis sample (non-finite
+    values and sub-black values are excluded from all of them).  When a
+    required channel has no usable sample the analysis fails closed and
+    returns ``None`` — it never fabricates synthetic pixels.
 
     Returns ``None`` for missing / unusable input.
     """
@@ -452,29 +714,52 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
     channels = _analysis_channels(np, arr)
     if not channels:
         return None
+    # Fail-closed pre-check: every required channel must contribute a usable
+    # analysis sample (finite, non-negative); the in-domain samples are kept
+    # so counts, overflow and stats describe the exact same population.
+    in_domain_by_channel: Dict[str, Any] = {}
+    for name, sample in channels:
+        in_domain = _analysis_sample(np, sample)
+        if in_domain.size == 0:
+            # Never fabricate a synthetic pixel for an unusable required
+            # channel (all-NaN / sub-black channel).
+            return None
+        in_domain_by_channel[name] = in_domain
+    upper = _analysis_upper(np, channels)
+    analysis_range = (ANALYSIS_DOMAIN_FLOOR, upper)
+    bin_hi = _plot_bin_high(
+        np, [(name, in_domain_by_channel[name]) for name, _ in channels], upper
+    )
+    bin_range = (ANALYSIS_DOMAIN_FLOOR, bin_hi)
     counts: Dict[str, Any] = {}
     log_counts: Dict[str, Any] = {}
     stats: Dict[str, Dict[str, float]] = {}
-    for name, sample in channels:
-        in_domain = _in_domain_sample(np, sample)
-        if in_domain.size == 0:
-            # Fail closed: never fabricate a synthetic pixel for an unusable
-            # required channel (all-NaN / out-of-domain channel).
-            return None
-        hist, _ = np.histogram(in_domain, bins=HISTOGRAM_BINS, range=HISTOGRAM_RANGE)
+    overflow: Dict[str, int] = {}
+    overflow_total = 0
+    for name, _sample in channels:
+        in_domain = in_domain_by_channel[name]
+        hist, _ = np.histogram(
+            in_domain, bins=HISTOGRAM_BINS, range=bin_range
+        )
         hist = hist.astype(np.int64)
         counts[name] = hist
         log_counts[name] = np.log1p(hist.astype(np.float64))
         stats[name] = _sample_stats(np, in_domain)
+        n_overflow = _histogram_overflow(np, in_domain, bin_hi)
+        overflow[name] = n_overflow
+        overflow_total += n_overflow
     return {
         "bins": HISTOGRAM_BINS,
-        "range": HISTOGRAM_RANGE,
+        "range": analysis_range,
         "channels": [name for name, _ in channels],
         "counts": counts,
         "log_counts": log_counts,
         "stats": stats,
-        "x_range": _robust_x_range_from_samples(np, channels),
-        "full_range": (0.0, 1.0),
+        "x_range": _robust_x_range_from_samples(np, channels, upper),
+        "full_range": analysis_range,
+        "bin_range": bin_range,
+        "overflow": overflow,
+        "overflow_total": overflow_total,
     }
 
 
@@ -493,8 +778,10 @@ def compute_histogram_stats_float(mapped) -> Optional[Dict[str, Dict[str, float]
 def compute_robust_x_range(mapped) -> Tuple[float, float]:
     """Robust plotted X range for the analysis buffer (§5.3 point 6).
 
-    Percentile-based over the finite sample, guarded against empty/degenerate
-    samples; the explicit full ``[0, 1]`` range is the caller's toggle.
+    Percentile-based over the finite non-negative analysis sample, guarded
+    against empty/degenerate samples; the explicit full analysis range is the
+    caller's toggle.  With dense HDR headroom the robust high end can
+    legitimately exceed ``1.0``.
     """
     np = _load_numpy()
     if np is None:
@@ -505,7 +792,7 @@ def compute_robust_x_range(mapped) -> Tuple[float, float]:
     channels = _analysis_channels(np, arr)
     if not channels:
         return (0.0, 1.0)
-    return _robust_x_range_from_samples(np, channels)
+    return _robust_x_range_from_samples(np, channels, _analysis_upper(np, channels))
 
 
 # --------------------------------------------------------------------------
@@ -513,12 +800,22 @@ def compute_robust_x_range(mapped) -> Tuple[float, float]:
 # --------------------------------------------------------------------------
 
 def _stretch_sample(np: Any, arr, mask=None):
-    """§5.5 input sample ``S``: finite WB-only mapped values, excluding exact 0/1.
+    """§5.5 input sample ``S``: finite WB-only mapped values, excluding the
+    exact display clip boundaries ``0.0`` / ``1.0`` but **keeping preserved
+    headroom above ``1.0``** (PHI-AUTO-HISTOGRAM-UX-V1).
 
     RGB data is reduced to its Rec.601 luminance (a single global BP/WP pair
     applies to every channel); mono data is used directly.  A 2D validity mask
     (``mask[pixel] > 0``) is applied when provided.  The result is capped via
     the deterministic stride.
+
+    Exclusion semantics: exact ``0.0`` (the sub-black display floor / legacy
+    clipped black) and exact ``1.0`` (the legacy display-window top) stay
+    excluded exactly as the ratified §5.5 step 1 requires, so in-window
+    ``[0, 1]`` analysis buffers produce the *same* sample as before; every
+    finite value **above** ``1.0`` (preserved analysis headroom) is now kept
+    so the estimator can select a white point above ``1`` when a meaningful
+    bright tail exists.  Non-finite values are always excluded.
     """
     lum = _luminance(np, arr)
     flat = lum.ravel()
@@ -527,28 +824,44 @@ def _stretch_sample(np: Any, arr, mask=None):
         if m.ndim == 2 and m.shape == lum.shape and m.size == flat.size:
             flat = flat[m.ravel() > 0]
     finite = flat[np.isfinite(flat)]
-    finite = finite[(finite > 0.0) & (finite < 1.0)]
+    finite = finite[(finite > 0.0) & (finite != 1.0)]
     if finite.size == 0:
         return None
     return _cap_sample(np, finite)
 
 
 def compute_auto_stretch_float(mapped, mask=None, sep: float = ANCHOR_SEP) -> Tuple[float, float]:
-    """Auto Stretch black/white points (§5.5 exact algorithm).
+    """Auto Stretch black/white points (§5.5 exact algorithm, analysis units).
 
-    Operates on the WB-only mapped float ``[0, 1]`` buffer.  Steps:
+    PHI-AUTO-HISTOGRAM-UX-V1: operates on the WB-only mapped float analysis
+    buffer **in its preserved analysis units** — finite values above the
+    legacy display-window top ``1.0`` (preserved HDR headroom) are part of the
+    input sample (only the exact legacy clip boundaries ``0.0``/``1.0`` stay
+    excluded, so in-window ``[0, 1]`` buffers are bit-identical to the
+    ratified §5.5 algorithm), and the white point may therefore be selected
+    **above ``1``** when a meaningful bright tail exists.  There is no hidden
+    ``[0, 1]`` cap: the final separation clip is bounded by the *robust
+    analysis high* ``D = max(1.0, p99.5 of the stretch sample)`` — the same
+    robust top percentile as the histogram plot high — so a single extreme
+    pixel can never pull the white point up to the outlier/max, while a
+    genuinely dense bright population extends it.  (Legacy in-window data has
+    ``p99.5(S) <= 1.0``, so ``D == 1.0`` and the clip is bit-identical to the
+    ratified §5.5 spec.)
+    Steps:
 
     1. keep finite pixels (and ``mask[pixel] > 0`` when a mask is given),
-       excluding exact clipped ``0.0`` / ``1.0``;
+       excluding the exact clip boundaries ``0.0`` and ``1.0``;
     2. ``|S| < 20`` -> deterministic defaults ``(0.01, 0.99)``;
     3. ``p005 = percentile(S, 0.5)``, ``p60 = percentile(S, 60)``,
        ``p995 = percentile(S, 99.5)``;
     4. background ``B = { s <= p60 }``; ``bg = median(B)``;
        ``sigma = 1.4826 * MAD(B)``;
-    5. ``bp = clip(max(p005, bg - 2.8 sigma), 0, 1 - sep)``;
-    6. ``wp = clip(max(p995, bg + 8 sigma, bp + sep), bp + sep, 1)``;
+    5. ``bp = clip(max(p005, bg - 2.8 sigma), 0, D - sep)``;
+    6. ``wp = clip(max(p995, bg + 8 sigma, bp + sep), bp + sep, D)`` where
+       ``D = max(1.0, p99.5 of S)`` (legacy in-window data: ``D == 1.0`` and
+       steps 5-6 are bit-identical to the ratified spec);
     7. degenerate fallback (empty/non-finite ``B`` or ``sigma == 0``):
-       ``bp = p005``, ``wp = p995``, then clamp/separate as above.
+       ``bp = p005``, ``wp = p995``, then clamp/separate as in 5-6.
 
     There is **no** min/max renormalization step.
     """
@@ -580,10 +893,17 @@ def compute_auto_stretch_float(mapped, mask=None, sep: float = ANCHOR_SEP) -> Tu
             bp = max(p005, bg - AUTO_STRETCH_BG_SPREAD_BP * sigma)
             wp = max(p995, bg + AUTO_STRETCH_BG_SPREAD_WP * sigma)
 
-    # Step 5: clip bp; step 6: clip/separate wp.  The ``bp + sep`` lower bound
-    # of the clip enforces the spec's ``max(..., bp + sep)`` term exactly.
-    bp = float(np.clip(bp, 0.0, 1.0 - sep))
-    wp = float(np.clip(wp, bp + sep, 1.0))
+    # PHI-AUTO-HISTOGRAM-UX-V1 final separation/clip.  The legacy [0, 1]
+    # display-window ceiling becomes the robust analysis high D = max(1.0,
+    # p99.5 of the stretch sample): in-window data keeps D == 1.0 (bit-
+    # identical legacy output); analysis buffers with meaningful headroom
+    # extend D above 1 so WP > 1 is selectable, while an isolated extreme
+    # outlier never raises D (the 99.5th percentile is outlier-robust).  The
+    # ``bp + sep`` lower bound of the wp clip enforces the spec's
+    # ``max(..., bp + sep)`` term exactly.
+    D = max(1.0, float(np.percentile(S, X_RANGE_PCT_HI)))
+    bp = float(np.clip(bp, 0.0, D - sep))
+    wp = float(np.clip(wp, bp + sep, D))
     return (bp, wp)
 
 
@@ -594,8 +914,11 @@ def compute_auto_stretch_float(mapped, mask=None, sep: float = ANCHOR_SEP) -> Tu
 def compute_auto_wb_float(mapped) -> Tuple[float, float, float]:
     """Auto WB gains (§5.6 true-background-band algorithm).
 
-    Estimates from the *pristine pre-WB* mapped float ``[0, 1]`` source (never
+    Estimates from the *pristine pre-WB* mapped float analysis buffer (never
     from already-WB pixels), so repeated AutoWB is deterministic/idempotent.
+    The ``(0, 0.98)`` per-channel exclusion below removes both the display
+    window top and any preserved anchor headroom (values ``>= 0.98``), so the
+    algorithm output is unchanged by PHI-R3 headroom preservation.
 
     1. common finite RGB set (>=3 channels, all three channels finite);
     2. every channel in ``(0, 0.98)`` (excludes zero/dark borders and

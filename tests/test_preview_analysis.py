@@ -5,9 +5,13 @@ Covers the ratified float-domain contracts in
 on the toolkit-free :mod:`seestar.gui_qt.preview_analysis` module (no Qt
 widgets, no ``QImage``, no scientific-engine imports):
 
-* 512-bin float histogram over ``[0, 1]`` with deterministic per-channel
-  counts / ``log1p`` counts / min/max/median/mean/std on the *same* sample,
-  RGB overlay + mono semantics;
+* 512-bin float histogram over the preserved analysis range ``[0, upper]``
+  (``upper = max(1.0, finite max)``; equals ``[0, 1]`` when no HDR headroom
+  exists) with deterministic per-channel counts / ``log1p`` counts /
+  min/max/median/mean/std on the *same* sample, RGB overlay + mono semantics;
+  the anchor mapping and the WB derivation preserve finite out-of-range float
+  headroom (no premature hard-clip; NaN/Inf never propagate; only the display
+  boundary bounds to uint8);
 * robust plotted X range (outlier-resistant) + explicit full ``[0, 1]`` range;
 * Auto Stretch exact background-population algorithm (outlier insensitivity,
   repeatability, valid ``bp < wp``, no min/max renormalization);
@@ -404,18 +408,67 @@ def test_histogram_bins_override_cannot_bypass_contract():
 
 
 def test_histogram_out_of_domain_restricted_same_sample():
-    # Values outside [0, 1] are excluded from BOTH counts and stats so the
-    # histogram never silently drops values the stats still describe.
+    """PHI-R3: values below the analysis floor (sub-black) and non-finite
+    values are excluded from BOTH counts and stats; preserved headroom above
+    ``1.0`` is kept and extends the explicit analysis range."""
+    # 2.0 is preserved headroom (counted, extends range upper to 2.0); -1.0 is
+    # sub-black (excluded); NaN is non-finite (excluded).
     arr = np.array([[0.0, 0.5, 1.0], [2.0, -1.0, np.nan]], dtype=np.float32)
     res = compute_histogram_float(arr)
     assert res is not None
     counts = res["counts"]["L"]
-    assert counts.sum() == 3  # only 0.0, 0.5, 1.0 are in-domain
+    assert counts.sum() == 4  # 0.0, 0.5, 1.0 in-window + 2.0 headroom
+    assert res["range"] == (0.0, 2.0)
+    assert res["full_range"] == (0.0, 2.0)
     s = res["stats"]["L"]
     assert s["min"] == 0.0
-    assert s["max"] == 1.0
-    assert s["median"] == 0.5
-    assert s["mean"] == pytest.approx(0.5)
+    assert s["max"] == 2.0  # headroom is visible in the analysis stats
+    assert s["median"] == 0.75  # median of (0.0, 0.5, 1.0, 2.0)
+    assert s["mean"] == pytest.approx(0.875)  # (0+0.5+1+2)/4
+
+
+def test_histogram_hdr_headroom_extends_analysis_range_and_stats():
+    """PHI-R3: an HDR/WB buffer with finite values above 1.0 keeps them in the
+    histogram: the explicit range upper bound equals the finite max (floored
+    at 1.0), headroom values land in the bins above the display window, and
+    the per-channel stats describe the same preserved sample."""
+    rng = np.random.default_rng(48)
+    hdr = np.array([[0.2, 0.7, 1.4], [2.6, 0.05, 3.5]], dtype=np.float64)
+    res = compute_histogram_float(hdr)
+    assert res["channels"] == ["L"]
+    assert res["bins"] == 512
+    assert res["range"] == (0.0, 3.5)
+    assert res["full_range"] == (0.0, 3.5)
+    counts = res["counts"]["L"]
+    assert counts.sum() == 6  # every finite non-negative value is counted
+    # Headroom values (1.4, 2.6, 3.5) occupy bins strictly above the bin that
+    # holds the display top 1.0 (bin width 3.5/512 -> 1.0 sits in bin ~146).
+    display_top_bin = int(1.0 / 3.5 * 512)
+    assert int(counts[display_top_bin + 1 :].sum()) == 3
+    s = res["stats"]["L"]
+    assert s["min"] == 0.05
+    assert s["max"] == 3.5
+    assert s["median"] == pytest.approx(float(np.median([0.2, 0.7, 1.4, 2.6, 0.05, 3.5])))
+    assert s["mean"] == pytest.approx(float(np.mean([0.2, 0.7, 1.4, 2.6, 0.05, 3.5])))
+
+
+def test_map_raw_linear_preserves_headroom_and_sanitizes():
+    """PHI-R3: the anchor mapping keeps finite out-of-range headroom (> 1.0),
+    floors sub-black values at 0, sanitizes NaN/Inf to 0, and never mutates
+    the input."""
+    raw = np.array(
+        [[0.0, 5.0, 10.0, 12.0, -3.0, np.nan, np.inf]], dtype=np.float32
+    )
+    before = raw.copy()
+    mapped = map_raw_linear(raw, 0.0, 10.0)
+    assert np.array_equal(raw, before, equal_nan=True)  # input untouched
+    assert np.allclose(mapped[0, :4], [0.0, 0.5, 1.0, 1.2])  # headroom kept
+    assert mapped[0, 4] == 0.0  # sub-black floors to 0 (pre-R3 low-side clip)
+    assert mapped[0, 5] == 0.0 and mapped[0, 6] == 0.0  # no NaN/Inf propagation
+    assert not (np.any(np.isnan(mapped)) or np.any(np.isinf(mapped)))
+    # In-range mapping is unchanged (frozen-mapping invariant).
+    assert np.allclose(map_raw_linear(np.array([[0.0, 5.0, 10.0]], dtype=np.float32), 0.0, 10.0),
+                       [[0.0, 0.5, 1.0]])
 
 
 def test_histogram_stats_wrapper_same_sample():
@@ -439,13 +492,24 @@ def test_robust_x_range_outlier_resistant():
 
 
 def test_apply_wb_float_non_mutating():
+    """PHI-R3: WB gains are NOT clipped to [0,1] — finite headroom survives
+    the WB derivation; sub-black/non-finite inputs sanitize to 0; the input is
+    never mutated; mono is unaffected."""
     rng = np.random.default_rng(8)
     arr = rng.random((8, 8, 3)).astype(np.float32)
     before = arr.copy()
     out = apply_wb_float(arr, (1.5, 1.0, 0.5))
     assert np.array_equal(arr, before)  # input untouched
-    assert np.allclose(out[..., 0], np.clip(before[..., 0] * 1.5, 0, 1))
-    assert np.allclose(out[..., 2], np.clip(before[..., 2] * 0.5, 0, 1))
+    # Gains apply without any [0,1] clip: values > 1 after a strong gain are
+    # preserved analysis headroom.
+    assert np.allclose(out[..., 0], before[..., 0] * 1.5)
+    assert np.allclose(out[..., 2], before[..., 2] * 0.5)
+    assert float(np.max(out[..., 0])) > 1.0  # headroom preserved
+    # Sub-black / non-finite sanitize to the 0 floor.
+    edge = np.stack([np.array([[0.5, -2.0, np.nan]], dtype=np.float64)] * 3, -1)
+    eout = apply_wb_float(edge, (2.0, 1.0, 1.0))
+    assert eout[0, 0, 0] == 1.0
+    assert eout[0, 1, 0] == 0.0 and eout[0, 2, 0] == 0.0
     # mono is unaffected
     mono = np.full((4, 4), 0.5, dtype=np.float32)
     assert np.array_equal(apply_wb_float(mono, (2.0, 2.0, 2.0)), mono)
