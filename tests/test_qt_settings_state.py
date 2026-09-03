@@ -119,7 +119,7 @@ def test_run_request_builds_from_default_state():
     assert req.align_on_disk is False  # batch_size 0
     assert "chunk_size" not in req.backend_kwargs
     assert req.backend_kwargs["batch_size"] == 0
-    assert req.backend_kwargs["stacking_mode"] == "kappa-sigma"
+    assert req.backend_kwargs["stacking_mode"] == "winsorized-sigma-clip"
     assert req.backend_kwargs["local_solver_preference"] == "none"
     assert req.backend_kwargs["drizzle_group_size"] == 50
 

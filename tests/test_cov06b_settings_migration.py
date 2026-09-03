@@ -15,7 +15,7 @@ def test_fresh_installation_has_safe_cov_defaults():
     state = QtSettingsState()
     assert state.apply_feathering is False
     assert state.apply_batch_feathering is True
-    assert state.apply_coverage_render is False
+    assert state.apply_coverage_render is True
 
 
 def test_old_apply_feathering_true_migrates_to_safe_state():

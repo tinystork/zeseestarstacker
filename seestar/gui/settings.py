@@ -215,7 +215,7 @@ class SettingsManager:
                 gui_instance,
                 "stacking_mode",
                 tk.StringVar(
-                    value=default_values_from_code.get("stacking_mode", "kappa-sigma")
+                    value=default_values_from_code.get("stacking_mode", "winsorized-sigma-clip")
                 ),
             ).get()
             self.kappa = getattr(
@@ -227,14 +227,14 @@ class SettingsManager:
                 gui_instance,
                 "stack_norm_method_var",
                 tk.StringVar(
-                    value=default_values_from_code.get("stack_norm_method", "none")
+                    value=default_values_from_code.get("stack_norm_method", "sky_mean")
                 ),
             ).get()
             self.stack_weight_method = getattr(
                 gui_instance,
                 "stack_weight_method_var",
                 tk.StringVar(
-                    value=default_values_from_code.get("stack_weight_method", "none")
+                    value=default_values_from_code.get("stack_weight_method", "noise_variance")
                 ),
             ).get()
             self.stack_reject_algo = getattr(
@@ -242,7 +242,7 @@ class SettingsManager:
                 "stack_reject_algo_var",
                 tk.StringVar(
                     value=default_values_from_code.get(
-                        "stack_reject_algo", "kappa_sigma"
+                        "stack_reject_algo", "winsorized_sigma_clip"
                     )
                 ),
             ).get()
@@ -284,7 +284,7 @@ class SettingsManager:
                 gui_instance,
                 "stack_method_var",
                 tk.StringVar(
-                    value=default_values_from_code.get("stack_method", "kappa_sigma")
+                    value=default_values_from_code.get("stack_method", "winsorized_sigma_clip")
                 ),
             ).get()
             if getattr(self, "stacking_mode", "") != "classic":
@@ -1286,11 +1286,11 @@ class SettingsManager:
         defaults_dict["batch_size"] = 0
         defaults_dict["order_csv_path"] = ""
         defaults_dict["order_file_list"] = []
-        defaults_dict["stacking_mode"] = "kappa-sigma"
+        defaults_dict["stacking_mode"] = "winsorized-sigma-clip"
         defaults_dict["kappa"] = 2.5
-        defaults_dict["stack_norm_method"] = "none"
-        defaults_dict["stack_weight_method"] = "none"
-        defaults_dict["stack_reject_algo"] = "kappa_sigma"
+        defaults_dict["stack_norm_method"] = "sky_mean"
+        defaults_dict["stack_weight_method"] = "noise_variance"
+        defaults_dict["stack_reject_algo"] = "winsorized_sigma_clip"
         defaults_dict["stack_kappa_low"] = 3.0
         defaults_dict["stack_kappa_high"] = 3.0
         defaults_dict["stack_winsor_limits"] = "0.05,0.05"
@@ -1298,7 +1298,7 @@ class SettingsManager:
         defaults_dict["stack_final_combine"] = "mean"
         defaults_dict["match_background_for_final"] = None
         defaults_dict["max_hq_mem_gb"] = 8
-        defaults_dict["stack_method"] = "kappa_sigma"
+        defaults_dict["stack_method"] = "winsorized_sigma_clip"
         defaults_dict["correct_hot_pixels"] = True
         defaults_dict["hot_pixel_threshold"] = 3.0
         defaults_dict["neighborhood_size"] = 5
@@ -1354,7 +1354,7 @@ class SettingsManager:
         defaults_dict["apply_feathering"] = False  # COV-06: legacy inverse-WHT feather OFF by default
         defaults_dict["feather_blur_px"] = 256
         defaults_dict["apply_batch_feathering"] = True
-        defaults_dict["apply_coverage_render"] = False
+        defaults_dict["apply_coverage_render"] = True
         defaults_dict["apply_low_wht_mask"] = False
         defaults_dict["low_wht_percentile"] = 5
         defaults_dict["low_wht_soften_px"] = 128

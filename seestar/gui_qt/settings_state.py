@@ -173,13 +173,13 @@ class QtSettingsState:
     resume_source: str = ""
 
     # --- Stacking method ---
-    stacking_mode: str = "kappa-sigma"
+    stacking_mode: str = "winsorized-sigma-clip"
     kappa: float = 2.5
     stack_kappa_low: float = 3.0
     stack_kappa_high: float = 3.0
     stack_winsor_limits: str = "0.05,0.05"
-    stack_norm_method: str = "none"
-    stack_weight_method: str = "none"
+    stack_norm_method: str = "sky_mean"
+    stack_weight_method: str = "noise_variance"
     # Final-combination business choice.  One of
     # ``mean`` / ``median`` / ``winsorized_sigma_clip`` / ``reproject`` /
     # ``reproject_coadd``.  Drives the two reproject flags below exactly like
@@ -259,7 +259,7 @@ class QtSettingsState:
     apply_feathering: bool = False  # COV-06: legacy inverse-WHT feather OFF by default
     feather_blur_px: int = 256
     apply_batch_feathering: bool = True
-    apply_coverage_render: bool = False
+    apply_coverage_render: bool = True
     apply_low_wht_mask: bool = False
     low_wht_percentile: int = 5
     low_wht_soften_px: int = 128
