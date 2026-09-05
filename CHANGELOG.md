@@ -2,6 +2,15 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [Unreleased]
+
+### Removed
+
+- removed the obsolete `seestar.apply_denoise` (OpenCV-CUDA non-local-means
+  denoising) public export as dead-surface cleanup — GPU acceleration is now
+  CuPy-only for the sorting-based stacking reductions (kappa-sigma /
+  linear-fit-clip / median); it was never a supported public contract.
+
 ## [8.2.3] — Phoenix consedit
 
 - histogram: preserve the complete HDR tail distribution with a dual-domain

@@ -639,7 +639,6 @@ def parse_args():
         choices=["snr", "stars", "noise_variance", "noise_fwhm", "none"],
         help="Weighting method",
     )
-    p.add_argument("--reject", default="winsorized_sigma", choices=["kappa_sigma", "winsorized_sigma", "none"], help="Rejection algorithm")
     # F7: GPU acceleration intent (CuPy is the sole backend).  Only the
     # BOOLEAN intent crosses the subprocess boundary; the stacker resolves its
     # OWN probe/policy via ``SeestarQueuedStacker(gpu=...)``.
@@ -838,6 +837,16 @@ def _run_stack(args, progress_cb) -> int:
     solver = AstrometrySolver(progress_callback=progress_cb) if args.batch_size == 1 else None
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker
+    # Truthful GPU note (R2-F3): Boring's default reduction below is
+    # winsorized-sigma, which is CPU-only in the current backend — GPU
+    # accelerates only kappa-sigma / linear-fit-clip / median, so a requested
+    # --gpu does NOT make this default run execute on the GPU.
+    if args.request_gpu:
+        logger.info(
+            "GPU acceleration requested, but Boring's default reduction "
+            "(winsorized-sigma) is CPU-only; GPU accelerates only "
+            "kappa-sigma / linear-fit-clip / median."
+        )
     try:
         if bytes_limit is not None:
             try:

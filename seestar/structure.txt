@@ -47,6 +47,6 @@
 |-- main.py                            <-- Point d'entrée principal pour LANCER l'application GUI
 |-- seestar_settings.json              <-- Fichier de configuration utilisateur
 |-- README.md                          <-- (Fichier standard, recommandé)
-|-- requirements.txt                   <-- (Fichier standard, recommandé)
+|-- requirements.txt                   <-- (Fichier standard, recommandé; fichier d'installation unique — CuPy manuel, voir README)
 |-- .gitignore                         <-- (Fichier standard, recommandé)
 |

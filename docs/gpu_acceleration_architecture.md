@@ -60,6 +60,24 @@ _stack_batch reductions routed through _gpu_reduce:
   tiled paths. CuPy accelerates *only* kappa-sigma / linear-fit-clip / median
   when selected and VRAM-fitting.
 
+## Limitation: high-RAM / tiled path (R2-F6)
+
+GPU acceleration applies only to eligible **non-tiled, in-memory** batch
+reductions. The batch-stacking path routes a reduction to the CPU tiled / HQ
+path (`_combine_hq_by_tiles`) when the estimated working set exceeds the HQ
+RAM limit (`total_bytes > max_hq_mem`) — and that routing decision happens
+BEFORE `_gpu_reduce()` is reached. Therefore:
+
+* a large-VRAM GPU does NOT automatically accelerate arbitrarily large
+  stacks (a stack that is routed to the tiled path runs on CPU regardless of
+  GPU size);
+* inside the GPU-capable (non-tiled) path, VRAM eligibility remains dynamic
+  (`driver free + CuPy pool free` vs the estimated footprint) with automatic
+  CPU fallback — there is no MX150-derived fixed N threshold.
+
+The tiled path itself is intentionally NOT redesigned; this section only
+documents the boundary of GPU acceleration.
+
 ## VRAM-dynamic eligibility
 
 `SeestarQueuedStacker._reduction_xp` evaluates eligibility **dynamically** for
