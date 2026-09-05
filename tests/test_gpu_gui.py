@@ -12,8 +12,12 @@ c. With a "ready" capability (probe monkeypatched) the Use GPU checkbox is
 d. With a "not ready" capability the checkbox is DISABLED and the label does
    not claim "ready".
 e. The toggle re-renders the resolved-state line (enabled+checked ->
-   "…acceleration…"; enabled+unchecked -> "…CUDA ready (disabled)").
-f. The bridge source stays import-hygiene-clean (no engine dotted token).
+   "GPU acceleration enabled — CuPy / <device>"; enabled+unchecked ->
+   "<device> — GPU acceleration disabled").
+f. The probe runs OFF the Qt main thread (F3): the window defers the cold
+   probe to a ``GpuProbeWorker`` QThread (never synchronously during
+   construction), and the worker executes its probe on a different thread.
+g. The bridge source stays import-hygiene-clean (no engine dotted token).
 
 No real stacking, no engine at import time (only through the bridge's lazy
 split-string import), no FITS/PNG writes, no subprocess.
@@ -173,21 +177,21 @@ def test_toggle_rerenders_resolved_state(monkeypatch, window):
     monkeypatch.setattr(gpu_bridge, "probe_gpu", lambda: caps)
     window._refresh_gpu_status()
 
-    # Enabled + unchecked -> "… — CUDA ready (disabled)".
+    # Enabled + unchecked -> "<device> — GPU acceleration disabled".
     window.use_gpu_check.setChecked(False)
     label_off = window.gpu_status_label.text()
     assert caps.device_name in label_off
-    assert "disabled" in label_off
+    assert "GPU acceleration disabled" in label_off
 
-    # Checked -> the resolved policy line (CuPy acceleration on <device>).
+    # Checked -> the truthful resolved policy line.
     window.use_gpu_check.setChecked(True)
     label_on = window.gpu_status_label.text()
-    assert "acceleration" in label_on
+    assert "GPU acceleration enabled" in label_on
     assert caps.device_name in label_on
 
     # Unchecking again restores the disabled line.
     window.use_gpu_check.setChecked(False)
-    assert "disabled" in window.gpu_status_label.text()
+    assert "GPU acceleration disabled" in window.gpu_status_label.text()
 
 
 # ---------------------------------------------------------------------------
@@ -207,3 +211,96 @@ def test_gpu_bridge_source_is_hygiene_clean():
         "zesolver",
     ):
         assert token not in text, f"gpu_bridge.py references {token}"
+
+
+# ---------------------------------------------------------------------------
+# f. off-main-thread probing (F3)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_worker_executes_on_background_thread(qapp):
+    """The probe worker runs its probe off the Qt main thread and delivers
+    the result through the signal."""
+    import threading
+
+    from PySide6.QtCore import QEventLoop, QObject, QTimer, Qt
+    from PySide6.QtCore import Signal as QtSignal
+
+    main_thread = threading.current_thread()
+    observed = {}
+
+    def probe_fn():
+        observed["thread"] = threading.current_thread()
+        observed["caps"] = _fake_caps()
+        return observed["caps"]
+
+    worker = gpu_bridge.GpuProbeWorker(probe_fn=probe_fn)
+
+    class _Sink(QObject):
+        got = QtSignal(object)
+
+    sink = _Sink()
+    received = []
+    loop = QEventLoop()
+    worker.resultReady.connect(sink.got, Qt.QueuedConnection)
+    sink.got.connect(lambda caps: (received.append(caps), loop.quit()))
+    QTimer.singleShot(8000, loop.quit)  # safety timeout
+
+    worker.start()
+    loop.exec()
+    assert worker.wait(2000)
+
+    assert observed["thread"] is not main_thread
+    assert len(received) == 1
+    assert received[0] is observed["caps"]
+
+
+def test_window_probe_is_deferred_to_worker_not_constructor(qapp, monkeypatch):
+    """Window construction never probes synchronously: the probe starts only
+    after the event loop turns (via the worker), and the result lands on the
+    status label / checkbox enablement."""
+    import threading
+
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    calls = []
+    caps = _fake_caps()
+
+    def fake_probe():
+        calls.append(threading.current_thread())
+        return caps
+
+    monkeypatch.setattr(gpu_bridge, "probe_gpu", fake_probe)
+    win = MainWindow()
+    try:
+        # Construction must not probe (the cold probe would block the GUI
+        # thread); the label still shows the probing placeholder.
+        assert calls == []
+        assert win._gpu_probe_worker is None
+
+        # Let the deferred singleShot fire: the worker probes off-thread and
+        # the queued result re-enables the checkbox and fills the label.
+        loop = QEventLoop()
+        timer = QTimer()
+
+        def check():
+            if caps.device_name in win.gpu_status_label.text():
+                loop.quit()
+
+        timer.timeout.connect(check)
+        timer.start(20)
+        QTimer.singleShot(8000, loop.quit)
+        loop.exec()
+        timer.stop()
+
+        assert calls, "the deferred probe never ran"
+        assert calls[0] is not threading.current_thread()
+        # Unchecked default: truthful "disabled" line, checkbox now enabled.
+        assert caps.device_name in win.gpu_status_label.text()
+        assert "GPU acceleration disabled" in win.gpu_status_label.text()
+        assert win.use_gpu_check.isEnabled() is True
+        # Checking the (now enabled) box renders the truthful enabled line.
+        win.use_gpu_check.setChecked(True)
+        assert "GPU acceleration enabled" in win.gpu_status_label.text()
+    finally:
+        win.shutdown()

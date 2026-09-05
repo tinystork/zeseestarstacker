@@ -1263,8 +1263,11 @@ class MainWindow(QMainWindow):
         self.gpu_status_label.setText(self._tr("gpu_status_probing"))
         form.addRow(self.gpu_status_header, self.gpu_status_label)
         self._gpu_capabilities = None
+        self._gpu_probe_worker = None  # owned worker; see _start_gpu_probe
         self._refresh_gpu_check_enabled()
-        QTimer.singleShot(0, self._refresh_gpu_status)
+        # Defer the real probe to a background QThread (F3): the cold probe
+        # (CuPy import/JIT, nvidia-smi) must never run on the Qt main thread.
+        QTimer.singleShot(0, self._start_gpu_probe)
 
         # Appearance / theme (presentation-only).  Default System.
         self.appearance_label = QLabel(self._tr("appearance_label"))
@@ -2516,17 +2519,66 @@ class MainWindow(QMainWindow):
         self.use_gpu_check.setEnabled(ready)
 
     def _refresh_gpu_status(self, *_ignored) -> None:
-        """Probe (once, deferred-safe) and render capability + enablement."""
+        """Render capability + enablement, probing if nothing is cached yet.
+
+        Production startup uses :meth:`_start_gpu_probe` so the (cold) probe
+        runs on a worker thread; this synchronous variant exists for
+        deterministic tests and for re-renders once capabilities are cached.
+        """
         caps = getattr(self, "_gpu_capabilities", None)
         if caps is None:
             caps = gpu_bridge.probe_gpu()
             self._gpu_capabilities = caps
+        self._render_gpu_state(caps)
+
+    def _start_gpu_probe(self) -> None:
+        """Start the off-main-thread GPU probe (F3).
+
+        The cold probe (engine import + CuPy JIT + nvidia-smi) runs inside a
+        :class:`~seestar.gui_qt.gpu_bridge.GpuProbeWorker`; the result is
+        delivered back to this (GUI) thread via the queued ``resultReady``
+        signal.  The worker reference is kept on the window so it can never be
+        garbage-collected mid-probe, and the checkbox stays disabled with the
+        "probing…" placeholder until the result arrives.
+        """
+        worker = getattr(self, "_gpu_probe_worker", None)
+        if worker is not None and worker.isRunning():
+            return  # a probe is already in flight
+        if self._gpu_capabilities is not None:
+            # Probe already completed (cache warm): nothing to do.
+            return
+        worker = gpu_bridge.GpuProbeWorker(parent=self)
+        worker.resultReady.connect(self._on_gpu_probe_result)
+        self._gpu_probe_worker = worker
+        worker.start()
+
+    def _on_gpu_probe_result(self, caps) -> None:
+        """Main-thread slot: apply the worker's probe result to the UI."""
+        self._gpu_capabilities = caps
+        self._render_gpu_state(caps)
+
+    def _render_gpu_state(self, caps) -> None:
+        """Render the capability line + checkbox enablement for ``caps``."""
         self.gpu_status_label.setText(
             gpu_bridge.describe_policy(
                 caps, request_gpu=self.use_gpu_check.isChecked()
             )
         )
         self._refresh_gpu_check_enabled()
+
+    def _stop_gpu_probe(self, wait_ms: Optional[int]) -> bool:
+        """Wait for the probe worker to finish; True when fully stopped."""
+        worker = getattr(self, "_gpu_probe_worker", None)
+        if worker is None:
+            return True
+        if not worker.isRunning():
+            self._gpu_probe_worker = None
+            return True
+        worker.requestInterruption()
+        if not worker.wait(wait_ms):
+            return False
+        self._gpu_probe_worker = None
+        return True
 
     def _on_gpu_toggle(self, *_ignored) -> None:
         """Re-render the resolved-state line when the checkbox toggles.
@@ -5897,8 +5949,11 @@ class MainWindow(QMainWindow):
                 pass
         # Stop + join the bounded histogram worker (invalidates in-flight work).
         histogram_stopped = self._histogram_coordinator.shutdown(wait_ms=wait_ms)
+        # F3: stop + join the off-thread GPU probe worker (best-effort; the
+        # probe is short and interruption only prevents it from starting).
+        probe_stopped = self._stop_gpu_probe(wait_ms=wait_ms)
         shutdown_complete = self.controller.shutdown(wait_ms=wait_ms)
-        if shutdown_complete and histogram_stopped:
+        if shutdown_complete and histogram_stopped and probe_stopped:
             self._shutdown_called = True
             self._running = False
             self._update_run_state()

@@ -320,11 +320,16 @@ class AccelerationPolicy:
         return self.capabilities.failure_reason or self.capabilities.state
 
     def describe(self) -> str:
-        """GUI-friendly single line describing the resolved state."""
+        """GUI-friendly single line describing the resolved state.
+
+        The CuPy branch is worded truthfully: GPU acceleration is *enabled for
+        the reductions that support it*, never implying the whole run executes
+        on the GPU.
+        """
         capabilities = self.capabilities
         if self.backend == "cpu":
             if not self.request_gpu:
                 return "CPU stacking (GPU acceleration not requested)"
             return f"CPU stacking (GPU requested but unavailable: {self.fallback_reason})"
-        identity = capabilities.device_name or "CUDA GPU"
-        return f"CuPy acceleration on {identity}"
+        device = capabilities.device_name or "CUDA GPU"
+        return f"GPU acceleration enabled — CuPy / {device}"

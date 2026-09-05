@@ -362,8 +362,10 @@ def test_policy_prefers_cupy_when_requested_and_ready():
 
     assert policy.backend == "cupy"
     assert policy.fallback_reason is None
-    assert "CuPy" in policy.describe()
-    assert "NVIDIA Fake MX150" in policy.describe()
+    description = policy.describe()
+    assert "GPU acceleration enabled" in description
+    assert "CuPy" in description
+    assert "NVIDIA Fake MX150" in description
 
 
 def test_opencv_cuda_ready_never_makes_backend_ready():
