@@ -2357,9 +2357,11 @@ class SeestarQueuedStacker:
         """Lazily probed GPU capabilities (cached after first access)."""
         from ..core.gpu import probe_gpu
 
-        if self._gpu_capabilities is None:
-            self._gpu_capabilities = probe_gpu()
-        return self._gpu_capabilities
+        caps = getattr(self, "_gpu_capabilities", None)
+        if caps is None:
+            caps = probe_gpu()
+            self._gpu_capabilities = caps
+        return caps
 
     def _resolve_acceleration_policy(self):
         """Resolve (once) and freeze the authoritative run policy.
@@ -2371,11 +2373,13 @@ class SeestarQueuedStacker:
         """
         from ..core.gpu import AccelerationPolicy
 
-        if self._acceleration_policy is None:
-            self._acceleration_policy = AccelerationPolicy(
-                self._gpu_caps(), request_gpu=self.request_gpu
+        policy = getattr(self, "_acceleration_policy", None)
+        if policy is None:
+            policy = AccelerationPolicy(
+                self._gpu_caps(), request_gpu=getattr(self, "request_gpu", False)
             )
-        return self._acceleration_policy
+            self._acceleration_policy = policy
+        return policy
 
     @property
     def acceleration_policy(self):
