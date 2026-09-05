@@ -2382,10 +2382,13 @@ class SeestarQueuedStacker:
         except Exception:
             return None
         try:
-            # VRAM safety: estimate stack + sorting temporaries (~3x), require headroom.
+            # VRAM safety: estimate stack + sorting temporaries.  The sorting
+            # kernels' real peak footprint is ~4.5x the float32 stack (measured
+            # on the 2 GiB MX150, Nono review F1); use 4x so the guard keeps the
+            # kernel under the real peak while still admitting moderate stacks.
             n = len(images)
             elem = int(n) * int(np.prod(images[0].shape))
-            need = elem * 4 * 3  # float32 * ~3x sorting copies
+            need = elem * 4 * 4  # float32 * ~4x sorting peak
             free, _total = cp.cuda.runtime.memGetInfo()
             if need > 0.6 * free:
                 return None
