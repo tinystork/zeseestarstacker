@@ -241,7 +241,7 @@ def test_incremental_initialize_master_uses_separate_transport():
     RW, fpW = reproj(W, wcs_in, wcs_out)
     separate = RV * RW
 
-    # Real production kernel (float32 path, use_gpu=False).
+    # Real production kernel (float32 CPU path).
     master_sum, master_cov = initialize_master(
         V.astype(np.float32), W.astype(np.float32), wcs_in, wcs_out
     )

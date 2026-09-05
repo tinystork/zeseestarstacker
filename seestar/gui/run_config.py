@@ -127,7 +127,8 @@ def _copy_dict_or_none(value: Any) -> Any:
 # * ``stack_final_combine`` — the QueueManager reads it from its instance (or
 #   its settings object), never from a ``start_processing`` argument.
 # * ``use_gpu`` / ``max_hq_mem_gb`` — Qt-collected seam fields (M20).  The
-#   engine reads ``use_gpu`` and ``max_hq_mem`` (bytes) from the stacker
+#   engine reads ``request_gpu`` (GPU acceleration intent, resolved through
+#   ``AccelerationPolicy``) and ``max_hq_mem`` (bytes) from the stacker
 #   instance, never from ``start_processing``; the Qt backend adapter applies
 #   them to the stacker after this split.  They are *not* emitted by
 #   ``build_backend_kwargs`` (so the Tk flow is byte-identical) — the Qt shell

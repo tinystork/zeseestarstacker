@@ -564,7 +564,7 @@ def test_process_batches_retains_hwc_wht(tmp_path, monkeypatch):
     obj.stack_final_combine = "mean"
     obj._get_final_match_background = lambda default=False: False
     obj.ref_wcs_header = fits.Header()
-    obj.use_gpu = False
+    obj.request_gpu = False
     obj.interbatch_norm_active = False
     obj.enable_preview = False
     obj.cumulative_wht_path = str(tmp_path / "cumulative_WHT.npy")
@@ -580,7 +580,7 @@ def test_process_batches_retains_hwc_wht(tmp_path, monkeypatch):
     # _reproject_worker contract: returns a premultiplied numerator (V*W) and
     # the weight map W, both HWC, with per-channel differing W.
     def fake_worker(fits_path, ref_wcs_header=None, shape_out=None,
-                    use_gpu=False, match_background=False):
+                    match_background=False):
         num = np.full((2, 2, 3), [30.0, 40.0, 40.0], dtype=np.float32)
         wht = np.full((2, 2, 3), [3.0, 4.0, 4.0], dtype=np.float32)
         return num, wht
@@ -692,7 +692,7 @@ def test_process_batches_mixed_hw_hwc_wht_preserves_hwc(tmp_path, monkeypatch):
     obj.stack_final_combine = "mean"
     obj._get_final_match_background = lambda default=False: False
     obj.ref_wcs_header = fits.Header()
-    obj.use_gpu = False
+    obj.request_gpu = False
     obj.interbatch_norm_active = False
     obj.enable_preview = False
     obj.cumulative_wht_path = str(tmp_path / "cumulative_WHT.npy")
@@ -715,7 +715,7 @@ def test_process_batches_mixed_hw_hwc_wht_preserves_hwc(tmp_path, monkeypatch):
     ]
 
     def fake_worker(fits_path, ref_wcs_header=None, shape_out=None,
-                    use_gpu=False, match_background=False):
+                    match_background=False):
         return responses.pop(0)
 
     monkeypatch.setattr(

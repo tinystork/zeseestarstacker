@@ -65,7 +65,6 @@ def _known_transform(scale=1.02, rotation_deg=2.0, tx=5.0, ty=-3.0):
 
 def test_align_image_discards_scale_and_returns_M(monkeypatch):
     aligner = SeestarAligner()
-    aligner.use_cuda = False
     T, params = _known_transform()
 
     def fake_find_transform(source, target):
@@ -94,7 +93,6 @@ def test_align_image_discards_scale_and_returns_M(monkeypatch):
 
 def test_align_image_failure_returns_M_none(monkeypatch):
     aligner = SeestarAligner()
-    aligner.use_cuda = False
 
     def fake_find_transform_none(source, target):
         return None, (None, None)

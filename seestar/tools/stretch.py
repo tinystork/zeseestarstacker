@@ -171,7 +171,7 @@ def apply_auto_white_balance(data):
 # --- Enhanced Stretch (Example implementation) ---
 def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_size=8, sharpen=False):
     """
-    Applies enhanced stretch: Asinh, optional CUDA CLAHE, saturation, sharpening.
+    Applies enhanced stretch: Asinh, optional CLAHE, saturation, sharpening.
 
     Args:
         data (np.ndarray): Image (HxW or HxWx3, float, 0-1).
@@ -184,14 +184,6 @@ def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_
         np.ndarray: Enhanced image (float, 0-1). Returns input data on error.
     """
     if data is None: return None
-
-    # --- Check CUDA availability ---
-    try:
-        from ..core.utils import check_cuda
-    except Exception:
-        def check_cuda():
-            return False
-    use_cuda = check_cuda()
 
     try:
         stretched_data = data.copy()
@@ -226,33 +218,9 @@ def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_
                     lab = cv2.cvtColor(img_for_clahe, cv2.COLOR_RGB2LAB)
                     l_channel, a_channel, b_channel = cv2.split(lab)
 
-                    if use_cuda:
-                        gpu_l_channel = cv2.cuda_GpuMat()
-                        try:
-                            # print("DEBUG: Attempting CUDA CLAHE (color)")
-                            gpu_l_channel.upload(l_channel)
-                            # CUDA CLAHE takes double clipLimit, int gridSize
-                            clahe_cuda = cv2.cuda.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
-                            gpu_cl = clahe_cuda.apply(gpu_l_channel)
-                            cl = gpu_cl.download()
-                            clahe_applied = True
-                            # print("DEBUG: CUDA CLAHE (color) successful.")
-                        except cv2.error as cuda_err:
-                            print(f"Warning: CUDA CLAHE (color) failed: {cuda_err}. Falling back to CPU.")
-                            use_cuda = False # Fallback for this operation
-                        except Exception as e:
-                            print(f"Warning: Unexpected CUDA CLAHE error (color): {e}. Falling back to CPU.")
-                            traceback.print_exc(limit=1)
-                            use_cuda = False
-                        finally:
-                            del gpu_l_channel # Release GPU memory
-
-                    # Fallback to CPU if CUDA not available or failed
-                    if not use_cuda or not clahe_applied:
-                        # print("DEBUG: Using CPU CLAHE (color)")
-                        clahe_cpu = cv2.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
-                        cl = clahe_cpu.apply(l_channel)
-                        clahe_applied = True
+                    clahe_cpu = cv2.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
+                    cl = clahe_cpu.apply(l_channel)
+                    clahe_applied = True
 
                     # Merge channels and convert back to RGB
                     limg = cv2.merge((cl, a_channel, b_channel))
@@ -260,32 +228,9 @@ def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_
 
                 # --- Grayscale CLAHE ---
                 else: # Grayscale
-                    if use_cuda:
-                        gpu_gray_channel = cv2.cuda_GpuMat()
-                        try:
-                            # print("DEBUG: Attempting CUDA CLAHE (grayscale)")
-                            gpu_gray_channel.upload(img_for_clahe)
-                            clahe_cuda = cv2.cuda.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
-                            gpu_cl = clahe_cuda.apply(gpu_gray_channel)
-                            enhanced_img_uint8 = gpu_cl.download()
-                            clahe_applied = True
-                            # print("DEBUG: CUDA CLAHE (grayscale) successful.")
-                        except cv2.error as cuda_err:
-                            print(f"Warning: CUDA CLAHE (grayscale) failed: {cuda_err}. Falling back to CPU.")
-                            use_cuda = False
-                        except Exception as e:
-                            print(f"Warning: Unexpected CUDA CLAHE error (grayscale): {e}. Falling back to CPU.")
-                            traceback.print_exc(limit=1)
-                            use_cuda = False
-                        finally:
-                            del gpu_gray_channel
-
-                    # Fallback to CPU
-                    if not use_cuda or not clahe_applied:
-                        # print("DEBUG: Using CPU CLAHE (grayscale)")
-                        clahe_cpu = cv2.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
-                        enhanced_img_uint8 = clahe_cpu.apply(img_for_clahe)
-                        clahe_applied = True
+                    clahe_cpu = cv2.createCLAHE(clipLimit=float(clahe_strength), tileGridSize=(int(clahe_tile_size), int(clahe_tile_size)))
+                    enhanced_img_uint8 = clahe_cpu.apply(img_for_clahe)
+                    clahe_applied = True
 
                 # Update PIL image if CLAHE was applied
                 if clahe_applied:

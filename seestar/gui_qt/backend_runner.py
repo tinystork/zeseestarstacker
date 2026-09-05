@@ -336,8 +336,9 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         * ``stack_final_combine`` — set on the stacker and (when a settings
           object is attached) mirrored there so a later settings re-read cannot
           clobber the selected value.
-        * ``use_gpu`` — drizzle GPU toggle; the engine reads ``stacker.use_gpu``
-          at run time.
+        * ``use_gpu`` — GPU acceleration intent; the engine reads
+          ``stacker.request_gpu`` and resolves its backend via
+          ``AccelerationPolicy`` (GPU capability module ``core.gpu``).
         * ``max_hq_mem_gb`` — HQ RAM limit in GB; the engine reads
           ``stacker.max_hq_mem`` in bytes, so the GB value is converted here.
         * ``reference_origin_hint`` — ephemeral provenance for an explicit
@@ -356,7 +357,7 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
                 pass
 
         if "use_gpu" in seam_kwargs:
-            stacker.use_gpu = bool(seam_kwargs["use_gpu"])
+            stacker.request_gpu = bool(seam_kwargs["use_gpu"])
 
         if "max_hq_mem_gb" in seam_kwargs:
             stacker.max_hq_mem = int(float(seam_kwargs["max_hq_mem_gb"]) * 1024 ** 3)

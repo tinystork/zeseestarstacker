@@ -1377,14 +1377,9 @@ def _reproject_worker(
     fits_path: str,
     ref_wcs_header: fits.Header,
     shape_out: tuple,
-    use_gpu: bool = False,
     match_background: bool = False,
 ):
     """Reproject a FITS image onto ``ref_wcs_header``.
-
-    For ``batch_size == 1`` the GPU path is currently a placeholder and would
-    produce an identity reprojection. To guarantee a correct result we force the
-    CPU path even when ``use_gpu`` is ``True``.
 
     Parameters
     ----------
@@ -1394,8 +1389,6 @@ def _reproject_worker(
         Header defining the target WCS grid.
     shape_out : tuple
         Output shape ``(H, W)`` for the reprojection.
-    use_gpu : bool, optional
-        Ignored. Present for API compatibility.
     match_background : bool, optional
         When ``True``, subtract a sigma-clipped median background from the
         reprojected image before returning it. Defaults to ``False``.
@@ -2355,6 +2348,26 @@ class SeestarQueuedStacker:
 
     logger.debug("Lecture de la définition de la classe SeestarQueuedStacker...")
 
+    def _gpu_caps(self):
+        """Lazily probed GPU capabilities (cached after first access)."""
+        from ..core.gpu import probe_gpu
+
+        if self._gpu_capabilities is None:
+            self._gpu_capabilities = probe_gpu()
+        return self._gpu_capabilities
+
+    @property
+    def acceleration_policy(self):
+        """Authoritative acceleration policy for this run."""
+        from ..core.gpu import AccelerationPolicy
+
+        return AccelerationPolicy(self._gpu_caps(), request_gpu=self.request_gpu)
+
+    @property
+    def effective_backend(self) -> str:
+        """Resolved backend for this run: "cpu" | "cupy" | "opencv_cuda"."""
+        return self.acceleration_policy.backend
+
     def __getstate__(self):
         """Return picklable state for multiprocessing."""
         state = self.__dict__.copy()
@@ -2569,7 +2582,6 @@ class SeestarQueuedStacker:
             _reproject_worker,
             ref_wcs_header=self.ref_wcs_header,
             shape_out=self.reference_shape,
-            use_gpu=self.use_gpu,
             match_background=match_background,
         )
 
@@ -3434,8 +3446,8 @@ class SeestarQueuedStacker:
         self._configure_global_threads(thread_fraction)
         self.autotuner = CpuIoAutoTuner(self) if autotune else None
         self.io_profile = io_profile
-        self.use_cuda = bool(gpu and cv2.cuda.getCudaEnabledDeviceCount() > 0)
-        self.use_gpu = bool(gpu)
+        self.request_gpu = bool(gpu)
+        self._gpu_capabilities = None  # lazily probed on first policy access
         self.align_on_disk = align_on_disk
         self.settings = settings
         # RF2: registration target provenance / passive diagnostics session id.
@@ -3920,7 +3932,6 @@ class SeestarQueuedStacker:
                 "  -> Instanciation SeestarAligner (pour alignement général astroalign)..."
             )
             self.aligner = SeestarAligner()
-            self.aligner.use_cuda = self.use_cuda
             logger.debug("     ✓ SeestarAligner (astroalign) OK.")
         except Exception as e_align:
             logger.debug(f"  -> ERREUR SeestarAligner (astroalign): {e_align}")

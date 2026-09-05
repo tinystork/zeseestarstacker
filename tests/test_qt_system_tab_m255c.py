@@ -192,7 +192,7 @@ def test_gpu_toggle_reaches_stackers_instance_via_seam(window):
 
     result = backend.run(request, lambda p: None, lambda m: None, lambda: False)
     assert result is BackendRunResult.FINISHED
-    assert instances[0].use_gpu is True
+    assert instances[0].request_gpu is True
     # Seam fields never leak into the start_processing surface.
     assert "use_gpu" not in instances[0].start_kwargs
 

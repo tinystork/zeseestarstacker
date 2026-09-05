@@ -25,7 +25,7 @@ from .image_processing import (
 )
 
 from .hot_pixels import detect_and_correct_hot_pixels
-from .utils import estimate_batch_size, check_cuda
+from .utils import estimate_batch_size
 from .alignment import SeestarAligner # C'est l'aligneur basé sur astroalign
 from .weights import (
     _calculate_image_weights_noise_variance,
@@ -55,7 +55,6 @@ __all__ = [
     'save_fits_image',
     'save_preview_image',
     'estimate_batch_size',
-    'check_cuda',             # Exposer la fonction de vérification CUDA
     'SeestarAligner',         # L'aligneur astroalign
     '_calculate_image_weights_noise_variance',
     '_calculate_image_weights_noise_fwhm',

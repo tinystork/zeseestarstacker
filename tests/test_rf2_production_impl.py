@@ -82,7 +82,6 @@ def _fake_find_transform(T):
 
 def test_transform_only_tf_equals_regular_tf(monkeypatch):
     aligner = SeestarAligner()
-    aligner.use_cuda = False
     T, _ = _known_transform()
     monkeypatch.setattr(alignment_mod.aa, "find_transform", _fake_find_transform(T))
 
@@ -108,23 +107,16 @@ def test_transform_only_tf_equals_regular_tf(monkeypatch):
 
 def test_transform_only_does_not_call_warp_backend(monkeypatch):
     aligner = SeestarAligner()
-    aligner.use_cuda = False
     T, _ = _known_transform()
     monkeypatch.setattr(alignment_mod.aa, "find_transform", _fake_find_transform(T))
 
     cpu_calls = []
-    cuda_calls = []
 
     def spy_cpu(self, img, M, dsize, out=None):
         cpu_calls.append(1)
         raise AssertionError("warp backend must not be called in transform-only mode")
 
-    def spy_cuda(self, img, M, dsize):
-        cuda_calls.append(1)
-        raise AssertionError("warp backend must not be called in transform-only mode")
-
     monkeypatch.setattr(SeestarAligner, "_align_cpu", spy_cpu)
-    monkeypatch.setattr(SeestarAligner, "_align_cuda", spy_cuda)
 
     src = _make_star_image()
     ref = _make_star_image()
@@ -133,14 +125,13 @@ def test_transform_only_does_not_call_warp_backend(monkeypatch):
     )
     assert ok is True
     assert M is not None
-    assert cpu_calls == [] and cuda_calls == []
+    assert cpu_calls == []
 
 
 def test_classic_still_warps_exactly_once(monkeypatch):
     import cv2 as _cv2
 
     aligner = SeestarAligner()
-    aligner.use_cuda = False
     T, _ = _known_transform(scale=1.0, rotation_deg=0.0, tx=3.0, ty=-2.0)
     monkeypatch.setattr(alignment_mod.aa, "find_transform", _fake_find_transform(T))
 
@@ -163,7 +154,6 @@ def test_classic_still_warps_exactly_once(monkeypatch):
 
 def test_failure_return_contracts(monkeypatch):
     aligner = SeestarAligner()
-    aligner.use_cuda = False
 
     def fail(source, target):
         return None, (None, None)
@@ -198,7 +188,6 @@ def test_failure_return_contracts(monkeypatch):
 
 def test_diagnostics_do_not_alter_M_or_output(monkeypatch):
     aligner = SeestarAligner()
-    aligner.use_cuda = False
     T, _ = _known_transform()
     monkeypatch.setattr(alignment_mod.aa, "find_transform", _fake_find_transform(T))
 
@@ -371,7 +360,6 @@ def _drizzle_qm(shape):
     obj.update_progress = lambda *a, **k: None
     obj.warned_unaligned_source_folders = set()
     obj.aligner = SeestarAligner()
-    obj.aligner.use_cuda = False
     obj.aligner.update_progress = lambda *a, **k: None
     obj.drizzle_output_wcs, out_shape = build_output_grid(
         obj.reference_wcs_object, shape, 1.0

@@ -14,33 +14,7 @@ try:
 except ImportError:
     _psutil_available = False
     print("Optional dependency 'psutil' not found. Automatic batch size estimation may be limited.")
-# --- Add a global check for CUDA availability ONCE ---
-_cuda_available = False
-_cuda_checked = False
 
-def check_cuda():
-    """Checks if OpenCV reports CUDA devices and sets a global flag."""
-    global _cuda_available, _cuda_checked
-    if _cuda_checked:
-        return _cuda_available
-    try:
-        # Make sure opencv-contrib-python is potentially installed
-        if not hasattr(cv2, 'cuda'):
-             print("DEBUG: cv2.cuda module not found (likely opencv-python, not opencv-contrib-python or CUDA not supported in build).")
-             _cuda_available = False
-        elif cv2.cuda.getCudaEnabledDeviceCount() > 0:
-            print("DEBUG: CUDA device(s) detected by OpenCV.")
-            cv2.cuda.printCudaDeviceInfo(cv2.cuda.getDevice()) # Print info about the default device
-            _cuda_available = True
-        else:
-            print("DEBUG: No CUDA devices detected by OpenCV.")
-            _cuda_available = False
-    except Exception as e:
-        print(f"DEBUG: Error checking for CUDA devices: {e}")
-        _cuda_available = False
-    finally:
-        _cuda_checked = True
-    return _cuda_available
 
 def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
     """

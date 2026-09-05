@@ -301,7 +301,7 @@ def test_backend_applies_seam_gpu_and_mem_to_stackers_instance():
     assert result is BackendRunResult.FINISHED
     stacker = instances[0]
     # Seam fields reached the stacker instance...
-    assert stacker.use_gpu is True
+    assert stacker.request_gpu is True
     assert stacker.max_hq_mem == 16 * 1024 ** 3
     assert stacker.reference_origin_hint == "ZEANALYSER_V1"
     # ...and were filtered out of the start_processing surface.
@@ -324,7 +324,7 @@ def test_backend_seam_defaults_leave_gpu_off_and_default_mem():
 
     assert result is BackendRunResult.FINISHED
     stacker = instances[0]
-    assert stacker.use_gpu is False
+    assert stacker.request_gpu is False
     assert stacker.max_hq_mem == 8 * 1024 ** 3
 
 

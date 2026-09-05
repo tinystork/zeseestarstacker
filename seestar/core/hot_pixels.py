@@ -4,14 +4,11 @@ Module pour la détection et la correction des pixels chauds dans les images ast
 import numpy as np
 import cv2
 import traceback
-# --- Add import for CUDA check ---
-from .utils import check_cuda # Relative import since it's in the same package directory
 
 
 def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
     """
-    Détecte et corrige les pixels chauds dans une image. Uses CUDA for blurring
-    steps if available, otherwise falls back to CPU.
+    Détecte et corrige les pixels chauds dans une image.
 
     Parameters:
         image (numpy.ndarray): Image à traiter (HxW ou HxWx3, float ou int)
@@ -32,9 +29,6 @@ def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
     neighborhood_size = max(3, neighborhood_size)
     ksize = (neighborhood_size, neighborhood_size) # Kernel size tuple
 
-    # --- Check for CUDA ---
-    use_cuda = check_cuda()
-
     original_dtype = image.dtype
     # Work with float32 for calculations
     img_float = image.astype(np.float32, copy=True) # Work on a copy
@@ -49,48 +43,13 @@ def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
             for c in range(img_float.shape[2]):
                 channel = corrected_float[:, :, c] # Work directly on the copy
 
-                # --- Median Filter (CPU only) ---
+                # --- Median Filter (CPU) ---
                 # Use median filter for both detection reference and replacement value
                 median_filtered_channel = cv2.medianBlur(channel, neighborhood_size)
 
-                # --- Mean and Std Dev Calculation (CUDA or CPU) ---
-                mean = None
-                mean_sq = None
-
-                if use_cuda:
-                    gpu_channel = cv2.cuda_GpuMat()
-                    gpu_channel_sq = cv2.cuda_GpuMat()
-                    try:
-                        # print(f"DEBUG: Using CUDA blur for hot pixel channel {c}")
-                        gpu_channel.upload(channel)
-
-                        # Create box filter (equivalent to blur)
-                        box_filter = cv2.cuda.createBoxFilter(gpu_channel.type(), -1, ksize)
-                        gpu_mean = box_filter.apply(gpu_channel)
-                        mean = gpu_mean.download()
-
-                        # Calculate mean of squares
-                        gpu_channel_sq = cv2.cuda.sqr(gpu_channel) # Square on GPU
-                        gpu_mean_sq = box_filter.apply(gpu_channel_sq)
-                        mean_sq = gpu_mean_sq.download()
-                        # print(f"DEBUG: CUDA blur successful for channel {c}")
-
-                    except cv2.error as cuda_err:
-                        print(f"Warning: CUDA BoxFilter failed for hot pixel channel {c}: {cuda_err}. Falling back to CPU.")
-                        use_cuda = False # Fallback for this channel / further processing
-                    except Exception as e:
-                        print(f"Warning: Unexpected CUDA error during hot pixel blur channel {c}: {e}. Falling back to CPU.")
-                        traceback.print_exc(limit=1)
-                        use_cuda = False # Fallback
-                    finally:
-                         # Ensure GPU mats are released (optional, Python handles it, but good practice)
-                         del gpu_channel, gpu_channel_sq, box_filter # Explicitly delete objects
-
-                # Fallback to CPU if CUDA not available or failed
-                if not use_cuda or mean is None or mean_sq is None:
-                    # print(f"DEBUG: Using CPU blur for hot pixel channel {c}")
-                    mean = cv2.blur(channel, ksize)
-                    mean_sq = cv2.blur(channel**2, ksize)
+                # --- Mean and Std Dev Calculation (CPU) ---
+                mean = cv2.blur(channel, ksize)
+                mean_sq = cv2.blur(channel**2, ksize)
 
                 # Calculate standard deviation
                 std_dev = np.sqrt(np.maximum(mean_sq - mean**2, 1e-10)) # Add epsilon
@@ -109,40 +68,12 @@ def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):
         else: # Grayscale image
             channel = corrected_float # Work directly on the copy
 
-            # --- Median Filter (CPU only) ---
+            # --- Median Filter (CPU) ---
             median_filtered_channel = cv2.medianBlur(channel, neighborhood_size)
 
-            # --- Mean and Std Dev Calculation (CUDA or CPU) ---
-            mean = None
-            mean_sq = None
-            if use_cuda:
-                 gpu_channel = cv2.cuda_GpuMat()
-                 gpu_channel_sq = cv2.cuda_GpuMat()
-                 try:
-                     # print(f"DEBUG: Using CUDA blur for hot pixel (grayscale)")
-                     gpu_channel.upload(channel)
-                     box_filter = cv2.cuda.createBoxFilter(gpu_channel.type(), -1, ksize)
-                     gpu_mean = box_filter.apply(gpu_channel)
-                     mean = gpu_mean.download()
-                     gpu_channel_sq = cv2.cuda.sqr(gpu_channel)
-                     gpu_mean_sq = box_filter.apply(gpu_channel_sq)
-                     mean_sq = gpu_mean_sq.download()
-                     # print(f"DEBUG: CUDA blur successful for grayscale")
-                 except cv2.error as cuda_err:
-                     print(f"Warning: CUDA BoxFilter failed for hot pixel grayscale: {cuda_err}. Falling back to CPU.")
-                     use_cuda = False
-                 except Exception as e:
-                     print(f"Warning: Unexpected CUDA error during hot pixel blur grayscale: {e}. Falling back to CPU.")
-                     traceback.print_exc(limit=1)
-                     use_cuda = False
-                 finally:
-                     del gpu_channel, gpu_channel_sq, box_filter
-
-            # Fallback to CPU
-            if not use_cuda or mean is None or mean_sq is None:
-                 # print(f"DEBUG: Using CPU blur for hot pixel (grayscale)")
-                 mean = cv2.blur(channel, ksize)
-                 mean_sq = cv2.blur(channel**2, ksize)
+            # --- Mean and Std Dev Calculation (CPU) ---
+            mean = cv2.blur(channel, ksize)
+            mean_sq = cv2.blur(channel**2, ksize)
 
             # Calculate standard deviation
             std_dev = np.sqrt(np.maximum(mean_sq - mean**2, 1e-10))
