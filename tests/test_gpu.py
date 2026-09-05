@@ -526,3 +526,65 @@ def test_stacker_acceleration_policy_is_frozen():
     assert stacker.acceleration_policy is first
     assert first.backend == "cupy"
     assert stacker.effective_backend == "cupy"
+
+
+def test_stacker_policy_re_resolved_per_run():
+    """R2-F1: each new ``start_processing`` re-resolves the policy from the
+    CURRENT ``request_gpu`` (fresh policy per RUN), while the policy stays
+    frozen for the duration of the active run.  Uses the real
+    ``start_processing`` early-return path (no aligner -> returns False right
+    after the freeze point), with ready fake capabilities and no real probe.
+    """
+    import logging
+
+    from seestar.queuep.queue_manager import SeestarQueuedStacker
+
+    ready_caps = _caps(
+        gpu_detected=True,
+        cuda_runtime_ready=True,
+        cupy_ready=True,
+        backend_ready=True,
+        state=STATE_READY,
+        device_name="NVIDIA Fake MX150",
+    )
+
+    def make_stacker(request_gpu):
+        obj = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+        obj._gpu_capabilities = ready_caps
+        obj._acceleration_policy = None
+        obj._gpu_fallback_logged = set()
+        obj.request_gpu = request_gpu
+        obj.processing_active = False
+        obj.logger = logging.getLogger("test_gpu")
+        obj.update_progress = lambda *a, **k: None
+        # ``aligner`` is intentionally absent: start_processing freezes the
+        # policy, then bails out via the aligner guard (returns False) — no
+        # heavy run machinery is reached.
+        return obj
+
+    # Run 1: GPU requested -> cupy.
+    stacker = make_stacker(request_gpu=True)
+    assert stacker.start_processing("/in", "/out") is False
+    p1 = stacker.acceleration_policy
+    assert p1.backend == "cupy"
+
+    # Run 2: intent turned off -> a FRESH policy resolves to cpu.
+    stacker.request_gpu = False
+    assert stacker.start_processing("/in", "/out") is False
+    p2 = stacker.acceleration_policy
+    assert p2 is not p1
+    assert p2.backend == "cpu"
+
+    # Run 3: intent back on -> another fresh policy resolves to cupy.
+    stacker.request_gpu = True
+    assert stacker.start_processing("/in", "/out") is False
+    p3 = stacker.acceleration_policy
+    assert p3 is not p2
+    assert p3.backend == "cupy"
+
+    # Frozen for the duration of the run: mutating request_gpu after the last
+    # start must not change the resolved backend.
+    stacker.request_gpu = False
+    assert stacker.acceleration_policy is p3
+    assert p3.backend == "cupy"
+    assert stacker.effective_backend == "cupy"

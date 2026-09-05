@@ -2364,12 +2364,14 @@ class SeestarQueuedStacker:
         return caps
 
     def _resolve_acceleration_policy(self):
-        """Resolve (once) and freeze the authoritative run policy.
+        """Resolve (once per RUN) and freeze the authoritative run policy.
 
         The policy is resolved from the probed capabilities and the intent
-        field ``request_gpu`` at this moment, then cached forever: later
-        mutation of ``request_gpu`` must NOT change the resolved backend for
-        the run.
+        field ``request_gpu`` at this moment, then cached until the next run
+        re-resolves it: ``start_processing`` invalidates the cache first
+        (R2-F1), so each new run gets a FRESH policy from the CURRENT
+        ``request_gpu``, and later mutation of ``request_gpu`` cannot change
+        the backend of the active run.
         """
         from ..core.gpu import AccelerationPolicy
 
@@ -2394,8 +2396,10 @@ class SeestarQueuedStacker:
     def _reduction_xp(self, images):
         """Return the cupy module when a GPU reduction is safe, else None (CPU).
 
-        VRAM eligibility is evaluated DYNAMICALLY against the actual device
-        free memory (``cp.cuda.runtime.memGetInfo``) for every call: there is
+        VRAM eligibility is evaluated DYNAMICALLY for every call against the
+        ACTUAL available device memory, counting BOTH the driver-reported free
+        memory AND the reusable blocks retained by CuPy's default memory pool
+        (``pool.free_bytes()``) — without freeing the pool (R2-F4).  There is
         NO fixed workload-size (stack-count) threshold.  Crossover points
         (where CPU/GPU trade off) are hardware-specific and were measured on
         an NVIDIA MX150 (2 GB, CC 6.1) — a larger/faster GPU admits larger
@@ -2403,27 +2407,74 @@ class SeestarQueuedStacker:
         selection is VRAM-gated today; transfer/execution-cost tuning for tiny
         stacks is intentionally NOT encoded as a fixed threshold (to avoid
         excluding larger GPUs).
+
+        Diagnostics (R2-F5): returning None because the policy is CPU is NOT
+        a fallback (no diagnostic); CuPy import failure, VRAM reject and
+        mem-query exceptions DO emit a warning, throttled to once per reason
+        per stacker (``_gpu_fallback_logged``).
         """
         if getattr(self, "effective_backend", "cpu") != "cupy":
-            return None
+            return None  # CPU by policy — not a fallback (no diagnostic)
         try:
             import cupy as cp
-        except Exception:
+        except Exception as exc:
+            self._log_gpu_fallback_once(
+                "cupy_import",
+                "GPU acceleration requested but CuPy import failed (%s: %s); "
+                "using CPU",
+                type(exc).__name__,
+                exc,
+            )
             return None
         try:
-            # Dynamic VRAM guard (no N threshold): estimate the stack plus the
-            # sorting kernels' peak footprint (~4x the float32 stack, measured
-            # on the 2 GiB MX150, Nono review F1) and require headroom against
-            # the CURRENTLY free device memory.
+            # Dynamic, pool-aware VRAM guard (no N threshold): estimate the
+            # stack plus the sorting kernels' peak footprint (~4x the float32
+            # stack, measured on the 2 GiB MX150, Nono review F1) and require
+            # 60% headroom against the CURRENTLY available device memory
+            # (driver free + reusable CuPy pool blocks).
             n = len(images)
             elem = int(n) * int(np.prod(images[0].shape))
             need = elem * 4 * 4  # float32 * ~4x sorting peak
             free, _total = cp.cuda.runtime.memGetInfo()
-            if need > 0.6 * free:
+            try:
+                pool_free = cp.get_default_memory_pool().free_bytes()
+            except Exception:
+                pool_free = 0
+            effective_free = int(free) + int(pool_free)
+            if need > 0.6 * effective_free:
+                self._log_gpu_fallback_once(
+                    "vram_reject",
+                    "GPU acceleration enabled but reduction needs ~%d MiB vs "
+                    "~%d MiB free (incl. CuPy pool); using CPU",
+                    need // (1024 * 1024),
+                    effective_free // (1024 * 1024),
+                )
                 return None
             return cp
-        except Exception:
+        except Exception as exc:
+            self._log_gpu_fallback_once(
+                "mem_query",
+                "GPU memory query failed (%s: %s); using CPU",
+                type(exc).__name__,
+                exc,
+            )
             return None
+
+    def _log_gpu_fallback_once(self, reason: str, message: str, *args) -> None:
+        """Emit a GPU-to-CPU fallback warning at most once per reason code.
+
+        Repeated batches must not spam the log for the same cause; the set is
+        per-stacker (``_gpu_fallback_logged``), initialized lazily so
+        ``__new__``-constructed stackers in tests work too.
+        """
+        logged = getattr(self, "_gpu_fallback_logged", None)
+        if logged is None:
+            logged = set()
+            self._gpu_fallback_logged = logged
+        if reason in logged:
+            return
+        logged.add(reason)
+        self.logger.warning(message, *args)
 
     def _gpu_reduce(self, fn_cpu, fn_gpu, images, weights=None, **kwargs):
         """Run a reduction on CuPy when beneficial, else CPU; GPU failure -> CPU fallback."""
@@ -3518,7 +3569,8 @@ class SeestarQueuedStacker:
         self.io_profile = io_profile
         self.request_gpu = bool(gpu)
         self._gpu_capabilities = None  # lazily probed on first policy access
-        self._acceleration_policy = None  # resolved once and frozen at run start
+        self._acceleration_policy = None  # re-resolved once per run (R2-F1)
+        self._gpu_fallback_logged = set()  # once-per-reason fallback diagnostics (R2-F5)
         self.align_on_disk = align_on_disk
         self.settings = settings
         # RF2: registration target provenance / passive diagnostics session id.
@@ -19039,10 +19091,15 @@ class SeestarQueuedStacker:
         )
         logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
 
-        # F2: freeze the acceleration policy at the run boundary.  Resolved
-        # once here from the probed capabilities + current request_gpu; any
-        # later mutation of request_gpu must NOT change the backend used for
-        # this run (acceleration_policy/effective_backend stay stable).
+        # R2-F1: fresh acceleration policy per RUN.  Invalidate the cached
+        # policy (which was resolved from the PREVIOUS run's request_gpu) and
+        # resolve anew from the CURRENT request_gpu, then keep it frozen for
+        # the duration of this run: later mutation of request_gpu cannot
+        # change the current run's backend.  Hardware capabilities are NOT
+        # reset (the probe result is run-invariant).  This runs before the
+        # processing-active refusal below so a refused/failed Start can never
+        # poison a later Start.
+        self._acceleration_policy = None
         self._resolve_acceleration_policy()
 
         if self.processing_active:

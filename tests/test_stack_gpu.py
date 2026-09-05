@@ -21,6 +21,7 @@ from seestar.core.stack_gpu import (
     stack_linear_fit_clip_gpu,
     stack_median_gpu,
 )
+from seestar.core.gpu import GpuCapabilities
 from seestar.core.stack_methods import (
     _stack_kappa_sigma,
     _stack_linear_fit_clip,
@@ -322,3 +323,146 @@ def test_boring_style_no_gpu_intent_uses_cpu_kernel():
         np.testing.assert_allclose(result[0], cpu_ref[0], rtol=1e-6, atol=1e-5)
     finally:
         stacker.quality_executor.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------------------------------------------------------------------------
+# R2-F4/F5: pool-aware VRAM guard + truthful once-per-reason diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _gpu_stacker(logger_name="zsss.gpu.pooltest"):
+    """Minimal SeestarQueuedStacker with ready capabilities (no real probe)."""
+    stacker = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    stacker._gpu_capabilities = GpuCapabilities(
+        gpu_detected=True,
+        cuda_runtime_ready=True,
+        cupy_ready=True,
+        opencv_cuda_ready=False,
+        backend_ready=True,
+        device_name="Fake NVIDIA GPU",
+        device_vram_mb=8192,
+        compute_capability="8.0",
+        failure_reason=None,
+        state="ready",
+    )
+    stacker._acceleration_policy = None
+    stacker._gpu_fallback_logged = set()
+    stacker.request_gpu = True
+    stacker.logger = logging.getLogger(logger_name)
+    return stacker
+
+
+def test_reduction_xp_eligible_first_and_repeated_reductions():
+    """R2-F4: the first GPU reduction is eligible and SAME-SIZE subsequent
+    reductions stay on GPU (the CuPy pool's reusable blocks count toward the
+    effective free memory; no spurious CPU switch across repeated batches)."""
+    stacker = _gpu_stacker()
+    images = list(_make_stack(n=10, shape=(64, 64), seed=31))
+    weights = _weights(10, seed=3)
+
+    cp = stacker._reduction_xp(images)
+    assert cp is not None
+
+    # A real GPU reduction that allocates + returns (leaving pool blocks).
+    stacker._gpu_reduce(
+        _stack_kappa_sigma,
+        stack_kappa_sigma_gpu,
+        images,
+        weights,
+        sigma_low=3.0,
+        sigma_high=3.0,
+        return_weights=True,
+    )
+
+    # Same-size second + subsequent reductions remain GPU.
+    for seed in (32, 33, 34, 35):
+        im = list(_make_stack(n=10, shape=(64, 64), seed=seed))
+        assert stacker._reduction_xp(im) is not None, seed
+
+
+def test_reduction_xp_vram_reject_returns_none_and_logs_once(caplog, monkeypatch):
+    """R2-F4/F5: a genuinely non-fitting workload returns None (CPU) and the
+    VRAM-reject diagnostic is emitted at most once across repeated calls."""
+    import cupy as _cp
+
+    class _EmptyPool:
+        def free_bytes(self):
+            return 0
+
+        def used_bytes(self):
+            return 0
+
+    monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _EmptyPool())
+    # Driver-reported free memory far too small for the (fake) workload.
+    monkeypatch.setattr(
+        _cp.cuda.runtime, "memGetInfo", lambda: (512 * 1024, 2 * 1024 ** 3)
+    )
+    stacker = _gpu_stacker()
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.pooltest")
+
+    fake_images = [
+        type("_FakeFrame", (), {"shape": (1080, 1920)})() for _ in range(40)
+    ]
+    assert stacker._reduction_xp(fake_images) is None
+    assert stacker._reduction_xp(fake_images) is None
+
+    assert "vram_reject" in stacker._gpu_fallback_logged
+    assert "reduction needs" in caplog.text
+    assert caplog.text.count("reduction needs") == 1  # throttled
+
+
+def test_reduction_xp_import_failure_logs_once(caplog, monkeypatch):
+    """R2-F5: CuPy import failure inside _reduction_xp logs once and returns
+    None (CPU), even when the policy says cupy."""
+    import sys
+
+    stacker = _gpu_stacker()
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.pooltest")
+    monkeypatch.setitem(sys.modules, "cupy", None)  # import -> ImportError
+
+    images = list(_make_stack(n=6, shape=(32, 32)))
+    assert stacker._reduction_xp(images) is None
+    assert stacker._reduction_xp(images) is None
+
+    assert "cupy_import" in stacker._gpu_fallback_logged
+    assert "CuPy import failed" in caplog.text
+    assert caplog.text.count("CuPy import failed") == 1
+
+
+def test_reduction_xp_mem_query_failure_logs_once(caplog, monkeypatch):
+    """R2-F5: a memGetInfo/pool query exception logs once and returns None."""
+    import cupy as _cp
+
+    stacker = _gpu_stacker()
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.pooltest")
+    monkeypatch.setattr(
+        _cp.cuda.runtime,
+        "memGetInfo",
+        lambda: (_ for _ in ()).throw(RuntimeError("driver query boom")),
+    )
+
+    images = list(_make_stack(n=6, shape=(32, 32)))
+    assert stacker._reduction_xp(images) is None
+    assert stacker._reduction_xp(images) is None
+
+    assert "mem_query" in stacker._gpu_fallback_logged
+    assert "GPU memory query failed" in caplog.text
+    assert caplog.text.count("GPU memory query failed") == 1
+
+
+def test_reduction_xp_cpu_policy_no_diagnostic(caplog):
+    """R2-F5: effective_backend != \"cupy\" is CPU by POLICY, not a fallback:
+    no diagnostic is emitted and no reason is recorded."""
+    stacker = _gpu_stacker()
+    stacker.request_gpu = False
+    stacker._acceleration_policy = None  # force re-resolution -> cpu
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.pooltest")
+
+    images = list(_make_stack(n=6, shape=(32, 32)))
+    assert stacker.effective_backend == "cpu"
+    assert stacker._reduction_xp(images) is None
+
+    assert stacker._gpu_fallback_logged == set()
+    assert "reduction needs" not in caplog.text
+    assert "CuPy import failed" not in caplog.text
+    assert "GPU memory query failed" not in caplog.text
