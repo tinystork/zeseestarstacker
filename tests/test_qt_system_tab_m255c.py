@@ -14,8 +14,9 @@ workflow:
 * the Appearance theme selector defaults to System, applies Dark/Light
   immediately via a Qt palette, re-reads the platform palette on System, and
   persists through save/load,
-* no ``zealfie`` token anywhere in ``gui_qt`` (source scan), and no GPU status
-  label is invented (Zsss has no public GPU probe).
+* no ``zealfie`` token anywhere in ``gui_qt`` (source scan), and the GPU
+  status label is capability-driven (M5): it reports the REAL probed GPU
+  capability instead of inventing a fake one.
 
 No real stacking, no engine, no Tk, no FITS/PNG writes, no subprocess.
 ``QT_QPA_PLATFORM=offscreen`` is set defensively before any ``QApplication`` is
@@ -418,12 +419,17 @@ def test_no_zealfie_token_anywhere_in_gui_qt_source():
         assert "zealfie" not in text, f"{py.name} references zealfie"
 
 
-def test_no_gpu_status_label_invented(window):
-    """Zsss has no public GPU probe, so no status label is invented.
+def test_gpu_status_label_reports_capability(window):
+    """The System tab carries a real capability label (M5).
 
-    The decision (documented in the checklist) is to omit the label entirely
-    rather than invent a probe that imports the engine/ZeAlfie or adds a
-    dependency.  Asserting no such widget exists pins that decision.
+    M5 replaced the old decision ("no status label invented") with a live,
+    probe-backed label: the window exposes ``gpu_status_label`` and a deferred
+    probe refresh keeps startup unblocked.  Exact capability semantics are
+    covered in ``tests/test_gpu_gui.py``; here we only pin widget presence.
     """
-    assert not hasattr(window, "gpu_status_label")
-    assert not hasattr(window, "gpu_status")
+    assert hasattr(window, "gpu_status_label")
+    assert hasattr(window, "gpu_status_header")
+    # Deferred probe: without an event-loop turn the label still shows the
+    # probing placeholder (never empty/undefined).
+    assert window.gpu_status_label.text()
+    assert window.gpu_status_header.text()

@@ -89,6 +89,7 @@ from PySide6.QtWidgets import (
 from . import (
     analyzer_launch,
     boring_route,
+    gpu_bridge,
     initial_preview,
     localization,
     settings_persistence,
@@ -1242,14 +1243,28 @@ class MainWindow(QMainWindow):
         form.addRow(self.language_label, self.language_combo)
 
         # Use GPU toggle (moved from the Stacking tab).  Same QCheckBox, same
-        # ``drizzle_use_gpu`` label key, same ``use_gpu`` state key, same
-        # drizzle-gating and M20 seam.  No GPU status label: Zsss has no public
-        # GPU probe (and importing engine/ZeAlfie or adding a dependency is
-        # forbidden), so we show nothing instead of inventing one.
+        # ``drizzle_use_gpu`` label key, same ``use_gpu`` state key and same
+        # M20 seam plumbing.  Enablement is capability-driven (M5): the probe
+        # runs deferred (never during startup) and the status label reports the
+        # REAL probed GPU capability instead of an arbitrary boolean.
         self.use_gpu_check = QCheckBox(self._tr("drizzle_use_gpu"))
         self._bind_text(self.use_gpu_check, "drizzle_use_gpu")
         self.use_gpu_check.setChecked(bool(self.settings_state.use_gpu))
         form.addRow("", self.use_gpu_check)
+
+        # GPU status label (M5): live capability line, refreshed when the
+        # checkbox toggles.  Initially the probing placeholder; the deferred
+        # refresh replaces it as soon as the event loop turns.  Deliberately
+        # NOT ``_bind_text``-bound: the text is dynamic (probe result), so a
+        # language re-translation must not clobber it.
+        self.gpu_status_header = QLabel(self._tr("gpu_status"))
+        self._bind_text(self.gpu_status_header, "gpu_status")
+        self.gpu_status_label = QLabel()
+        self.gpu_status_label.setText(self._tr("gpu_status_probing"))
+        form.addRow(self.gpu_status_header, self.gpu_status_label)
+        self._gpu_capabilities = None
+        self._refresh_gpu_check_enabled()
+        QTimer.singleShot(0, self._refresh_gpu_status)
 
         # Appearance / theme (presentation-only).  Default System.
         self.appearance_label = QLabel(self._tr("appearance_label"))
@@ -2212,6 +2227,7 @@ class MainWindow(QMainWindow):
         )
         self.drizzle_pixfrac_spin.valueChanged.connect(self._sync_state_from_controls)
         self.use_gpu_check.stateChanged.connect(self._sync_state_from_controls)
+        self.use_gpu_check.toggled.connect(self._on_gpu_toggle)
         self.solver_combo.currentIndexChanged.connect(self._sync_state_from_controls)
 
         for widget in self._settings_widgets.values():
@@ -2486,15 +2502,57 @@ class MainWindow(QMainWindow):
         # combined boring + enable-drizzle state.
         self._update_drizzle_gating()
 
+    # ----------------------------------------------------------- GPU (M5)
+    def _refresh_gpu_check_enabled(self) -> None:
+        """Enable the Use GPU checkbox only when a usable backend was probed.
+
+        Capability-driven (M5): the checkbox no longer follows the drizzle
+        flag; it reflects ``backend_ready`` from the probed capabilities.
+        Never probes by itself — the deferred ``_refresh_gpu_status`` owns
+        probing so startup stays unblocked.
+        """
+        caps = getattr(self, "_gpu_capabilities", None)
+        ready = bool(caps is not None and getattr(caps, "backend_ready", False))
+        self.use_gpu_check.setEnabled(ready)
+
+    def _refresh_gpu_status(self, *_ignored) -> None:
+        """Probe (once, deferred-safe) and render capability + enablement."""
+        caps = getattr(self, "_gpu_capabilities", None)
+        if caps is None:
+            caps = gpu_bridge.probe_gpu()
+            self._gpu_capabilities = caps
+        self.gpu_status_label.setText(
+            gpu_bridge.describe_policy(
+                caps, request_gpu=self.use_gpu_check.isChecked()
+            )
+        )
+        self._refresh_gpu_check_enabled()
+
+    def _on_gpu_toggle(self, *_ignored) -> None:
+        """Re-render the resolved-state line when the checkbox toggles.
+
+        Rendering only (never probes): the checkbox can only be toggled once
+        enabled, which implies the probe already completed.
+        """
+        caps = getattr(self, "_gpu_capabilities", None)
+        if caps is not None:
+            self.gpu_status_label.setText(
+                gpu_bridge.describe_policy(
+                    caps, request_gpu=self.use_gpu_check.isChecked()
+                )
+            )
+
     def _update_drizzle_gating(self) -> None:
         """Gate drizzle sub-options from the Enable-drizzle flag (Tk parity).
 
         Mirrors the Tk ``_update_drizzle_options_state`` method: when drizzle is
-        disabled (or boring mode forces it off) the mode combo, the scale/WHT/
-        kernel/pixfrac sub-options and the GPU toggle are disabled; the group-size
-        spinbox is additionally enabled only in the Large-dataset (``Incremental``)
-        mode, exactly like the Tk M3-D policy (``drizzle_group_size`` depends on
-        the Large-dataset policy, not the global drizzle flag alone).
+        disabled (or boring mode forces it off) the mode combo and the scale/WHT/
+        kernel/pixfrac sub-options are disabled; the group-size spinbox is
+        additionally enabled only in the Large-dataset (``Incremental``) mode,
+        exactly like the Tk M3-D policy (``drizzle_group_size`` depends on
+        the Large-dataset policy, not the global drizzle flag alone).  The GPU
+        toggle is NOT drizzle-gated anymore (M5): its enablement is driven by
+        the probed GPU capability (see ``_refresh_gpu_check_enabled``).
         """
         boring = self.boring_check.isChecked()
         drizzle = self.drizzle_check.isChecked() and not boring
@@ -2506,7 +2564,8 @@ class MainWindow(QMainWindow):
         group = drizzle and self.drizzle_mode_combo.currentData() == "Incremental"
         self.drizzle_group_spin.setEnabled(group)
 
-        self.use_gpu_check.setEnabled(drizzle)
+        # M5: the GPU toggle is capability-driven, not drizzle-gated.
+        self._refresh_gpu_check_enabled()
 
         # Drizzle advanced sub-options (Stacking-tab Drizzle block, D3) share
         # the same global Enable-drizzle gate (Tk parity).

@@ -51,6 +51,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "theme_system": {"en": "System", "fr": "Système"},
     "theme_dark": {"en": "Dark", "fr": "Sombre"},
     "theme_light": {"en": "Light", "fr": "Clair"},
+    # GPU capability status (M5): header for the live capability line.  The
+    # line itself is the engine ``describe()`` text (English, acceptable
+    # minimum); the header and placeholder are localized.
+    "gpu_status": {"en": "GPU:", "fr": "GPU :"},
+    "gpu_status_probing": {"en": "Probing…", "fr": "Détection…"},
     # Stacking tab.
     "input_folder": {"en": "Input folder", "fr": "Dossier d'entrée"},
     "output_folder": {"en": "Output folder", "fr": "Dossier de sortie"},

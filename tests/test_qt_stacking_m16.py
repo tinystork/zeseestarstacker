@@ -226,19 +226,19 @@ def test_stacking_localization_keys_have_full_parity():
 # (2) drizzle enabler gating mirrors Tk + (3) group-size / mode interaction
 # --------------------------------------------------------------------------
 def test_drizzle_enabler_gates_suboptions(window):
-    # Default: drizzle off -> every sub-option disabled.
+    # Default: drizzle off -> drizzle sub-options disabled.  The GPU toggle is
+    # NOT part of drizzle gating (M5): its enablement is capability-driven and
+    # stays disabled until a probe reports a ready backend.
     assert window.drizzle_check.isChecked() is False
     assert not window.drizzle_mode_combo.isEnabled()
     assert not window.drizzle_group_spin.isEnabled()
-    assert not window.use_gpu_check.isEnabled()
     for w in _drizzle_advanced_widgets(window):
         assert not w.isEnabled()
 
-    # Enable drizzle -> mode / GPU / advanced sub-options re-enable; the
-    # group-size spin stays disabled in Standard (Final) mode.
+    # Enable drizzle -> mode / advanced sub-options re-enable; the group-size
+    # spin stays disabled in Standard (Final) mode.
     window.drizzle_check.setChecked(True)
     assert window.drizzle_mode_combo.isEnabled()
-    assert window.use_gpu_check.isEnabled()
     for w in _drizzle_advanced_widgets(window):
         assert w.isEnabled()
     assert not window.drizzle_group_spin.isEnabled()
@@ -251,10 +251,9 @@ def test_drizzle_enabler_gates_suboptions(window):
     window.drizzle_mode_combo.setCurrentText("Standard")
     assert not window.drizzle_group_spin.isEnabled()
 
-    # Disable drizzle -> everything gated off again.
+    # Disable drizzle -> drizzle sub-options gated off again.
     window.drizzle_check.setChecked(False)
     assert not window.drizzle_mode_combo.isEnabled()
-    assert not window.use_gpu_check.isEnabled()
     assert not window.drizzle_group_spin.isEnabled()
     for w in _drizzle_advanced_widgets(window):
         assert not w.isEnabled()
