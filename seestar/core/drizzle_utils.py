@@ -1,15 +1,10 @@
 import numpy as np
-import importlib.util
-
-_cupy_available = importlib.util.find_spec("cupy") is not None
-cp = None  # lazily imported when needed
 
 
 def drizzle_finalize(
     sci_sum: np.ndarray,
     wht_sum: np.ndarray,
     mode: str = "divide",
-    use_gpu: bool | None = None,
 ) -> np.ndarray:
     """Finalize drizzled data by normalising once.
 
@@ -28,30 +23,19 @@ def drizzle_finalize(
     np.ndarray
         Normalised image as ``float32`` with invalid values replaced by ``0``.
     """
-    if use_gpu is None:
-        use_gpu = _cupy_available
-
-    xp = np
-    cp = None
-    if use_gpu and _cupy_available:
-        import cupy as cp  # type: ignore
-        xp = cp
-
-    sci = xp.asarray(sci_sum, dtype=xp.float32)
-    wht = xp.asarray(wht_sum, dtype=xp.float32)
+    sci = np.asarray(sci_sum, dtype=np.float32)
+    wht = np.asarray(wht_sum, dtype=np.float32)
     if mode not in {"divide", "none", "max", "n_images"}:
         mode = "divide"
     if mode == "none":
         result = sci
     else:
-        wht_safe = xp.maximum(wht, 1e-9)
+        wht_safe = np.maximum(wht, 1e-9)
         result = sci / wht_safe
         if mode == "max":
-            result *= float(xp.max(wht_safe))
+            result *= float(np.max(wht_safe))
         elif mode == "n_images":
-            result *= float(xp.mean(wht_safe))
+            result *= float(np.mean(wht_safe))
 
-    result = xp.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(xp.float32)
-    if cp is not None:
-        result = cp.asnumpy(result)
+    result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     return result.astype(np.float32)

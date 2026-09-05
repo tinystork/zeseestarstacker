@@ -41,9 +41,6 @@ DEFAULT_CONFIG = {
     "apply_radial_weight": False,
     "radial_feather_fraction": 0.8,
     "radial_shape_power": 2.0,
-    "use_gpu_phase5": False,
-    "gpu_id_phase5": 0,
-    "gpu_selector": "",
     "final_assembly_method": "reproject_coadd",  # "reproject_coadd" | "incremental"
     "save_final_as_uint16": False,
     "coadd_use_memmap": True,

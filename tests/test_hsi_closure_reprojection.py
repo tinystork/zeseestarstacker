@@ -243,7 +243,7 @@ def test_incremental_initialize_master_uses_separate_transport():
 
     # Real production kernel (float32 path, use_gpu=False).
     master_sum, master_cov = initialize_master(
-        V.astype(np.float32), W.astype(np.float32), wcs_in, wcs_out, use_gpu=False
+        V.astype(np.float32), W.astype(np.float32), wcs_in, wcs_out
     )
 
     mask = _common_valid_mask(fpS, fpV, fpW)

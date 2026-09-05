@@ -32,7 +32,6 @@ _LAZY_IMPORTS = {
     "save_fits_image": ("seestar.core", "save_fits_image"),
     "save_preview_image": ("seestar.core", "save_preview_image"),
     "estimate_batch_size": ("seestar.core", "estimate_batch_size"),
-    "apply_denoise": ("seestar.core", "apply_denoise"),
     "collect_headers": ("seestar.core", "collect_headers"),
     "compute_final_output_grid": ("seestar.core", "compute_final_output_grid"),
     # tools
