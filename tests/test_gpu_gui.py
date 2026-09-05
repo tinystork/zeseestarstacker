@@ -307,22 +307,36 @@ def test_window_probe_is_deferred_to_worker_not_constructor(qapp, monkeypatch):
 
 
 def test_boring_mode_status_is_truthful(monkeypatch, window):
-    """R3-F4: in Boring mode the GPU status must not claim active GPU
+    """R3-F4/R8-F1: in Boring mode the GPU status must not claim active GPU
     acceleration (Boring's default winsorized-sigma reduction is CPU-only),
-    even with a ready backend and the Use GPU box checked; unchecking Boring
-    reverts to the normal wording."""
+    even with a ready backend and the Use GPU box checked.  The label must
+    change THROUGH THE ACTUAL CHECKBOX/SIGNAL PATHS — no manual
+    ``_refresh_gpu_status`` after toggling."""
     caps = _fake_caps()
     monkeypatch.setattr(gpu_bridge, "probe_gpu", lambda: caps)
+    # Establish the initial render the way the (fake) probe result would.
+    window._refresh_gpu_status()
+    assert window.use_gpu_check.isEnabled() is True
+
+    # Use GPU checked via the signal path -> normal enabled wording.
     window.use_gpu_check.setChecked(True)
+    assert "GPU acceleration enabled" in window.gpu_status_label.text()
 
+    # Check Boring -> its stateChanged handler re-renders from cache: the
+    # label switches to the truthful CPU-only wording, no manual refresh.
     window.boring_check.setChecked(True)
-    window._refresh_gpu_status()
-    boring_text = window.gpu_status_label.text()
-    assert "GPU acceleration enabled" not in boring_text
-    assert "Boring default stack is CPU-only" in boring_text
+    text = window.gpu_status_label.text()
+    assert "GPU acceleration enabled" not in text
+    assert "Boring default stack is CPU-only" in text
 
+    # Uncheck Boring through the signal path -> wording reverts.
     window.boring_check.setChecked(False)
-    window._refresh_gpu_status()
-    normal_text = window.gpu_status_label.text()
-    assert "GPU acceleration enabled" in normal_text
-    assert "Boring default stack is CPU-only" not in normal_text
+    assert "GPU acceleration enabled" in window.gpu_status_label.text()
+
+    # Indirect path: batch_spin.setValue(1) checks boring_check (batch-size
+    # signal chain) -> the label becomes the Boring CPU-only wording again.
+    window.batch_spin.setValue(1)
+    assert window.boring_check.isChecked() is True
+    assert "Boring default stack is CPU-only" in window.gpu_status_label.text()
+    window.batch_spin.setValue(0)
+    assert "GPU acceleration enabled" in window.gpu_status_label.text()

@@ -2411,7 +2411,8 @@ class SeestarQueuedStacker:
         Diagnostics (R2-F5): returning None because the policy is CPU is NOT
         a fallback (no diagnostic); CuPy import failure, VRAM reject and
         mem-query exceptions DO emit a warning, throttled to once per reason
-        per stacker (``_gpu_fallback_logged``).
+        per run (``_gpu_fallback_logged``, reset at each accepted run
+        boundary).
         """
         if getattr(self, "effective_backend", "cpu") != "cupy":
             return None  # CPU by policy — not a fallback (no diagnostic)
@@ -2474,8 +2475,9 @@ class SeestarQueuedStacker:
         """Emit a GPU-to-CPU fallback warning at most once per reason code.
 
         Repeated batches must not spam the log for the same cause; the set is
-        per-stacker (``_gpu_fallback_logged``), initialized lazily so
-        ``__new__``-constructed stackers in tests work too.
+        per-run (``_gpu_fallback_logged``, reset at each accepted run
+        boundary), initialized lazily so ``__new__``-constructed stackers in
+        tests work too.
         """
         logged = getattr(self, "_gpu_fallback_logged", None)
         if logged is None:

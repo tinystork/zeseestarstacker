@@ -2477,6 +2477,9 @@ class MainWindow(QMainWindow):
             if self.batch_spin.value() == 1:
                 self.batch_spin.setValue(0)
         self._update_boring_gating()
+        # R8-F1: Boring mode changes the truthful GPU wording (its default
+        # winsorized-sigma reduction is CPU-only) — re-render from cache only.
+        self._render_gpu_status_from_cache()
 
     def _on_batch_size_changed(self, value: int) -> None:
         """Synchronise the boring checkbox with the batch size (Tk parity).
@@ -2489,6 +2492,15 @@ class MainWindow(QMainWindow):
         elif value != 1 and self.boring_check.isChecked():
             self.boring_check.setChecked(False)
         self._update_boring_gating()
+        # R8-F1: batch size indirectly drives boring mode (batch==1 -> boring),
+        # which changes the GPU wording — re-render from cache only.
+        self._render_gpu_status_from_cache()
+
+    def _render_gpu_status_from_cache(self) -> None:
+        """Re-render the GPU status from already-cached capabilities (no probe)."""
+        caps = getattr(self, "_gpu_capabilities", None)
+        if caps is not None:
+            self._render_gpu_state(caps)
 
     def _update_boring_gating(self) -> None:
         """Gate controls incompatible with boring mode (honest interdependency).
