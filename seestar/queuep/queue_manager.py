@@ -2438,8 +2438,18 @@ class SeestarQueuedStacker:
             free, _total = cp.cuda.runtime.memGetInfo()
             try:
                 pool_free = cp.get_default_memory_pool().free_bytes()
-            except Exception:
+            except Exception as pool_exc:
+                # R3-F3: a failed pool query must not fail the run — evaluate
+                # VRAM conservatively with driver-visible memory only, but
+                # report the query failure truthfully (once per reason).
                 pool_free = 0
+                self._log_gpu_fallback_once(
+                    "pool_query",
+                    "CuPy memory-pool query failed (%s: %s); evaluating VRAM "
+                    "conservatively using driver-visible memory only",
+                    type(pool_exc).__name__,
+                    pool_exc,
+                )
             effective_free = int(free) + int(pool_free)
             if need > 0.6 * effective_free:
                 self._log_gpu_fallback_once(
@@ -19091,20 +19101,28 @@ class SeestarQueuedStacker:
         )
         logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
 
-        # R2-F1: fresh acceleration policy per RUN.  Invalidate the cached
-        # policy (which was resolved from the PREVIOUS run's request_gpu) and
-        # resolve anew from the CURRENT request_gpu, then keep it frozen for
-        # the duration of this run: later mutation of request_gpu cannot
-        # change the current run's backend.  Hardware capabilities are NOT
-        # reset (the probe result is run-invariant).  This runs before the
-        # processing-active refusal below so a refused/failed Start can never
-        # poison a later Start.
-        self._acceleration_policy = None
-        self._resolve_acceleration_policy()
-
+        # R3-F1: a REFUSED concurrent Start must not touch the active run's
+        # policy.  The processing-active refusal runs FIRST; only an ACCEPTED
+        # new run invalidates and re-resolves the policy below.  Invariant: a
+        # refused Start leaves the active run's policy object + backend
+        # IDENTICAL.
         if self.processing_active:
             self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
             return False
+
+        # R2-F1/R3-F1+F2: fresh acceleration policy per RUN.  This point is
+        # only reached when no run is active (accepted new run).  Invalidate
+        # the cached policy (resolved from the PREVIOUS run's request_gpu),
+        # resolve anew from the CURRENT request_gpu, and reset the
+        # once-per-reason fallback diagnostics; the policy then stays frozen
+        # for the duration of this run (later mutation of request_gpu cannot
+        # change the current run's backend).  Hardware capabilities are NOT
+        # reset (the probe result is run-invariant).  Kept before the
+        # aligner-guard early return so a no-aligner failure still resolves
+        # the run policy.
+        self._acceleration_policy = None
+        self._resolve_acceleration_policy()
+        self._gpu_fallback_logged = set()
 
         self.stop_processing = False
         self.user_requested_stop = False

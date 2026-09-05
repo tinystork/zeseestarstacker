@@ -588,3 +588,56 @@ def test_stacker_policy_re_resolved_per_run():
     assert stacker.acceleration_policy is p3
     assert p3.backend == "cupy"
     assert stacker.effective_backend == "cupy"
+
+
+def test_refused_start_does_not_mutate_active_policy():
+    """R3-F1: a refused concurrent Start must leave the ACTIVE run's policy
+    object and backend IDENTICAL (the refusal check runs before the policy
+    invalidate+re-resolve)."""
+    import logging
+
+    from seestar.queuep.queue_manager import SeestarQueuedStacker
+
+    ready_caps = _caps(
+        gpu_detected=True,
+        cuda_runtime_ready=True,
+        cupy_ready=True,
+        backend_ready=True,
+        state=STATE_READY,
+        device_name="NVIDIA Fake MX150",
+    )
+
+    def make_stacker(request_gpu):
+        obj = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+        obj._gpu_capabilities = ready_caps
+        obj._acceleration_policy = None
+        obj._gpu_fallback_logged = set()
+        obj.request_gpu = request_gpu
+        obj.processing_active = False
+        obj.logger = logging.getLogger("test_gpu")
+        obj.update_progress = lambda *a, **k: None
+        return obj
+
+    # Active CuPy run; a later Start with the intent OFF must be refused and
+    # must NOT swap the active policy to CPU.
+    stacker = make_stacker(request_gpu=True)
+    p0 = stacker.acceleration_policy
+    assert p0.backend == "cupy"
+
+    stacker.processing_active = True
+    stacker.request_gpu = False
+    assert stacker.start_processing("/in", "/out") is False  # refused
+    assert stacker.acceleration_policy is p0  # SAME object
+    assert stacker.effective_backend == "cupy"  # unchanged
+
+    # Inverse: active CPU policy; a refused Start with the intent ON must keep
+    # it CPU.
+    stacker2 = make_stacker(request_gpu=False)
+    q0 = stacker2.acceleration_policy
+    assert q0.backend == "cpu"
+
+    stacker2.processing_active = True
+    stacker2.request_gpu = True
+    assert stacker2.start_processing("/in", "/out") is False  # refused
+    assert stacker2.acceleration_policy is q0
+    assert stacker2.effective_backend == "cpu"  # unchanged

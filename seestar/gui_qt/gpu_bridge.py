@@ -92,12 +92,17 @@ def describe_capability(caps):
     return caps.describe()
 
 
-def describe_policy(caps, request_gpu: bool = False):
+def describe_policy(caps, request_gpu: bool = False, boring: bool = False):
     """Resolved-state line for the status label.
 
     * no capabilities            -> "GPU status unavailable"
     * no usable backend          -> the capability line (e.g. "No compatible
                                     GPU detected")
+    * boring mode + ready backend -> "GPU available — Boring default stack is
+                                    CPU-only" (Boring always runs the default
+                                    winsorized-sigma reduction, which is
+                                    CPU-only; the status must not claim active
+                                    GPU acceleration)
     * backend ready + requested  -> the resolved policy line (truthful
                                     wording, e.g. "GPU acceleration enabled —
                                     CuPy / NVIDIA GeForce MX150")
@@ -108,6 +113,8 @@ def describe_policy(caps, request_gpu: bool = False):
     ready = bool(getattr(caps, "backend_ready", False))
     if not ready:
         return caps.describe()
+    if boring:
+        return "GPU available — Boring default stack is CPU-only"
     if request_gpu:
         try:
             policy = _gpu_module().AccelerationPolicy(caps, request_gpu=True)

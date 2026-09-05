@@ -304,3 +304,25 @@ def test_window_probe_is_deferred_to_worker_not_constructor(qapp, monkeypatch):
         assert "GPU acceleration enabled" in win.gpu_status_label.text()
     finally:
         win.shutdown()
+
+
+def test_boring_mode_status_is_truthful(monkeypatch, window):
+    """R3-F4: in Boring mode the GPU status must not claim active GPU
+    acceleration (Boring's default winsorized-sigma reduction is CPU-only),
+    even with a ready backend and the Use GPU box checked; unchecking Boring
+    reverts to the normal wording."""
+    caps = _fake_caps()
+    monkeypatch.setattr(gpu_bridge, "probe_gpu", lambda: caps)
+    window.use_gpu_check.setChecked(True)
+
+    window.boring_check.setChecked(True)
+    window._refresh_gpu_status()
+    boring_text = window.gpu_status_label.text()
+    assert "GPU acceleration enabled" not in boring_text
+    assert "Boring default stack is CPU-only" in boring_text
+
+    window.boring_check.setChecked(False)
+    window._refresh_gpu_status()
+    normal_text = window.gpu_status_label.text()
+    assert "GPU acceleration enabled" in normal_text
+    assert "Boring default stack is CPU-only" not in normal_text

@@ -2564,7 +2564,9 @@ class MainWindow(QMainWindow):
         """Render the capability line + checkbox enablement for ``caps``."""
         self.gpu_status_label.setText(
             gpu_bridge.describe_policy(
-                caps, request_gpu=self.use_gpu_check.isChecked()
+                caps,
+                request_gpu=self.use_gpu_check.isChecked(),
+                boring=self.boring_check.isChecked(),
             )
         )
         self._refresh_gpu_check_enabled()
@@ -2593,7 +2595,9 @@ class MainWindow(QMainWindow):
         if caps is not None:
             self.gpu_status_label.setText(
                 gpu_bridge.describe_policy(
-                    caps, request_gpu=self.use_gpu_check.isChecked()
+                    caps,
+                    request_gpu=self.use_gpu_check.isChecked(),
+                    boring=self.boring_check.isChecked(),
                 )
             )
 

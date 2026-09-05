@@ -466,3 +466,65 @@ def test_reduction_xp_cpu_policy_no_diagnostic(caplog):
     assert "reduction needs" not in caplog.text
     assert "CuPy import failed" not in caplog.text
     assert "GPU memory query failed" not in caplog.text
+
+
+def test_fallback_logging_throttle_resets_per_run(caplog, monkeypatch):
+    """R3-F2: vram_reject warnings are throttled within a run (one log across
+    repeated calls) but the ACCEPTED-run boundary resets the throttle so the
+    next run warns again (once)."""
+    import cupy as _cp
+
+    class _EmptyPool:
+        def free_bytes(self):
+            return 0
+
+    monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _EmptyPool())
+    monkeypatch.setattr(
+        _cp.cuda.runtime, "memGetInfo", lambda: (512 * 1024, 2 * 1024 ** 3)
+    )
+    stacker = _gpu_stacker()
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.pooltest")
+
+    fake_images = [
+        type("_FakeFrame", (), {"shape": (1080, 1920)})() for _ in range(40)
+    ]
+    assert stacker._reduction_xp(fake_images) is None
+    assert stacker._reduction_xp(fake_images) is None
+    assert caplog.text.count("reduction needs") == 1  # throttled in-run
+
+    # Accepted new-run boundary (real start_processing early-return path:
+    # processing inactive, no aligner -> freeze/reset then return False).
+    stacker.processing_active = False
+    stacker.update_progress = lambda *a, **k: None
+    # No aligner attribute -> start_processing returns False after the
+    # accepted-boundary reset.
+    assert stacker.start_processing("/in", "/out") is False
+
+    assert stacker._reduction_xp(fake_images) is None
+    assert stacker._reduction_xp(fake_images) is None
+    assert caplog.text.count("reduction needs") == 2  # reset -> warns again
+
+
+def test_reduction_xp_pool_query_failure_logs_once_and_still_works(
+    caplog, monkeypatch
+):
+    """R3-F3: a CuPy pool query failure must NOT fail the reduction: the guard
+    falls back to driver-visible memory only, still returns cp when eligible,
+    and the pool_query diagnostic is emitted exactly once across two calls."""
+    import cupy as _cp
+
+    class _BoomPool:
+        def free_bytes(self):
+            raise RuntimeError("pool boom")
+
+    monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _BoomPool())
+    stacker = _gpu_stacker()
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.pooltest")
+
+    images = list(_make_stack(n=8, shape=(64, 64), seed=41))
+    assert stacker._reduction_xp(images) is not None  # still eligible (CPU-safe)
+    assert stacker._reduction_xp(images) is not None  # twice, never raises
+
+    assert "pool_query" in stacker._gpu_fallback_logged
+    assert "memory-pool query failed" in caplog.text
+    assert caplog.text.count("memory-pool query failed") == 1
