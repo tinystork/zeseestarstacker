@@ -2369,6 +2369,9 @@ class MainWindow(QMainWindow):
             save_final_as_float32=bool(state.save_final_as_float32),
             final_combine=str(state.stack_final_combine or "mean"),
             max_mem_gb=float(state.max_hq_mem_gb),
+            # F7: propagate only the BOOLEAN user intent across the process
+            # boundary; the subprocess resolves its own probe/policy.
+            request_gpu=bool(state.use_gpu),
         )
         self.log(
             "Launching boring stack "

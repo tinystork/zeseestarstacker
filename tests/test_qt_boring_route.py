@@ -608,3 +608,135 @@ def test_boring_route_fresh_process_import_hygiene():
         f"boring route import hygiene violated: stdout={proc.stdout!r} "
         f"stderr={proc.stderr!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# F7: GPU intent crosses the boring subprocess seam (same acceleration contract)
+# --------------------------------------------------------------------------
+
+
+def test_build_boring_request_gpu_flag_true():
+    req = build_boring_request(
+        csv_path="/in/stack_plan.csv",
+        output_dir="/out",
+        request_gpu=True,
+        python_executable="/py",
+    )
+    assert req.request_gpu is True
+    assert "--gpu" in req.command
+    assert "--no-gpu" not in req.command
+
+
+def test_build_boring_request_gpu_flag_false_by_default():
+    req = build_boring_request(
+        csv_path="/in/stack_plan.csv",
+        output_dir="/out",
+        python_executable="/py",
+    )
+    assert req.request_gpu is False
+    assert "--no-gpu" in req.command
+    assert "--gpu" not in req.command
+
+    req_explicit = build_boring_request(
+        csv_path="/in/stack_plan.csv",
+        output_dir="/out",
+        request_gpu=False,
+        python_executable="/py",
+    )
+    assert req_explicit.request_gpu is False
+    assert "--no-gpu" in req_explicit.command
+    assert "--gpu" not in req_explicit.command
+
+
+def test_start_boring_route_propagates_gpu_intent_on(qapp, tmp_path):
+    """Use GPU checked -> the launched BoringRunRequest carries request_gpu=True."""
+    input_dir = _make_inputs(tmp_path, fits_names=("a.fits", "b.fits"))
+    _write_csv(input_dir, [["a.fits"], ["b.fits"]])
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+
+    fakes = []
+
+    def factory():
+        fake = FakeBoringRunner()
+        fakes.append(fake)
+        return fake
+
+    win = MainWindow(boring_runner_factory=factory)
+    try:
+        win.input_edit.setText(str(input_dir))
+        win.output_edit.setText(str(output_dir))
+        win.batch_spin.setValue(1)
+        # Programmatic toggle: the checkbox may be disabled until the (worker)
+        # capability probe resolves, but the seam reads the ``use_gpu`` state.
+        win.use_gpu_check.setChecked(True)
+        win.start_button.click()
+
+        assert len(fakes) == 1
+        req = fakes[0].start_calls[0]
+        assert isinstance(req, BoringRunRequest)
+        assert req.request_gpu is True
+        assert "--gpu" in req.command
+    finally:
+        win.shutdown()
+
+
+def test_start_boring_route_gpu_intent_off_default(qapp, tmp_path):
+    input_dir = _make_inputs(tmp_path, fits_names=("a.fits",))
+    _write_csv(input_dir, [["a.fits"]])
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+
+    fakes = []
+
+    def factory():
+        fake = FakeBoringRunner()
+        fakes.append(fake)
+        return fake
+
+    win = MainWindow(boring_runner_factory=factory)
+    try:
+        win.input_edit.setText(str(input_dir))
+        win.output_edit.setText(str(output_dir))
+        win.batch_spin.setValue(1)
+        win.start_button.click()
+
+        assert len(fakes) == 1
+        req = fakes[0].start_calls[0]
+        assert req.request_gpu is False
+        assert "--no-gpu" in req.command
+    finally:
+        win.shutdown()
+
+
+def test_boring_stack_parse_args_gpu_flag(monkeypatch):
+    """The subprocess parser accepts --gpu / --no-gpu and defaults to False."""
+    import seestar.gui.boring_stack as boring_stack  # heavy engine import
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["boring_stack", "--csv", "/in/stack_plan.csv", "--out", "/out", "--gpu"],
+    )
+    assert boring_stack.parse_args().request_gpu is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["boring_stack", "--csv", "/in/stack_plan.csv", "--out", "/out"],
+    )
+    assert boring_stack.parse_args().request_gpu is False
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "boring_stack",
+            "--csv",
+            "/in/stack_plan.csv",
+            "--out",
+            "/out",
+            "--no-gpu",
+        ],
+    )
+    assert boring_stack.parse_args().request_gpu is False

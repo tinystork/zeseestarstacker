@@ -640,6 +640,16 @@ def parse_args():
         help="Weighting method",
     )
     p.add_argument("--reject", default="winsorized_sigma", choices=["kappa_sigma", "winsorized_sigma", "none"], help="Rejection algorithm")
+    # F7: GPU acceleration intent (CuPy is the sole backend).  Only the
+    # BOOLEAN intent crosses the subprocess boundary; the stacker resolves its
+    # OWN probe/policy via ``SeestarQueuedStacker(gpu=...)``.
+    p.add_argument(
+        "--gpu",
+        dest="request_gpu",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Request GPU acceleration (CuPy) for eligible reductions",
+    )
     p.add_argument("--no-hot-pixels", dest="correct_hot_pixels", action="store_false")
     p.add_argument("--hot-threshold", type=float, default=3.0)
     p.add_argument("--hot-neighborhood", type=int, default=5)
@@ -807,7 +817,15 @@ def _run_stack(args, progress_cb) -> int:
         "astap_sensitivity": settings.astap_sensitivity,
     }
 
+    # F7: the user's GPU intent (``request_gpu``) is resolved INSIDE this
+    # subprocess by the canonical probe/policy (``acceleration_policy`` /
+    # ``effective_backend``).  NOTE: Boring's default reduction is
+    # ``stacking_mode="winsorized-sigma"`` below, which stays CPU-only in the
+    # current backend (GPU accelerates kappa-sigma / linear-fit-clip /
+    # median only) — so the intent now crosses the boundary and resolves the
+    # same policy, but the DEFAULT Boring reduction still executes on CPU.
     stacker = SeestarQueuedStacker(
+        gpu=args.request_gpu,
         align_on_disk=args.align_on_disk,
         settings=settings,
         local_solver_preference=settings.local_solver_preference,

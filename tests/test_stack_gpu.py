@@ -249,3 +249,76 @@ def test_gpu_reduce_real_parity_small_stack():
     np.testing.assert_allclose(gpu[0], cpu[0], rtol=1e-3, atol=1e-2)
     np.testing.assert_allclose(gpu[1], cpu[1], rtol=1e-3, atol=1e-2)
     assert abs(float(gpu[2]) - float(cpu[2])) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# F7: boring subprocess constructs SeestarQueuedStacker(gpu=args.request_gpu);
+# prove the constructor-resolved backend drives _gpu_reduce end to end.
+# ---------------------------------------------------------------------------
+
+
+def test_boring_style_gpu_true_constructor_invokes_gpu_kernel():
+    """``SeestarQueuedStacker(gpu=True)`` (as boring_stack.py now does after
+    F7) resolves ``effective_backend == \"cupy\"`` on a CuPy host and routes
+    an eligible reduction through the GPU kernel with CPU parity."""
+    stacker = SeestarQueuedStacker(gpu=True)
+    try:
+        assert stacker.effective_backend == "cupy"
+        images = list(_make_stack(n=8, seed=21))
+        weights = _weights(8, seed=2)
+
+        gpu_calls = []
+
+        def spied_gpu(*args, **kwargs):
+            gpu_calls.append(1)
+            return stack_kappa_sigma_gpu(*args, **kwargs)
+
+        cpu_ref = _stack_kappa_sigma(
+            images, weights, sigma_low=3.0, sigma_high=3.0, return_weights=True
+        )
+        result = stacker._gpu_reduce(
+            _stack_kappa_sigma,
+            spied_gpu,
+            images,
+            weights,
+            sigma_low=3.0,
+            sigma_high=3.0,
+            return_weights=True,
+        )
+        assert gpu_calls == [1], "GPU kernel must be invoked when backend=cupy"
+        np.testing.assert_allclose(result[0], cpu_ref[0], rtol=1e-3, atol=1e-2)
+        np.testing.assert_allclose(result[1], cpu_ref[1], rtol=1e-3, atol=1e-2)
+    finally:
+        stacker.quality_executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_boring_style_no_gpu_intent_uses_cpu_kernel():
+    """``SeestarQueuedStacker()`` (no ``--gpu``; request_gpu=False) resolves
+    ``effective_backend == \"cpu\"`` and never invokes the GPU kernel."""
+    stacker = SeestarQueuedStacker()  # gpu defaults to False
+    try:
+        assert stacker.effective_backend == "cpu"
+        images = list(_make_stack(n=8, seed=22))
+        weights = _weights(8, seed=4)
+        gpu_calls = []
+
+        def spied_gpu(*args, **kwargs):
+            gpu_calls.append(1)
+            raise AssertionError("GPU kernel must not run when backend=cpu")
+
+        result = stacker._gpu_reduce(
+            _stack_kappa_sigma,
+            spied_gpu,
+            images,
+            weights,
+            sigma_low=3.0,
+            sigma_high=3.0,
+            return_weights=True,
+        )
+        assert gpu_calls == []
+        cpu_ref = _stack_kappa_sigma(
+            images, weights, sigma_low=3.0, sigma_high=3.0, return_weights=True
+        )
+        np.testing.assert_allclose(result[0], cpu_ref[0], rtol=1e-6, atol=1e-5)
+    finally:
+        stacker.quality_executor.shutdown(wait=False, cancel_futures=True)

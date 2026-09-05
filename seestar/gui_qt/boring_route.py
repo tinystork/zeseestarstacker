@@ -94,6 +94,7 @@ class BoringRunRequest:
     save_final_as_float32: bool = False
     final_combine: str = "mean"
     max_mem_gb: float = 8.0
+    request_gpu: bool = False
 
 
 def csv_path_for(input_folder: str) -> str:
@@ -248,6 +249,7 @@ def build_boring_request(
     save_final_as_float32: bool = False,
     final_combine: str = "mean",
     max_mem_gb: float = 8.0,
+    request_gpu: bool = False,
     python_executable: Optional[str] = None,
 ) -> BoringRunRequest:
     """Build the immutable boring-stack subprocess command.
@@ -258,6 +260,10 @@ def build_boring_request(
       chunk logic) / ``--log-dir`` (``<output>/logs``) / ``--norm``
       (normalization) / ``--save-as-float32`` or ``--no-save-as-float32`` /
       ``--final-combine`` (final-combine key) / ``--max-mem``.
+    * GPU intent (F7): only the BOOLEAN user intent crosses the subprocess
+      boundary as ``--gpu`` / ``--no-gpu``; the subprocess resolves its OWN
+      probe/policy (``SeestarQueuedStacker(gpu=...)`` →
+      ``acceleration_policy``), so no hardware assumption is passed from Qt.
 
     ``python_executable`` defaults to :data:`sys.executable` (overridable in
     tests so the assertion never depends on the interpreter path).
@@ -289,6 +295,7 @@ def build_boring_request(
         "--save-as-float32" if save_final_as_float32 else "--no-save-as-float32",
         "--final-combine",
         str(final_combine),
+        "--gpu" if request_gpu else "--no-gpu",
     ]
     return BoringRunRequest(
         command=command,
@@ -301,4 +308,5 @@ def build_boring_request(
         save_final_as_float32=save_final_as_float32,
         final_combine=final_combine,
         max_mem_gb=max_mem_gb,
+        request_gpu=request_gpu,
     )
