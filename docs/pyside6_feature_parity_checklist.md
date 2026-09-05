@@ -293,7 +293,7 @@ Notes / gaps:
   canonical `build_backend_kwargs` is deliberately left unchanged, so the Tk
   flow stays byte-identical): `MainWindow.build_run_request` attaches them via
   `run_handoff.attach_run_settings`, and `SeestarQueuedStackerBackend` applies
-  `use_gpu` → `stacker.use_gpu` and `max_hq_mem_gb` →
+  `use_gpu` → `stacker.request_gpu` (renamed from `use_gpu` to `request_gpu` in the GPU-modernization pass; resolved via `AccelerationPolicy`) and `max_hq_mem_gb` →
   `stacker.max_hq_mem` (bytes) before `start_processing`, never as
   `start_processing` kwargs (see §19).  The boring single-batch subprocess
   route forwards the same `max_hq_mem_gb` as `--max-mem` since M25 (see §20.4),
@@ -526,7 +526,7 @@ and the Qt backend adapter applies them to the stacker *instance*.
 
 | Setting | Qt control | Collected field | Consumed where | Test |
 |---|---|---|---|---|
-| Use GPU (drizzle) | `use_gpu_check` (System tab, M25.5-C — moved from Stacking) | `QtSettingsState.use_gpu` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.use_gpu` | `test_qt_run_settings_handoff_m20.py` / `test_qt_system_tab_m255c.py` |
+| Use GPU (drizzle) | `use_gpu_check` (System tab, M25.5-C — moved from Stacking) | `QtSettingsState.use_gpu` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.request_gpu` (renamed from `use_gpu` in the GPU-modernization pass; resolved via `AccelerationPolicy`) | `test_qt_run_settings_handoff_m20.py` / `test_qt_system_tab_m255c.py` |
 | HQ RAM limit (GB) | `max_hq_mem_spin` (Stacking tab) | `QtSettingsState.max_hq_mem_gb` | `run_handoff.attach_run_settings` → `RunRequest.backend_kwargs["max_hq_mem_gb"]` → `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.max_hq_mem` (bytes) | `test_qt_run_settings_handoff_m20.py` |
 
 Mechanics:
@@ -539,7 +539,8 @@ Mechanics:
   (additive, default-preserving): `split_backend_kwargs` filters them out of the
   `start_processing` kwargs, so the engine never receives them as keywords.
 * `SeestarQueuedStackerBackend._apply_seam_kwargs` applies `use_gpu` →
-  `stacker.use_gpu` and `max_hq_mem_gb` → `stacker.max_hq_mem =
+  `stacker.request_gpu` (renamed from `use_gpu` in the GPU-modernization pass;
+  resolved via `AccelerationPolicy`) and `max_hq_mem_gb` → `stacker.max_hq_mem =
   int(gb * 1024**3)`; the GB→bytes conversion lives in the adapter, not the
   snapshot.
 * Fallback: a bare surface (no persisted settings / untouched controls) attaches
@@ -1176,7 +1177,8 @@ No GUI behaviour was changed; no backend semantic was added.
   its `RunRequest` as seam-only fields via a new engine/Tk-free
   `seestar/gui_qt/run_handoff.py` (`attach_run_settings`), and
   `SeestarQueuedStackerBackend._apply_seam_kwargs` applies `use_gpu` →
-  `stacker.use_gpu` and `max_hq_mem_gb` → `stacker.max_hq_mem` (bytes) before
+  `stacker.request_gpu` (renamed from `use_gpu` in the GPU-modernization pass;
+  resolved via `AccelerationPolicy`) and `max_hq_mem_gb` → `stacker.max_hq_mem` (bytes) before
   `start_processing` — never as `start_processing` kwargs.
   `seestar.gui.run_config.SEAM_ONLY_KWARGS` gains the two names (additive,
   default-preserving) so `split_backend_kwargs` filters them out.  Fallback
@@ -1357,7 +1359,7 @@ No GUI behaviour was changed; no backend semantic was added.
   the **Use GPU** toggle moved from the Stacking tab into System with the exact
   same `use_gpu` state key and M20 RunRequest/seam plumbing (`QtSettingsState.
   use_gpu` → `attach_run_settings` → `RunRequest.backend_kwargs["use_gpu"]` →
-  `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.use_gpu`); the
+  `SeestarQueuedStackerBackend._apply_seam_kwargs` → `stacker.request_gpu` (renamed from `use_gpu` in the GPU-modernization pass; resolved via `AccelerationPolicy`)); the
   drizzle-gating is preserved verbatim and no GPU science changed.  Added an
   **Appearance** theme selector (System/Dark/Light, default System,
   presentation-only): a compact `QPalette` (no giant stylesheet) is applied

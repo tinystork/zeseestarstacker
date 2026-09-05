@@ -207,7 +207,7 @@ def apply_enhanced_stretch(data, saturation=1.2, clahe_strength=2.0, clahe_tile_
             print("Warning: Cannot apply enhanced stretch to this image format.")
             return data # Return original data
 
-        # 2. Apply CLAHE (using CUDA if available)
+        # 2. Apply CLAHE (CPU)
         if clahe_strength > 0 and clahe_tile_size > 1:
             clahe_applied = False
             try:

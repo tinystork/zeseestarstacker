@@ -241,83 +241,70 @@ pytest -q
 
 
 ---
-## Optional GPU Acceleration (CUDA)
+## Optional GPU Acceleration (CuPy)
 
-This application can optionally leverage an NVIDIA GPU using CUDA to accelerate certain processing steps, potentially leading to significant speed improvements, especially for stacking large numbers of images.
+This application can optionally leverage an NVIDIA GPU through **CuPy** to accelerate a specific subset of stacking operations. **CPU is the complete default path**: the application runs fully and correctly on your computer's main processor (CPU) by default, without requiring any special hardware or setup. GPU acceleration is strictly optional.
 
-**However, GPU acceleration is strictly optional.** The application will run correctly using your computer's main processor (CPU) by default, without requiring any special hardware or setup.
+### What is accelerated
 
-### Requirements for GPU Acceleration
+CuPy is the **single GPU backend** used by ZSSS (OpenCV-CUDA is not used by any processing operation). Only the *sorting-based stacking reductions* run on the GPU when they are selected and the stack fits in VRAM:
 
-To enable GPU acceleration, you need:
+* **kappa-sigma** rejection stacking
+* **linear-fit-clip** stacking
+* **median** stacking
+
+Winsorized-sigma-clip (the default rejection) and **mean** stacking remain on the CPU, as do alignment, drizzle, reprojection and every other step.
+
+### Requirements
 
 1.  **Hardware:** An NVIDIA graphics card that supports CUDA.
 2.  **Drivers:** Up-to-date NVIDIA drivers for your graphics card.
 3.  **CUDA Toolkit:** The NVIDIA CUDA Toolkit installed on your system. You can check if it's installed and find its version by opening a terminal or command prompt and running `nvcc --version`.
 
-### Python Dependencies for GPU Acceleration
+### Python Dependencies
 
-If you meet the requirements above, you need specific Python packages:
+If you meet the requirements above, install the matching CuPy package *manually* after installing the base requirements:
 
-1.  **OpenCV Contrib:** The `requirements.txt` file includes `opencv-contrib-python`. This version *might* use CUDA for some operations (like denoising) if your system is correctly configured *before* you install it via pip.
-2.  **CuPy:** For significantly faster image stacking, you need to install CuPy *manually* after installing the base requirements.
-    *   Check your CUDA Toolkit version (`nvcc --version`).
-    *   Install the matching CuPy package. See the detailed comments in the `requirements.txt` file for the exact `pip install cupy-cudaXXX` command corresponding to your CUDA version (e.g., `pip install cupy-cuda12x` for CUDA 12.x).
+*   Check your CUDA Toolkit version (`nvcc --version`).
+*   Install the matching CuPy package. See the detailed comments in the `requirements.txt` file for the exact `pip install cupy-cudaXXX` command corresponding to your CUDA version (e.g., `pip install cupy-cuda12x` for CUDA 12.x). This is the same NVIDIA-CUDA dependency closure that ZeAlfie can provision.
 
-### Important Note on Terminal Messages (GPU Checks)
+### GPU state reporting and CPU fallback
 
-When you run the application, it performs checks to see if CUDA-enabled OpenCV and CuPy are available.
-
-*   You might see messages in your terminal like:
-    *   `DEBUG: CUDA device(s) detected by OpenCV.` (or `No CUDA devices detected...`)
-    *   `DEBUG: CuPy library not found.`
-    *   `DEBUG: CuPy detected CUDA Device X: ...` (or `No CUDA device is available/detected by CuPy.`)
-    *   `Warning: CUDA ... failed: ... Falling back to CPU.`
-    *   Errors related to missing `.dll` files (like `nvrtc64_XXX.dll`) if CuPy is installed but doesn't match your CUDA Toolkit.
-
-*   **If you do NOT have an NVIDIA GPU or have not installed the CUDA Toolkit and the correct CuPy package, seeing these messages is NORMAL and EXPECTED.**
-*   They simply indicate that the optional GPU acceleration could not be activated.
-*   **The application is designed to automatically and safely fall back to using the CPU in these cases.** It will continue to function correctly.
+ZSSS probes GPU capability automatically and reports it in the GUI (device name + state, e.g. `GPU acceleration enabled — CuPy / NVIDIA GeForce MX150`); the legacy `check_cuda` / `check_cupy_cuda` DEBUG messages no longer exist. When no NVIDIA GPU or matching CuPy install is available, GPU acceleration is simply not enabled and the application automatically and safely falls back to the CPU — it continues to function correctly.
 
 ---
 
-## Accélération GPU Optionnelle (CUDA) - French Version
+## Accélération GPU Optionnelle (CuPy) - Version française
 
-Cette application peut optionnellement utiliser une carte graphique NVIDIA via CUDA pour accélérer certaines étapes de traitement, ce qui peut améliorer significativement la vitesse, notamment pour l'empilement d'un grand nombre d'images.
+Cette application peut optionnellement utiliser une carte graphique NVIDIA via **CuPy** pour accélérer un sous-ensemble précis des opérations d'empilement. **Le CPU est le chemin par défaut complet** : l'application fonctionnera correctement en utilisant le processeur principal de votre ordinateur (CPU) par défaut, sans nécessiter de matériel ou de configuration spécifique. L'accélération GPU est strictement optionnelle.
 
-**Cependant, l'accélération GPU est strictement optionnelle.** L'application fonctionnera correctement en utilisant le processeur principal de votre ordinateur (CPU) par défaut, sans nécessiter de matériel ou de configuration spécifique.
+### Qu'est-ce qui est accéléré
 
-### Prérequis pour l'Accélération GPU
+CuPy est l'**unique backend GPU** utilisé par ZSSS (OpenCV-CUDA n'est utilisé par aucune opération de traitement). Seules les réductions d'empilement *fondées sur le tri* s'exécutent sur le GPU lorsqu'elles sont sélectionnées et que l'empilement tient dans la VRAM :
 
-Pour activer l'accélération GPU, vous avez besoin de :
+* l'empilement par rejet **kappa-sigma**
+* l'empilement **linear-fit-clip**
+* l'empilement **médian**
+
+Le rejet winsorisé-sigma (le réglage par défaut) et l'empilement **moyenne** restent sur le CPU, de même que l'alignement, le drizzle, la reprojection et toutes les autres étapes.
+
+### Prérequis
 
 1.  **Matériel :** Une carte graphique NVIDIA supportant CUDA.
 2.  **Pilotes :** Des pilotes NVIDIA à jour pour votre carte graphique.
 3.  **CUDA Toolkit :** Le NVIDIA CUDA Toolkit installé sur votre système. Vous pouvez vérifier s'il est installé et connaître sa version en ouvrant un terminal ou une invite de commande et en exécutant `nvcc --version`.
 
-### Dépendances Python pour l'Accélération GPU
+### Dépendances Python
 
-Si vous remplissez les conditions ci-dessus, vous avez besoin de paquets Python spécifiques :
+Si vous remplissez les conditions ci-dessus, installez le paquet CuPy correspondant *manuellement* après avoir installé les dépendances de base :
 
-1.  **OpenCV Contrib :** Le fichier `requirements.txt` inclut `opencv-contrib-python`. Cette version *peut potentiellement* utiliser CUDA pour certaines opérations (comme le débruitage) si votre système est correctement configuré *avant* son installation via pip.
-2.  **CuPy :** Pour un empilement d'images significativement plus rapide, vous devez installer CuPy *manuellement* après avoir installé les dépendances de base.
-    *   Vérifiez la version de votre CUDA Toolkit (`nvcc --version`).
-    *   Installez le paquet CuPy correspondant. Consultez les commentaires détaillés dans le fichier `requirements.txt` pour la commande exacte `pip install cupy-cudaXXX` adaptée à votre version CUDA (ex: `pip install cupy-cuda12x` pour CUDA 12.x).
+*   Vérifiez la version de votre CUDA Toolkit (`nvcc --version`).
+*   Installez le paquet CuPy correspondant. Consultez les commentaires détaillés dans le fichier `requirements.txt` pour la commande exacte `pip install cupy-cudaXXX` adaptée à votre version CUDA (ex : `pip install cupy-cuda12x` pour CUDA 12.x). Il s'agit de la même fermeture de dépendances NVIDIA-CUDA que ZeAlfie peut provisionner.
 
-### Note Importante Concernant les Messages du Terminal (Vérifications GPU)
+### État GPU affiché et repli automatique sur le CPU
 
-Lorsque vous lancez l'application, elle effectue des vérifications pour voir si OpenCV avec CUDA et CuPy sont disponibles.
+ZSSS détecte automatiquement la capacité GPU et l'affiche dans l'interface (nom du périphérique + état, ex. `GPU acceleration enabled — CuPy / NVIDIA GeForce MX150`) ; les anciens messages DEBUG `check_cuda` / `check_cupy_cuda` n'existent plus. Lorsqu'aucun GPU NVIDIA ou paquet CuPy compatible n'est disponible, l'accélération GPU n'est simplement pas activée et l'application utilise automatiquement et sans danger le CPU — elle continue de fonctionner correctement.
 
-*   Vous pourriez voir des messages dans votre terminal tels que :
-    *   `DEBUG: CUDA device(s) detected by OpenCV.` (ou `No CUDA devices detected...`)
-    *   `DEBUG: CuPy library not found.`
-    *   `DEBUG: CuPy detected CUDA Device X: ...` (ou `No CUDA device is available/detected by CuPy.`)
-    *   `Warning: CUDA ... failed: ... Falling back to CPU.`
-    *   Des erreurs liées à des fichiers `.dll` manquants (comme `nvrtc64_XXX.dll`) si CuPy est installé mais ne correspond pas à votre CUDA Toolkit.
-
-*   **Si vous N'AVEZ PAS de GPU NVIDIA ou si vous n'avez pas installé le CUDA Toolkit et le paquet CuPy correct, voir ces messages est NORMAL et ATTENDU.**
-*   Ils indiquent simplement que l'accélération GPU optionnelle n'a pas pu être activée.
-*   **L'application est conçue pour utiliser automatiquement et sans danger le CPU dans ces cas.** Elle continuera de fonctionner correctement.
 ## Usage / Utilisation
 
 **(English)**
@@ -543,7 +530,7 @@ Inspiration and motivation for this project came from discussions and shared ent
 This software stands on the shoulders of giants — the developers of amazing open-source libraries. Special thanks to the teams behind:
 
 - **NumPy** – Core numerical operations.  
-- **OpenCV** (via `opencv-python` & `opencv-contrib-python`) – Image processing tasks: debayering, denoising, transformations, and more.  
+- **OpenCV** (via `opencv-python` & `opencv-contrib-python`) – Image processing tasks: debayering, transformations, and more.  
 - **Astropy** – FITS file handling and astronomy utilities.  
 - **Astroalign** – The alignment engine at the heart of the stacker.  
 - **Matplotlib** – For histogram visualization.  
@@ -551,7 +538,7 @@ This software stands on the shoulders of giants — the developers of amazing op
 - **Scikit-image** – Dependencies for alignment and other image analysis.  
 - **Tqdm** – Smooth progress bars for terminal and logs.  
 - **Psutil** *(optional)* – System monitoring for auto batch size tuning.  
-- **CuPy** *(optional)* – Optional GPU acceleration for stacking.  
+- **CuPy** *(optional)* – Optional GPU acceleration for the sorting-based stacking reductions (kappa-sigma / linear-fit-clip / median).  
 - **Python & Tkinter** – The foundation of the language and GUI.
 
 Thank you to everyone whose work, directly or indirectly, made ZeSeestarStacker possible!
@@ -576,7 +563,7 @@ Ce projet tire son inspiration et sa motivation des échanges passionnés au sei
 Ce logiciel repose sur les épaules de géants : les développeurs de bibliothèques open source exceptionnelles. Merci tout particulier aux équipes derrière :
 
 - **NumPy** – Pour les opérations numériques de base.  
-- **OpenCV** (via `opencv-python` & `opencv-contrib-python`) – Pour le traitement d’image : débayerisation, débruitage, transformations, etc.  
+- **OpenCV** (via `opencv-python` & `opencv-contrib-python`) – Pour le traitement d’image : débayerisation, transformations, etc.  
 - **Astropy** – Pour la gestion des fichiers FITS et les utilitaires astronomiques.  
 - **Astroalign** – Pour l’algorithme d’alignement au cœur du stacker.  
 - **Matplotlib** – Pour l’affichage des histogrammes.  
@@ -584,7 +571,7 @@ Ce logiciel repose sur les épaules de géants : les développeurs de bibliothè
 - **Scikit-image** – En tant que dépendance pour l’alignement et d’autres traitements.  
 - **Tqdm** – Pour les barres de progression en terminal/logs.  
 - **Psutil** *(optionnel)* – Pour la surveillance système et l’estimation automatique de la taille des lots.  
-- **CuPy** *(optionnel)* – Pour l’accélération GPU facultative.  
+- **CuPy** *(optionnel)* – Pour l'accélération GPU facultative des réductions d'empilement fondées sur le tri (kappa-sigma / linear-fit-clip / médian).  
 - **Python & Tkinter** – Pour le langage et l’interface graphique.
 
 Merci à toutes celles et ceux dont le travail, direct ou indirect, a rendu ZeSeestarStacker possible !

@@ -257,7 +257,7 @@ def check_dependencies():
     # Dependencies required - should match requirements.txt
     dependencies = [
         ('numpy', 'numpy'),
-        ('cv2', 'opencv-python'), # opencv-contrib-python est recommandé pour CUDA
+        ('cv2', 'opencv-python'), # CuPy (optionnel) est le backend GPU, pas OpenCV-CUDA
         ('astropy', 'astropy'),
         ('astroalign', 'astroalign'),
         ('tqdm', 'tqdm'),

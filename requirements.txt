@@ -62,18 +62,17 @@ threadpoolctl     # Optional: control of BLAS threadpools
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# OPTIONAL GPU ACCELERATION (CUDA for Core App)
+# OPTIONAL GPU ACCELERATION (CuPy for the Core App)
 # ---------------------------------------------------------------------------
-# For potential speedups in denoising, blurring, CLAHE, and STACKING.
+# CuPy accelerates ONLY the sorting-based stacking reductions:
+# kappa-sigma / linear-fit-clip / median (when selected and VRAM allows).
+# There is NO OpenCV-CUDA denoising/blurring/CLAHE: those are plain CPU
+# operations, and winsorized-sigma (default) / mean stacking stay on CPU.
 # The program runs correctly on CPU if CUDA/CuPy are not configured.
 # See README.md for full details.
 
-# 1. OpenCV CUDA (via opencv-contrib-python listed above)
-#    - Relies on user having CUDA Toolkit + drivers installed BEFORE pip install.
-#    - Automatic CPU fallback if unavailable. "DEBUG: No CUDA devices detected by OpenCV" is normal.
-
-# 2. CuPy CUDA (Requires MANUAL installation by user AFTER base install)
-#    - Provides significant stacking speedup on compatible NVIDIA GPUs.
+# 1. CuPy CUDA (Requires MANUAL installation by user AFTER base install)
+#    - Provides stacking speedup on compatible NVIDIA GPUs.
 #    - User MUST install the correct CuPy package matching their system's CUDA Toolkit.
 #    - Check your system CUDA version: nvcc --version
 #    - Example (if you have CUDA 12.x installed):
@@ -82,10 +81,9 @@ threadpoolctl     # Optional: control of BLAS threadpools
 #      pip install cupy-cuda11x
 #    - Find exact package name: https://docs.cupy.dev/en/stable/install.html
 #
-#    - WARNING MESSAGES ARE NORMAL if CuPy/CUDA not set up correctly.
-#      Messages like "CuPy library not found", "nvrtc64_XXX.dll not found",
-#      or "CUDA runtime error" during startup or processing mean the GPU path
-#      failed. The program WILL automatically fall back to the CPU.
+#    - GPU state is reported in the GUI (no DEBUG terminal messages); if a GPU
+#      reduction fails at runtime the program logs a warning and automatically
+#      falls back to the CPU.
 #
 # cupy-cudaXXX  # <-- DO NOT UNCOMMENT. User installs manually if desired.
 # ---------------------------------------------------------------------------
@@ -140,18 +138,17 @@ PySide6                   # Qt6 bindings for the official PySide6 GUI shell
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# ACCÉLÉRATION GPU OPTIONNELLE (CUDA pour l'App Principale)
+# ACCÉLÉRATION GPU OPTIONNELLE (CuPy pour l'App Principale)
 # ---------------------------------------------------------------------------
-# Pour des accélérations potentielles (débruitage, flou, CLAHE, EMPILEMENT).
-# Le programme fonctionne correctement sur CPU si CUDA/CuPy ne sont pas configurés.
-# Voir README.md pour les détails complets.
+# CuPy accélère UNIQUEMENT les réductions d'empilement fondées sur le tri :
+# kappa-sigma / linear-fit-clip / median (lorsqu'elles sont sélectionnées et que
+# la VRAM le permet). Il N'EXISTE PAS de débruitage/flou/CLAHE OpenCV-CUDA : ces
+# opérations sont purement CPU, et l'empilement winsorisé-sigma (défaut) / moyenne
+# reste sur CPU. Le programme fonctionne correctement sur CPU si CUDA/CuPy ne sont
+# pas configurés. Voir README.md pour les détails complets.
 
-# 1. OpenCV CUDA (via opencv-contrib-python listé ci-dessus)
-#    - Nécessite que l'utilisateur ait installé CUDA Toolkit + pilotes AVANT pip install.
-#    - Repli automatique sur CPU si indisponible. "DEBUG: No CUDA devices detected by OpenCV" est normal.
-
-# 2. CuPy CUDA (Nécessite une installation MANUELLE par l'utilisateur APRÈS l'install de base)
-#    - Accélère significativement l'empilement sur GPU NVIDIA compatibles.
+# 1. CuPy CUDA (Nécessite une installation MANUELLE par l'utilisateur APRÈS l'install de base)
+#    - Accélère l'empilement sur GPU NVIDIA compatibles.
 #    - L'utilisateur DOIT installer le paquet CuPy correct correspondant à son CUDA Toolkit système.
 #    - Vérifiez votre version CUDA système : nvcc --version
 #    - Exemple (si vous avez CUDA 12.x installé):
@@ -160,10 +157,9 @@ PySide6                   # Qt6 bindings for the official PySide6 GUI shell
 #      pip install cupy-cuda11x
 #    - Trouvez le nom exact du paquet : https://docs.cupy.dev/en/stable/install.html
 #
-#    - LES MESSAGES D'AVERTISSEMENT SONT NORMAUX si CuPy/CUDA ne sont pas bien configurés.
-#      Les messages comme "CuPy library not found", "nvrtc64_XXX.dll not found",
-#      ou "CUDA runtime error" au démarrage ou pendant le traitement signifient que
-#      le chemin GPU a échoué. Le programme se REPLIERA automatiquement sur le CPU.
+#    - L'état GPU est affiché dans l'interface (aucun message DEBUG en terminal) ;
+#      si une réduction GPU échoue à l'exécution, le programme journalise un
+#      avertissement et se replie automatiquement sur le CPU.
 #
 # cupy-cudaXXX  # <-- NE PAS DÉCOMMENTER. L'utilisateur installe manuellement si désiré.
 # ---------------------------------------------------------------------------
