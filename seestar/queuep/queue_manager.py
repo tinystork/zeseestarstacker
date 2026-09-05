@@ -276,6 +276,11 @@ from seestar.core.stack_methods import (
     _stack_median,
     _stack_winsorized_sigma,
 )
+from seestar.core.stack_gpu import (
+    stack_kappa_sigma_gpu,
+    stack_linear_fit_clip_gpu,
+    stack_median_gpu,
+)
 from seestar.core.streaming_stack import stack_disk_streaming
 
 try:
@@ -2367,6 +2372,39 @@ class SeestarQueuedStacker:
     def effective_backend(self) -> str:
         """Resolved backend for this run: "cpu" | "cupy" | "opencv_cuda"."""
         return self.acceleration_policy.backend
+
+    def _reduction_xp(self, images):
+        """Return the cupy module when a GPU reduction is safe and beneficial, else None (CPU)."""
+        if getattr(self, "effective_backend", "cpu") != "cupy":
+            return None
+        try:
+            import cupy as cp
+        except Exception:
+            return None
+        try:
+            # VRAM safety: estimate stack + sorting temporaries (~3x), require headroom.
+            n = len(images)
+            elem = int(n) * int(np.prod(images[0].shape))
+            need = elem * 4 * 3  # float32 * ~3x sorting copies
+            free, _total = cp.cuda.runtime.memGetInfo()
+            if need > 0.6 * free:
+                return None
+            return cp
+        except Exception:
+            return None
+
+    def _gpu_reduce(self, fn_cpu, fn_gpu, images, weights=None, **kwargs):
+        """Run a reduction on CuPy when beneficial, else CPU; GPU failure -> CPU fallback."""
+        cp = self._reduction_xp(images)
+        if cp is None:
+            return fn_cpu(images, weights, **kwargs)
+        try:
+            return fn_gpu(images, weights, **kwargs)
+        except Exception:
+            self.logger.warning(
+                "GPU reduction failed; falling back to CPU", exc_info=True
+            )
+            return fn_cpu(images, weights, **kwargs)
 
     def __getstate__(self):
         """Return picklable state for multiprocessing."""
@@ -12666,7 +12704,9 @@ class SeestarQueuedStacker:
                         _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, batch_coverage_map_2d, _ = _stack_kappa_sigma(
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = self._gpu_reduce(
+                        _stack_kappa_sigma,
+                        stack_kappa_sigma_gpu,
                         images_for_stack,
                         quality_weights,
                         sigma_low=self.stack_kappa_low,
@@ -12702,7 +12742,9 @@ class SeestarQueuedStacker:
                         _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, batch_coverage_map_2d, _ = _stack_linear_fit_clip(
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = self._gpu_reduce(
+                        _stack_linear_fit_clip,
+                        stack_linear_fit_clip_gpu,
                         images_for_stack,
                         quality_weights,
                         return_weights=True,
@@ -12734,7 +12776,9 @@ class SeestarQueuedStacker:
                         _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    stacked_batch_data_np, batch_coverage_map_2d, _ = _stack_median(
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = self._gpu_reduce(
+                        _stack_median,
+                        stack_median_gpu,
                         images_for_stack,
                         quality_weights,
                         return_weights=True,
