@@ -2,8 +2,8 @@
 
 This module gives ZeSeestarStacker its own GPU detection layer, independent of
 the legacy ``check_cuda`` / ``check_cupy_cuda`` helpers and of ZeAlfie.  It is
-the single source of truth for *whether* a usable GPU backend exists on this
-machine and *which* backend the stacker should use for a given run.
+the single source of truth for *whether* the production GPU backend (CuPy)
+exists on this machine and *which* backend the stacker should use for a run.
 
 Design rules:
 
@@ -11,15 +11,21 @@ Design rules:
   call from anywhere (GUI, CLI, headless runs, tests).  It never raises and
   never imports optional libraries at module import time: CuPy and the
   ``cv2.cuda`` submodule are only touched defensively at probe time.
+* CuPy is the SOLE production GPU backend.  OpenCV CUDA (``cv2.cuda``) is
+  reported by the probe but is **diagnostic-only**: no production operation
+  uses it, and it never makes ``backend_ready``/``state`` resolve to ready.
 * Five canonical, machine-readable states are distinguished:
 
   * ``no_gpu``            -- no supported GPU detected anywhere.
   * ``gpu_no_runtime``    -- GPU present but the CUDA runtime cannot reach it.
-  * ``cuda_no_backend``   -- CUDA/driver present but no usable Python backend.
-  * ``backend_error``     -- a backend found the device but failed to
-                             initialize (e.g. CuPy real-kernel JIT failure
-                             caused by missing CUDA toolkit headers).
-  * ``ready``             -- at least one backend actually works.
+  * ``cuda_no_backend``   -- CUDA/driver present but no usable Python backend
+                             (including OpenCV-CUDA-only machines: CuPy is
+                             unavailable while OpenCV CUDA is present but
+                             diagnostic-only).
+  * ``backend_error``     -- the CuPy backend found the device but failed to
+                             initialize (e.g. real-kernel JIT failure caused
+                             by missing CUDA toolkit headers).
+  * ``ready``             -- the CuPy production backend actually works.
 
 * ``AccelerationPolicy`` resolves the backend exactly once per run and is the
   authoritative decision record handed to the rest of the application.
@@ -49,7 +55,7 @@ STATE_NO_GPU = "no_gpu"  # no supported GPU detected
 STATE_GPU_NO_RUNTIME = "gpu_no_runtime"  # GPU present but CUDA runtime unavailable
 STATE_CUDA_NO_BACKEND = "cuda_no_backend"  # CUDA available but required Python backend unavailable
 STATE_BACKEND_ERROR = "backend_error"  # GPU backend initialization failure
-STATE_READY = "ready"  # at least one usable GPU backend initialized
+STATE_READY = "ready"  # the CuPy production backend initialized
 
 
 def _truncate(text: object, limit: int = 200) -> str:
@@ -67,8 +73,12 @@ class GpuCapabilities:
     gpu_detected: bool  # a supported GPU is physically present
     cuda_runtime_ready: bool  # CUDA runtime/driver usable
     cupy_ready: bool  # CuPy importable AND a real kernel initializes
-    opencv_cuda_ready: bool  # cv2.cuda has >= 1 enabled device
-    backend_ready: bool  # cupy_ready or opencv_cuda_ready
+    # Diagnostic only: no production operation uses OpenCV CUDA.  Reported for
+    # information, but it must NEVER drive backend_ready / state==ready.
+    opencv_cuda_ready: bool  # cv2.cuda has >= 1 enabled device (diagnostic only)
+    # A production GPU backend is ready == cupy_ready only (CuPy is the sole
+    # production backend; OpenCV CUDA is diagnostic-only).
+    backend_ready: bool  # cupy_ready
     device_name: str | None  # e.g. "NVIDIA GeForce MX150"
     device_vram_mb: int | None
     compute_capability: str | None  # e.g. "6.1"
@@ -78,9 +88,8 @@ class GpuCapabilities:
     def describe(self) -> str:
         """Human-readable single line for the GUI."""
         if self.state == STATE_READY:
-            backend = "CuPy" if self.cupy_ready else "OpenCV CUDA"
             identity = self.device_name or "CUDA GPU"
-            return f"{identity} — CUDA ready ({backend})"
+            return f"{identity} — CUDA ready (CuPy)"
         if self.state == STATE_NO_GPU:
             return "No compatible GPU detected"
         if self.state == STATE_GPU_NO_RUNTIME:
@@ -226,11 +235,15 @@ def probe_gpu() -> GpuCapabilities:
                 device_vram_mb = smi_vram_mb
 
     # --- (d) Deterministic state resolution ---------------------------------
+    # Hardware presence / runtime evidence may count OpenCV CUDA, but the
+    # production backend is CuPy only: backend_ready and state==ready are
+    # driven exclusively by cp_kernel_ok (F1).
     gpu_detected = bool(cp_device_ok or ocv_device or smi_gpu)
     cuda_runtime_ready = bool(cp_device_ok or ocv_device)
-    backend_ready = bool(cp_kernel_ok or ocv_device)
+    backend_ready = bool(cp_kernel_ok)
 
-    if backend_ready:
+    if cp_kernel_ok:
+        # The CuPy production backend actually works.
         state = STATE_READY
         failure_reason = None
     elif not gpu_detected:
@@ -240,21 +253,28 @@ def probe_gpu() -> GpuCapabilities:
         # Device visible to CuPy but the real kernel failed to initialize.
         state = STATE_BACKEND_ERROR
         failure_reason = cupy_failure
-    elif cp_import_ok and not cp_device_ok:
+    elif cp_import_ok and not cp_device_ok and not ocv_device:
         # GPU visible (nvidia-smi) but the CUDA runtime cannot reach it.
         state = STATE_GPU_NO_RUNTIME
         failure_reason = cupy_failure or (
             "cupy: CUDA runtime cannot reach the GPU"
         )
     else:
-        # GPU present via nvidia-smi but no usable Python CUDA backend.
+        # CUDA-capable hardware present, but the CuPy production backend is
+        # unavailable (absent, runtime-unreachable, or kernel-broken).  When
+        # OpenCV CUDA is present it is reported but unused (diagnostic only).
         state = STATE_CUDA_NO_BACKEND
         parts = [part for part in (cupy_failure, opencv_failure) if part]
+        if ocv_device:
+            parts.append(
+                "OpenCV-CUDA is present but diagnostic-only: CuPy is the sole "
+                "production backend and is unavailable"
+            )
         failure_reason = (
             "; ".join(parts)
             if parts
-            else "no CUDA-capable Python backend available "
-                 "(neither CuPy nor OpenCV-CUDA)"
+            else "no CUDA-capable Python backend available (CuPy is the sole "
+                 "production backend)"
         )
 
     return GpuCapabilities(
@@ -273,20 +293,23 @@ def probe_gpu() -> GpuCapabilities:
 
 @dataclass(frozen=True)
 class AccelerationPolicy:
-    """Resolves backend selection ONCE per run. Authoritative single source."""
+    """Resolves backend selection ONCE per run. Authoritative single source.
+
+    Resolvable backends are ``"cpu"`` and ``"cupy"`` only: CuPy is the sole
+    production GPU backend (``opencv_cuda`` is diagnostic-only and never a
+    resolvable backend).
+    """
 
     capabilities: GpuCapabilities
     request_gpu: bool = False
 
     @property
     def backend(self) -> str:
-        """Resolved backend for this run: "cpu" | "cupy" | "opencv_cuda"."""
+        """Resolved backend for this run: "cpu" | "cupy" (never opencv_cuda)."""
         if not self.request_gpu:
             return "cpu"
         if self.capabilities.cupy_ready:
             return "cupy"
-        if self.capabilities.opencv_cuda_ready:
-            return "opencv_cuda"
         return "cpu"
 
     @property
@@ -304,6 +327,4 @@ class AccelerationPolicy:
                 return "CPU stacking (GPU acceleration not requested)"
             return f"CPU stacking (GPU requested but unavailable: {self.fallback_reason})"
         identity = capabilities.device_name or "CUDA GPU"
-        if self.backend == "cupy":
-            return f"CuPy acceleration on {identity}"
-        return f"OpenCV CUDA acceleration on {identity}"
+        return f"CuPy acceleration on {identity}"

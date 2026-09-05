@@ -1,19 +1,24 @@
 """Tests for the GPU capability probe and acceleration policy.
 
 Exercises :mod:`seestar.core.gpu` deterministically through mocks so the
-suite is green on any host (with or without a GPU, CuPy or OpenCV-CUDA), plus
+suite is green on any host (with or without a GPU, with or without CuPy), plus
 one unmocked coherence smoke test that only asserts the probe never raises and
-returns a self-consistent :class:`GpuCapabilities`.
+returns a self-consistent :class:`GpuCapabilities`.  CuPy is the SOLE
+production backend: OpenCV-CUDA detection is diagnostic-only (F1) and never
+makes the capability ready or selectable.
 
 Five states are each proven reachable:
 
 * ``no_gpu``            -- no GPU evidence anywhere.
 * ``gpu_no_runtime``    -- nvidia-smi sees a GPU, CuPy importable but its CUDA
                            runtime cannot reach the device.
-* ``cuda_no_backend``   -- nvidia-smi sees a GPU, CuPy absent, cv2.cuda absent.
+* ``cuda_no_backend``   -- CUDA-capable hardware present but the CuPy
+                           production backend unavailable (includes
+                           OpenCV-CUDA-only machines, which are reported but
+                           never ready).
 * ``backend_error``     -- CuPy sees the device but the real kernel fails
                            (e.g. missing CUDA toolkit headers -> JIT failure).
-* ``ready``             -- CuPy kernel or OpenCV-CUDA device actually works.
+* ``ready``             -- the CuPy production backend actually works.
 """
 
 import sys
@@ -273,7 +278,9 @@ def test_probe_gpu_present_but_no_python_backend(monkeypatch):
     assert "backend unavailable" in caps.describe()
 
 
-def test_probe_ready_opencv_cuda_path(monkeypatch):
+def test_probe_opencv_cuda_only_is_diagnostic_not_ready(monkeypatch):
+    """OpenCV-CUDA-only machines are NOT ready (F1: CuPy is the sole
+    production backend); OpenCV CUDA is still reported diagnostically."""
     monkeypatch.setitem(sys.modules, "cv2", _fake_cv2_module(cuda_devices=2))
     monkeypatch.setitem(sys.modules, "cupy", None)
     monkeypatch.setattr(gpu_module, "_query_nvidia_smi",
@@ -281,14 +288,17 @@ def test_probe_ready_opencv_cuda_path(monkeypatch):
 
     caps = probe_gpu()
 
-    assert caps.state == STATE_READY
+    assert caps.state == STATE_CUDA_NO_BACKEND
     assert caps.gpu_detected is True
-    assert caps.cuda_runtime_ready is True
+    assert caps.cuda_runtime_ready is True  # a runtime sees the device
     assert caps.cupy_ready is False
-    assert caps.opencv_cuda_ready is True
-    assert caps.backend_ready is True
+    assert caps.opencv_cuda_ready is True  # still detected (diagnostic)
+    assert caps.backend_ready is False  # OpenCV CUDA must NOT enable readiness
     assert caps.device_name is None
-    assert "CUDA ready" in caps.describe()
+    assert caps.failure_reason is not None
+    assert "CuPy" in caps.failure_reason or "cupy" in caps.failure_reason
+    assert "backend unavailable" in caps.describe()
+    assert "ready" not in caps.describe().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -306,14 +316,14 @@ def test_probe_real_environment_never_raises_and_is_coherent():
     if caps.state == STATE_READY:
         assert caps.backend_ready is True
         assert caps.cuda_runtime_ready is True
-        assert caps.cupy_ready or caps.opencv_cuda_ready
+        assert caps.cupy_ready is True  # ready means the CuPy backend works (F1)
         assert caps.failure_reason is None
     elif caps.state == STATE_NO_GPU:
         assert caps.gpu_detected is False
         assert caps.backend_ready is False
     else:
         assert caps.gpu_detected is True
-        assert caps.backend_ready is False
+        assert caps.backend_ready is False  # never ready without a CuPy kernel
 
 
 # ---------------------------------------------------------------------------
@@ -356,20 +366,65 @@ def test_policy_prefers_cupy_when_requested_and_ready():
     assert "NVIDIA Fake MX150" in policy.describe()
 
 
-def test_policy_prefers_opencv_cuda_when_cupy_not_ready():
+def test_opencv_cuda_ready_never_makes_backend_ready():
+    """F1: ``opencv_cuda_ready`` is diagnostic-only and does not enable the
+    production backend, either at the capability or the policy level."""
+    caps = _caps(
+        gpu_detected=True,
+        cuda_runtime_ready=True,
+        cupy_ready=False,
+        opencv_cuda_ready=True,
+        backend_ready=False,
+        state=STATE_CUDA_NO_BACKEND,
+        device_name="NVIDIA Fake MX150",
+    )
+    assert caps.backend_ready is False
+    policy = AccelerationPolicy(caps, request_gpu=True)
+    assert policy.backend == "cpu"
+    assert policy.fallback_reason is not None
+
+
+def test_policy_backend_only_cpu_or_cupy():
+    """F1: ``AccelerationPolicy.backend`` never resolves to ``opencv_cuda``
+    across a matrix of capabilities."""
+    matrix = [
+        (_caps(), False),
+        (_caps(), True),
+        (_caps(state=STATE_READY, backend_ready=True, cupy_ready=True,
+               gpu_detected=True), False),
+        (_caps(state=STATE_READY, backend_ready=True, cupy_ready=True,
+               gpu_detected=True), True),
+        (_caps(state=STATE_CUDA_NO_BACKEND, gpu_detected=True,
+               cupy_ready=False, opencv_cuda_ready=True, backend_ready=False,
+               failure_reason="cupy absent; opencv diagnostic-only"), True),
+        (_caps(state=STATE_GPU_NO_RUNTIME, gpu_detected=True,
+               cupy_ready=False, backend_ready=False), True),
+        (_caps(state=STATE_BACKEND_ERROR, gpu_detected=True,
+               cupy_ready=False, backend_ready=False,
+               failure_reason="cupy kernel failed"), True),
+    ]
+    for caps, request_gpu in matrix:
+        backend = AccelerationPolicy(caps, request_gpu=request_gpu).backend
+        assert backend in {"cpu", "cupy"}, (caps.state, request_gpu, backend)
+
+
+def test_policy_opencv_cuda_alone_falls_back_to_cpu():
+    """F1: a machine with only OpenCV-CUDA ready never selects a GPU backend."""
     caps = _caps(
         gpu_detected=True,
         cuda_runtime_ready=True,
         opencv_cuda_ready=True,
-        backend_ready=True,
-        state=STATE_READY,
-        device_name="NVIDIA Fake MX150",
+        backend_ready=False,
+        state=STATE_CUDA_NO_BACKEND,
+        failure_reason="cupy: absent; OpenCV-CUDA present but diagnostic-only",
     )
     policy = AccelerationPolicy(caps, request_gpu=True)
 
-    assert policy.backend == "opencv_cuda"
-    assert policy.fallback_reason is None
-    assert "OpenCV CUDA" in policy.describe()
+    assert policy.backend == "cpu"
+    assert policy.fallback_reason == caps.failure_reason
+    description = policy.describe()
+    assert "CPU" in description
+    assert "OpenCV CUDA acceleration" not in description
 
 
 def test_policy_falls_back_to_cpu_with_state_reason():
@@ -401,8 +456,11 @@ def test_policy_describe_is_non_empty_for_all_branches():
     combos = [
         (_caps(state=STATE_READY, backend_ready=True, cupy_ready=True,
                gpu_detected=True), True),
-        (_caps(state=STATE_READY, backend_ready=True, opencv_cuda_ready=True,
-               gpu_detected=True), True),
+        (_caps(state=STATE_READY, backend_ready=True, cupy_ready=True,
+               gpu_detected=True), False),
+        (_caps(state=STATE_CUDA_NO_BACKEND, gpu_detected=True,
+               opencv_cuda_ready=True, cupy_ready=False, backend_ready=False,
+               failure_reason="cupy: absent"), True),
         (_caps(state=STATE_NO_GPU), False),
         (_caps(state=STATE_NO_GPU), True),
         (_caps(state=STATE_BACKEND_ERROR, gpu_detected=True,
@@ -411,6 +469,7 @@ def test_policy_describe_is_non_empty_for_all_branches():
     for caps, request_gpu in combos:
         description = AccelerationPolicy(caps, request_gpu=request_gpu).describe()
         assert description and description.strip()
+        assert "OpenCV CUDA acceleration" not in description
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +494,33 @@ def test_capabilities_describe_contains_device_name_when_known():
 def test_capabilities_describe_fallback_without_device_name():
     caps = _caps(state=STATE_NO_GPU)
     assert caps.describe() == "No compatible GPU detected"
+
+
+def test_stacker_acceleration_policy_is_frozen():
+    """F2: the stacker resolves its policy ONCE and freezes it — repeated
+    access returns the SAME object, and mutating ``request_gpu`` after first
+    resolution must not change the resolved backend."""
+    from seestar.queuep.queue_manager import SeestarQueuedStacker
+
+    stacker = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    stacker._gpu_capabilities = _caps(
+        gpu_detected=True,
+        cuda_runtime_ready=True,
+        cupy_ready=True,
+        backend_ready=True,
+        state=STATE_READY,
+        device_name="NVIDIA Fake MX150",
+    )
+    stacker._acceleration_policy = None
+    stacker.request_gpu = True
+
+    first = stacker.acceleration_policy
+    second = stacker.acceleration_policy
+    assert first is second  # cached, not rebuilt per access
+    assert first.backend == "cupy"
+
+    # Later mutation of the intent field must NOT change the frozen backend.
+    stacker.request_gpu = False
+    assert stacker.acceleration_policy is first
+    assert first.backend == "cupy"
+    assert stacker.effective_backend == "cupy"

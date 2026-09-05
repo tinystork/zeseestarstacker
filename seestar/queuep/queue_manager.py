@@ -2361,20 +2361,45 @@ class SeestarQueuedStacker:
             self._gpu_capabilities = probe_gpu()
         return self._gpu_capabilities
 
-    @property
-    def acceleration_policy(self):
-        """Authoritative acceleration policy for this run."""
+    def _resolve_acceleration_policy(self):
+        """Resolve (once) and freeze the authoritative run policy.
+
+        The policy is resolved from the probed capabilities and the intent
+        field ``request_gpu`` at this moment, then cached forever: later
+        mutation of ``request_gpu`` must NOT change the resolved backend for
+        the run.
+        """
         from ..core.gpu import AccelerationPolicy
 
-        return AccelerationPolicy(self._gpu_caps(), request_gpu=self.request_gpu)
+        if self._acceleration_policy is None:
+            self._acceleration_policy = AccelerationPolicy(
+                self._gpu_caps(), request_gpu=self.request_gpu
+            )
+        return self._acceleration_policy
+
+    @property
+    def acceleration_policy(self):
+        """Authoritative acceleration policy for this run (frozen, cached)."""
+        return self._resolve_acceleration_policy()
 
     @property
     def effective_backend(self) -> str:
-        """Resolved backend for this run: "cpu" | "cupy" | "opencv_cuda"."""
+        """Resolved backend for this run: "cpu" | "cupy" (frozen at run start)."""
         return self.acceleration_policy.backend
 
     def _reduction_xp(self, images):
-        """Return the cupy module when a GPU reduction is safe and beneficial, else None (CPU)."""
+        """Return the cupy module when a GPU reduction is safe, else None (CPU).
+
+        VRAM eligibility is evaluated DYNAMICALLY against the actual device
+        free memory (``cp.cuda.runtime.memGetInfo``) for every call: there is
+        NO fixed workload-size (stack-count) threshold.  Crossover points
+        (where CPU/GPU trade off) are hardware-specific and were measured on
+        an NVIDIA MX150 (2 GB, CC 6.1) — a larger/faster GPU admits larger
+        workloads automatically via the same dynamic guard.  Final CPU/GPU
+        selection is VRAM-gated today; transfer/execution-cost tuning for tiny
+        stacks is intentionally NOT encoded as a fixed threshold (to avoid
+        excluding larger GPUs).
+        """
         if getattr(self, "effective_backend", "cpu") != "cupy":
             return None
         try:
@@ -2382,10 +2407,10 @@ class SeestarQueuedStacker:
         except Exception:
             return None
         try:
-            # VRAM safety: estimate stack + sorting temporaries.  The sorting
-            # kernels' real peak footprint is ~4.5x the float32 stack (measured
-            # on the 2 GiB MX150, Nono review F1); use 4x so the guard keeps the
-            # kernel under the real peak while still admitting moderate stacks.
+            # Dynamic VRAM guard (no N threshold): estimate the stack plus the
+            # sorting kernels' peak footprint (~4x the float32 stack, measured
+            # on the 2 GiB MX150, Nono review F1) and require headroom against
+            # the CURRENTLY free device memory.
             n = len(images)
             elem = int(n) * int(np.prod(images[0].shape))
             need = elem * 4 * 4  # float32 * ~4x sorting peak
@@ -3489,6 +3514,7 @@ class SeestarQueuedStacker:
         self.io_profile = io_profile
         self.request_gpu = bool(gpu)
         self._gpu_capabilities = None  # lazily probed on first policy access
+        self._acceleration_policy = None  # resolved once and frozen at run start
         self.align_on_disk = align_on_disk
         self.settings = settings
         # RF2: registration target provenance / passive diagnostics session id.
@@ -19008,6 +19034,12 @@ class SeestarQueuedStacker:
             f"    match_background_for_final (arg de func): {match_background_for_final}"
         )
         logger.debug("  --- FIN BACKEND ARGS REÇUS ---")
+
+        # F2: freeze the acceleration policy at the run boundary.  Resolved
+        # once here from the probed capabilities + current request_gpu; any
+        # later mutation of request_gpu must NOT change the backend used for
+        # this run (acceleration_policy/effective_backend stay stable).
+        self._resolve_acceleration_policy()
 
         if self.processing_active:
             self.update_progress("⚠️ Tentative de démarrer un traitement déjà en cours.")
