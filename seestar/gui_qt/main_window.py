@@ -952,6 +952,18 @@ class MainWindow(QMainWindow):
         # Lazily-created boring subprocess runner (default real runner only
         # used outside tests; tests inject a factory).
         self._boring_runner: Optional[BoringRunnerBase] = None
+        # Phase B2 (canonical batch contract, Qt UX): boring-mode widget state.
+        # ``_syncing_batch_boring`` is the in-flight guard that lets the batch
+        # spinner and the boring checkbox reconcile each other without signal
+        # recursion — the spinner is NEVER disabled to break a signal loop.
+        self._syncing_batch_boring: bool = False
+        # Non-destructive boring gating: while boring mode is active the
+        # incompatible drizzle request is visually gated (unchecked+disabled)
+        # but remembered in ``_boring_drizzle_request`` and restored when
+        # boring mode is left, so a transient 0 -> 1 -> 2 spinner pass never
+        # erases a requested preference.
+        self._boring_gate_active: bool = False
+        self._boring_drizzle_request: Optional[bool] = None
         self._shutdown_called: bool = False
         # Additional folders staged by the user before a run (Tk
         # ``additional_folders_to_process`` parity).  Passed as a copied list
@@ -1308,9 +1320,14 @@ class MainWindow(QMainWindow):
         self.browse_last_stack_button = QPushButton("…")
 
         self.batch_spin = QSpinBox()
-        self.batch_spin.setRange(-1, 1_000_000)
+        # Phase B2 (canonical batch contract): 0 = Auto is the single Auto
+        # spelling.  The legacy Auto sentinel -1 is removed from the range:
+        # the spinner is 0 .. supported max and can never generate a negative
+        # value (a persisted legacy -1 loads as canonical Auto 0 via the
+        # spinbox clamp and ``QtSettingsState`` normalization).
+        self.batch_spin.setRange(0, 1_000_000)
         self.batch_spin.setValue(0)
-        self.batch_spin.setToolTip("Batch size (-1 = auto).")
+        self.batch_spin.setToolTip(self._tr("batch_size_tooltip"))
 
         # Boring (single-batch CSV) mode toggle — Tk ``boring_thread_check``
         # parity.  Checked <=> batch_size == 1.
@@ -2469,37 +2486,59 @@ class MainWindow(QMainWindow):
         """Synchronise the batch spinbox with the boring-thread checkbox.
 
         Tk ``_toggle_boring_thread`` parity: checking the box forces
-        ``batch_size == 1`` and locks the spinbox; unchecking unlocks it and, if
-        it was pinned at 1, resets it to 0 (Auto).
+        ``batch_size == 1``; unchecking it while the spinner is pinned at 1
+        resets the spinner to 0 (Auto).  The spinner is NEVER disabled (Phase
+        B2): it stays continuously navigable, and the shared
+        :meth:`_reconcile_boring_controls` in-flight guard prevents signal
+        recursion instead.
         """
-        if bool(checked):
-            if self.batch_spin.value() != 1:
-                self.batch_spin.setValue(1)
-            self.batch_spin.setEnabled(False)
-        else:
-            self.batch_spin.setEnabled(True)
-            if self.batch_spin.value() == 1:
-                self.batch_spin.setValue(0)
+        self._reconcile_boring_controls(bool(checked))
+
+    def _on_batch_size_changed(self, value: int) -> None:
+        """Synchronise the boring checkbox with the batch size (Tk parity).
+
+        ``batch_size == 1`` checks the box; any other value unchecks it.  The
+        spinner stays ENABLED at 1 (Phase B2), so passing through 1
+        (0 -> 1 -> 2 -> 3 or 3 -> 2 -> 1 -> 0) never traps the control.
+        Re-entrancy is bounded by :meth:`_reconcile_boring_controls`, never by
+        disabling the spinner.
+        """
+        self._reconcile_boring_controls(value == 1)
+
+    def _reconcile_boring_controls(self, boring: bool) -> None:
+        """Converge the batch spinner + boring checkbox to one mode state.
+
+        Both controls are views of the same boolean (boring checked
+        <=> ``batch_size == 1``), and each writes the other on change, so a
+        naive implementation would ping-pong signals.  The
+        ``_syncing_batch_boring`` in-flight guard makes the reconciliation
+        atomic per user action: the nested signal-driven call returns
+        immediately and the outer call runs the gating + GPU re-render exactly
+        once.  Boring mode never disables the spinner here, so both
+        navigation directions work and passing through 1 cannot trap the
+        control.
+        """
+        if self._syncing_batch_boring:
+            return
+        self._syncing_batch_boring = True
+        try:
+            if boring:
+                if self.batch_spin.value() != 1:
+                    self.batch_spin.setValue(1)
+                if not self.boring_check.isChecked():
+                    self.boring_check.setChecked(True)
+            else:
+                if self.boring_check.isChecked():
+                    self.boring_check.setChecked(False)
+                if self.batch_spin.value() == 1:
+                    self.batch_spin.setValue(0)
+        finally:
+            self._syncing_batch_boring = False
         self._update_boring_gating()
         # R8-F1/D0.1: Boring mode changes the truthful GPU wording (its
         # default winsorized-sigma reduction is GPU-eligible on the Classic
         # stacking path since 8.3.0, workload/VRAM-gated with CPU fallback;
         # Drizzle is never GPU-accelerated) — re-render from cache only.
-        self._render_gpu_status_from_cache()
-
-    def _on_batch_size_changed(self, value: int) -> None:
-        """Synchronise the boring checkbox with the batch size (Tk parity).
-
-        ``batch_size == 1`` checks the box; anything else unchecks it.  The
-        guard prevents a ping-pong with :meth:`_on_boring_check_changed`.
-        """
-        if value == 1 and not self.boring_check.isChecked():
-            self.boring_check.setChecked(True)
-        elif value != 1 and self.boring_check.isChecked():
-            self.boring_check.setChecked(False)
-        self._update_boring_gating()
-        # R8-F1: batch size indirectly drives boring mode (batch==1 -> boring),
-        # which changes the GPU wording — re-render from cache only.
         self._render_gpu_status_from_cache()
 
     def _render_gpu_status_from_cache(self) -> None:
@@ -2512,15 +2551,36 @@ class MainWindow(QMainWindow):
         """Gate controls incompatible with boring mode (honest interdependency).
 
         Boring mode forces ``use_drizzle=False`` (the boring CLI hardcodes it),
-        so the drizzle controls are disabled and unchecked while boring mode is
-        active.  Stacking mode / final-combine remain available: the boring CLI
-        forces winsorized-sigma stacking but genuinely supports the
+        so while boring mode is active the drizzle controls are disabled and
+        the Enable-drizzle checkbox is visually cleared.  The visual clear is
+        NON-DESTRUCTIVE (Phase B2): the requested drizzle state is remembered
+        the moment the gate engages (``_boring_drizzle_request``) and restored
+        when boring mode is left, so a transient 0 -> 1 -> 2 spinner pass or a
+        Boring check/uncheck without a run never erases the user's requested
+        preference and has no persistent scientific side effect.  Stacking
+        mode / final-combine remain available: the boring CLI forces
+        winsorized-sigma stacking but genuinely supports the
         ``--final-combine`` override, matching the Tk subprocess path.
         """
         boring = self.boring_check.isChecked()
-        self.drizzle_check.setEnabled(not boring)
-        if boring and self.drizzle_check.isChecked():
-            self.drizzle_check.setChecked(False)
+        if boring:
+            # Gate engage — remember the requested drizzle state exactly once
+            # per boring episode, before the visual gating clears the box.
+            if not self._boring_gate_active:
+                self._boring_gate_active = True
+                self._boring_drizzle_request = self.drizzle_check.isChecked()
+            self.drizzle_check.setEnabled(False)
+            if self.drizzle_check.isChecked():
+                self.drizzle_check.setChecked(False)  # visual gating only
+        else:
+            leaving_boring = self._boring_gate_active
+            requested = self._boring_drizzle_request
+            if leaving_boring:
+                self._boring_gate_active = False
+                self._boring_drizzle_request = None
+            self.drizzle_check.setEnabled(True)
+            if leaving_boring and requested:
+                self.drizzle_check.setChecked(True)
         # Re-apply the drizzle sub-option gating (Tk ``_update_drizzle_options_state``)
         # so the mode/group/scale/WHT/kernel/pixfrac/GPU controls reflect the
         # combined boring + enable-drizzle state.
@@ -5637,11 +5697,12 @@ class MainWindow(QMainWindow):
     def _effective_settings_state(self) -> QtSettingsState:
         """Return a settings snapshot with batch-size normalization applied.
 
-        Normalisation (UI ``0`` -> Auto sentinel ``-1``, or the special
-        batch-zero mode when ``reproject_coadd_final`` is set) is applied to a
+        Normalisation (Phase B1 canonical contract: any ``<= 0`` value —
+        including the legacy Auto spelling ``-1`` — becomes canonical Auto
+        ``0``; ``1`` stays Boring; ``>= 2`` stays explicit) is applied to a
         *copy* of the model whenever it changes the value, so the shared
-        ``self.settings_state`` keeps the raw UI value and the special mode is
-        never lost across widget edits.
+        ``self.settings_state`` keeps the raw UI value and no legacy negative
+        sentinel can ever reach the request/engine boundary.
         """
         state = self.collect_settings_state()
         normalized = normalize_batch_size(
@@ -5881,6 +5942,7 @@ class MainWindow(QMainWindow):
             idx = self.tabs.indexOf(tab_widget)
             if idx >= 0:
                 self.tabs.setTabText(idx, self._tr(key))
+        self.batch_spin.setToolTip(self._tr("batch_size_tooltip"))
         self._refresh_theme_combo()
         self._refresh_drizzle_mode_combo()
         self._render_elapsed_label()

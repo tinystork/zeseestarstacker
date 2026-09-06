@@ -64,6 +64,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "reference_image": {"en": "Reference image", "fr": "Image de référence"},
     "last_stack": {"en": "Last stack", "fr": "Dernier stack"},
     "batch_size": {"en": "Batch size", "fr": "Taille du lot"},
+    "batch_size_tooltip": {
+        "en": "Batch size (0 = auto).",
+        "fr": "Taille du lot (0 = auto).",
+    },
     "stacking_mode": {"en": "Stacking mode", "fr": "Mode d'empilement"},
     "stacking_mode_drizzle_na_tooltip": {
         "en": "Not applied in Drizzle mode \u2014 Drizzle uses direct accumulation (no stacking/rejection algorithm)",
