@@ -2630,9 +2630,33 @@ class MainWindow(QMainWindow):
         the Large-dataset policy, not the global drizzle flag alone).  The GPU
         toggle is NOT drizzle-gated anymore (M5): its enablement is driven by
         the probed GPU capability (see ``_refresh_gpu_check_enabled``).
+
+        D1.5: the stacking-mode combo is drizzle-gated as well.  The Drizzle
+        path bypasses the Classic reducers entirely (direct accumulation, no
+        rejection), so offering a rejection selector under Drizzle would present
+        winsorized-sigma-clip / kappa-sigma / median as meaningful when they are
+        not applied.  When Drizzle is effectively active the combo is DISABLED
+        with a localized N/A tooltip; when it is off the combo is re-enabled
+        (prior behaviour).  Only the enabled state + tooltip change: the value
+        transmitted by ``collect_settings_state`` is untouched, so the Classic
+        reducers keep their exact requested value for a Classic run and the
+        Drizzle provenance records the requested mode faithfully.
         """
         boring = self.boring_check.isChecked()
         drizzle = self.drizzle_check.isChecked() and not boring
+
+        # D1.5: the stacking/rejection algorithm is not applied in Drizzle mode
+        # (Drizzle uses direct accumulation, no Classic reducer runs).  Disable
+        # the selector while Drizzle is active and explain why via a localized
+        # tooltip; restore the combo when Drizzle is off.  The transmitted value
+        # is never changed (the combo keeps its currentText while disabled).
+        self.stacking_mode_combo.setEnabled(drizzle is False)
+        if drizzle:
+            self.stacking_mode_combo.setToolTip(
+                self._tr("stacking_mode_drizzle_na_tooltip")
+            )
+        else:
+            self.stacking_mode_combo.setToolTip("")
 
         self.drizzle_mode_combo.setEnabled(drizzle)
 
