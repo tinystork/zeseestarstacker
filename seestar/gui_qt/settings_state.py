@@ -359,6 +359,12 @@ class QtSettingsState:
         # (unknown, corrupt, or non-string) falls back to the platform default.
         if state.theme not in _SUPPORTED_THEMES:
             state.theme = "system"
+        # Canonical batch contract (Phase B2): the persisted settings file is a
+        # compatibility boundary.  The legacy Auto spelling -1 (any negative)
+        # must load as canonical Auto 0 — new code never generates -1, and a
+        # settings file written by an older build must not re-introduce it.
+        if state.batch_size < 0:
+            state.batch_size = 0
         return state
 
     def to_dict(self) -> Dict[str, Any]:
