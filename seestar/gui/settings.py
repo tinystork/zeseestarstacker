@@ -1840,7 +1840,6 @@ class SettingsManager:
                 "square",
                 "gaussian",
                 "point",
-                "tophat",
                 "turbo",
                 "lanczos2",
                 "lanczos3",

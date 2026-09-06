@@ -308,8 +308,13 @@ def _validate_drizzle_manifest_and_config(
     threshold = sci.get("drizzle_wht_threshold_effective")
     if scale not in (1.0, 2.0, 3.0, 4.0):
         return "Drizzle effective scale is not representable by this UI"
+    # UI-representable drizzle kernels == the drizzle 2.2.0 engine set ==
+    # ``seestar.core.drizzle_core.VALID_DRIZZLE_KERNELS`` (tophat is unsupported
+    # by the engine and never offered).  This module stays stdlib-only, so the
+    # set is duplicated here on purpose and pinned by
+    # ``tests/test_drizzle_kernel_list_consistency.py``.
     if kernel not in {
-        "square", "gaussian", "point", "tophat", "turbo", "lanczos2", "lanczos3"
+        "square", "gaussian", "point", "turbo", "lanczos2", "lanczos3"
     }:
         return "Drizzle effective kernel is not representable by this UI"
     if (

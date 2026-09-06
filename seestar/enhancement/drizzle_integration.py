@@ -198,7 +198,10 @@ class DrizzleProcessor:
 
         self.scale_factor = float(max(1.0, scale_factor))
         self.pixfrac = float(np.clip(pixfrac, 0.01, 1.0))
-        valid_kernels = ['square', 'gaussian', 'point', 'tophat', 'turbo', 'lanczos2', 'lanczos3']
+        # Kernel allowlist: must match the drizzle 2.2.0 engine set exactly
+        # (``seestar.core.drizzle_core.VALID_DRIZZLE_KERNELS``) — ``tophat`` is
+        # NOT supported by drizzle and is never accepted here.
+        valid_kernels = ('square', 'gaussian', 'point', 'turbo', 'lanczos2', 'lanczos3')
         self.kernel = kernel.lower() if kernel.lower() in valid_kernels else 'square'
         self.fillval = str(fillval) 
         self.final_wht_threshold = float(np.clip(final_wht_threshold, 0.0, 1.0))

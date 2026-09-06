@@ -303,9 +303,10 @@ def test_valid_kernel_set_matches_engine():
 
 
 def test_validate_kernel_tophat_gui_name_falls_back():
-    # The Qt/Tk GUI and settings still list "tophat", but drizzle 2.2.0 rejects
-    # it.  The runtime boundary must coerce it deterministically to "square"
-    # (never claim every GUI name is engine-supported).
+    # ``tophat`` is no longer offered by any GUI/settings list (drizzle 2.2.0
+    # rejects it), but a legacy persisted value or a future drift must still be
+    # coerced deterministically to "square" at the runtime boundary (never
+    # claim every name is engine-supported).
     kernel, reason = validate_drizzle_kernel("tophat")
     assert kernel == "square"
     assert reason is not None

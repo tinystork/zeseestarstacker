@@ -421,7 +421,8 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        qt="drizzle_kernel", backend="drizzle_kernel", legacy=("drizzle_kernel",)),
     _f("drizzle_kernel_effective", Section.SCIENTIFIC, KIND_STR,
        presence=PRESENCE_CHECKPOINT, fp=_FP_DRIZZLE,
-       doc="Runtime-effective kernel (tophat coerces to square)."),
+       doc="Runtime-effective kernel (unsupported/legacy values coerce to "
+           "square)."),
     _f("drizzle_pixfrac_requested", Section.SCIENTIFIC, KIND_FLOAT,
        qt="drizzle_pixfrac", backend="drizzle_pixfrac", legacy=("drizzle_pixfrac",)),
     _f("drizzle_pixfrac_effective", Section.SCIENTIFIC, KIND_FLOAT,

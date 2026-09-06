@@ -299,12 +299,12 @@ DRIZZLE_CONFIG kernel=<effective> pixfrac=<effective> scale=<effective> wht_thre
 For Lanczos, an adjacent bounded message records the requested -> effective
 explanation (pixfrac and threshold).
 
-**GUI-name caveat**: the Qt/Tk UI and settings still list `tophat`, but the
-underlying drizzle 2.2.0 engine **rejects** it.  `validate_drizzle_kernel` does
-not claim every GUI name is engine-supported: `tophat` (and any other
-GUI-only name) is deterministically coerced to `square` at the runtime
-boundary, with an explicit warning and test coverage.  The GUI list itself is
-out of scope for this corrective task.
+**GUI-name caveat (resolved in 8.3.0)**: no Qt/Tk UI or settings list offers
+`tophat` anymore — every user-facing kernel list matches the engine's
+`VALID_DRIZZLE_KERNELS`.  `validate_drizzle_kernel` still does not claim every
+name is engine-supported: a legacy/unknown kernel name is deterministically
+coerced to `square` at the runtime boundary, with an explicit warning and test
+coverage.
 
 ---
 
