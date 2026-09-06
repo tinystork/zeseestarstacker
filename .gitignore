@@ -64,3 +64,4 @@ dist/
 # === Phase A GPU profiling generated artifacts (raw evidence on disk; numbers mirrored in .a2a-reports) ===
 profiling/results_phaseA/
 profiling/results_phaseC/
+profiling/results_phaseD/
