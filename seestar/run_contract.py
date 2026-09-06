@@ -588,7 +588,8 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("gpu_execution", Section.EXECUTION, KIND_STR_OR_NONE,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
        doc="Execution outcome: 'used' | 'fallback' | 'not_eligible' | "
-           "'not_requested'."),
+           "'not_requested' | 'not_executed' (Drizzle direct-accumulation "
+           "runs bypass the Classic reducer entirely)."),
     _f("gpu_fallback_reason", Section.EXECUTION, KIND_STR_OR_NONE,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
        doc="Explicit reason when GPU was requested but not used "
@@ -612,6 +613,43 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        backend="save_as_float32", legacy=("save_final_as_float32",)),
     _f("preserve_linear_output", Section.EXECUTION, KIND_BOOL,
        qt="preserve_linear_output"),
+    # D3.6: output-serialization requested/effective evidence.  Requested
+    # tokens are captured at the RUN_REQUEST seam; effective tokens are
+    # recorded by ``_save_final_stack`` ONLY when the primary FITS write
+    # actually completed.  Diagnostics only: never fingerprinted, never
+    # settings/backend sourced, never restored.
+    _f("save_as_float32_requested", Section.EXECUTION, KIND_BOOL,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Requested final-FITS float32 mode (true=float32 / false=uint16), "
+           "captured at the accepted-run seam."),
+    _f("save_as_float32_effective", Section.EXECUTION, KIND_BOOL,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="float32 mode ACTUALLY used for the written final FITS (recorded "
+           "only after a successful write)."),
+    _f("preserve_linear_output_requested", Section.EXECUTION, KIND_BOOL,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Requested linear-output preservation (skip percentile "
+           "normalization), captured at the accepted-run seam."),
+    _f("preserve_linear_output_effective", Section.EXECUTION, KIND_BOOL,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Linear-output preservation ACTUALLY used by _save_final_stack "
+           "(explicit argument OR instance setting; recorded only after a "
+           "successful write)."),
+    _f("output_dtype_effective", Section.EXECUTION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Semantic dtype of the written final science: 'float32' | 'uint16' "
+           "(recorded only after a successful write)."),
+    _f("scientific_domain_before_serialization", Section.EXECUTION,
+       KIND_STR_OR_NONE, presence=PRESENCE_OPTIONAL, backend_mapped=False,
+       restore=False,
+       doc="Content domain of the data handed to the serializer: "
+           "'signed_float32' when linear output was preserved (negatives "
+           "kept) else 'clipped_nonnegative'."),
+    _f("scientific_domain_written", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Content domain as persisted: 'signed_float32'/'clipped_nonnegative' "
+           "for a float32 FITS, 'uint16' for the BZERO-shifted unsigned "
+           "representation."),
     _f("mosaic_mode_active", Section.EXECUTION, KIND_BOOL, qt="mosaic_mode_active",
        backend="is_mosaic_run"),
     _f("mosaic_settings", Section.EXECUTION, KIND_DICT, qt="mosaic_settings"),
