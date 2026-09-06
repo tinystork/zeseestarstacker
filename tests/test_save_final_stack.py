@@ -827,3 +827,148 @@ def test_m3_finalization_no_full_positive_wht_cube(tmp_path, monkeypatch):
     assert float(np.min(wht_data)) <= -0.4
     # allocation boundary: no full HWC float32 cube was ever stacked
     assert stacked_cubes == []
+
+
+# ---------------------------------------------------------------------------
+# D3.2: preserve_linear_output argument is HONORED (confirmed defect fix)
+# ---------------------------------------------------------------------------
+
+
+def test_save_final_stack_preserve_linear_argument_overrides_false_attribute(
+    tmp_path,
+):
+    """D3.2 regression: the explicit ``preserve_linear_output=True`` argument
+    used to be shadowed by the instance attribute (default ``False``), so the
+    three classic-reproject callers' intent -- keep the linear scientific
+    SUM/W data unnormalized -- was silently dropped.  The fix makes the
+    explicit argument FORCE preservation even when
+    ``self.preserve_linear_output=False``: negative linear values survive and
+    no percentile normalization is applied."""
+    obj = _make_obj(tmp_path, True)
+    obj.finalization_mode = qm.FINALIZATION_MODE_MOSAIC
+    obj.preserve_linear_output = False  # object setting says: do NOT preserve
+    data = np.array([[-5.0, 100.0], [40.0, 2.5]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_mosaic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+        preserve_linear_output=True,  # explicit argument must win
+    )
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.dtype.kind == "f" and saved.dtype.itemsize == 4
+    # Negative linear values preserved (no clip >= 0) and no percentile
+    # normalization collapsed the 100 ADU range to [0,1].
+    assert np.array_equal(saved.astype(np.float32), data)
+
+
+def test_save_final_stack_preserve_linear_attribute_honored_without_argument(
+    tmp_path,
+):
+    """D3.2 inverse: when the caller passes no explicit argument (or ``False``
+    -- no caller passes ``False`` to force non-preservation, audited), the
+    object-level setting still applies: the OR contract keeps preservation
+    active whenever either source asks for it."""
+    obj = _make_obj(tmp_path, True)
+    obj.finalization_mode = qm.FINALIZATION_MODE_MOSAIC
+    obj.preserve_linear_output = True
+    data = np.array([[-5.0, 100.0], [40.0, 2.5]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_mosaic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+        preserve_linear_output=False,  # explicit False must NOT force non-preserve
+    )
+    saved = fits.getdata(obj.final_stacked_path)
+    assert saved.dtype.kind == "f"
+    assert np.array_equal(saved.astype(np.float32), data)
+
+
+# ---------------------------------------------------------------------------
+# D3.6: output-serialization provenance recorded at finalization
+# ---------------------------------------------------------------------------
+
+
+def _bind_provenance_emitter(obj):
+    """Bind the durable provenance emitter onto a Dummy so SERIALIZATION_*
+    blocks can be asserted (module-level logger is used internally)."""
+    obj._provenance_line = qm.SeestarQueuedStacker._provenance_line
+    obj._emit_provenance_block = types.MethodType(
+        qm.SeestarQueuedStacker._emit_provenance_block, obj
+    )
+    return obj
+
+
+def test_save_final_stack_records_serialization_effective_float32_preserve(
+    tmp_path,
+):
+    obj = _make_obj(tmp_path, True)  # save_final_as_float32 = True
+    obj.finalization_mode = qm.FINALIZATION_MODE_MOSAIC
+    obj.preserve_linear_output = False  # forced by the explicit arg below
+    events = []
+    obj.update_progress = lambda message, progress=None, level=None: events.append(
+        str(message)
+    )
+    _bind_provenance_emitter(obj)
+    data = np.array([[-5.0, 100.0], [40.0, 2.5]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_mosaic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+        preserve_linear_output=True,
+    )
+    assert obj._serialization_effective == {
+        "save_as_float32_effective": True,
+        "preserve_linear_output_effective": True,
+        "output_dtype_effective": "float32",
+        "scientific_domain_before_serialization": "signed_float32",
+        "scientific_domain_written": "signed_float32",
+    }
+    ser_lines = [e for e in events if e.startswith("SERIALIZATION_EFFECTIVE ")]
+    assert len(ser_lines) == 1, events
+    line = ser_lines[0]
+    assert "save_as_float32_effective=true" in line
+    assert "preserve_linear_output_effective=true" in line
+    assert "output_dtype_effective=float32" in line
+    assert "scientific_domain_before_serialization=signed_float32" in line
+    assert "scientific_domain_written=signed_float32" in line
+
+
+def test_save_final_stack_records_serialization_effective_uint16_clipped(
+    tmp_path,
+):
+    obj = _make_obj(tmp_path, False)  # save_final_as_float32 = False -> uint16
+    obj.finalization_mode = qm.FINALIZATION_MODE_MOSAIC
+    obj.preserve_linear_output = False
+    events = []
+    obj.update_progress = lambda message, progress=None, level=None: events.append(
+        str(message)
+    )
+    _bind_provenance_emitter(obj)
+    data = np.array([[-5.0, 100.0], [40.0, 2.5]], dtype=np.float32)
+    wht = np.ones_like(data, dtype=np.float32)
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj,
+        output_filename_suffix="_mosaic_reproject",
+        drizzle_final_sci_data=data,
+        drizzle_final_wht_data=wht,
+    )
+    assert obj._serialization_effective == {
+        "save_as_float32_effective": False,
+        "preserve_linear_output_effective": False,
+        "output_dtype_effective": "uint16",
+        "scientific_domain_before_serialization": "clipped_nonnegative",
+        "scientific_domain_written": "uint16",
+    }
+    ser_lines = [e for e in events if e.startswith("SERIALIZATION_EFFECTIVE ")]
+    assert len(ser_lines) == 1, events
+    line = ser_lines[0]
+    assert "save_as_float32_effective=false" in line
+    assert "output_dtype_effective=uint16" in line
+    assert "scientific_domain_before_serialization=clipped_nonnegative" in line
+    assert "scientific_domain_written=uint16" in line

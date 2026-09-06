@@ -63,6 +63,8 @@ def _run_lifecycle(
     stacking_mode="kappa-sigma",
     request_gpu=False,
     gpu_caps=None,
+    save_as_float32=False,
+    preserve_linear_output=False,
 ):
     """Run the real start_processing lifecycle to the worker seam.
 
@@ -104,6 +106,8 @@ def _run_lifecycle(
         move_stacked=False,
         reproject_between_batches=False,
         reproject_coadd_final=False,
+        save_as_float32=bool(save_as_float32),
+        preserve_linear_output=bool(preserve_linear_output),
     )
     if stacker.processing_thread is not None:
         stacker.processing_thread.join(timeout=10)

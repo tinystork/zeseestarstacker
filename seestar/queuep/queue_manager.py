@@ -17189,6 +17189,11 @@ class SeestarQueuedStacker:
             Si ``True``, saute la normalisation par percentiles et conserve la
             dynamique linéaire de ``final_image_initial_raw``.
 
+            D3.2: l'argument explicite est désormais HONORÉ (auparavant masqué
+            par l'attribut d'instance ``self.preserve_linear_output``).
+            L'argument ``True`` force la préservation; l'argument absent ou
+            ``False`` retombe sur l'attribut d'instance.
+
         Version: V_SaveFinal_CorrectedDataFlow_1
         """
         logger.debug("\n" + "=" * 80)
@@ -17207,7 +17212,17 @@ class SeestarQueuedStacker:
         )
 
         save_as_float32_setting = getattr(self, "save_final_as_float32", False)
-        preserve_linear_output_setting = getattr(self, "preserve_linear_output", False)
+        # D3.2 (confirmed defect): the explicit ``preserve_linear_output``
+        # argument was never read - the effective setting only looked at the
+        # instance attribute, silently dropping the intent of the three
+        # classic-reproject callers that pass ``preserve_linear_output=True``
+        # (which MUST keep the linear scientific SUM/W data unnormalized).
+        # Contract: the explicit argument FORCES preservation; otherwise the
+        # object-level setting applies.  No caller passes ``False`` explicitly
+        # (audited at fix time), so the OR is unambiguous.
+        preserve_linear_output_setting = bool(preserve_linear_output) or bool(
+            getattr(self, "preserve_linear_output", False)
+        )
         # Retro-compatibilité : certaines versions utilisaient le nom
         # `preserve_linear_output_flag`. On crée un alias pour éviter
         # un NameError si d'anciens appels ou du code externe s'y réfèrent.
@@ -18228,6 +18243,38 @@ class SeestarQueuedStacker:
             path=os.path.basename(fits_path),
         )
 
+        # D3.6: record the output-serialization evidence ACTUALLY used -- but
+        # only when the primary FITS write genuinely completed (never claim a
+        # dtype/domain that was not written).  Stored on the instance so any
+        # later run_config.cfg assembly carries it, and emitted as a durable
+        # provenance block in the run log (same channel as RUN_EFFECTIVE).
+        # Fail-open: provenance must never break an otherwise-successful save.
+        if fits_write_success:
+            float32_eff = bool(save_as_float32_setting)
+            preserve_eff = bool(preserve_linear_output_setting)
+            domain_before = (
+                "signed_float32" if preserve_eff else "clipped_nonnegative"
+            )
+            serialization_effective = {
+                "save_as_float32_effective": float32_eff,
+                "preserve_linear_output_effective": preserve_eff,
+                "output_dtype_effective": "float32" if float32_eff else "uint16",
+                "scientific_domain_before_serialization": domain_before,
+                "scientific_domain_written": (
+                    domain_before if float32_eff else "uint16"
+                ),
+            }
+            try:
+                self._serialization_effective = dict(serialization_effective)
+            except Exception:
+                pass
+            try:
+                self._emit_provenance_block(
+                    "SERIALIZATION_EFFECTIVE", serialization_effective
+                )
+            except Exception:
+                pass
+
         # M3 DPIC-01 (R1.5): companion WHT FITS product (fail-open).  Written
         # ONLY when ``save_drizzle_wht`` is explicitly enabled (ZSSS-OPTIONAL-
         # WHT-01; default False) AND after the primary FITS write succeeded,
@@ -19018,18 +19065,29 @@ class SeestarQueuedStacker:
         self._run_prov_requested = dict(tokens)
         self._emit_provenance_block("RUN_REQUEST", tokens)
 
-    def _stacking_mode_effective(self) -> str:
-        """Canonical stacking/rejection key the dispatcher actually executes.
-
-        Any GUI alias spelling is folded to one canonical key
-        (``winsorized_sigma_clip`` / ``kappa_sigma`` / ``linear_fit_clip`` /
-        ``median`` / ``mean``), matching the dispatch helpers.
+    def _drizzle_direct_accumulation_active(self) -> bool:
+        """True when this run's per-frame scientific combination bypasses the
+        Classic rejection reducers entirely (Drizzle direct accumulation: every
+        frame goes straight to ``DrizzleAccumulator.add()`` via
+        ``_add_frame_to_drizzle_accumulators`` -- no winsorized/kappa-sigma/
+        median/mean reducer runs).  Matches the worker's actual execution
+        branch (``drizzle_active_session``) and ``_decide_finalization_mode``
+        (the single source of truth for one mode == one accumulation
+        strategy).  Mosaic runs set ``drizzle_active_session`` too, so they
+        are covered by the same flag.
         """
-        mode = str(
-            getattr(self, "stacking_mode", "")
-            or getattr(self, "stack_reject_algo", "")
-            or ""
+        return bool(getattr(self, "drizzle_active_session", False)) or (
+            getattr(self, "finalization_mode", None) == FINALIZATION_MODE_DRIZZLE
         )
+
+    @staticmethod
+    def _canonical_stacking_reducer_key(mode) -> str:
+        """Fold a requested stacking-mode spelling to the canonical Classic
+        reducer key (``winsorized_sigma_clip`` / ``kappa_sigma`` /
+        ``linear_fit_clip`` / ``median`` / ``mean``), matching the dispatch
+        helpers.  Any GUI alias spelling is canonicalized here.
+        """
+        mode = str(mode or "")
         if _is_winsorized_mode(mode):
             return "winsorized_sigma_clip"
         if _is_linear_fit_clip_mode(mode):
@@ -19040,6 +19098,30 @@ class SeestarQueuedStacker:
         if key in ("median", "kappa_sigma", "linear_fit_clip"):
             return key
         return key or "mean"
+
+    def _stacking_mode_effective(self) -> str:
+        """Canonical stacking/rejection key the run ACTUALLY executes.
+
+        Execution-aware (D1.3): when the run is a Drizzle direct accumulation
+        (``drizzle_active_session`` / ``FINALIZATION_MODE_DRIZZLE``) the
+        requested Classic reducer is never dispatched -- frames are deposited
+        straight into the Drizzle accumulators with no rejection and no
+        Classic reducer.  The effective stacking semantics are then reported
+        as ``drizzle_direct_accumulation`` (with the explicit
+        ``stacking_mode_substitution_reason=classic_reducer_not_used_by_drizzle_path``
+        token attached by the callers).  On the Classic path the requested
+        GUI alias spelling is folded to one canonical reducer key
+        (``winsorized_sigma_clip`` / ``kappa_sigma`` / ``linear_fit_clip`` /
+        ``median`` / ``mean``), matching the dispatch helpers.
+        """
+        if self._drizzle_direct_accumulation_active():
+            return "drizzle_direct_accumulation"
+        mode = str(
+            getattr(self, "stacking_mode", "")
+            or getattr(self, "stack_reject_algo", "")
+            or ""
+        )
+        return self._canonical_stacking_reducer_key(mode)
 
     def _reference_requested_policy(self, reference_path_ui) -> Optional[str]:
         """Requested reference policy token (user/zeanalyser/auto/resume)."""
@@ -19064,6 +19146,14 @@ class SeestarQueuedStacker:
 
         # Stacking / normalisation / weighting family.
         eff["stacking_mode_effective"] = self._stacking_mode_effective()
+        # D1.3: a Drizzle direct-accumulation run never dispatches the
+        # requested Classic reducer, so ``stacking_mode_effective`` reports
+        # ``drizzle_direct_accumulation``; attach the explicit substitution
+        # reason instead of ever claiming the Classic reducer ran.
+        if self._drizzle_direct_accumulation_active():
+            eff["stacking_mode_substitution_reason"] = (
+                "classic_reducer_not_used_by_drizzle_path"
+            )
         eff["normalization_effective"] = str(
             getattr(self, "normalize_method", "none") or "none"
         )
@@ -19197,13 +19287,17 @@ class SeestarQueuedStacker:
         """Emit GPU_DECISION when GPU was requested (A3).
 
         ``requested=true operation=<op> effective_backend=<cpu|cupy>
-        execution=<used|fallback|not_eligible> fallback_reason=<reason|none>``
+        execution=<used|fallback|not_eligible|not_executed>
+        fallback_reason=<reason|none>``
         The operation is the run's stacking reduction family: kappa-sigma /
         linear-fit-clip / median / winsorized-sigma-clip now all have GPU
         reducers (winsorized landed in M3, dispatched in B7); ``used`` is
         reported when the resolved backend is cupy (per-batch VRAM rejections
         during ``_stack_batch`` additionally emit their own throttled durable
         fallback warning with the real reason), ``fallback`` otherwise.
+        D1.4: on a Drizzle direct-accumulation run the Classic stacking
+        reducer never executes, so the decision is ``not_executed`` with
+        ``fallback_reason=reducer_bypassed_by_drizzle_path`` (never ``used``).
         """
         if not getattr(self, "request_gpu", False):
             return
@@ -19212,6 +19306,34 @@ class SeestarQueuedStacker:
         caps = getattr(self, "_gpu_caps", lambda: None)()
         stacking_key = self._stacking_mode_effective()
         operation = f"stacking_reduction:{stacking_key}"
+        # D1.4: in a Drizzle direct-accumulation run the Classic stacking
+        # reducer is never executed (frames go straight to the Drizzle
+        # accumulators), so NO Classic GPU reducer can have been ``used`` --
+        # whatever the resolved backend says.  The requested operation is
+        # reported as ``not_executed`` with the explicit bypass reason.  The
+        # operation keeps the REQUESTED Classic reducer key (from the
+        # RUN_REQUEST snapshot) so the record states what was requested but
+        # not run; ``stacking_mode_effective`` in the same RUN_EFFECTIVE
+        # block carries the truthful ``drizzle_direct_accumulation``.
+        if self._drizzle_direct_accumulation_active():
+            requested_tokens = getattr(self, "_run_prov_requested", {}) or {}
+            req_mode = requested_tokens.get("stacking_mode_requested")
+            if req_mode is not None:
+                operation = (
+                    "stacking_reduction:"
+                    + self._canonical_stacking_reducer_key(req_mode)
+                )
+            self._emit_provenance_block(
+                "GPU_DECISION",
+                {
+                    "requested": True,
+                    "operation": operation,
+                    "effective_backend": effective_backend,
+                    "execution": "not_executed",
+                    "fallback_reason": "reducer_bypassed_by_drizzle_path",
+                },
+            )
+            return
         gpu_capable = stacking_key in (
             "kappa_sigma",
             "linear_fit_clip",
@@ -19276,6 +19398,19 @@ class SeestarQueuedStacker:
             return {}
         out: dict = {}
         requested = self._run_prov_requested or {}
+        # D3.6: output serialization requested tokens (captured at the
+        # RUN_REQUEST seam) are deterministic for the same run and therefore
+        # safe for every cfg write (fresh + resume).
+        for key in ("save_as_float32_requested", "preserve_linear_output_requested"):
+            if requested.get(key) is not None:
+                out[key] = bool(requested[key])
+        # D3.6: finalization-time serialization evidence.  Recorded by
+        # ``_save_final_stack`` only when the primary FITS write genuinely
+        # completed; absent here before finalization so the deterministic
+        # mid-run cfg writes never change digest.
+        ser_eff = getattr(self, "_serialization_effective", None)
+        if ser_eff:
+            out.update({k: v for k, v in ser_eff.items() if v is not None})
         batch_req = requested.get("batch_size_requested")
         if batch_req is not None:
             out["batch_size_requested"] = str(batch_req)
@@ -19317,6 +19452,14 @@ class SeestarQueuedStacker:
         stacking_key = self._stacking_mode_effective()
         if stacking_key:
             out["stacking_mode_effective"] = stacking_key
+        # D1.3 mirror: when the run is a Drizzle direct accumulation the
+        # Classic reducer never executes; record the substitution reason so a
+        # cfg consumer never mistakes ``drizzle_direct_accumulation`` for a
+        # Classic reducer that ran.
+        if self._drizzle_direct_accumulation_active():
+            out["stacking_mode_substitution_reason"] = (
+                "classic_reducer_not_used_by_drizzle_path"
+            )
         out["normalize_method_effective"] = str(
             getattr(self, "normalize_method", "none") or "none"
         )
@@ -19344,6 +19487,11 @@ class SeestarQueuedStacker:
             out["gpu_operation"] = f"stacking_reduction:{stacking_key2}"
             if not gpu_requested:
                 out["gpu_execution"] = "not_requested"
+            elif self._drizzle_direct_accumulation_active():
+                # D1.4 mirror: no Classic GPU reducer can be ``used`` when the
+                # Drizzle path bypasses the Classic reducers entirely.
+                out["gpu_execution"] = "not_executed"
+                out["gpu_fallback_reason"] = "reducer_bypassed_by_drizzle_path"
             elif stacking_key2 not in (
                 "kappa_sigma", "linear_fit_clip", "median",
                 "winsorized_sigma_clip",
@@ -19671,6 +19819,9 @@ class SeestarQueuedStacker:
         # configured) reflects this session's classic settings.
         self._run_config_canonical = None
         self._run_config_canonical_fingerprint = None
+        # D3.6: a new Start attempt must never reuse the previous attempt's
+        # finalization-time serialization evidence.
+        self._serialization_effective = None
         if hasattr(self, "aligner") and self.aligner is not None:
             self.aligner.stop_processing = False
         else:
@@ -20176,6 +20327,10 @@ class SeestarQueuedStacker:
             winsor_requested=_prov_token(winsor_limits),
             batch_size_requested=_batch_requested_token(batch_size),
             gpu_requested=bool(getattr(self, "request_gpu", False)),
+            # D3.6: requested output-serialization tokens (effective values
+            # are recorded at finalization by ``_save_final_stack``).
+            save_as_float32_requested=bool(save_as_float32),
+            preserve_linear_output_requested=bool(preserve_linear_output),
             drizzle_requested=bool(use_drizzle),
             drizzle_kernel_requested=drizzle_kernel,
             drizzle_scale_requested=drizzle_scale,
