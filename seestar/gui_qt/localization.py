@@ -69,6 +69,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Not applied in Drizzle mode \u2014 Drizzle uses direct accumulation (no stacking/rejection algorithm)",
         "fr": "Non appliqu\u00e9 en mode Drizzle \u2014 le Drizzle utilise l'accumulation directe (aucun algorithme d'empilement/rejet)",
     },
+    "save_as_float32_signed_lanczos_tooltip": {
+        "en": "Held on: signed Lanczos SCI requires float32 (uint16 would silently clip the negative ringing)",
+        "fr": "Maintenue activ\u00e9e : le SCI Lanczos sign\u00e9 requiert float32 (uint16 clipperait silencieusement le ringing n\u00e9gatif)",
+    },
     "final_combine": {"en": "Final combine", "fr": "Combinaison finale"},
     "drizzle_mode": {"en": "Drizzle mode", "fr": "Mode drizzle"},
     "drizzle_group_size": {

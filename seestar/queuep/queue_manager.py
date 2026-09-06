@@ -487,6 +487,60 @@ _FINALIZATION_MODES = frozenset(
 )
 
 
+def _resolve_signed_lanczos_float32_reason(obj, finalization_mode=None) -> Optional[str]:
+    """D4 deterministic run-start float32-canonicalization reason (duck-safe).
+
+    Returns ``"signed_lanczos_requires_float32"`` when the science that
+    ``_save_final_stack`` serializes was produced by a signed Lanczos drizzle
+    kernel (``lanczos2`` / ``lanczos3``) while the caller requested uint16
+    (``save_final_as_float32`` False) — i.e. when the engine FORCES the final
+    FITS to float32 (a uint16 export would silently clip the legitimate
+    negative Lanczos ringing; never a silent scientific downgrade).  Returns
+    ``None`` when no force applies: the caller already requested float32, the
+    effective kernel is a positive kernel (square/gaussian/point/turbo), the
+    finalization is a Classic mode (the drizzle kernel never ran on that
+    science), or no drizzle deposition is active.
+
+    Single source of truth shared by ``_save_final_stack`` (which must stay
+    duck-compatible with the lightweight test harnesses that bind the real
+    method), ``SeestarQueuedStacker._signed_lanczos_forced_float32_reason`` and
+    the ``RUN_EFFECTIVE`` mirror.  The resolution reads ONLY session-level
+    state that is byte-identical at run start (RUN_EFFECTIVE emission, canonical
+    cfg construction) and at finalization, so the effective dtype is a
+    deterministic run-start fact, never a post-finalization surprise.
+    ``finalization_mode`` may be passed explicitly by callers that already
+    resolved the mode; when omitted the instance mode applies, falling back to
+    the session drizzle flag before ``initialize`` decided the accumulation
+    mode.
+    """
+    if bool(getattr(obj, "save_final_as_float32", False)):
+        return None
+    fmode = finalization_mode
+    if fmode is None:
+        fmode = getattr(obj, "finalization_mode", None)
+    if fmode is not None and fmode not in (
+        FINALIZATION_MODE_DRIZZLE,
+        FINALIZATION_MODE_MOSAIC,
+    ):
+        # Classic finalization: the drizzle kernel never ran on this science,
+        # so no Lanczos ringing exists to protect.
+        return None
+    if fmode is None and not bool(getattr(obj, "drizzle_active_session", False)):
+        return None
+    # Kernel resolution mirrors ``_run_provenance_effective`` exactly so
+    # RUN_EFFECTIVE and the save-time guard cannot drift: mosaic sessions
+    # deposit with the per-mosaic kernel, standard sessions with the global
+    # drizzle kernel (already canonicalized at run start).
+    if getattr(obj, "is_mosaic_run", False):
+        mosaic = getattr(obj, "mosaic_settings_dict", None) or {}
+        kernel_eff = str(mosaic.get("kernel", "square") or "square")
+    else:
+        kernel_eff = str(getattr(obj, "drizzle_kernel", "square") or "square")
+    if kernel_eff in LANCZOS_KERNELS:
+        return "signed_lanczos_requires_float32"
+    return None
+
+
 def _bounded_traceback(limit: int = 3, max_len: int = 2000) -> str:
     """Return a bounded, single-line traceback string (best-effort, never raises).
 
@@ -17216,7 +17270,20 @@ class SeestarQueuedStacker:
             self
         )
 
-        save_as_float32_setting = getattr(self, "save_final_as_float32", False)
+        # D4: ``save_as_float32_requested`` keeps exactly what the caller asked
+        # (Qt/CLI/legacy — every path reaches this method).  The signed Lanczos
+        # drizzle kernels (lanczos2/lanczos3) legitimately produce negative
+        # ringing, which the uint16 export would silently clip, so the effective
+        # dtype is a deterministic RUN-START fact: float32 whenever the science
+        # being serialized was produced by a signed Lanczos kernel.  The force
+        # is applied below, right after the finalization mode is resolved (the
+        # same deterministic place the kernel is known); ``requested`` is never
+        # mutated and is recorded truthfully in the provenance tokens.
+        save_as_float32_requested = bool(
+            getattr(self, "save_final_as_float32", False)
+        )
+        save_as_float32_setting = save_as_float32_requested
+        save_as_float32_forced_reason: Optional[str] = None
         # D3.2 (confirmed defect): the explicit ``preserve_linear_output``
         # argument was never read - the effective setting only looked at the
         # instance attribute, silently dropping the intent of the three
@@ -17233,10 +17300,10 @@ class SeestarQueuedStacker:
         # un NameError si d'anciens appels ou du code externe s'y réfèrent.
         preserve_linear_output_flag = preserve_linear_output_setting
         self.update_progress(
-            f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}"
+            f"  DEBUG QM: Option de sauvegarde FITS demandée (self.save_final_as_float32): {save_as_float32_requested}"
         )
         logger.debug(
-            f"  DEBUG QM: Option de sauvegarde FITS effective (self.save_final_as_float32): {save_as_float32_setting}"
+            f"  DEBUG QM: Option de sauvegarde FITS demandée (self.save_final_as_float32): {save_as_float32_requested}"
         )
         logger.debug(
             f"  DEBUG QM: preserve_linear_output active?: {preserve_linear_output_setting}"
@@ -17270,6 +17337,36 @@ class SeestarQueuedStacker:
         is_classic_stacking_mode = (
             finalization_mode == FINALIZATION_MODE_CLASSIC_SUMW
         )
+
+        # D4 engine guard (no silent scientific downgrade): when the science
+        # being serialized was produced by a signed Lanczos drizzle kernel and
+        # the caller requested uint16, FORCE the effective dtype to float32 so
+        # the legitimate negative ringing survives (never clipped).  The
+        # canonicalization is recorded with the visible reason below and in the
+        # post-write SERIALIZATION_EFFECTIVE block; ``save_as_float32_requested``
+        # (what the caller asked) stays untouched.  Deterministic: the kernel is
+        # resolved at run start, so this is a run-start fact, not a surprise.
+        # The module-level resolver keeps the guard duck-compatible with the
+        # lightweight test harnesses that bind the real ``_save_final_stack``.
+        if not save_as_float32_setting:
+            _forced_reason = _resolve_signed_lanczos_float32_reason(
+                self, finalization_mode=finalization_mode
+            )
+            if _forced_reason is not None:
+                save_as_float32_setting = True
+                save_as_float32_forced_reason = _forced_reason
+                self.update_progress(
+                    f"  D4 guard: sauvegarde FITS finale FORCÉE en float32 "
+                    f"({_forced_reason}) — l'export uint16 demandé clipperait "
+                    f"silencieusement la science Lanczos signée (ringing négatif)."
+                )
+                logger.debug(
+                    "D4 guard: final FITS save forced to float32 (%s): a "
+                    "requested uint16 export would silently clip the signed "
+                    "Lanczos science (negative ringing). requested=%s",
+                    _forced_reason,
+                    save_as_float32_requested,
+                )
 
         # Validation du CONTRAT DE DONNÉES par mode (jamais de fallback) :
         # les modes qui finalisent depuis un résultat SCI/WHT exigent ces
@@ -18314,6 +18411,14 @@ class SeestarQueuedStacker:
                 "scientific_domain_before_serialization": domain_before,
                 "scientific_domain_written": domain_written,
             }
+            # D4: when the signed-Lanczos guard forced float32 over a requested
+            # uint16 export, record the explicit canonicalization reason so the
+            # divergence is never silent (visible in the run log and carried by
+            # the later run_config.cfg assembly).
+            if save_as_float32_forced_reason:
+                serialization_effective["save_as_float32_reason"] = (
+                    save_as_float32_forced_reason
+                )
             try:
                 self._serialization_effective = dict(serialization_effective)
             except Exception:
@@ -19130,6 +19235,17 @@ class SeestarQueuedStacker:
             getattr(self, "finalization_mode", None) == FINALIZATION_MODE_DRIZZLE
         )
 
+    def _signed_lanczos_forced_float32_reason(
+        self, finalization_mode=None
+    ) -> Optional[str]:
+        """D4 deterministic run-start float32-canonicalization reason.
+
+        Instance-facing wrapper over :func:`_resolve_signed_lanczos_float32_reason`
+        (single source of truth shared with ``_save_final_stack``, which must
+        stay duck-compatible with lightweight test harnesses).
+        """
+        return _resolve_signed_lanczos_float32_reason(self, finalization_mode)
+
     @staticmethod
     def _canonical_stacking_reducer_key(mode) -> str:
         """Fold a requested stacking-mode spelling to the canonical Classic
@@ -19273,6 +19389,16 @@ class SeestarQueuedStacker:
             eff["drizzle_scale_effective"] = "none"
             eff["drizzle_pixfrac_effective"] = "none"
             eff["drizzle_wht_threshold_effective"] = "none"
+
+        # D4: the final-FITS dtype is a deterministic RUN-START fact.  When a
+        # signed Lanczos drizzle kernel forces float32 over a requested uint16
+        # export, RUN_EFFECTIVE records the divergence (requested stays in the
+        # RUN_REQUEST block) with the explicit canonicalization reason — never
+        # a silent scientific downgrade.
+        s32_forced_reason = self._signed_lanczos_forced_float32_reason()
+        if s32_forced_reason is not None:
+            eff["save_as_float32_effective"] = True
+            eff["save_as_float32_reason"] = s32_forced_reason
 
         # Batch size: requested semantics vs executed concrete value.
         batch_requested = requested.get("batch_size_requested")
@@ -20053,6 +20179,13 @@ class SeestarQueuedStacker:
         self.is_mosaic_run = is_mosaic_run
         self.drizzle_active_session = use_drizzle or self.is_mosaic_run
         self.drizzle_mode = str(drizzle_mode)
+        # D4: the RAW drizzle-kernel request spelling is captured here, at the
+        # accepted-run seam (before any Lanczos / unsupported-kernel
+        # canonicalization in ``initialize``), so the canonical drizzle
+        # run_config.cfg can record ``drizzle_kernel_requested`` as a
+        # deterministic run-start fact while ``self.drizzle_kernel`` later
+        # holds the validated effective kernel.
+        self._drizzle_kernel_requested = str(drizzle_kernel or "square")
         self.drizzle_group_size = _coerce_drizzle_group_size(drizzle_group_size)
         logger.debug(
             f"    [Drizzle Group Size] self.drizzle_group_size = {self.drizzle_group_size}"

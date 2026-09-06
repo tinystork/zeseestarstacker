@@ -2682,6 +2682,41 @@ class MainWindow(QMainWindow):
         self.drizzle_kernel_combo.setEnabled(drizzle)
         self.drizzle_pixfrac_spin.setEnabled(drizzle)
 
+        # D4: signed-Lanczos float32 hold.  The signed Lanczos kernels
+        # (lanczos2/lanczos3) legitimately produce negative ringing that a
+        # uint16 export would silently clip, so while Drizzle is effectively
+        # enabled AND a signed Lanczos kernel is selected the "Save final as
+        # float32" checkbox is auto-checked and HELD (disabled) with a
+        # localized tooltip; switching back to a non-signed kernel
+        # (square/gaussian/point/turbo) re-enables the checkbox and restores
+        # the previously-persisted value (normal user control).  Only the
+        # checked/disabled state + tooltip are driven by the kernel: the
+        # transmitted value always matches what the engine will write (the
+        # engine independently re-forces float32 for any Qt/CLI/legacy caller
+        # that still requests uint16 under a signed Lanczos kernel).
+        save32 = self._settings_widgets.get("save_final_as_float32")
+        if save32 is not None:
+            hold = drizzle and signed_wht
+            if hold:
+                if not getattr(self, "_save32_hold_active", False):
+                    self._save32_hold_prior = bool(save32.isChecked())
+                    self._save32_hold_active = True
+                if not save32.isChecked():
+                    save32.setChecked(True)
+                save32.setEnabled(False)
+                save32.setToolTip(
+                    self._tr("save_as_float32_signed_lanczos_tooltip")
+                )
+            else:
+                if getattr(self, "_save32_hold_active", False):
+                    save32.setChecked(
+                        bool(getattr(self, "_save32_hold_prior", False))
+                    )
+                    self._save32_hold_active = False
+                    self._save32_hold_prior = None
+                save32.setEnabled(True)
+                save32.setToolTip("")
+
     def _toggle_kappa_visibility(self, *_ignored) -> None:
         """Show/hide the Kappa Low/High + Winsor-Limits widgets (Tk parity, M17).
 

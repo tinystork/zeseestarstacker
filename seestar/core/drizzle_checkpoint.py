@@ -151,7 +151,11 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from seestar import run_contract
-from seestar.core.drizzle_core import DrizzleAccumulator, VALID_DRIZZLE_KERNELS
+from seestar.core.drizzle_core import (
+    DrizzleAccumulator,
+    LANCZOS_KERNELS,
+    VALID_DRIZZLE_KERNELS,
+)
 
 __all__ = [
     "DrizzleCheckpointError",
@@ -529,6 +533,59 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         "drizzle_group_size": int(getattr(qm, "drizzle_group_size", 50) or 50),
     }
     provenance = {"drizzle_lib_version": _drizzle_lib_version()}
+    # ------------------------------------------------------------------
+    # D4: deterministic RUN-START facts for the canonical run_config.cfg.
+    # The canonical cfg is built once per run (checkpoint-init time) and must
+    # never change digest across a resume, so every token below derives ONLY
+    # from session state that is byte-identical at original-run time and at
+    # resume-validation time (``drizzle_active_session``, the requested/effective
+    # drizzle kernel, ``save_final_as_float32``) — never from mutable
+    # finalization-time state.  Duck-typed harness objects without a drizzle
+    # session keep their historical byte-identical cfgs (no token added).
+    if bool(getattr(qm, "drizzle_active_session", False)) and not bool(
+        getattr(qm, "is_mosaic_run", False)
+    ):
+        # The standard Drizzle path bypasses the Classic reducers entirely
+        # (direct accumulation, no rejection): record the execution-aware
+        # stacking semantics + the explicit substitution reason (D1.3 mirror).
+        scientific["stacking_mode_effective"] = "drizzle_direct_accumulation"
+        scientific["stacking_mode_substitution_reason"] = (
+            "classic_reducer_not_used_by_drizzle_path"
+        )
+        # Requested vs effective drizzle kernel (the effective kernel is
+        # already canonicalized by ``initialize`` / the read-only preflight
+        # before the writer is constructed; an invalid request spelling is
+        # therefore visible as requested != effective).
+        effective_kernel = str(
+            getattr(qm, "drizzle_kernel", "square") or "square"
+        )
+        scientific["drizzle_kernel_requested"] = str(
+            getattr(qm, "_drizzle_kernel_requested", None)
+            or effective_kernel
+        )
+        # D4 float32 canonicalization: a signed Lanczos kernel (lanczos2 /
+        # lanczos3) legitimately produces negative ringing that a requested
+        # uint16 export would silently clip, so the effective save dtype is a
+        # deterministic RUN-START fact: float32 whenever the effective kernel
+        # is signed Lanczos, whatever the caller requested.  ``requested``
+        # keeps what the caller asked; ``effective`` is what the engine will
+        # write; the explicit reason makes the canonicalization visible.
+        save_requested = bool(getattr(qm, "save_final_as_float32", False))
+        force_reason = (
+            None
+            if save_requested
+            else (
+                "signed_lanczos_requires_float32"
+                if effective_kernel in LANCZOS_KERNELS
+                else None
+            )
+        )
+        execution["save_as_float32_requested"] = save_requested
+        execution["save_as_float32_effective"] = (
+            save_requested or force_reason is not None
+        )
+        if force_reason:
+            execution["save_as_float32_reason"] = force_reason
     return run_contract.RunConfig.from_sections(
         product_version=product_version,
         scientific=scientific,

@@ -550,6 +550,13 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
        doc="Canonical stacking/rejection key actually dispatched "
            "(e.g. 'winsorized_sigma_clip' for any GUI alias spelling)."),
+    _f("stacking_mode_substitution_reason", Section.SCIENTIFIC, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Explicit reason when ``stacking_mode_effective`` is NOT the "
+           "requested reducer: on a Drizzle direct-accumulation run the "
+           "Classic reducer never executes, so the canonical cfg records "
+           "'classic_reducer_not_used_by_drizzle_path' next to "
+           "``drizzle_direct_accumulation`` (D1.3/D4 run-start fact)."),
     _f("use_quality_weighting_effective", Section.SCIENTIFIC, KIND_BOOL,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
        doc="Derived quality-weighting flag actually used (requested flag OR "
@@ -624,8 +631,17 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
            "captured at the accepted-run seam."),
     _f("save_as_float32_effective", Section.EXECUTION, KIND_BOOL,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
-       doc="float32 mode ACTUALLY used for the written final FITS (recorded "
-           "only after a successful write)."),
+       doc="float32 mode ACTUALLY used for the written final FITS.  Since D4 "
+           "this is a deterministic RUN-START fact for the canonical Drizzle "
+           "cfg (a signed Lanczos kernel forces float32 whatever the caller "
+           "requested); the post-write SERIALIZATION_EFFECTIVE record keeps "
+           "confirming the write evidence."),
+    _f("save_as_float32_reason", Section.EXECUTION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Explicit canonicalization reason when ``save_as_float32_effective`` "
+           "differs from the request: 'signed_lanczos_requires_float32' when a "
+           "signed Lanczos drizzle kernel forces float32 over a requested "
+           "uint16 export (never a silent downgrade, D4)."),
     _f("preserve_linear_output_requested", Section.EXECUTION, KIND_BOOL,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
        doc="Requested linear-output preservation (skip percentile "
