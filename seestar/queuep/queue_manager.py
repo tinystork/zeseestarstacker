@@ -17175,6 +17175,11 @@ class SeestarQueuedStacker:
         - self.last_saved_data_for_preview (pour GUI) est maintenant l'image normalisée [0,1] SANS stretch cosmétique du backend.
         - save_preview_image (pour PNG) est appelé avec apply_stretch=True sur ces données [0,1].
         - La sauvegarde FITS reste basée sur self.raw_adu_data_for_ui_histogram (si float32) ou les données cosmétiques [0,1] (si uint16).
+        - D3.5: la sauvegarde FITS float32 (scientifique) préserve le domaine
+          SIGNÉ (les valeurs négatives légitimes des noyaux Drizzle Lanczos2/3
+          ne sont jamais clipées) indépendamment de preserve_linear_output, qui
+          ne gouverne plus que la normalisation d'AFFICHAGE (percentiles) et le
+          chemin d'export uint16 non négatif.
         Parameters
         ----------
         output_filename_suffix : str, optional
@@ -17667,13 +17672,23 @@ class SeestarQueuedStacker:
                         pass
 
         final_image_initial_raw = final_image_initial_raw.astype(np.float32)
-        if not preserve_linear_output_setting:
-            final_image_initial_raw = np.clip(final_image_initial_raw, 0.0, None)
+        # D3.5 (domain conflation fix): ``final_image_initial_raw`` is the
+        # SCIENTIFIC carrier and keeps its SIGNED domain from here on.
+        # Negative values are legitimate science for the Lanczos2/3 Drizzle
+        # kernels (kernel-ringing undershoot: witness min ~ -166 / ~ -405.7)
+        # and must survive into the float32 FITS serialization REGARDLESS of
+        # ``preserve_linear_output`` (which only governs the DISPLAY
+        # normalization).  The old unconditional ``np.clip(..., 0.0, None)``
+        # here destroyed that signed science before the FITS write.  The
+        # >= 0 clip is a DISPLAY/EXPORT-domain operation and is now applied
+        # only where that domain actually consumes the data (the percentile
+        # display normalization below and the uint16 export path), never to
+        # the scientific float32 serialization.
         self.update_progress(
-            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+            f"    DEBUG QM: final_image_initial_raw scientifique SIGNÉ (clip display différé) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
         )
         logger.debug(
-            f"    DEBUG QM: Après clip >=0 des valeurs négatives, final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
+            f"    DEBUG QM: final_image_initial_raw scientifique SIGNÉ (clip display différé) - Range: [{np.nanmin(final_image_initial_raw):.4g}, {np.nanmax(final_image_initial_raw):.4g}]"
         )
 
         # M3 DPIC-01 (R1.1): the *relative* WHT threshold policy applies ONLY
@@ -17740,6 +17755,12 @@ class SeestarQueuedStacker:
         )
 
         # --- Normalisation par percentiles pour obtenir final_image_normalized_for_cosmetics (0-1) ---
+        # D3.5/D4: this branch produces DISPLAY/export data only.  The
+        # >= 0 clip (when the linear output is not preserved) is applied HERE
+        # to a display-only copy -- never to the scientific carrier
+        # ``final_image_initial_raw`` (whose signed values feed the float32
+        # FITS).  ``preserve_linear_output`` keeps its historical meaning for
+        # this display normalization (skip percentiles, keep raw linear).
         if preserve_linear_output_setting:
             logger.debug(
                 "  DEBUG QM [_save_final_stack]: preserve_linear_output actif - saut de la normalisation par percentiles."
@@ -17749,10 +17770,12 @@ class SeestarQueuedStacker:
             ).astype(np.float32)
         else:
             logger.debug(
-                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw..."
+                f"  DEBUG QM [_save_final_stack]: Normalisation (0-1) par percentiles de final_image_initial_raw (copie display >=0)..."
             )
-            data_for_percentile_norm = np.nan_to_num(
-                final_image_initial_raw, nan=0.0
+            # Display-domain clone: non-negative.  The scientific array above
+            # stays signed; only this display copy is clipped.
+            data_for_percentile_norm = np.clip(
+                np.nan_to_num(final_image_initial_raw, nan=0.0), 0.0, None
             ).astype(np.float32)
             if data_for_percentile_norm.ndim == 3:
                 luminance = (
@@ -18097,6 +18120,16 @@ class SeestarQueuedStacker:
                 self.output_folder, f"{base_name}{run_type_suffix}.fit"
             )
             preview_path = os.path.splitext(fits_path)[0] + ".png"
+        # D4: an interrupted/incomplete run must stay identifiable as such in
+        # its own FITS header (display-neutral, header-only).  The filename
+        # suffix above already carries the ``_stopped`` / ``_error`` marker;
+        # the keyword makes the state explicit and machine-readable without
+        # inventing any data.
+        if stopped_early or getattr(self, "processing_error", None):
+            final_header["PROCSTAT"] = (
+                "STOPPED_PARTIAL" if stopped_early else "ERROR_PARTIAL",
+                "Final stack written from an interrupted run (partial data)",
+            )
         self.final_stacked_path = fits_path
         self.update_progress(f"Chemin FITS final: {os.path.basename(fits_path)}")
 
@@ -18111,7 +18144,7 @@ class SeestarQueuedStacker:
             )
             data_for_primary_hdu_save = (
                 self.raw_adu_data_for_ui_histogram
-            )  # Utilise les données "ADU-like" (non-normalisées 0-1 cosmétiquement)
+            )  # D3.5: array scientifique SIGNÉ (valeurs négatives Lanczos préservées, jamais clipées)
             self.update_progress(
                 f"     DEBUG QM: -> FITS float32: Utilisation self.raw_adu_data_for_ui_histogram. Shape: {data_for_primary_hdu_save.shape}, Range: [{np.min(data_for_primary_hdu_save):.4f}, {np.max(data_for_primary_hdu_save):.4f}]"
             )
@@ -18131,6 +18164,14 @@ class SeestarQueuedStacker:
                 "   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)..."
             )
             raw_data = self.raw_adu_data_for_ui_histogram
+            # D3.5: the uint16 export is the NON-NEGATIVE display/export
+            # domain.  ``raw_adu_data_for_ui_histogram`` is now the signed
+            # scientific array (the float32 FITS uses it signed); the >= 0
+            # clip transition happens HERE for the uint16 path only, unless
+            # the linear output was preserved (historical behaviour: signed
+            # raw entered the uint16 conversion, which clips in its scaling).
+            if not preserve_linear_output_setting:
+                raw_data = np.clip(raw_data, 0.0, None)
             max_val = np.nanmax(raw_data)
             if getattr(self, "batch_size", 0) == 1 and max_val <= 0:
                 # In batch_size=1 mode the accumulated data can be
@@ -18252,17 +18293,26 @@ class SeestarQueuedStacker:
         if fits_write_success:
             float32_eff = bool(save_as_float32_setting)
             preserve_eff = bool(preserve_linear_output_setting)
+            # D3.5: the scientific array that reaches the float32 serializer is
+            # ALWAYS the signed float32 science (negative Lanczos ringing
+            # preserved).  The >= 0 clip transition exists only on the
+            # NON-NEGATIVE export/display paths and is recorded where it
+            # really occurs: at the uint16 export boundary when the linear
+            # output was not preserved (``clipped_nonnegative`` input ->
+            # ``uint16`` written); a preserved linear output still hands the
+            # signed array to the uint16 conversion (which clips in its
+            # scaling); the float32 FITS never clips (``signed_float32`` in,
+            # ``signed_float32`` out).
             domain_before = (
-                "signed_float32" if preserve_eff else "clipped_nonnegative"
+                "signed_float32" if (float32_eff or preserve_eff) else "clipped_nonnegative"
             )
+            domain_written = "signed_float32" if float32_eff else "uint16"
             serialization_effective = {
                 "save_as_float32_effective": float32_eff,
                 "preserve_linear_output_effective": preserve_eff,
                 "output_dtype_effective": "float32" if float32_eff else "uint16",
                 "scientific_domain_before_serialization": domain_before,
-                "scientific_domain_written": (
-                    domain_before if float32_eff else "uint16"
-                ),
+                "scientific_domain_written": domain_written,
             }
             try:
                 self._serialization_effective = dict(serialization_effective)
