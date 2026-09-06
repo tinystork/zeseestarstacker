@@ -86,7 +86,7 @@ from ..tools.file_ops import move_to_stacked
 logger.debug("Imports standard OK.")
 
 
-from typing import Literal, List, Tuple, Optional
+from typing import Any, Literal, List, Tuple, Optional
 
 import astroalign as aa
 import cv2
@@ -393,7 +393,50 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     "Frozen reference:",
     "Reference selected:",
     "Worker consumes:",
+    # A3 run-provenance diagnostics: always durable (throttle-exempt), emitted
+    # once per accepted run from start_processing.
+    "RUN_REQUEST ",
+    "RUN_EFFECTIVE ",
+    "GPU_DECISION ",
 )
+
+
+def _prov_token(value: Any) -> str:
+    """Render one provenance token value machine-readably.
+
+    Bools become lowercase true/false, None becomes the explicit token
+    ``none`` (never an empty string), tuples (e.g. winsor limits) become
+    comma-joined scalars, everything else is stringified.
+    """
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (tuple, list)):
+        return ",".join(_prov_token(v) for v in value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _batch_requested_token(batch_size: Any) -> str:
+    """Semantic requested-batch token from the backend batch_size argument.
+
+    The engine normalizes the GUI request at the seam (see
+    ``seestar.gui_qt.settings_validation.normalize_batch_size``): a negative
+    value is the Auto sentinel (-1), 0 is the special all-in-RAM single batch
+    (Reproject&Coadd mode), and >= 1 is an explicit fixed batch size.  The
+    token records the *meaning*, never an unexplained sentinel integer.
+    """
+    try:
+        requested = int(batch_size)
+    except (TypeError, ValueError):
+        return str(batch_size)
+    if requested < 0:
+        return "auto"
+    if requested == 0:
+        return "all_ram"
+    return str(requested)
 _BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
 
 # ----------------------------------------------------------------------
@@ -13835,6 +13878,22 @@ class SeestarQueuedStacker:
         cfg.execution["apply_coverage_render"] = bool(
             getattr(self, "apply_coverage_render", False)
         )
+        # A2/A4: requested/effective + GPU/reference provenance evidence.  The
+        # values are canonical A2 field names registered in run_contract, so
+        # the cfg round-trips (read/write) and stays deterministic for the
+        # same run.  Runtime state is read once at write time; fields absent
+        # before their resolution step are simply omitted.
+        for name, value in self.run_provenance_cfg_values().items():
+            try:
+                fd = run_contract.field_def(name)
+            except KeyError:
+                continue
+            if value is None:
+                continue
+            if fd.section == run_contract.Section.SCIENTIFIC:
+                cfg.scientific[name] = value
+            elif fd.section == run_contract.Section.EXECUTION:
+                cfg.execution[name] = value
         self._run_config_canonical = cfg
         if fingerprint is not None:
             self._run_config_canonical_fingerprint = fingerprint
@@ -18855,6 +18914,391 @@ class SeestarQueuedStacker:
             }
         return {"input_count": count, "input_count_state": "known"}
 
+    # ------------------------------------------------------------------
+    # A2/A3: run provenance diagnostics (RUN_REQUEST / RUN_EFFECTIVE /
+    # GPU_DECISION) — durable, machine-readable, once per accepted run.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _provenance_line(prefix: str, tokens: dict) -> str:
+        """Format one durable provenance block (sorted keys, 'k=v' tokens)."""
+        parts = [f"{k}={_prov_token(v)}" for k, v in sorted(tokens.items())]
+        return prefix + " " + " ".join(parts)
+
+    def _emit_provenance_block(self, prefix: str, tokens: dict) -> None:
+        """Emit one provenance block to the logger AND the durable run log.
+
+        ``update_progress`` is the same channel the M1 DRIZZLE_CONFIG line uses
+        (Qt durable run log + logger); the RUN_* prefixes are throttle-exempt
+        so the block is never silently dropped right after a progress burst.
+        Fail-open: a missing/raising progress channel must never break the run.
+        """
+        try:
+            line = self._provenance_line(prefix, tokens)
+            logger.info("M3: %s", line)
+            self.update_progress(line)
+        except Exception:
+            pass
+
+    def _capture_run_provenance_requested(self, **requested) -> None:
+        """Snapshot the REQUESTED config and emit the RUN_REQUEST block.
+
+        Called at the accepted-run seam in ``start_processing`` (policy frozen,
+        session args applied, batch semantics captured BEFORE auto-resolution
+        mutates ``self.batch_size``).  The snapshot is kept on the instance so
+        the later RUN_EFFECTIVE block can attach explicit reason tokens for
+        every requested != effective divergence.
+        """
+        tokens = {k: v for k, v in requested.items() if v is not None}
+        self._run_prov_requested = dict(tokens)
+        self._emit_provenance_block("RUN_REQUEST", tokens)
+
+    def _stacking_mode_effective(self) -> str:
+        """Canonical stacking/rejection key the dispatcher actually executes.
+
+        Any GUI alias spelling is folded to one canonical key
+        (``winsorized_sigma_clip`` / ``kappa_sigma`` / ``linear_fit_clip`` /
+        ``median`` / ``mean``), matching the dispatch helpers.
+        """
+        mode = str(
+            getattr(self, "stacking_mode", "")
+            or getattr(self, "stack_reject_algo", "")
+            or ""
+        )
+        if _is_winsorized_mode(mode):
+            return "winsorized_sigma_clip"
+        if _is_linear_fit_clip_mode(mode):
+            return "linear_fit_clip"
+        key = str(mode or "mean").strip().lower().replace("-", "_")
+        if key in ("mean", "average", "arithmetic_mean"):
+            return "mean"
+        if key in ("median", "kappa_sigma", "linear_fit_clip"):
+            return key
+        return key or "mean"
+
+    def _reference_requested_policy(self, reference_path_ui) -> Optional[str]:
+        """Requested reference policy token (user/zeanalyser/auto/resume)."""
+        if getattr(self, "_resume_requested", False):
+            return "resume"
+        if getattr(self, "reference_origin_hint", None) == ORIGIN_ZEANALYSER:
+            return "zeanalyser"
+        if reference_path_ui and os.path.isfile(str(reference_path_ui)):
+            return "user"
+        return "auto"
+
+    def _run_provenance_effective(self) -> dict:
+        """Effective tokens resolved at run start (A2/A3 RUN_EFFECTIVE).
+
+        Reads the frozen runtime state (policy, resolved batch, frozen
+        reference, validated drizzle values) and appends an explicit reason
+        token for every requested != effective divergence.  Never raises.
+        """
+        requested = getattr(self, "_run_prov_requested", {}) or {}
+        eff: dict = {}
+        reasons: dict = {}
+
+        # Stacking / normalisation / weighting family.
+        eff["stacking_mode_effective"] = self._stacking_mode_effective()
+        eff["normalization_effective"] = str(
+            getattr(self, "normalize_method", "none") or "none"
+        )
+        eff["weighting_effective"] = str(
+            getattr(self, "weighting_method", "none") or "none"
+        )
+        eff["use_quality_weighting_effective"] = bool(
+            getattr(self, "use_quality_weighting", False)
+        )
+        eff["weight_by_snr_effective"] = bool(getattr(self, "weight_by_snr", True))
+        eff["weight_by_stars_effective"] = bool(
+            getattr(self, "weight_by_stars", True)
+        )
+        eff["kappa_low_effective"] = getattr(self, "stack_kappa_low", 2.5)
+        eff["kappa_high_effective"] = getattr(self, "stack_kappa_high", 2.5)
+        eff["winsor_effective"] = list(getattr(self, "winsor_limits", (0.05, 0.05)))
+        if requested.get("stacking_mode_requested"):
+            req_key = _prov_token(requested["stacking_mode_requested"])
+            req_key = req_key.strip().lower().replace("-", "_")
+            if req_key not in ("mean", "median", "kappa_sigma",
+                               "linear_fit_clip", "winsorized_sigma_clip"):
+                reasons["stacking_mode_reason"] = (
+                    f"alias_or_unknown_requested:{_prov_token(requested['stacking_mode_requested'])}"
+                )
+
+        # Drizzle: requested (bool/mode/kernel/scale) vs what the session runs.
+        drizzle_on = bool(getattr(self, "drizzle_active_session", False))
+        eff["drizzle_effective"] = drizzle_on
+        if drizzle_on:
+            mode = str(getattr(self, "drizzle_mode", "Final") or "Final")
+            eff["drizzle_mode_effective"] = mode
+            # Mosaic deposits use the mosaic-specific kernel/pixfrac; the
+            # standard session uses the global drizzle kernel (already
+            # validated by initialize at this point).
+            if getattr(self, "is_mosaic_run", False):
+                mosaic = getattr(self, "mosaic_settings_dict", {}) or {}
+                kernel = str(mosaic.get("kernel", "square") or "square")
+                pixfrac = float(mosaic.get("pixfrac", 1.0) or 1.0)
+            else:
+                kernel = str(getattr(self, "drizzle_kernel", "square") or "square")
+                pixfrac = float(getattr(self, "drizzle_pixfrac", 1.0) or 1.0)
+            eff["drizzle_kernel_effective"] = kernel
+            eff["drizzle_scale_effective"] = float(
+                getattr(self, "drizzle_scale", 1.0) or 1.0
+            )
+            eff["drizzle_pixfrac_effective"] = pixfrac
+            threshold = float(
+                getattr(self, "drizzle_wht_threshold_effective",
+                        getattr(self, "drizzle_wht_threshold", 0.0))
+                or 0.0
+            )
+            eff["drizzle_wht_threshold_effective"] = threshold
+            if requested.get("drizzle_kernel_requested"):
+                kernel_req = _prov_token(requested["drizzle_kernel_requested"])
+                if kernel_req != kernel:
+                    reasons["drizzle_kernel_reason"] = (
+                        f"requested={kernel_req} -> effective={kernel}"
+                    )
+            if requested.get("drizzle_pixfrac_requested") is not None:
+                pix_req = float(requested["drizzle_pixfrac_requested"])
+                if abs(pix_req - pixfrac) > 1e-9:
+                    reasons["drizzle_pixfrac_reason"] = (
+                        f"requested={_prov_token(pix_req)} -> effective={_prov_token(pixfrac)}"
+                    )
+        else:
+            eff["drizzle_kernel_effective"] = "none"
+            eff["drizzle_scale_effective"] = "none"
+            eff["drizzle_pixfrac_effective"] = "none"
+            eff["drizzle_wht_threshold_effective"] = "none"
+
+        # Batch size: requested semantics vs executed concrete value.
+        batch_requested = requested.get("batch_size_requested")
+        batch_effective = int(getattr(self, "batch_size", 0) or 0)
+        eff["batch_size_effective"] = batch_effective
+        if batch_requested == "auto" and batch_effective >= 1:
+            reasons["batch_size_reason"] = "auto_estimated"
+        elif batch_requested == "all_ram" and batch_effective == 0:
+            reasons["batch_size_reason"] = "explicit_all_ram_single_batch"
+        elif batch_requested not in (None, str(batch_effective)):
+            reasons["batch_size_reason"] = (
+                f"requested={_prov_token(batch_requested)} -> "
+                f"effective={batch_effective}"
+            )
+
+        # GPU: requested backend vs resolved backend.
+        gpu_req = requested.get("gpu_requested", False)
+        policy = getattr(self, "acceleration_policy", None)
+        caps = getattr(self, "_gpu_caps", lambda: None)()
+        effective_backend = getattr(policy, "backend", "cpu") if policy else "cpu"
+        eff["gpu_backend_effective"] = effective_backend
+        if gpu_req and effective_backend != "cupy":
+            reason = None
+            if policy is not None:
+                try:
+                    reason = policy.fallback_reason
+                except Exception:
+                    reason = None
+            if not reason and caps is not None:
+                reason = getattr(caps, "state", "cpu") or "cpu"
+            reasons["gpu_backend_reason"] = reason or "cpu_unavailable"
+
+        # Reference: requested policy vs frozen origin/path.
+        frozen = getattr(self, "_frozen_reference", None)
+        if frozen is not None:
+            eff["reference_effective"] = (
+                f"origin={_prov_token(getattr(frozen, 'origin', None))}"
+            )
+            eff["reference_path_effective"] = getattr(
+                frozen, "source_path", None
+            )
+        else:
+            eff["reference_effective"] = "none"
+        req_policy = requested.get("reference_policy_requested")
+        if req_policy == "auto" and frozen is not None:
+            reasons["reference_reason"] = (
+                f"auto_selected:{_prov_token(getattr(frozen, 'origin', None))}"
+            )
+        elif req_policy == "user" and frozen is None:
+            reasons["reference_reason"] = "requested_reference_unavailable"
+
+        eff.update(reasons)
+        return eff
+
+    def _emit_run_provenance_effective(self) -> None:
+        """Emit RUN_EFFECTIVE (+ GPU_DECISION when GPU was requested)."""
+        eff = self._run_provenance_effective()
+        self._emit_provenance_block("RUN_EFFECTIVE", eff)
+        self._emit_gpu_decision_block()
+
+    def _emit_gpu_decision_block(self) -> None:
+        """Emit GPU_DECISION when GPU was requested (A3).
+
+        ``requested=true operation=<op> effective_backend=<cpu|cupy>
+        execution=<used|fallback|not_eligible> fallback_reason=<reason|none>``
+        For M2 the operation is the run's stacking reduction family: the
+        existing kappa-sigma / linear-fit-clip / median reducers populate
+        ``used``/``fallback`` from the resolved backend; winsorized-sigma is
+        not yet GPU-qualified (Track B) and is reported ``not_eligible`` with
+        the explicit reason.
+        """
+        if not getattr(self, "request_gpu", False):
+            return
+        policy = getattr(self, "acceleration_policy", None)
+        effective_backend = getattr(policy, "backend", "cpu") if policy else "cpu"
+        caps = getattr(self, "_gpu_caps", lambda: None)()
+        stacking_key = self._stacking_mode_effective()
+        operation = f"stacking_reduction:{stacking_key}"
+        gpu_capable = stacking_key in ("kappa_sigma", "linear_fit_clip", "median")
+        if not gpu_capable:
+            reason = "winsorized_gpu_qualification_pending_track_b" if (
+                stacking_key == "winsorized_sigma_clip"
+            ) else f"no_gpu_reducer_for_mode:{stacking_key}"
+            self._emit_provenance_block(
+                "GPU_DECISION",
+                {
+                    "requested": True,
+                    "operation": operation,
+                    "effective_backend": effective_backend,
+                    "execution": "not_eligible",
+                    "fallback_reason": reason,
+                },
+            )
+            return
+        if effective_backend == "cupy":
+            self._emit_provenance_block(
+                "GPU_DECISION",
+                {
+                    "requested": True,
+                    "operation": operation,
+                    "effective_backend": "cupy",
+                    "execution": "used",
+                    "fallback_reason": "none",
+                },
+            )
+            return
+        reason = None
+        if policy is not None:
+            try:
+                reason = policy.fallback_reason
+            except Exception:
+                reason = None
+        if not reason and caps is not None:
+            reason = getattr(caps, "state", "cpu") or "cpu"
+        self._emit_provenance_block(
+            "GPU_DECISION",
+            {
+                "requested": True,
+                "operation": operation,
+                "effective_backend": "cpu",
+                "execution": "fallback",
+                "fallback_reason": reason or "cpu_unavailable",
+            },
+        )
+
+    def run_provenance_cfg_values(self) -> dict:
+        """Canonical requested/effective/diagnostic values for run_config.cfg.
+
+        Maps the A2 fields onto the current run state.  Returns only fields
+        that are meaningful for this run; absent keys are omitted so a cfg
+        written before a resolution step stays valid and deterministic.
+        Only populated once the run provenance snapshot was captured (i.e. by
+        a real accepted ``start_processing``), so duck-typed/``__new__``
+        harness objects keep their historical byte-identical cfgs.
+        """
+        if getattr(self, "_run_prov_requested", None) is None:
+            return {}
+        out: dict = {}
+        requested = self._run_prov_requested or {}
+        batch_req = requested.get("batch_size_requested")
+        if batch_req is not None:
+            out["batch_size_requested"] = str(batch_req)
+        batch_eff = getattr(self, "batch_size", None)
+        if batch_eff is not None:
+            try:
+                out["batch_size_effective"] = int(batch_eff)
+            except (TypeError, ValueError):
+                pass
+        out.update(self.run_provenance_cfg_values_drizzle_safe())
+
+        req_policy = requested.get("reference_policy_requested")
+        if req_policy is not None:
+            out["reference_policy_requested"] = str(req_policy)
+        frozen = getattr(self, "_frozen_reference", None)
+        if frozen is not None:
+            origin = getattr(frozen, "origin", None)
+            if origin:
+                out["reference_origin_effective"] = str(origin)
+            path = getattr(frozen, "source_path", None)
+            if path:
+                out["reference_path_effective"] = str(path)
+        return out
+
+    def run_provenance_cfg_values_drizzle_safe(self) -> dict:
+        """A2 fields that are safe to embed in the canonical drizzle cfg.
+
+        The canonical drizzle config participates in resume digest equality
+        (``initialize`` rebuilds it and compares to the persisted cfg).  Only
+        fields that are deterministic for the same run across a resume are
+        included here: GPU decision fields (same machine, same request) and
+        the classic runtime-effective aliases.  Batch semantics and the frozen
+        reference origin/path are deliberately excluded — they may legitimately
+        differ between the original run and its resume continuation.
+        """
+        if getattr(self, "_run_prov_requested", None) is None:
+            return {}
+        out: dict = {}
+        stacking_key = self._stacking_mode_effective()
+        if stacking_key:
+            out["stacking_mode_effective"] = stacking_key
+        out["normalize_method_effective"] = str(
+            getattr(self, "normalize_method", "none") or "none"
+        )
+        out["weighting_method_effective"] = str(
+            getattr(self, "weighting_method", "none") or "none"
+        )
+        out["use_quality_weighting_effective"] = bool(
+            getattr(self, "use_quality_weighting", False)
+        )
+        policy = getattr(self, "acceleration_policy", None)
+        effective_backend = getattr(policy, "backend", "cpu") if policy else "cpu"
+        caps = getattr(self, "_gpu_caps", lambda: None)()
+        gpu_requested = bool(getattr(self, "request_gpu", False))
+        if gpu_requested or effective_backend == "cupy":
+            out["gpu_requested_backend"] = "cupy" if gpu_requested else "cpu"
+            out["gpu_effective_backend"] = effective_backend
+            if caps is not None:
+                state = getattr(caps, "state", None)
+                if state:
+                    out["gpu_capability_state"] = str(state)
+                device = getattr(caps, "device_name", None)
+                if device:
+                    out["gpu_device_name"] = str(device)
+            stacking_key2 = self._stacking_mode_effective()
+            out["gpu_operation"] = f"stacking_reduction:{stacking_key2}"
+            if not gpu_requested:
+                out["gpu_execution"] = "not_requested"
+            elif stacking_key2 not in (
+                "kappa_sigma", "linear_fit_clip", "median"
+            ):
+                out["gpu_execution"] = "not_eligible"
+                out["gpu_fallback_reason"] = (
+                    "winsorized_gpu_qualification_pending_track_b"
+                    if stacking_key2 == "winsorized_sigma_clip"
+                    else f"no_gpu_reducer_for_mode:{stacking_key2}"
+                )
+            elif effective_backend == "cupy":
+                out["gpu_execution"] = "used"
+            else:
+                out["gpu_execution"] = "fallback"
+                reason = None
+                if policy is not None:
+                    try:
+                        reason = policy.fallback_reason
+                    except Exception:
+                        reason = None
+                if not reason and caps is not None:
+                    reason = getattr(caps, "state", "cpu") or "cpu"
+                out["gpu_fallback_reason"] = reason or "cpu_unavailable"
+        return out
+
     def _resolve_automatic_reference(self, current_folder, additional_folders, plan_path, requested_batch_size):
         """Resolve and freeze exactly one automatic reference for this run."""
         def _report(message, progress=None, level="INFO"):
@@ -19646,6 +20090,34 @@ class SeestarQueuedStacker:
             low_wht_mask=bool(self.apply_low_wht_mask),
         )
 
+        # A3: durable requested-config block, emitted once for every ACCEPTED
+        # run (policy frozen, session args applied, before heavy reference
+        # prep).  Requested semantics are captured from the raw run request;
+        # the later RUN_EFFECTIVE block reports what actually executed.
+        self._capture_run_provenance_requested(
+            stacking_mode_requested=stacking_mode,
+            normalization_requested=normalize_method,
+            weighting_requested=weighting_method,
+            use_quality_weighting_requested=bool(
+                use_weighting or str(weighting_method).lower() == "quality"
+            ),
+            weight_by_snr_requested=bool(weight_by_snr),
+            weight_by_stars_requested=bool(weight_by_stars),
+            kappa_low_requested=stack_kappa_low,
+            kappa_high_requested=stack_kappa_high,
+            winsor_requested=_prov_token(winsor_limits),
+            batch_size_requested=_batch_requested_token(batch_size),
+            gpu_requested=bool(getattr(self, "request_gpu", False)),
+            drizzle_requested=bool(use_drizzle),
+            drizzle_kernel_requested=drizzle_kernel,
+            drizzle_scale_requested=drizzle_scale,
+            drizzle_pixfrac_requested=drizzle_pixfrac,
+            drizzle_wht_threshold_requested=drizzle_wht_threshold,
+            reference_policy_requested=self._reference_requested_policy(
+                reference_path_ui
+            ),
+        )
+
         # --- ÉTAPE 2 : PRÉPARATION DE L'IMAGE DE RÉFÉRENCE (shape ET WCS global si nécessaire) ---
         # ... (le reste de la méthode est inchangé) ...
         logger.debug(
@@ -20388,6 +20860,12 @@ class SeestarQueuedStacker:
         # after every synchronous validation step has passed — so no earlier
         # false start can leak a running tuner thread.
         self._start_autotuner_for_attempt()
+
+        # A3: durable effective-config block (plus GPU_DECISION when GPU was
+        # requested).  Emitted after every runtime choice is resolved (batch
+        # auto-resolution, drizzle kernel validation in initialize, frozen
+        # reference) and before the worker thread begins heavy processing.
+        self._emit_run_provenance_effective()
 
         logger.debug(
             "DEBUG QM (start_processing V_StartProcessing_SaveDtypeOption_1): Démarrage du thread worker..."
