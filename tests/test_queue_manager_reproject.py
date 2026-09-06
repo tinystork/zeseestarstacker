@@ -805,9 +805,12 @@ def test_start_processing_bs0_defaults_to_reproject_coadd(monkeypatch, tmp_path)
         batch_size=0,
     )
 
+    # Phase B1 (canonical batch contract): batch_size=0 is canonical Auto —
+    # it must NOT force Reproject&Coadd.  Reproject is an independent mode
+    # flag; Auto without reproject stays a plain classic Auto run.
     assert ok
-    assert obj.reproject_coadd_final is True
-    assert obj.stack_final_combine == "reproject_coadd"
+    assert obj.reproject_coadd_final is False
+    assert obj.stack_final_combine == "mean"
 
 
 def test_bs0_reproject_disables_inter_batch(monkeypatch, tmp_path):

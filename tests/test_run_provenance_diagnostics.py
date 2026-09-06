@@ -296,15 +296,20 @@ def test_run_config_cfg_records_requested_auto_and_concrete_effective(
     assert sci.get("stacking_mode_effective") == "kappa_sigma"
 
 
-def test_run_config_cfg_requested_all_ram_stays_explicit(monkeypatch, tmp_path):
-    # batch_size=0 is the special all-in-RAM single batch mode; it must be
-    # recorded as the explicit 'all_ram' semantics, not as a bare 0 sentinel.
+def test_run_config_cfg_requested_zero_is_canonical_auto(monkeypatch, tmp_path):
+    # Phase B1 (canonical batch contract): batch_size=0 IS canonical Auto.
+    # It must be recorded with the 'auto' semantics (never an unexplained
+    # all-RAM/0 sentinel), and the engine freezes a concrete B_resolved >= 1
+    # next to the requested token.
     stacker, events, output_dir = _run_lifecycle(
         monkeypatch, tmp_path, batch_size=0, stacking_mode="winsorized-sigma-clip"
     )
     req = [e for e in events if e.startswith("RUN_REQUEST ")]
-    assert req and "batch_size_requested=all_ram" in req[0]
+    assert req and "batch_size_requested=auto" in req[0]
     cfg_path = output_dir / "run_config.cfg"
     if cfg_path.is_file():
         report = run_contract.read_cfg(str(cfg_path))
-        assert report.config.scientific.get("batch_size_requested") == "all_ram"
+        assert report.config.scientific.get("batch_size_requested") == "auto"
+        effective = report.config.scientific.get("batch_size_effective")
+        assert isinstance(effective, int) and effective >= 1
+        assert report.config.scientific.get("batch_size") == effective

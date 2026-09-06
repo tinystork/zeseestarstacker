@@ -475,7 +475,8 @@ def test_seestar_mode_reproject_with_astap_path_reaches_controller(qapp):
 # M13: batch-size contract + ZeSolver-only solver gate at the shell level
 # --------------------------------------------------------------------------
 def test_batch_size_zero_normalizes_to_auto_sentinel(qapp):
-    """UI 0 on a normal stack becomes the -1 Auto sentinel before the request."""
+    """UI 0 IS canonical Auto: the request keeps 0 (no -1 sentinel is ever
+    generated under the Phase B1 canonical batch contract)."""
     win = MainWindow()
     seen = []
     original_start = win.controller.start
@@ -490,7 +491,7 @@ def test_batch_size_zero_normalizes_to_auto_sentinel(qapp):
         win.start_button.click()
         assert _pump_until(qapp, lambda: win.is_running is False)
         assert len(seen) == 1
-        assert seen[0].backend_kwargs["batch_size"] == -1
+        assert seen[0].backend_kwargs["batch_size"] == 0
         assert seen[0].align_on_disk is False
     finally:
         win.shutdown()

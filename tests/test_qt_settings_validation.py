@@ -89,7 +89,7 @@ def test_batch_size_below_auto_sentinel_rejected():
         _state(input_folder="/in", output_folder="/out", batch_size=-5),
         "seestar",
     )
-    assert any("Batch size must be -1 (auto) or greater" in e for e in errors)
+    assert any("auto" in e and "-5" in e for e in errors)
 
 
 def test_batch_size_valid_sentinels_accepted():
@@ -347,13 +347,17 @@ def test_run_request_batch_size_one_accepted():
 
 # --------------------------------------------------------------------------
 # normalize_batch_size (UI value -> backend contract)
+# Phase B1 (canonical batch contract): 0 is the single canonical Auto value.
 # --------------------------------------------------------------------------
 def test_normalize_batch_size_zero_becomes_auto_sentinel():
-    assert normalize_batch_size(0) == -1
-    assert normalize_batch_size(0, reproject_coadd_final=False) == -1
+    # 0 IS canonical Auto; the normalize seam never generates -1 anymore.
+    assert normalize_batch_size(0) == 0
+    assert normalize_batch_size(0, reproject_coadd_final=False) == 0
 
 
 def test_normalize_batch_size_zero_with_reproject_coadd_stays_zero():
+    # Reproject&Coadd is decoupled from the batch value: Auto + reproject
+    # stays canonical Auto 0 (Reproject runs on its own flags).
     assert normalize_batch_size(0, reproject_coadd_final=True) == 0
 
 
@@ -368,8 +372,9 @@ def test_normalize_batch_size_explicit_unchanged():
 
 
 def test_normalize_batch_size_negative_becomes_auto():
-    assert normalize_batch_size(-1) == -1
-    assert normalize_batch_size(-5) == -1
+    # Legacy negative Auto spellings normalize to canonical Auto 0.
+    assert normalize_batch_size(-1) == 0
+    assert normalize_batch_size(-5) == 0
 
 
 def test_normalize_batch_size_non_integer_passthrough():

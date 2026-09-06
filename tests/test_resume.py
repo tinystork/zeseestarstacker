@@ -3439,20 +3439,21 @@ def _close_lifecycle_memmaps(s):
     [
         # Plain classic, no stack plan, explicit batch size (control).
         "plain_batch10_no_plan",
-        # Persisted batch_size=0 (plain classic, reproject off): the
-        # user-observed settings shape; no queue-planning re-bind.
+        # Canonical Auto (0), plain classic, reproject off: resolution
+        # estimates, the freeze point caps B_resolved to the static queue.
         "plain_batch0_no_plan",
-        # GUI "Auto" sentinel (-1) without a plan: engine-estimated batch.
+        # Legacy Auto spelling (-1) without a plan: normalized to canonical
+        # Auto 0, engine-estimated and frozen.
         "auto_no_plan",
-        # GUI "Auto" (-1) with a stack plan: use_plan re-binds batch_size to 0
-        # after the bootstrap write (pre-fix: refused).
+        # Canonical Auto with a stack plan: plan rows drive tokenized batches;
+        # B_resolved stays frozen (never re-bound to a sentinel after the
+        # bootstrap write).
         "auto_with_plan",
-        # Batch_size=1 single-batch CSV mode with a stack plan: queue planning
-        # sets batch_size=999999999 after the bootstrap write (pre-fix:
-        # refused).
+        # Boring (1) single-batch CSV mode with a stack plan: queue planning
+        # binds B_resolved to the whole CSV population before the freeze point.
         "single_batch_csv_with_plan",
         # Externally prepared queue whose single-batch adaptation sets
-        # batch_size=1 after the bootstrap write (pre-fix: refused).
+        # batch_size=1 before the freeze point.
         "prepared_queue_single_batch",
     ],
 )
@@ -3543,17 +3544,28 @@ def test_fresh_start_two_write_lifecycle_stays_consistent(tmp_path, scenario):
     # Every manifest write carried canonical == engine fingerprint.
     assert len(writes) == 2, writes  # bootstrap + plan-binding preflight
     assert all(w["engine_fp"] == w["cfg_fp"] for w in writes), writes
-    # The effective transition is real: the two writes may differ in
-    # batch_size only when queue planning re-bound it.
+    # Phase B1 (canonical batch contract): B_resolved is frozen before the
+    # plan-binding write and is never re-bound to a sentinel afterwards.
     engine_last = writes[-1]["batch_size_engine"]
+    engine_first = writes[0]["batch_size_engine"]
     if scenario == "auto_with_plan":
-        assert writes[0]["batch_size_engine"] == 1 and engine_last == 0
+        # Auto + plan: capacity frozen >= 1 across both writes (no legacy
+        # re-bind to the 0 sentinel after the bootstrap write).
+        assert engine_first >= 1 and engine_last == engine_first
     elif scenario == "single_batch_csv_with_plan":
-        assert writes[0]["batch_size_engine"] == 1 and engine_last == 999999999
+        # Boring single-batch CSV: bootstrap B_resolved=1, then the queue-prep
+        # binds the whole CSV population (7 files) before the freeze point.
+        assert engine_first == 1 and engine_last == 7
     elif scenario == "prepared_queue_single_batch":
-        assert writes[0]["batch_size_engine"] == 7 and engine_last == 1
+        # Externally prepared queue: explicit 7 -> single-batch adaptation to 1
+        # before the freeze point.
+        assert engine_first == 7 and engine_last == 1
     elif scenario == "plain_batch0_no_plan":
-        assert engine_last == 0
+        # Canonical Auto (0): bootstrap write carries the RAM estimate, the
+        # freeze point caps B_resolved to the static queue population (8 FITS
+        # in the folder: 7 obs + reference) — never 0, never a dynamic shrink
+        # afterwards.
+        assert engine_first >= 1 and engine_last == 8
 
     # On-disk manifest + run_config.cfg reflect the effective contract.
     _assert_consistent_persisted_contract(s, out_dir)

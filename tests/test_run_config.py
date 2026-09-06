@@ -332,7 +332,7 @@ def test_run_request_against_real_settings_defaults():
     sm.validate_settings()
     req = build_run_request(sm, initial_additional_folders=[])
     assert dict(req.backend_kwargs)
-    assert req.backend_kwargs["batch_size"] == -1  # default 0 -> auto sentinel
+    assert req.backend_kwargs["batch_size"] == 0  # default 0 -> canonical Auto
 
 
 def test_main_window_call_site_wires_run_request_arguments():
