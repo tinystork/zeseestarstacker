@@ -22,9 +22,11 @@ effective_backend  →  "cpu" | "cupy"   (never "opencv_cuda")
         │
         ▼
 _stack_batch reductions routed through _gpu_reduce:
-        kappa-sigma / linear-fit-clip / median → GPU when effective_backend
-        == "cupy" AND the stack fits in free VRAM (dynamic guard);
-        otherwise CPU.  Any GPU failure → logged warning + CPU fallback.
+        kappa-sigma / linear-fit-clip / median / winsorized-sigma-clip
+        (Classic stacking path) → GPU when effective_backend == "cupy" AND
+        the stack fits in free VRAM (dynamic guard); otherwise CPU.  Any GPU
+        failure → logged warning + CPU fallback.  Drizzle direct accumulation
+        never runs a Classic reducer (GPU_DECISION execution=not_executed).
 ```
 
 ## Components
@@ -51,14 +53,22 @@ _stack_batch reductions routed through _gpu_reduce:
 
 * **`seestar/core/stack_gpu.py`** — CuPy kernels that are exact twins of the
   CPU reference algorithms in `seestar/core/stack_methods.py` (untouched) for
-  the **sorting-based** reductions: kappa-sigma, linear-fit-clip, median.
-  NaN == missing sample; identical masks, floors, `_rejected_pct` formula and
-  weight maps; results are always returned as NumPy arrays.
+  the **sorting-based** reductions: kappa-sigma, linear-fit-clip, median and
+  winsorized-sigma-clip (8.3.0 feature lineage).  NaN == missing sample;
+  identical masks, floors, `_rejected_pct` formula and weight maps; results
+  are always returned as NumPy arrays.
 
-* **What stays CPU**: winsorized-sigma-clip (the default rejection), mean,
-  alignment, drizzle, reprojection, feathering, quality metrics, streaming and
-  tiled paths. CuPy accelerates *only* kappa-sigma / linear-fit-clip / median
-  when selected and VRAM-fitting.
+* **What stays CPU**: mean, alignment, drizzle, reprojection, feathering,
+  quality metrics, streaming and tiled paths.  GPU eligibility of the
+  sorting-based reducers (including winsorized-sigma-clip on the Classic
+  stacking path) is workload/VRAM-dependent: the memory model is
+  shape × dtype × operation footprint × 0.6 headroom, so larger GPUs admit
+  larger stacks automatically — there is no fixed stack-count threshold and
+  no hardware-name rule.  The CPU reference is authoritative: any per-batch
+  VRAM rejection falls back to the CPU automatically.  **Drizzle
+  accumulation is never GPU-accelerated** (no Classic reducer runs there, and
+  the provenance says so: ``stacking_mode_effective=drizzle_direct_accumulation``,
+  ``GPU_DECISION execution=not_executed``).
 
 ## Limitation: high-RAM / tiled path (R2-F6)
 
@@ -119,10 +129,12 @@ The Qt Boring Stack route launches `seestar/gui/boring_stack.py` as a separate
 process. Only the boolean intent crosses the boundary (`--gpu` / `--no-gpu`);
 the subprocess constructs `SeestarQueuedStacker(gpu=args.request_gpu)` and
 resolves the same probe/policy inside the subprocess. Boring's default
-reduction is `stacking_mode="winsorized-sigma"`, which remains CPU-only, so
-the default Boring run still executes on CPU even with `--gpu`; the intent is
-in place for eligible reductions (kappa-sigma / linear-fit-clip / median)
-should a Boring mode select them.
+reduction is `stacking_mode="winsorized-sigma"`, which is GPU-eligible on the
+Classic stacking path since the 8.3.0 feature lineage (workload/VRAM-gated,
+CPU fallback authoritative), so a `--gpu` Boring run MAY execute the default
+winsorized reduction on the GPU when the stack fits in VRAM and falls back to
+the CPU otherwise.  Drizzle/Boring accumulation itself is never
+GPU-accelerated.
 
 ## ZeAlfie follow-up (separate repo, NOT performed here)
 

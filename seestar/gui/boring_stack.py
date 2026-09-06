@@ -818,11 +818,12 @@ def _run_stack(args, progress_cb) -> int:
 
     # F7: the user's GPU intent (``request_gpu``) is resolved INSIDE this
     # subprocess by the canonical probe/policy (``acceleration_policy`` /
-    # ``effective_backend``).  NOTE: Boring's default reduction is
-    # ``stacking_mode="winsorized-sigma"`` below, which stays CPU-only in the
-    # current backend (GPU accelerates kappa-sigma / linear-fit-clip /
-    # median only) — so the intent now crosses the boundary and resolves the
-    # same policy, but the DEFAULT Boring reduction still executes on CPU.
+    # ``effective_backend``).  Boring's default reduction is
+    # ``stacking_mode="winsorized-sigma"`` below, which is GPU-eligible on the
+    # Classic stacking path since the 8.3.0 feature lineage — the intent
+    # crosses the boundary, resolves the same policy, and the default Boring
+    # reduction runs on the GPU when the stack fits in VRAM, else falls back
+    # to the authoritative CPU reference (Drizzle is never GPU-accelerated).
     stacker = SeestarQueuedStacker(
         gpu=args.request_gpu,
         align_on_disk=args.align_on_disk,
@@ -837,15 +838,17 @@ def _run_stack(args, progress_cb) -> int:
     solver = AstrometrySolver(progress_callback=progress_cb) if args.batch_size == 1 else None
     global _GLOBAL_STACKER
     _GLOBAL_STACKER = stacker
-    # Truthful GPU note (R2-F3): Boring's default reduction below is
-    # winsorized-sigma, which is CPU-only in the current backend — GPU
-    # accelerates only kappa-sigma / linear-fit-clip / median, so a requested
-    # --gpu does NOT make this default run execute on the GPU.
+    # Truthful GPU note (R2-F3 / D0.1): Boring's default reduction below is
+    # winsorized-sigma, which is GPU-eligible on the Classic stacking path
+    # (8.3.0 feature lineage) when the stack fits in VRAM, with automatic CPU
+    # fallback otherwise.  The per-run GPU_DECISION provenance records the
+    # truth (used / fallback / not_eligible / not_executed).
     if args.request_gpu:
         logger.info(
-            "GPU acceleration requested, but Boring's default reduction "
-            "(winsorized-sigma) is CPU-only; GPU accelerates only "
-            "kappa-sigma / linear-fit-clip / median."
+            "GPU acceleration requested; Boring's default reduction "
+            "(winsorized-sigma) runs on the GPU when the stack fits in VRAM "
+            "and falls back to the authoritative CPU reference otherwise "
+            "(see the GPU_DECISION provenance record)."
         )
     try:
         if bytes_limit is not None:

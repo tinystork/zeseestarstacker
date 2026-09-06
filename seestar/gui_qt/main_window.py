@@ -2481,8 +2481,10 @@ class MainWindow(QMainWindow):
             if self.batch_spin.value() == 1:
                 self.batch_spin.setValue(0)
         self._update_boring_gating()
-        # R8-F1: Boring mode changes the truthful GPU wording (its default
-        # winsorized-sigma reduction is CPU-only) — re-render from cache only.
+        # R8-F1/D0.1: Boring mode changes the truthful GPU wording (its
+        # default winsorized-sigma reduction is GPU-eligible on the Classic
+        # stacking path since 8.3.0, workload/VRAM-gated with CPU fallback;
+        # Drizzle is never GPU-accelerated) — re-render from cache only.
         self._render_gpu_status_from_cache()
 
     def _on_batch_size_changed(self, value: int) -> None:

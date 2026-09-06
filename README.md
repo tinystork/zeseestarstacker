@@ -252,8 +252,14 @@ CuPy is the **single GPU backend** used by ZSSS (OpenCV-CUDA is not used by any 
 * **kappa-sigma** rejection stacking
 * **linear-fit-clip** stacking
 * **median** stacking
+* **winsorized-sigma-clip** (the default rejection; 8.3.0 feature lineage)
 
-Winsorized-sigma-clip (the default rejection) and **mean** stacking remain on the CPU, as do alignment, drizzle, reprojection and every other step.
+**mean** stacking remains on the CPU, as do alignment, **drizzle**,
+reprojection and every other step.  GPU eligibility for the winsorized
+reduction (Classic stacking path) is workload/VRAM-dependent: the same memory
+model admits larger stacks on larger GPUs, and the CPU reference remains
+authoritative — any per-batch VRAM rejection falls back to the CPU
+automatically.  Drizzle accumulation itself is never GPU-accelerated.
 
 ### Requirements
 
@@ -285,8 +291,16 @@ CuPy est l'**unique backend GPU** utilisé par ZSSS (OpenCV-CUDA n'est utilisé 
 * l'empilement par rejet **kappa-sigma**
 * l'empilement **linear-fit-clip**
 * l'empilement **médian**
+* l'empilement par rejet **winsorisé-sigma** (le réglage par défaut ;
+  lignée fonctionnelle 8.3.0)
 
-Le rejet winsorisé-sigma (le réglage par défaut) et l'empilement **moyenne** restent sur le CPU, de même que l'alignement, le drizzle, la reprojection et toutes les autres étapes.
+L'empilement **moyenne** reste sur le CPU, de même que l'alignement, le
+**drizzle**, la reprojection et toutes les autres étapes.  L'éligibilité GPU de
+la réduction winsorisée (chemin d'empilement classique) dépend de la charge de
+travail et de la VRAM : le même modèle mémoire admet des empilements plus
+grands sur les GPU plus grands, et la référence CPU fait toujours autorité --
+tout refus VRAM par lot retombe automatiquement sur le CPU.  L'accumulation
+Drizzle n'est jamais accélérée par GPU.
 
 ### Prérequis
 
@@ -538,7 +552,7 @@ This software stands on the shoulders of giants — the developers of amazing op
 - **Scikit-image** – Dependencies for alignment and other image analysis.  
 - **Tqdm** – Smooth progress bars for terminal and logs.  
 - **Psutil** *(optional)* – System monitoring for auto batch size tuning.  
-- **CuPy** *(optional)* – Optional GPU acceleration for the sorting-based stacking reductions (kappa-sigma / linear-fit-clip / median).  
+- **CuPy** *(optional)* – Optional GPU acceleration for the sorting-based stacking reductions (kappa-sigma / linear-fit-clip / median / winsorized-sigma-clip; workload/VRAM-gated with authoritative CPU fallback).  
 - **Python & Tkinter** – The foundation of the language and GUI.
 
 Thank you to everyone whose work, directly or indirectly, made ZeSeestarStacker possible!

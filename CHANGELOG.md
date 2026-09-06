@@ -11,9 +11,15 @@ All notable changes to ZeSeestarStacker are documented in this file.
 - Drizzle-kernel consistency: the Qt and Tk GUIs and the kernel allowlists no
   longer offer `tophat` (unsupported by drizzle 2.2.0); every user-facing list
   now matches the engine's `VALID_DRIZZLE_KERNELS` exactly
-- Winsorized GPU qualification: placeholder — the CuPy backend for the
-  sorting-based stacking reductions is not yet re-qualified for Winsorized
-  kernels (Track B)
+- Winsorized GPU qualification: the CuPy winsorized-sigma-clip reducer is
+  implemented as an exact twin of the CPU reference and wired into the
+  production Classic stacking dispatch (8.3.0 feature lineage).  GPU
+  eligibility is workload/VRAM-dependent (same memory model admits larger
+  stacks on larger GPUs); the CPU reference remains authoritative and any
+  per-batch VRAM rejection falls back to the CPU automatically.  Drizzle
+  accumulation itself is not GPU-accelerated, and the provenance records the
+  truth (``stacking_mode_effective=drizzle_direct_accumulation`` /
+  ``GPU_DECISION execution=not_executed`` on Drizzle runs).
 
 ## [Unreleased]
 
@@ -22,7 +28,8 @@ All notable changes to ZeSeestarStacker are documented in this file.
 - removed the obsolete `seestar.apply_denoise` (OpenCV-CUDA non-local-means
   denoising) public export as dead-surface cleanup — GPU acceleration is now
   CuPy-only for the sorting-based stacking reductions (kappa-sigma /
-  linear-fit-clip / median); it was never a supported public contract.
+  linear-fit-clip / median / winsorized-sigma-clip since 8.3.0); it was never
+  a supported public contract.
 
 ## [8.2.3] — Phoenix consedit
 

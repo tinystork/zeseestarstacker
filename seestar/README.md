@@ -138,8 +138,14 @@ CuPy is the **single GPU backend** used by ZSSS (OpenCV-CUDA is not used by any 
 * **kappa-sigma** rejection stacking
 * **linear-fit-clip** stacking
 * **median** stacking
+* **winsorized-sigma-clip** (the default rejection; 8.3.0 feature lineage)
 
-Winsorized-sigma-clip (the default rejection) and **mean** stacking remain on the CPU, as do alignment, drizzle, reprojection and every other step.
+**mean** stacking remains on the CPU, as do alignment, **drizzle**,
+reprojection and every other step.  GPU eligibility for the winsorized
+reduction (Classic stacking path) is workload/VRAM-dependent (the same memory
+model admits larger stacks on larger GPUs); the CPU reference stays
+authoritative and any VRAM rejection falls back to the CPU automatically.
+Drizzle accumulation itself is never GPU-accelerated.
 
 ### Requirements
 
