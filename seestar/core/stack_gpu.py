@@ -257,6 +257,17 @@ def _winsorize_axis0_cp(cp, arr, limits):
 
     if low > 0:
         lowidx = cp.clip(cp.floor(low * n_valid).astype(cp.int64), 0, None)
+        # Mirror NumPy exactly: an index >= the axis length makes
+        # ``np.take_along_axis`` raise IndexError (e.g. ``low=1.0`` on an
+        # all-valid column -> floor(1.0 * n_valid) == n_valid == N).  CuPy
+        # silently wraps out-of-range indices, so the twin must raise
+        # explicitly to reproduce the CPU reference failure instead of
+        # diverging into wrapped-index garbage.
+        if bool(cp.any(lowidx >= arr.shape[0])):
+            raise IndexError(
+                f"index {int(cp.max(lowidx))} is out of bounds for axis 0 "
+                f"with size {arr.shape[0]}"
+            )
         low_bound = cp.take_along_axis(
             sorted_vals, lowidx[cp.newaxis], axis=0
         )

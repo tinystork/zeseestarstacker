@@ -69,6 +69,90 @@ def _weights(n, seed=7):
     return rng.uniform(0.4, 1.6, size=n).astype(np.float32)
 
 
+# ---------------------------------------------------------------------------
+# B6 metric recorder
+# ---------------------------------------------------------------------------
+# Every B6 matrix case records machine-readable parity metrics into
+# ``B6_METRICS`` (consumed by the qualification report) and asserts the
+# documented parity contract.  ``differing`` counts elements whose |cpu-gpu|
+# exceeds the documented combined tolerance (atol + rtol*|cpu|).
+
+B6_METRICS = []
+
+
+def _finite_maxabs(a, b):
+    both = np.isfinite(a) & np.isfinite(b)
+    if not np.any(both):
+        return 0.0
+    return float(
+        np.max(np.abs(a[both].astype(np.float64) - b[both].astype(np.float64)))
+    )
+
+
+def _finite_maxrel(a, b):
+    both = np.isfinite(a) & np.isfinite(b)
+    if not np.any(both):
+        return 0.0
+    denom = np.maximum(np.abs(b[both].astype(np.float64)), 1e-12)
+    return float(
+        np.max(
+            np.abs(a[both].astype(np.float64) - b[both].astype(np.float64))
+            / denom
+        )
+    )
+
+
+def _record_b6(tag, cpu, gpu, tolerance=(1e-3, 1e-2), strict=True):
+    """Assert documented-tolerance parity and record B6 metrics.
+
+    ``strict=False`` (adversarial boundary cases): parity metrics are still
+    recorded, but the ordinary-case allclose contract is NOT asserted — the
+    caller asserts the dedicated bounded-divergence classification instead.
+    """
+    c_res, c_w, c_pct = cpu
+    g_res, g_w, g_pct = gpu
+    if strict:
+        np.testing.assert_allclose(
+            g_res, c_res, rtol=tolerance[0], atol=tolerance[1], equal_nan=True
+        )
+        np.testing.assert_allclose(
+            g_w, c_w, rtol=tolerance[0], atol=tolerance[1], equal_nan=True
+        )
+        assert abs(float(g_pct) - float(c_pct)) <= 1.0, (g_pct, c_pct, tag)
+        assert g_res.shape == c_res.shape
+    tol = tolerance[1] + tolerance[0] * np.abs(c_res.astype(np.float64))
+    diff = np.abs(g_res.astype(np.float64) - c_res.astype(np.float64))
+    diff = np.where(np.isnan(diff), 0.0, diff)
+    differing = int(np.sum(diff > tol))
+    max_abs = float(np.max(diff)) if diff.size else 0.0
+    flat_idx = int(np.argmax(diff)) if diff.size else 0
+    worst = None
+    if diff.size:
+        coords = np.unravel_index(flat_idx, diff.shape)
+        worst = {
+            "coords": [int(v) for v in coords],
+            "max_abs": float(diff[coords]),
+            "cpu": (
+                float(c_res[coords]) if np.isfinite(c_res[coords]) else None
+            ),
+            "gpu": (
+                float(g_res[coords]) if np.isfinite(g_res[coords]) else None
+            ),
+        }
+    metrics = {
+        "tag": tag,
+        "max_abs": max_abs,
+        "max_rel": _finite_maxrel(g_res, c_res),
+        "differing": differing,
+        "weight_max_abs": _finite_maxabs(g_w, c_w),
+        "pct_cpu": float(c_pct),
+        "pct_gpu": float(g_pct),
+        "worst": worst,
+    }
+    B6_METRICS.append((tag, metrics))
+    return metrics
+
+
 def _assert_parity(cpu, gpu, tag=""):
     c_res, c_w, c_pct = cpu
     g_res, g_w, g_pct = gpu
@@ -208,6 +292,240 @@ def test_winsorize_axis0_helper_parity():
         )
         np.testing.assert_allclose(lb_cpu, lb_gpu, rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(hb_cpu, hb_gpu, rtol=1e-6, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 2b. B6 qualification matrix (M5): full adversarial coverage + metrics
+# ---------------------------------------------------------------------------
+# Every case runs BOTH implementations and records (tag, metrics) into
+# ``B6_METRICS`` for the qualification report while asserting the documented
+# tolerance contract (rtol=1e-3, atol=1e-2; rejected_pct within 1.0).  The
+# CPU ``_stack_winsorized_sigma_iter`` remains the scientific authority.
+
+
+def _stack_from_array(a, weights=None, **kw):
+    imgs = [a[i] for i in range(a.shape[0])]
+    cpu = _stack_winsorized_sigma_iter(imgs, weights, return_weights=True, **kw)
+    gpu = stack_winsorized_sigma_gpu(imgs, weights, return_weights=True, **kw)
+    return cpu, gpu
+
+
+def _one_valid_columns(n=8, shape=(5, 4)):
+    """Every column keeps exactly one valid (non-NaN) sample."""
+    rng = np.random.default_rng(31)
+    a = rng.normal(100.0, 10.0, size=(n,) + shape).astype(np.float32)
+    for j in range(shape[1]):
+        keep = j % n
+        for i in range(n):
+            if i != keep:
+                a[i, :, j] = np.nan
+    return a
+
+
+def _two_valid_columns(n=8, shape=(5, 4)):
+    """Every column keeps exactly two valid samples."""
+    rng = np.random.default_rng(32)
+    a = rng.normal(100.0, 10.0, size=(n,) + shape).astype(np.float32)
+    for j in range(shape[1]):
+        keep = {(j * 2) % n, (j * 2 + 1) % n}
+        for i in range(n):
+            if i not in keep:
+                a[i, :, j] = np.nan
+    return a
+
+
+def _fully_invalid_slices(n=10, shape=(6, 6)):
+    rng = np.random.default_rng(33)
+    a = rng.normal(100.0, 10.0, size=(n,) + shape).astype(np.float32)
+    a[0, :, :] = np.nan          # fully-invalid frame
+    a[:, 0, 0] = np.nan          # fully-invalid column
+    a[:, :, 2] = np.nan          # fully-invalid spatial column
+    return a
+
+
+def _unequal_weights_stack(n=12, shape=(12, 12), seed=34):
+    rng = np.random.default_rng(seed)
+    a = rng.normal(1000.0, 30.0, size=(n,) + shape).astype(np.float32)
+    a[rng.random(a.shape) < 0.03] = np.nan
+    w = np.geomspace(1e-3, 1e3, n).astype(np.float32)  # strongly unequal
+    return a, w
+
+
+def _extreme_low_variance(n=12, shape=(12, 12), seed=35):
+    rng = np.random.default_rng(seed)
+    a = np.full((n,) + shape, 1000.0, dtype=np.float32)
+    a += rng.normal(0.0, 1e-3, size=(n,) + shape).astype(np.float32)
+    return a
+
+
+def _outlier_frame_stack(n=12, shape=(10, 10), seed=47):
+    rng = np.random.default_rng(seed)
+    a = rng.normal(1000.0, 25.0, size=(n,) + shape).astype(np.float32)
+    a[3] += 5000.0                      # whole-frame outlier (e.g. cloud)
+    a[7, 2, 2] = 1e6                    # single hot pixel
+    a[9, 5, 5] = -1e6
+    return a
+
+
+def _ties_stack(n=12, shape=(8, 8), seed=48):
+    rng = np.random.default_rng(seed)
+    a = rng.normal(1000.0, 20.0, size=(n,) + shape).astype(np.float32)
+    a = np.round(a / 8.0) * 8.0          # heavy ties / duplicates
+    a[rng.random(a.shape) < 0.03] = np.nan
+    return a
+
+
+B6_TOL = (1e-3, 1e-2)
+
+
+@pytest.mark.parametrize(
+    "tag, builder",
+    [
+        ("mono_unweighted", lambda: _make_stack(12, (12, 12), seed=40)),
+        ("mono_weighted", lambda: (_make_stack(12, (12, 12), seed=40), _weights(12, seed=1))),
+        ("rgb_unweighted", lambda: _make_stack(12, (12, 12), channels=3, seed=41)),
+        ("rgb_weighted", lambda: (_make_stack(12, (12, 12), channels=3, seed=41), _weights(12, seed=2))),
+        ("dense_nan_40pct", lambda: _make_stack(10, (8, 8), seed=42, nan_frac=0.4)),
+        ("partially_invalid_scattered", lambda: _make_stack(10, (8, 8), seed=43, nan_frac=0.12)),
+        ("one_valid_per_column", lambda: _one_valid_columns()),
+        ("one_valid_per_column_weighted", lambda: (_one_valid_columns(), _weights(8, seed=6))),
+        ("two_valid_per_column", lambda: _two_valid_columns()),
+        ("two_valid_per_column_weighted", lambda: (_two_valid_columns(), _weights(8, seed=7))),
+        ("fully_invalid_slices", lambda: _fully_invalid_slices()),
+        ("fully_invalid_slices_weighted", lambda: (_fully_invalid_slices(), _weights(10, seed=8))),
+        ("strongly_unequal_weights", lambda: _unequal_weights_stack()),
+        ("extreme_low_variance", lambda: (_extreme_low_variance(), _weights(12, seed=9))),
+        ("outlier_frame", lambda: _outlier_frame_stack()),
+        ("ties_duplicates", lambda: _ties_stack()),
+        ("rewinsor_false", lambda: (_make_stack(10, (8, 8), seed=44), _weights(10, seed=10), dict(apply_rewinsor=False))),
+        ("kappa_decay_0p5", lambda: (_make_stack(14, (8, 8), seed=45), _weights(14, seed=11), dict(kappa=3.0, max_iters=4, kappa_decay=0.5))),
+        ("kappa_decay_1p0_narrow", lambda: (_make_stack(14, (8, 8), seed=46), _weights(14, seed=12), dict(kappa=1.2, max_iters=3, kappa_decay=1.0))),
+    ],
+)
+def test_b6_qualification_matrix(tag, builder):
+    """B6: parity + recorded metrics for every matrix case."""
+    built = builder()
+    if isinstance(built, tuple) and len(built) == 3:
+        a, w, kw = built
+    elif isinstance(built, tuple):
+        a, w = built
+        kw = {}
+    else:
+        a, w, kw = built, None, {}
+    imgs = [a[i] for i in range(a.shape[0])]
+    cpu = _stack_winsorized_sigma_iter(imgs, w, return_weights=True, **kw)
+    gpu = stack_winsorized_sigma_gpu(imgs, w, return_weights=True, **kw)
+    _record_b6(tag, cpu, gpu)
+
+
+def test_b6_extreme_limits_0_1_and_1_0_nan_columns():
+    """B6: (0.0, 1.0) and (1.0, 0.0) with a NaN in EVERY column.  The CPU
+    computes (the low/high bound index stays in-bounds because
+    ``n_valid < N``); the twin must reproduce the same output INCLUDING any
+    degenerate inf handling, not diverge."""
+    rng = np.random.default_rng(50)
+    n, h, w = 8, 6, 5
+    a = rng.normal(10.0, 2.0, size=(n, h, w)).astype(np.float32)
+    for c in range(w):
+        for r in range(h):
+            a[r % n, r, c] = np.nan   # every column keeps at least one NaN
+    for lim in [(0.0, 1.0), (1.0, 0.0)]:
+        cpu, gpu = _stack_from_array(a, None, winsor_limits=lim)
+        _record_b6(f"limits_{lim[0]}_{lim[1]}_nan_cols", cpu, gpu)
+
+
+def test_b6_limits_1_0_all_valid_column_mirrors_indexerror():
+    """B6: (1.0, 0.0) with an ALL-VALID column makes the CPU reference raise
+    IndexError (``floor(1.0 * n_valid) == n_valid == N`` -> out-of-bounds
+    take_along_axis).  The GPU twin must MIRROR that same failure instead of
+    silently wrapping the out-of-range index."""
+    rng = np.random.default_rng(51)
+    a = rng.normal(10.0, 2.0, size=(8, 5, 5)).astype(np.float32)  # no NaN
+    imgs = [a[i] for i in range(8)]
+    w = _weights(8, seed=13)
+    with pytest.raises(IndexError):
+        _stack_winsorized_sigma_iter(
+            imgs, w, winsor_limits=(1.0, 0.0), return_weights=True
+        )
+    with pytest.raises(IndexError):
+        stack_winsorized_sigma_gpu(
+            imgs, w, winsor_limits=(1.0, 0.0), return_weights=True
+        )
+
+
+def test_b6_ulp_boundary_divergence_is_bounded_not_algorithmic():
+    """B6: a case that DOES land samples exactly on the mu +/- kappa*sigma
+    clip boundary.  CPU (bottleneck nanmean/nanstd) and GPU (cupy reductions)
+    differ in the last ULPs, so a handful of boundary pixels can flip
+    acceptance and shift the rewinsorized value by ~1-2 ADU.  This must be a
+    BOUNDED handful (weight maps identical, few differing elements, small max
+    abs), i.e. the expected ULP threshold-boundary phenomenon, never an
+    algorithmic divergence."""
+    rng = np.random.default_rng(3)   # deterministic ULP-boundary seed
+    n, h, width = 20, 160, 192
+    a = rng.normal(1000.0, 30.0, size=(n, h, width)).astype(np.float32)
+    a[rng.random(a.shape) < 0.01] = np.nan
+    a = a + np.where(rng.random(a.shape) < 0.02, 300.0, 0.0).astype(np.float32)
+    imgs = [a[i] for i in range(n)]
+    weights = np.random.default_rng(103).uniform(0.5, 1.5, n).astype(np.float32)
+    cpu = _stack_winsorized_sigma_iter(imgs, weights, return_weights=True)
+    gpu = stack_winsorized_sigma_gpu(imgs, weights, return_weights=True)
+    c_res, c_w, c_pct = cpu
+    g_res, g_w, g_pct = gpu
+    # Deterministic ULP-boundary witness: this seed lands >= 1 sample exactly
+    # on the mu +/- kappa*sigma clip boundary, so CPU (bottleneck nanmean /
+    # nanstd) and GPU (cupy reductions) differ in the last ULPs and a handful
+    # of boundary pixels flip acceptance.  Outputs must stay FINITE and the
+    # divergence must be a bounded handful of ~1-2 ADU shifts at ~1000 ADU
+    # scale (verified: 2 differing pixels, max abs ~1.94 ADU on this host).
+    assert not np.isinf(g_res).any() and not np.isinf(c_res).any()
+    # Masks / weight maps must be essentially identical (ULP-level only).
+    np.testing.assert_allclose(g_w, c_w, rtol=1e-4, atol=1e-3)
+    assert abs(float(g_pct) - float(c_pct)) <= 1.0
+    # The divergence must be a small, bounded handful of pixels.
+    tol = 1e-2 + 1e-3 * np.abs(c_res.astype(np.float64))
+    diff = np.abs(g_res.astype(np.float64) - c_res.astype(np.float64))
+    diff = np.where(np.isnan(diff), 0.0, diff)
+    differing = int(np.sum(diff > tol))
+    max_abs = float(np.max(diff)) if diff.size else 0.0
+    total = int(np.prod(c_res.shape))
+    assert differing >= 1, "witness case must exercise the ULP boundary"
+    assert differing <= max(20, total // 200), (differing, total)
+    assert max_abs <= 10.0, max_abs  # ~1-2 ADU shifts at ~1000 ADU scale
+    _record_b6("ulp_boundary_witness", cpu, gpu, strict=False)
+
+
+def test_b6_max_iters_edge_full_5_iterations_no_early_exit(monkeypatch):
+    """B6: a case that does NOT early-exit — the full ``max_iters`` (5)
+    iterations run on both paths (kappa decay keeps rejecting).  Verified by
+    counting winsorize-axis0 calls (one per loop iteration)."""
+    import seestar.core.stack_methods as sm
+    import seestar.core.stack_gpu as sgp
+
+    calls = {"cpu": 0, "gpu": 0}
+    cpu_orig = sm._winsorize_axis0_numpy
+    gpu_orig = sgp._winsorize_axis0_cp
+
+    def cpu_spy(arr, limits):
+        calls["cpu"] += 1
+        return cpu_orig(arr, limits)
+
+    def gpu_spy(mod, arr, limits):
+        calls["gpu"] += 1
+        return gpu_orig(mod, arr, limits)
+
+    monkeypatch.setattr(sm, "_winsorize_axis0_numpy", cpu_spy)
+    monkeypatch.setattr(sgp, "_winsorize_axis0_cp", gpu_spy)
+    rng = np.random.default_rng(53)
+    n = 40
+    a = rng.normal(1000.0, 25.0, size=(n, 12, 12)).astype(np.float32)
+    a = a + np.linspace(0.0, 60.0, n).reshape(n, 1, 1).astype(np.float32)
+    a[rng.random(a.shape) < 0.06] += 300.0
+    w = _weights(n, seed=14)
+    cpu, gpu = _stack_from_array(a, w, kappa=2.0, max_iters=5, kappa_decay=0.6)
+    assert calls["cpu"] == 5, calls   # full 5 iterations, no early break
+    assert calls["gpu"] == 5, calls
+    _record_b6("max_iters_5_no_early_exit", cpu, gpu)
 
 
 # ---------------------------------------------------------------------------
@@ -412,3 +730,139 @@ def test_stack_batch_winsorized_backend_error_falls_back_cpu(monkeypatch):
     assert len(calls) == 1
     assert np.isclose(V[0, 0], 10.0, rtol=1e-3), V[0, 0]
     assert np.isclose(W[0, 0], 5.0, rtol=1e-3), W[0, 0]
+
+
+# ---------------------------------------------------------------------------
+# B5: high-VRAM eligibility validation (simulation, real _reduction_xp)
+# ---------------------------------------------------------------------------
+# The eligibility model must scale naturally across capacities using the SAME
+# general memory model (shape x dtype x per-operation footprint factor x 0.6
+# headroom) — no hardware-name rules, no fixed N ceiling.  Capacities below
+# are VALIDATION POINTS simulated via memGetInfo + pool.free_bytes.
+
+import logging as _logging  # noqa: E402
+
+_B5_CAPACITIES = [2, 8, 16, 24]  # GiB, validation points (not product tiers)
+
+
+class _B5EligibleStacker:
+    """Minimal stand-in exposing what ``_reduction_xp`` touches."""
+
+    def __init__(self, logger_name="zsss.gpu.b5"):
+        self._backend = "cupy"
+        self.logger = _logging.getLogger(logger_name)
+        self._gpu_fallback_logged = set()
+
+    @property
+    def effective_backend(self):
+        return self._backend
+
+    _reduction_xp = SeestarQueuedStacker._reduction_xp
+    _log_gpu_fallback_once = SeestarQueuedStacker._log_gpu_fallback_once
+
+
+def _b5_fake_images(n, shape=(1080, 1920)):
+    """Fake frames carrying only ``shape``: the VRAM guard never reads data."""
+    return [type("_Frame", (), {"shape": shape})() for _ in range(n)]
+
+
+def _b5_admissible_n(capacity_gib, monkeypatch):
+    """Largest N admissible at ``capacity_gib`` for a 1080x1920 mono stack
+    under the REAL ``_reduction_xp`` with the winsorized footprint factor."""
+    import cupy as _cp
+
+    free_bytes = int(capacity_gib * (1024 ** 3))
+
+    class _FullPool:
+        def free_bytes(self):
+            return 0
+
+    monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _FullPool())
+    monkeypatch.setattr(
+        _cp.cuda.runtime, "memGetInfo", lambda: (free_bytes, free_bytes)
+    )
+    stacker = _B5EligibleStacker()
+    lo, hi = 0, 4096
+    while lo < hi:  # largest N with _reduction_xp(images) not None
+        mid = (lo + hi + 1) // 2
+        if stacker._reduction_xp(_b5_fake_images(mid)) is not None:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def test_b5_vram_eligibility_scales_with_capacity(monkeypatch):
+    """B5: a 1080x1920xN stack ineligible at 2 GiB becomes eligible at larger
+    simulated capacities; admissible N grows with capacity under the SAME
+    memory model (no hardware-name rules, no fixed N ceiling)."""
+    import seestar.queuep.queue_manager as _qm
+
+    # Force the winsorized footprint factor (6x) through the real guard by
+    # calling _reduction_xp directly with the factor argument (mirrors the
+    # _gpu_reduce footprint_factor forwarding used by the B7 dispatch path).
+    import cupy as _cp
+
+    boundaries = {}
+    for cap in _B5_CAPACITIES:
+        free_bytes = int(cap * (1024 ** 3))
+
+        class _FullPool:
+            def free_bytes(self):
+                return 0
+
+        monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _FullPool())
+        monkeypatch.setattr(
+            _cp.cuda.runtime, "memGetInfo", lambda: (free_bytes, free_bytes)
+        )
+        stacker = _B5EligibleStacker()
+        # Binary search largest admissible N at this capacity.
+        lo, hi = 0, 4096
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            ok = (
+                stacker._reduction_xp(
+                    _b5_fake_images(mid),
+                    footprint_factor=_qm._GPU_FOOTPRINT_FACTOR_WINSORIZED,
+                )
+                is not None
+            )
+            if ok:
+                lo = mid
+            else:
+                hi = mid - 1
+        boundaries[cap] = lo
+    # Validation points are monotonic and strictly growing.
+    caps = list(boundaries)
+    for a, b in zip(caps, caps[1:]):
+        assert boundaries[b] > boundaries[a], boundaries
+    # A stack that is ineligible at 2 GiB becomes eligible at >= 8 GiB.
+    n_ineligible_2gb = boundaries[2] + 1
+    assert n_ineligible_2gb <= boundaries[8], boundaries
+    # Same stack, larger capacity -> eligible under the identical model.
+    stacker = _B5EligibleStacker()
+    for cap in _B5_CAPACITIES:
+        free_bytes = int(cap * (1024 ** 3))
+
+        class _FullPool2:
+            def free_bytes(self):
+                return 0
+
+        monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _FullPool2())
+        monkeypatch.setattr(
+            _cp.cuda.runtime, "memGetInfo", lambda: (free_bytes, free_bytes)
+        )
+        ok = (
+            stacker._reduction_xp(
+                _b5_fake_images(n_ineligible_2gb),
+                footprint_factor=_qm._GPU_FOOTPRINT_FACTOR_WINSORIZED,
+            )
+            is not None
+        )
+        if cap >= 8:
+            assert ok, (cap, n_ineligible_2gb)
+        else:
+            assert not ok, (cap, n_ineligible_2gb)
+    # Record for the report: B5_BOUNDARIES[(capacity_gib)] = admissible N.
+    B5_BOUNDARIES = boundaries
+    assert B5_BOUNDARIES[2] < B5_BOUNDARIES[8] < B5_BOUNDARIES[16] < B5_BOUNDARIES[24]
