@@ -527,6 +527,87 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        presence=PRESENCE_OPTIONAL, doc="Engine worker count (-1 auto)."),
     _f("use_gpu", Section.EXECUTION, KIND_BOOL, qt="use_gpu",
        doc="GPU acceleration intent (request_gpu)."),
+
+    # --- execution: requested vs effective batch-size semantics (A2/A4) ---
+    # ``batch_size`` above stays the fingerprinted engine contract; these two
+    # carry the *semantics* so a cfg reader can reconstruct what was asked
+    # ("auto"/"all_ram"/a fixed number) vs what the run actually executed.
+    _f("batch_size_requested", Section.SCIENTIFIC, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Requested batch-size semantics: 'auto' | 'all_ram' | '<n>'.  The "
+           "GUI 'auto' sentinel (-1/0) is recorded as 'auto' (all in RAM as "
+           "'all_ram'), never as an unexplained negative number."),
+    _f("batch_size_effective", Section.SCIENTIFIC, KIND_INT,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Concrete batch size the run executed (>=1; 0 = single all-in-RAM "
+           "batch).  Always recorded alongside batch_size_requested."),
+
+    # --- scientific: classic runtime-effective aliases (A2) ---
+    # The requested values live in the plain qt/backend fields above; these
+    # aliases record the value the engine actually executed where a
+    # canonicalization/derivation boundary exists (never fingerprinted).
+    _f("stacking_mode_effective", Section.SCIENTIFIC, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Canonical stacking/rejection key actually dispatched "
+           "(e.g. 'winsorized_sigma_clip' for any GUI alias spelling)."),
+    _f("use_quality_weighting_effective", Section.SCIENTIFIC, KIND_BOOL,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Derived quality-weighting flag actually used (requested flag OR "
+           "weighting_method == 'quality')."),
+    _f("normalize_method_effective", Section.SCIENTIFIC, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Normalization method actually executed (equals requested unless a "
+           "fallback applied)."),
+    _f("weighting_method_effective", Section.SCIENTIFIC, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Weighting method actually executed (equals requested unless a "
+           "fallback applied)."),
+
+    # --- execution: GPU decision diagnostics (A2/A3) ---
+    # Diagnostic fields only: never fingerprinted, never settings/backend
+    # sourced.  Populated by the engine at run start (GPU_DECISION record) and
+    # persisted into run_config.cfg so the effective decision is reproducible.
+    _f("gpu_capability_state", Section.EXECUTION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Detected GPU capability state token (e.g. ready/no_gpu/"
+           "cuda_no_backend/backend_error/gpu_no_runtime)."),
+    _f("gpu_device_name", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Detected GPU device name, or null when none/unknown."),
+    _f("gpu_requested_backend", Section.EXECUTION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Backend requested by the user policy: 'cupy' when GPU was "
+           "requested, else 'cpu'."),
+    _f("gpu_effective_backend", Section.EXECUTION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Backend actually resolved for the run: 'cpu' | 'cupy'."),
+    _f("gpu_operation", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Operation the GPU decision applies to (e.g. "
+           "'stacking_reduction:kappa-sigma'); null when none considered."),
+    _f("gpu_execution", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Execution outcome: 'used' | 'fallback' | 'not_eligible' | "
+           "'not_requested'."),
+    _f("gpu_fallback_reason", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Explicit reason when GPU was requested but not used "
+           "(capability/eligibility), else null."),
+
+    # --- execution: registration/reference provenance (A2) ---
+    # Requested user-supplied reference stays in ``reference_image_path``; the
+    # fields below record the requested policy and the frozen/executed source.
+    _f("reference_policy_requested", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Requested reference policy: 'user' | 'zeanalyser' | 'auto_geometry' "
+           "| 'auto_legacy' | 'resume' | null."),
+    _f("reference_origin_effective", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Origin token of the reference actually executed (USER / "
+           "ZEANALYSER_V1 / AUTO_GEOMETRY / AUTO_LEGACY / RESUME)."),
+    _f("reference_path_effective", Section.EXECUTION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
+       doc="Canonical source path of the frozen reference actually used."),
     _f("save_as_float32", Section.EXECUTION, KIND_BOOL, qt="save_final_as_float32",
        backend="save_as_float32", legacy=("save_final_as_float32",)),
     _f("preserve_linear_output", Section.EXECUTION, KIND_BOOL,
