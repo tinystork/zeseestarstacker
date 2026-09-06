@@ -642,14 +642,16 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("scientific_domain_before_serialization", Section.EXECUTION,
        KIND_STR_OR_NONE, presence=PRESENCE_OPTIONAL, backend_mapped=False,
        restore=False,
-       doc="Content domain of the data handed to the serializer: "
-           "'signed_float32' when linear output was preserved (negatives "
-           "kept) else 'clipped_nonnegative'."),
+       doc="Content domain of the data handed to the serializer.  D3.5: the "
+           "scientific float32 array is ALWAYS 'signed_float32' (negative "
+           "Lanczos ringing preserved); only the uint16 export without "
+           "preserved linear output receives a 'clipped_nonnegative' copy "
+           "(the >=0 clip transition happens at that export boundary)."),
     _f("scientific_domain_written", Section.EXECUTION, KIND_STR_OR_NONE,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
-       doc="Content domain as persisted: 'signed_float32'/'clipped_nonnegative' "
-           "for a float32 FITS, 'uint16' for the BZERO-shifted unsigned "
-           "representation."),
+       doc="Content domain as persisted: 'signed_float32' for a float32 FITS "
+           "(sign always preserved since D3.5), 'uint16' for the "
+           "BZERO-shifted unsigned representation."),
     _f("mosaic_mode_active", Section.EXECUTION, KIND_BOOL, qt="mosaic_mode_active",
        backend="is_mosaic_run"),
     _f("mosaic_settings", Section.EXECUTION, KIND_DICT, qt="mosaic_settings"),
