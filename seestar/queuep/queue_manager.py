@@ -423,21 +423,33 @@ def _prov_token(value: Any) -> str:
 def _batch_requested_token(batch_size: Any) -> str:
     """Semantic requested-batch token from the backend batch_size argument.
 
-    The engine normalizes the GUI request at the seam (see
-    ``seestar.gui_qt.settings_validation.normalize_batch_size``): a negative
-    value is the Auto sentinel (-1), 0 is the special all-in-RAM single batch
-    (Reproject&Coadd mode), and >= 1 is an explicit fixed batch size.  The
-    token records the *meaning*, never an unexplained sentinel integer.
+    Phase B1 (canonical batch contract): the canonical requested vocabulary is
+    0 = Auto / 1 = Boring / >= 2 = explicit.  Legacy negative Auto spellings
+    (``-1``) are normalized to Auto here too, so a cfg reader never sees an
+    unexplained sentinel.  The token records the *meaning* of the request:
+
+    * ``0`` / any negative  -> ``"auto"`` (engine resolves B_resolved once),
+    * ``1``                 -> ``"1"`` (Boring),
+    * ``>= 2``              -> ``"<n>"`` (explicit capacity).
+
+    Reproject&Coadd is not part of this token: *** is an independent mode flag
+    (``reproject_coadd_final`` / ``stack_final_combine``).
     """
     try:
         requested = int(batch_size)
     except (TypeError, ValueError):
         return str(batch_size)
-    if requested < 0:
+    if requested <= 0:
         return "auto"
-    if requested == 0:
-        return "all_ram"
     return str(requested)
+
+
+
+# Phase B1 (canonical batch contract): the shared vocabulary kernel
+# (seestar/core/batch_contract.py) is imported LAZILY at point of use
+# inside the resolution/freeze helpers, so the engine module-import order
+# stays identical to the pre-contract baseline (import-order-sensitive
+# tests).
 _BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
 
 # ----------------------------------------------------------------------
@@ -2739,10 +2751,6 @@ class SeestarQueuedStacker:
         duration = time.monotonic() - start
         msg = f"Processed {len(filepaths)} images in {duration:.2f} s"
         self.update_progress(msg)
-
-        if duration / max(len(filepaths), 1) > 0.01 and self.batch_size > 1:
-            self.batch_size = max(1, self.batch_size // 2)
-            self.update_progress(f"Batch size reduced to {self.batch_size}")
         return results
 
     def _prefetch(self, file_paths):
@@ -2769,8 +2777,19 @@ class SeestarQueuedStacker:
             daemon=True,
         ).start()
 
-    def _estimate_batch_size(self) -> int:
-        """Estimate an appropriate batch size based on available FITS files."""
+    def _estimate_batch_size(self, queue_length: Optional[int] = None) -> int:
+        """Estimate an appropriate Auto batch capacity based on available FITS
+        files and host memory.
+
+        Phase B1: delegates to the injectable AutoBatch planner (see
+        ``seestar.core.batch_contract``).  The returned value is a *candidate*
+        for B_resolved: it is frozen (and capped by the known static queue
+        population) at the freeze point, never mutated afterwards.  When
+        ``queue_length`` is known, the planner already caps the candidate so
+        B_resolved never exceeds the number of available scientific input
+        samples.
+        """
+        from ..core.batch_contract import AutoBatchPlanner
 
         sample_img_path = None
         candidate_folders: list[str] = []
@@ -2796,7 +2815,14 @@ class SeestarQueuedStacker:
                 break
 
         try:
-            estimated = estimate_batch_size(sample_image_path=sample_img_path)
+            # Conservative memory discovery: engine samples folder RAM via the
+            # legacy psutil-backed wrapper; the planner kernel itself stays
+            # injectable/backend-independent.
+            from ..core.utils import estimate_batch_size
+
+            estimated = estimate_batch_size(
+                sample_image_path=sample_img_path, queue_length=queue_length
+            )
             return max(1, int(estimated))
         except Exception as err:
             warn_msg = f"⚠️ Erreur estimation taille lot auto: {err}. Utilisation défaut (10)."
@@ -3950,6 +3976,20 @@ class SeestarQueuedStacker:
         # Flag indicating the queue was pre-populated externally
         self.queue_prepared = False
 
+        # Phase B1 (canonical batch contract): requested / resolved / flush
+        # vocabulary.  ``batch_requested`` is B_requested (0 = Auto, 1 =
+        # Boring, >= 2 = explicit); ``batch_resolved`` is B_resolved, the
+        # capacity frozen once before scientific batch execution (>= 1);
+        # ``batch_flush_mode`` is "count" (flush when N_batch reaches the
+        # trigger) or "token" (queue carries explicit batch delimiters; the
+        # count trigger is disabled).  ``_batch_contract_restored`` is True on
+        # a Resume that reused the persisted frozen contract.  Nothing mutates
+        # ``batch_size`` / ``batch_resolved`` after the freeze point.
+        self.batch_requested = 0
+        self.batch_resolved = 1
+        self.batch_flush_mode = "count"
+        self._batch_contract_restored = False
+
         # Backward compatibility attributes removed in favour of
         # ``reproject_between_batches``. They may still appear in old settings
         # files, so we simply ignore them here.
@@ -3974,7 +4014,6 @@ class SeestarQueuedStacker:
         self.drizzle_batch_output_dir = None
         self.classic_batch_output_dir = None
         self.final_stacked_path = None
-        self._auto_batch_size_zero_mode = None
 
         # Plate-solver configuration so early WCS solves have the required
         # attributes even if ``start_processing`` has not been called yet.
@@ -6244,38 +6283,342 @@ class SeestarQueuedStacker:
 
         return True
 
+    def _batch_flush_trigger(self) -> float:
+        """Return the count-based flush trigger for the current batch mode.
+
+        Phase B1 (canonical batch contract): the trigger is derived from
+        explicit mode state, never from the raw Auto sentinel:
+
+        * ``batch_flush_mode == "token"`` -> ``inf`` (the queue carries batch
+          delimiters; only the delimiter flush (or the final trailing flush)
+          closes a batch),
+        * Boring (B_resolved == 1) with a ``chunk_size`` -> ``chunk_size``
+          (streaming RAM grouping under the Boring path),
+        * otherwise -> the frozen B_resolved (>= 1).
+
+        The actual population flushed is N_batch (always 1 <= N_batch <=
+        B_resolved); the final partial batch is natural.
+        """
+        if getattr(self, "batch_flush_mode", "count") == "token":
+            return float("inf")
+        try:
+            capacity = int(getattr(self, "batch_size", 1))
+        except (TypeError, ValueError):
+            capacity = 1
+        if capacity < 1:
+            # Defensive legacy guard: a pre-resolution instance carrying the
+            # old all-in-RAM sentinel flushes only at the queue end, exactly
+            # like the historical ``batch_size == 0`` trigger did.  Canonical
+            # runs always carry B_resolved >= 1 here.
+            return float("inf")
+        if capacity == 1 and getattr(self, "chunk_size", None):
+            try:
+                return float(max(1, int(self.chunk_size)))
+            except (TypeError, ValueError):
+                return 1.0
+        return float(capacity)
+
     def _recalculate_total_batches(self):
-        """Estimates the total number of batches based on files_in_queue."""
+        """Estimates the total number of batches based on files_in_queue.
+
+        Phase B1 (canonical batch contract): this helper only *estimates the
+        batch count* for progress/ETA purposes.  It never mutates
+        ``batch_size`` / ``batch_resolved`` — the frozen capacity is chosen at
+        the batch-resolution/freeze point and may not be adjusted afterwards
+        (no timing/CPU/GPU/RAM-driven dynamic mutation).  A defensive guard
+        for a legacy ``batch_size <= 0`` value estimates the population from
+        the engine estimator but does NOT store it.
+        """
         if getattr(self, "use_batch_plan", False):
             return
-        if self.batch_size <= 0:
-            if self.batch_size == 0:
-                # Honour explicit "all in RAM" mode: keep batch_size at 0 and expose a
-                # single logical batch so downstream logic (reproject&coadd, white-fix,
-                # etc.) continues to behave like legacy batch_size=0 runs.
-                self.total_batches_estimated = 1 if self.files_in_queue > 0 else 0
-                return
-            if not getattr(self, "_has_stack_plan", False):
-                self.batch_size = max(1, int(self._estimate_batch_size()))
-                if self.files_in_queue > 0:
-                    self.total_batches_estimated = math.ceil(
-                        self.files_in_queue / self.batch_size
-                    )
-                else:
-                    self.total_batches_estimated = 0
-                if self.total_batches_estimated > 0:
-                    self.logger.info(
-                        f"[AutoBatch] Création de {self.total_batches_estimated} lots ({self.batch_size} images par lot)"
-                    )
-            else:
-                self.update_progress(
-                    f"⚠️ Taille de lot invalide ({self.batch_size}), impossible d'estimer le nombre total de lots."
+        effective_capacity = getattr(self, "batch_size", 0)
+        try:
+            effective_capacity = int(effective_capacity)
+        except (TypeError, ValueError):
+            effective_capacity = 0
+        if effective_capacity <= 0:
+            # Defensive only: a resolved run always carries B_resolved >= 1.
+            # Compute an estimate without freezing/mutating anything.
+            defensive = max(1, int(self._estimate_batch_size(queue_length=self.files_in_queue)))
+            if self.files_in_queue > 0:
+                self.total_batches_estimated = math.ceil(
+                    self.files_in_queue / defensive
                 )
+            else:
                 self.total_batches_estimated = 0
             return
 
         self.total_batches_estimated = math.ceil(
-            self.files_in_queue / self.batch_size
+            self.files_in_queue / effective_capacity
+        )
+
+    def _resolve_batch_request(self, batch_size):
+        """Phase B1 canonical batch-contract resolution (B_requested + resume
+        restore); called once at ``start_processing`` before the early resume
+        preflight.
+
+        Canonical vocabulary: B_requested 0 = Auto (single canonical Auto
+        value; legacy negative spellings are normalized to 0 at this
+        compatibility boundary and new code never generates -1), 1 = Boring,
+        >= 2 = explicit capacity.  B_resolved is the capacity frozen for the
+        run (>= 1).  On a Resume the persisted frozen contract is REUSED
+        verbatim (never re-estimated from the current machine RAM); a
+        mismatch between an explicitly requested value and the persisted
+        contract is refused later by the resume fingerprint gate (clear
+        failure, never silent contract mutation).
+
+        Reproject&Coadd is an independent execution-mode concept carried by
+        ``reproject_coadd_final`` / ``stack_final_combine`` — it is NOT
+        derived from (and no longer forces) the Auto sentinel.
+
+        The candidate is finalized (capped by the known static queue
+        population) by ``_freeze_batch_resolved()`` right after the queue is
+        filled and BEFORE the worker thread starts; nothing mutates it
+        afterwards (no timing / CPU/GPU / memory-driven shrink).
+        """
+        try:  # lazy import: keep engine module-import order baseline-stable
+            from ..core.batch_contract import (
+                BATCH_AUTO,
+                BATCH_BORING,
+                batch_requested_mode,
+                normalize_batch_requested,
+            )
+        except ImportError:  # pragma: no cover - flat/standalone loads
+            from seestar.core.batch_contract import (
+                BATCH_AUTO,
+                BATCH_BORING,
+                batch_requested_mode,
+                normalize_batch_requested,
+            )
+        self.batch_requested = normalize_batch_requested(batch_size)
+        requested_batch_size = self.batch_requested
+        self.batch_flush_mode = "count"
+        self._batch_contract_restored = False
+        if getattr(self, "_resume_requested", False):
+            restored_contract = self._read_persisted_batch_contract()
+            if restored_contract is not None:
+                self.batch_requested = int(restored_contract["requested"])
+                requested_batch_size = self.batch_requested
+                self.batch_resolved = max(1, int(restored_contract["resolved"]))
+                self.batch_size = self.batch_resolved
+                restored_chunk = restored_contract.get("chunk_size")
+                if restored_chunk is not None:
+                    try:
+                        self.chunk_size = int(restored_chunk)
+                    except (TypeError, ValueError):
+                        pass
+                self._batch_contract_restored = True
+                self.logger.info(
+                    "[BatchContract] Resume: B_resolved=%d réutilisé depuis le "
+                    "contrat persisté (jamais ré-estimé depuis la RAM courante).",
+                    self.batch_resolved,
+                )
+                self.update_progress(
+                    f"ⓘ Reprise: B_resolved={self.batch_resolved} réutilisé "
+                    f"(contrat de lot gelé persisté).",
+                    None,
+                )
+
+        if not self._batch_contract_restored:
+            if requested_batch_size == BATCH_AUTO:
+                # Auto: choose the capacity ONCE, before scientific batch
+                # execution.
+                estimated = self._estimate_batch_size()
+                self.batch_resolved = max(1, int(estimated))
+                self.batch_size = self.batch_resolved
+                self.logger.info(
+                    "[AutoBatch] Mode Auto (0) – estimation initiale: %d "
+                    "images/lot (B_resolved gelé avant exécution scientifique).",
+                    self.batch_resolved,
+                )
+                self.update_progress(
+                    f"✅ Mode Auto: B_resolved={self.batch_resolved} "
+                    f"(capacité gelée pour la session)",
+                    None,
+                )
+            elif requested_batch_size == BATCH_BORING:
+                self.batch_resolved = 1
+                self.batch_size = 1
+                self.update_progress(
+                    "ⓘ Mode Boring (B_resolved=1, une image par lot).", None
+                )
+            else:
+                self.batch_resolved = max(1, int(requested_batch_size))
+                self.batch_size = self.batch_resolved
+                self.update_progress(
+                    f"ⓘ Taille de lot explicite: B_resolved="
+                    f"{self.batch_resolved} images/lot.",
+                    None,
+                )
+
+        # Phase B1 intent routing: a canonical Auto + Reproject&Coadd run
+        # keeps the exact accepted single-grid workflow of the historical
+        # mode-0 runs — the reference WCS is frozen and the intermediate
+        # inter-batch reprojection is not active (the final coadd runs once on
+        # the frozen grid, batches inherit the frozen reference astrometry).
+        # Reproject&Coadd itself stays fully decoupled from the Auto sentinel:
+        # it executes from its own flags for Boring / explicit runs too.
+        if (
+            requested_batch_size == BATCH_AUTO
+            and not getattr(self, "_batch_contract_restored", False)
+            and getattr(self, "reproject_coadd_final", False)
+        ):
+            if not getattr(self, "freeze_reference_wcs", False):
+                logger.debug(
+                    "  -> Auto+Reproject&Coadd: freeze_reference_wcs activé "
+                    "pour conserver la grille unique (workflow accepté)."
+                )
+            self.freeze_reference_wcs = True
+            if getattr(self, "reproject_between_batches", False):
+                self.reproject_between_batches = False
+                self.update_progress(
+                    "ⓘ Auto+Reproject&Coadd : reprojection inter-lots "
+                    "désactivée (coadd final unique sur la grille gelée).",
+                    None,
+                )
+                logger.debug(
+                    "  -> Auto+Reproject&Coadd: reproject_between_batches forcé "
+                    "à False (coadd final unique)."
+                )
+            if (
+                str(getattr(self, "stack_final_combine", "")).lower()
+                != "reproject_coadd"
+            ):
+                self.stack_final_combine = "reproject_coadd"
+
+        self.logger.debug(
+            "QM start_processing: batch_requested=%r (mode=%s), B_resolved=%d, "
+            "flush_mode=%s, restored=%s",
+            self.batch_requested,
+            batch_requested_mode(self.batch_requested),
+            int(getattr(self, "batch_resolved", 1) or 1),
+            self.batch_flush_mode,
+            self._batch_contract_restored,
+        )
+
+    def _read_persisted_batch_contract(self):
+        """Read the persisted frozen batch contract for a Resume (read-only).
+
+        Returns ``None`` when no manifest / contract is available (fresh run,
+        schema-v1 legacy manifest without the batch block, corrupt payload).
+        The contract is a dict with ``requested`` (canonical B_requested) and
+        ``resolved`` (frozen B_resolved >= 1), plus an optional ``chunk_size``.
+        This never writes and never estimates from the current machine RAM.
+        """
+        if not getattr(self, "_resume_requested", False):
+            return None
+        if not getattr(self, "output_folder", None):
+            return None
+        try:
+            manifest_path = (
+                Path(self.output_folder)
+                / "memmap_accumulators"
+                / _RESUME_MANIFEST_FILENAME
+            )
+            if not manifest_path.is_file():
+                return None
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        batch = manifest.get("batch")
+        if not isinstance(batch, dict):
+            # Schema-v1 or pre-contract manifest: fall back to the canonical
+            # scientific config recorded in the manifest when present.
+            sci = manifest.get("scientific_config")
+            if isinstance(sci, dict) and isinstance(sci.get("batch_size"), int):
+                resolved = sci["batch_size"]
+                if resolved >= 1:
+                    return {
+                        "requested": 0,
+                        "resolved": resolved,
+                        "chunk_size": sci.get("chunk_size"),
+                    }
+            return None
+        try:
+            requested = int(batch.get("requested", 0))
+            resolved = int(batch.get("resolved", 0))
+        except (TypeError, ValueError):
+            return None
+        if resolved < 1:
+            return None
+        chunk = batch.get("chunk_size")
+        return {
+            "requested": requested,
+            "resolved": resolved,
+            "chunk_size": chunk,
+        }
+
+    def _freeze_batch_resolved(self):
+        """Freeze B_resolved once, after the queue is filled, before execution.
+
+        Phase B1 (canonical batch contract): this is the single freeze point.
+        Nothing mutates ``batch_size`` / ``batch_resolved`` after this call
+        (no timing / CPU-GPU throughput / memory-pressure / allocation-failure
+        driven shrink).  Rules:
+
+        * a Resume reuses the persisted frozen contract verbatim (never
+          recomputed, never shrunk by the remaining-queue population),
+        * a fresh Auto run caps the resolved capacity by the known static
+          queue population (``B_resolved <= samples``) when the queue is
+          non-empty — the final partial batch stays natural,
+        * Boring / explicit runs keep their resolved value; special
+          single-batch modes keep the whole-population capacity chosen by the
+          queue prep.
+        """
+        try:  # lazy import: keep engine module-import order baseline-stable
+            from ..core.batch_contract import (
+                batch_requested_mode,
+                BATCH_MODE_AUTO,
+            )
+        except ImportError:  # pragma: no cover - flat/standalone loads
+            from seestar.core.batch_contract import (
+                batch_requested_mode,
+                BATCH_MODE_AUTO,
+            )
+        if getattr(self, "_batch_contract_restored", False):
+            # Resume: the persisted contract was applied at resolution time.
+            # The queue-prep special flows (plan / boring CSV single-batch)
+            # reproduce the exact per-run capacity the original run derived,
+            # so the frozen value is whatever >= 1 is now bound — never
+            # re-estimated, never shrunk by the remaining-queue population.
+            current = getattr(self, "batch_size", None)
+            try:
+                current = int(current or 1)
+            except (TypeError, ValueError):
+                current = 1
+            current = max(1, current)
+            persisted = max(1, int(getattr(self, "batch_resolved", 1) or 1))
+            if current == 1 and persisted > 1:
+                # Count-mode resume: nothing overrode the restored capacity.
+                current = persisted
+            self.batch_resolved = current
+            self.batch_size = current
+            return
+        current = getattr(self, "batch_size", None)
+        try:
+            current = int(current or 1)
+        except (TypeError, ValueError):
+            current = 1
+        current = max(1, current)
+        requested = int(getattr(self, "batch_requested", 0) or 0)
+        mode = batch_requested_mode(requested)
+        if (
+            mode == BATCH_MODE_AUTO
+            and getattr(self, "batch_flush_mode", "count") == "count"
+        ):
+            n_samples = int(getattr(self, "files_in_queue", 0) or 0)
+            if n_samples > 0:
+                from ..core.batch_contract import clamp_resolved_to_samples  # noqa: F401
+
+                current = clamp_resolved_to_samples(current, n_samples)
+        self.batch_resolved = current
+        self.batch_size = current
+        self.logger.info(
+            "[BatchContract] B_resolved gelé: %d (mode=%s, flush=%s, file=%d)",
+            current,
+            mode,
+            getattr(self, "batch_flush_mode", "count"),
+            int(getattr(self, "files_in_queue", 0) or 0),
         )
 
     ##########################################################################
@@ -7391,14 +7734,7 @@ class SeestarQueuedStacker:
                                 )
                                 self._current_batch_paths.append(file_path)
 
-                                if self.batch_size == 0:
-                                    trigger = float("inf")
-                                elif self.batch_size == 1 and getattr(
-                                    self, "chunk_size", None
-                                ):
-                                    trigger = getattr(self, "chunk_size")
-                                else:
-                                    trigger = max(1, self.batch_size)
+                                trigger = self._batch_flush_trigger()
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
                                     >= trigger
@@ -7641,14 +7977,7 @@ class SeestarQueuedStacker:
                                             classic_stack_item
                                         )
 
-                                if self.batch_size == 0:
-                                    trigger = float("inf")
-                                elif self.batch_size == 1 and getattr(
-                                    self, "chunk_size", None
-                                ):
-                                    trigger = getattr(self, "chunk_size")
-                                else:
-                                    trigger = max(1, self.batch_size)
+                                trigger = self._batch_flush_trigger()
                                 if (
                                     len(current_batch_items_with_masks_for_stack_batch)
                                     >= trigger
@@ -14110,6 +14439,16 @@ class SeestarQueuedStacker:
                 if getattr(self, "use_quality_weighting", False)
                 else None
             ),
+            # Phase B1 (canonical batch contract): the frozen requested +
+            # resolved batch contract.  ``resolved`` (B_resolved >= 1) is the
+            # capacity frozen for the run; a Resume reuses it verbatim instead
+            # of re-estimating from the current machine RAM.  ``chunk_size``
+            # is persisted when present (Boring streaming grouping).
+            "batch": {
+                "requested": int(getattr(self, "batch_requested", 0) or 0),
+                "resolved": max(1, int(getattr(self, "batch_resolved", 1) or 1)),
+                "chunk_size": getattr(self, "chunk_size", None),
+            },
             "stacked_batches_count": int(stacked_batches_count),
             "images_in_cumulative_stack": int(
                 getattr(self, "images_in_cumulative_stack", 0) or 0
@@ -15831,16 +16170,19 @@ class SeestarQueuedStacker:
                 continue
 
             hdr = None
-            # Ensure a valid WCS is present when using reproject+coadd. Older
-            # ``batch_size=0`` runs already stored the reference WCS in the batch
+            # Ensure a valid WCS is present when using reproject+coadd. Runs
+            # with the canonical Auto batch intent (historical mode-0
+            # workflow) already stored the frozen reference WCS in the batch
             # header, so avoid re-solving when these keywords are present.
+            inherit_ref = self._reproject_inherits_frozen_reference()
             if getattr(self, "reproject_coadd_final", False):
                 if (
-                    getattr(self, "batch_size", 0) == 0
+                    inherit_ref
                     and getattr(self, "reference_header_for_wcs", None) is not None
                 ):
-                    # In ``batch_size=0`` mode always force the reference WCS so
-                    # that aligned batches share identical astrometric metadata.
+                    # Auto + Reproject&Coadd: always force the reference WCS
+                    # so that aligned batches share identical astrometric
+                    # metadata (accepted single-grid workflow).
                     hdr = self.reference_header_for_wcs.copy()
                     has_wcs = True
                 else:
@@ -15852,7 +16194,8 @@ class SeestarQueuedStacker:
                         has_wcs = False
                     if not has_wcs:
                         if getattr(self, "reference_header_for_wcs", None) is not None:
-                            # Inject the reference WCS to mirror previous batch_size=0 behaviour
+                            # Inject the reference WCS (same grid inheritance
+                            # as the historical mode-0 reproject behaviour).
                             try:
                                 hdr = hdr or fits.Header()
                                 for k in _REFERENCE_WCS_KEYS:
@@ -15865,7 +16208,7 @@ class SeestarQueuedStacker:
                                 has_wcs = True
                             except Exception:
                                 has_wcs = False
-                        if not has_wcs and getattr(self, "batch_size", 0) != 0:
+                        if not has_wcs and not inherit_ref:
                             try:
                                 self._run_solver_and_update_header(sci_path)
                                 hdr = fits.getheader(sci_path, memmap=False)
@@ -15879,7 +16222,10 @@ class SeestarQueuedStacker:
                     if hdr is None:
                         hdr = hdul[0].header
                 h, w = data_cxhxw.shape[-2:]
-                if getattr(self, "batch_size", 0) == 0 and self.reference_wcs_object is not None:
+                if (
+                    self._reproject_inherits_frozen_reference()
+                    and self.reference_wcs_object is not None
+                ):
                     batch_wcs = self.reference_wcs_object
                     batch_wcs.pixel_shape = (w, h)
                 else:
@@ -15991,7 +16337,7 @@ class SeestarQueuedStacker:
             accepted_support_batches, out_wcs, data_hwc.shape[:2]
         )
         apply_white_fix = (
-            int(getattr(self, "batch_size", 0) or 0) == 0
+            self._reproject_inherits_frozen_reference()
             and getattr(self, "reproject_coadd_final", False)
         )
         if apply_white_fix:
@@ -16558,13 +16904,49 @@ class SeestarQueuedStacker:
             pass
         return cropped_img, cropped_cov, new_wcs
 
-    def _ensure_reference_wcs_for_mode0(self, batch_files):
-        """Populate reference WCS/header when running the mode-0 reproject pass."""
+    def _reproject_inherits_frozen_reference(self) -> bool:
+        """True when classic Reproject&Coadd batches inherit the frozen
+        reference astrometry directly (no per-batch solving).
+
+        Phase B1 (canonical batch contract): this routes on explicit state —
+        the canonical Auto batch intent (B_requested == 0) combined with a
+        Reproject&Coadd final request reproduces the exact accepted
+        single-grid workflow of the historical mode-0 runs.  Boring / explicit
+        Reproject&Coadd runs keep the historical per-batch WCS recovery path.
+        A legacy pre-resolution instance still carrying the old all-in-RAM
+        sentinel (``batch_size <= 0``) maps to the same Auto workflow.
+        """
+        try:  # lazy import: keep engine module-import order baseline-stable
+            from ..core.batch_contract import BATCH_AUTO
+        except ImportError:  # pragma: no cover - flat/standalone loads
+            from seestar.core.batch_contract import BATCH_AUTO
+        if not getattr(self, "reproject_coadd_final", False):
+            return False
         try:
-            bs_mode = int(getattr(self, "batch_size", 0) or 0)
-        except Exception:
-            bs_mode = 0
-        if bs_mode != 0 or not getattr(self, "reproject_coadd_final", False):
+            requested = int(getattr(self, "batch_requested", 0) or 0)
+        except (TypeError, ValueError):
+            requested = 0
+        if requested == BATCH_AUTO:
+            return True
+        try:
+            legacy_zero = int(getattr(self, "batch_size", 1)) <= 0
+        except (TypeError, ValueError):
+            legacy_zero = False
+        return legacy_zero
+
+    def _ensure_reference_wcs_for_mode0(self, batch_files):
+        """Populate reference WCS/header for the Reproject&Coadd pass.
+
+        Phase B1 (canonical batch contract): the fallback reference capture is
+        gated on explicit mode state — the Reproject&Coadd flag AND the
+        tokenized flush mode (the historical mode-0 reproject workflow is
+        exactly the canonical token-mode Reproject&Coadd run).  It never
+        depends on a raw batch-size sentinel.  The historical name is kept for
+        call-site stability.
+        """
+        if not getattr(self, "reproject_coadd_final", False):
+            return
+        if getattr(self, "batch_flush_mode", "count") != "token":
             return
 
         need_wcs = getattr(self, "reference_wcs_object", None) is None
@@ -16723,7 +17105,6 @@ class SeestarQueuedStacker:
                 continue
             try:
                 hdr = None
-                bs_local = int(getattr(self, "batch_size", 0) or 0)
                 try:
                     hdr = fits.getheader(sci_path, memmap=False)
                     has_wcs = _header_has_wcs_keywords(hdr)
@@ -16737,19 +17118,14 @@ class SeestarQueuedStacker:
                         for key in _REFERENCE_WCS_KEYS:
                             if key in ref_hdr:
                                 hdr[key] = ref_hdr[key]
-                        # When ``batch_size`` equals 0 the classic batches should
-                        # inherit the reference astrometry directly, mirroring the
-                        # historical WIP workflow where no additional solving was
-                        # performed. For other batch sizes we keep the previous
-                        # behaviour of pre-populating the reference WCS so the
-                        # solver has a sensible starting point.
-                        if bs_local == 0 and getattr(self, "reproject_coadd_final", False):
-                            data_tmp = fits.getdata(sci_path, memmap=False)
-                            fits.PrimaryHDU(data=data_tmp, header=hdr).writeto(
-                                sci_path, overwrite=True, output_verify="ignore"
-                            )
-                            has_wcs = True
-                        elif bs_local != 0:
+                        # Phase B1 (canonical batch contract): the classic
+                        # batches inherit the frozen reference astrometry
+                        # directly when a Reproject&Coadd final pass is
+                        # active — mirroring the historical WIP workflow where
+                        # no additional batch solving was performed.  This
+                        # decision depends on the Reproject&Coadd mode flag
+                        # ONLY, never on the batch-size value / Auto sentinel.
+                        if getattr(self, "reproject_coadd_final", False):
                             data_tmp = fits.getdata(sci_path, memmap=False)
                             fits.PrimaryHDU(data=data_tmp, header=hdr).writeto(
                                 sci_path, overwrite=True, output_verify="ignore"
@@ -16760,9 +17136,9 @@ class SeestarQueuedStacker:
                 solved_ok = True
                 if not has_wcs:
                     # Always attempt solving when WCS is missing. In the
-                    # ``batch_size=0`` + reproject path the reference WCS above
-                    # already avoids this branch, but other scenarios still rely
-                    # on ASTAP to recover the astrometry.
+                    # Reproject&Coadd path the reference WCS above already
+                    # avoids this branch, but other scenarios still rely on
+                    # ASTAP to recover the astrometry.
                     solved_ok = self._run_solver_and_update_header(sci_path)
                     if solved_ok:
                         hdr = fits.getheader(sci_path, memmap=False)
@@ -18884,10 +19260,11 @@ class SeestarQueuedStacker:
                         count_added += 1
             if count_added > 0:
                 self.files_in_queue += count_added
-                if self._auto_batch_size_zero_mode:
-                    self._enable_auto_batching_for_zero_mode()
-                else:
-                    self._recalculate_total_batches()
+                # Phase B1: files added while a run is live are appended to the
+                # frozen queue; the count-based trigger (B_resolved) or the
+                # plan delimiters already in the queue bound N_batch.  This
+                # never mutates batch_size/batch_resolved.
+                self._recalculate_total_batches()
             return count_added
         except FileNotFoundError:
             self.update_progress(
@@ -18904,40 +19281,6 @@ class SeestarQueuedStacker:
                 f"❌ Erreur scan dossier {os.path.basename(folder_path)}: {e}"
             )
             return 0
-
-    def _enable_auto_batching_for_zero_mode(self) -> bool:
-        """Create batch delimiters when using batch_size=0 without stack_plan."""
-        queue_items = [
-            os.path.abspath(str(item))
-            for item in list(self.queue.queue)
-            if item != _BATCH_BREAK_TOKEN
-        ]
-        if not queue_items:
-            return False
-
-        if self._auto_batch_size_zero_mode:
-            auto_batch_size = self._auto_batch_size_zero_mode
-        else:
-            try:
-                auto_batch_size = max(1, int(self._estimate_batch_size()))
-            except Exception:
-                auto_batch_size = 1
-            self._auto_batch_size_zero_mode = auto_batch_size
-
-        new_queue = Queue()
-        for idx, filepath in enumerate(queue_items):
-            new_queue.put(filepath)
-            if (idx + 1) % auto_batch_size == 0 and (idx + 1) < len(queue_items):
-                new_queue.put(_BATCH_BREAK_TOKEN)
-
-        self.queue = new_queue
-        self.use_batch_plan = True
-        self.all_input_filepaths = list(queue_items)
-        self.files_in_queue = len(queue_items)
-        self.total_batches_estimated = math.ceil(
-            self.files_in_queue / self._auto_batch_size_zero_mode
-        )
-        return True
 
     ################################################################################################################################################
 
@@ -19400,14 +19743,15 @@ class SeestarQueuedStacker:
             eff["save_as_float32_effective"] = True
             eff["save_as_float32_reason"] = s32_forced_reason
 
-        # Batch size: requested semantics vs executed concrete value.
+        # Batch size: requested semantics vs frozen executed capacity.
+        # Phase B1: ``batch_effective`` is B_resolved (>= 1).  A canonical
+        # Auto request (0) resolves to B_resolved once and freezes it;
+        # Boring (1) / explicit (n) keep their requested capacity.
         batch_requested = requested.get("batch_size_requested")
-        batch_effective = int(getattr(self, "batch_size", 0) or 0)
+        batch_effective = max(1, int(getattr(self, "batch_resolved", 1) or 1))
         eff["batch_size_effective"] = batch_effective
         if batch_requested == "auto" and batch_effective >= 1:
-            reasons["batch_size_reason"] = "auto_estimated"
-        elif batch_requested == "all_ram" and batch_effective == 0:
-            reasons["batch_size_reason"] = "explicit_all_ram_single_batch"
+            reasons["batch_size_reason"] = "auto_resolved_frozen"
         elif batch_requested not in (None, str(batch_effective)):
             reasons["batch_size_reason"] = (
                 f"requested={_prov_token(batch_requested)} -> "
@@ -20390,61 +20734,8 @@ class SeestarQueuedStacker:
                 f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}"
             )
 
-        try:
-            requested_batch_size = int(batch_size)
-        except (TypeError, ValueError):
-            requested_batch_size = -1
-
-        if requested_batch_size < 0 and not self._has_stack_plan:
-            estimated = self._estimate_batch_size()
-            self.batch_size = max(1, int(estimated))
-            self.logger.info(
-                f"[AutoBatch] Mode activé (plan absent) – estimation: {self.batch_size} images/lot"
-            )
-            self.update_progress(
-                f"✅ Taille lot auto estimée et appliquée: {self.batch_size}", None
-            )
-        elif requested_batch_size == 0:
-            # Mode "batch size 0" explicite : aucun lot, tout en RAM
-            self.batch_size = 0
-            if self.reproject_between_batches:
-                self.update_progress(
-                    "ⓘ batch_size=0 : désactivation de la reprojection entre lots (workflow WIP).",
-                    None,
-                )
-                logger.debug(
-                    "  -> batch_size=0: reproject_between_batches forcé à False pour reproduire WIP."
-                )
-                self.reproject_between_batches = False
-            if not self.freeze_reference_wcs:
-                logger.debug(
-                    "  -> batch_size=0: freeze_reference_wcs activé pour conserver la grille WIP."
-                )
-                self.freeze_reference_wcs = True
-            if reproject_coadd_final is None and not self.reproject_coadd_final:
-                self.reproject_coadd_final = True
-                self.stack_final_combine = "reproject_coadd"
-                self.update_progress(
-                    "ⓘ batch_size=0 : activation automatique de Reproject&Coadd (comportement WIP).",
-                    None,
-                )
-                logger.debug(
-                    "  -> batch_size=0: reproject_coadd_final forcé à True pour reproduire le workflow WIP."
-                )
-            elif self.reproject_coadd_final and getattr(self, "stack_final_combine", "").lower() != "reproject_coadd":
-                self.stack_final_combine = "reproject_coadd"
-            # Re-synchronise final combine flags with GUI selection for BS=0
-            try:
-                _fm = str(getattr(self, "stack_final_combine", "")).lower()
-                if _fm in ("reproject", "mean", "median", "winsorized_sigma_clip"):
-                    self.reproject_coadd_final = False
-            except Exception:
-                pass
-        else:
-            self.batch_size = max(1, int(requested_batch_size))
-        self.update_progress(
-            f"ⓘ Taille de lot effective pour le traitement : {self.batch_size}"
-        )
+        self._resolve_batch_request(batch_size)
+        requested_batch_size = int(getattr(self, "batch_requested", 0) or 0)
         logger.debug(
             "DEBUG QM (start_processing): Fin Étape 1 - Configuration des paramètres de session."
         )
@@ -21065,10 +21356,11 @@ class SeestarQueuedStacker:
                 )
             self.queue_prepared = False
         elif special_single_csv:
-            # Single-batch CSV mode: mimic the "batch size 0" workflow but
-            # accumulate everything into one batch.  We disable the automatic
-            # per-image flushing by using a very large ``batch_size`` so that
-            # ``_worker`` only flushes at the end, just like batch size 0.
+            # Single-batch CSV mode: accumulate the ordered CSV files into one
+            # batch.  The count trigger equals the total population so
+            # ``_worker`` only flushes once the whole queue is accumulated
+            # (B_resolved == N_batch == the static sample count; the final
+            # flush is the natural single batch).
             self.use_batch_plan = True
             if ordered_files is None:
                 batches_from_plan = get_batches_from_stack_plan(
@@ -21078,7 +21370,6 @@ class SeestarQueuedStacker:
                     os.path.abspath(fp) for batch in batches_from_plan for fp in batch
                 ]
 
-            self.batch_size = 999999999
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
@@ -21091,6 +21382,8 @@ class SeestarQueuedStacker:
                 self.all_input_filepaths.append(abs_fp)
 
             batch_len = len(ordered_files)
+            self.batch_resolved = max(1, batch_len)
+            self.batch_size = self.batch_resolved
             self.total_batches_estimated = 1
             self.update_progress(
                 f"📋 {self.files_in_queue} fichiers initiaux ajoutés depuis stack_plan.csv"
@@ -21126,8 +21419,11 @@ class SeestarQueuedStacker:
                 plan_path, self.current_folder
             )
             logger.debug("Batching: using stacking plan from stack_plan.csv")
-            # En mode batch_size=0, ne pas surcharger la valeur; conserver 0
-            self.batch_size = 0
+            # Phase B1: plan rows are explicit batch delimiters; the queue is
+            # tokenized and the count trigger is disabled (``batch_flush_mode
+            # == "token"``).  ``batch_size`` / ``batch_resolved`` keep the
+            # frozen capacity (>= 1) — never the legacy all-in-RAM sentinel 0.
+            self.batch_flush_mode = "token"
             self.queue = Queue()
             self.files_in_queue = 0
             self.all_input_filepaths = []
@@ -21147,29 +21443,7 @@ class SeestarQueuedStacker:
         else:
             self.use_batch_plan = False
             initial_files_added = self._add_files_to_queue(self.current_folder)
-            should_auto_batch = (
-                self.batch_size == 0
-                and not self._has_stack_plan
-                and self.reproject_coadd_final
-            )
-            if should_auto_batch and initial_files_added > 0:
-                if self._enable_auto_batching_for_zero_mode():
-                    self.logger.info(
-                        "[AutoBatch] batch_size=0 sans stack_plan -> %d images par lot",
-                        self._auto_batch_size_zero_mode,
-                    )
-                    self.update_progress(
-                        f"[AutoBatch] Mode batch_size=0: {self._auto_batch_size_zero_mode} images par lot (sans stack_plan)."
-                    )
-                    self.update_progress(
-                        f"[AutoBatch] Total lots estimes: {self.total_batches_estimated}"
-                    )
-                else:
-                    self._recalculate_total_batches()
-                    self.update_progress(
-                        f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}"
-                    )
-            elif initial_files_added > 0:
+            if initial_files_added > 0:
                 self._recalculate_total_batches()
                 self.update_progress(
                     f"📋 {initial_files_added} fichiers initiaux ajoutés. Total lots estimé: {self.total_batches_estimated if self.total_batches_estimated > 0 else '?'}"
@@ -21178,6 +21452,16 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     "⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente."
                 )
+
+        # =====================================================================
+        # Phase B1 — FREEZE POINT: B_resolved is frozen HERE, once, before any
+        # scientific batch execution.  Every subsequent manifest/resume write
+        # carries this exact frozen contract; nothing in the worker, the
+        # queue timing, the CPU/GPU throughput or the memory pressure may
+        # mutate it afterwards.  The only acceptable smaller population is the
+        # natural final partial batch (N_batch < B_resolved).
+        # =====================================================================
+        self._freeze_batch_resolved()
 
         # HSI-2B: queue filtering uses the exact completed-source ledger (path +
         # size + mtime_ns), never ``stacked_batches_count * batch_size``.  This
