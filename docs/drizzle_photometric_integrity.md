@@ -293,8 +293,13 @@ At accumulator initialization one concise line is emitted to the durable Qt run
 log (`update_progress`) and the logger:
 
 ```
-DRIZZLE_CONFIG kernel=<effective> pixfrac=<effective> scale=<effective> wht_threshold=<effective>
+DRIZZLE_CONFIG kernel=<effective> pixfrac=<effective> scale=<effective> wht_threshold=<effective> requested_kernel=<requested> requested_scale=<requested> requested_pixfrac=<requested> requested_wht_threshold=<requested>
 ```
+
+Effective tokens keep their historical names; the requested tokens are
+appended with a `requested_` prefix so a requested ≠ effective divergence
+(Lanczos policy, coercion, or a legacy value) is visible in the same
+machine-readable record.
 
 For Lanczos, an adjacent bounded message records the requested -> effective
 explanation (pixfrac and threshold).

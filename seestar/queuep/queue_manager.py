@@ -4474,8 +4474,11 @@ class SeestarQueuedStacker:
                 # (deterministic well-logged fallback to square/1.0, consistent
                 # with existing settings coercion) so invalid runtime values can
                 # never reach the Drizzle engine.
+                kernel_requested = str(
+                    getattr(self, "drizzle_kernel", "square") or "square"
+                )
                 kernel_eff, kernel_reason = validate_drizzle_kernel(
-                    getattr(self, "drizzle_kernel", "square")
+                    kernel_requested
                 )
                 pixfrac_requested, pixfrac_reason = validate_drizzle_pixfrac(
                     getattr(self, "drizzle_pixfrac", 1.0)
@@ -4585,12 +4588,30 @@ class SeestarQueuedStacker:
                         resume_result.counters["frame_count"]
                     )
                 # Persistent effective-runtime configuration line (Qt durable
-                # run log + logger): one concise line, never requested/effective
-                # confusion.
-                scale_eff = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
+                # run log + logger): one concise line with BOTH the effective
+                # values and the requested values, so a requested != effective
+                # divergence (Lanczos policy / coercion / legacy value) is
+                # visible in the same machine-readable record.  Effective
+                # tokens keep the historical names; requested tokens are
+                # prefixed with ``requested_``.
+                scale_requested = float(
+                    getattr(self, "drizzle_scale", 1.0) or 1.0
+                )
+                scale_eff = scale_requested
                 config_line = (
                     "DRIZZLE_CONFIG kernel=%s pixfrac=%s scale=%s wht_threshold=%s"
-                    % (kernel_eff, pixfrac_eff, scale_eff, wht_threshold_eff)
+                    " requested_kernel=%s requested_scale=%s requested_pixfrac=%s"
+                    " requested_wht_threshold=%s"
+                    % (
+                        kernel_eff,
+                        pixfrac_eff,
+                        scale_eff,
+                        wht_threshold_eff,
+                        kernel_requested,
+                        scale_requested,
+                        pixfrac_requested,
+                        wht_threshold_requested,
+                    )
                 )
                 self.update_progress(config_line)
                 logger.info("M3: %s", config_line)
