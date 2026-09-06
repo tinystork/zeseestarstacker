@@ -531,16 +531,19 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     # --- execution: requested vs effective batch-size semantics (A2/A4) ---
     # ``batch_size`` above stays the fingerprinted engine contract; these two
     # carry the *semantics* so a cfg reader can reconstruct what was asked
-    # ("auto"/"all_ram"/a fixed number) vs what the run actually executed.
+    # ("auto" / "1" Boring / a fixed number) vs what the run actually
+    # executed (the frozen B_resolved).
     _f("batch_size_requested", Section.SCIENTIFIC, KIND_STR,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
-       doc="Requested batch-size semantics: 'auto' | 'all_ram' | '<n>'.  The "
-           "GUI 'auto' sentinel (-1/0) is recorded as 'auto' (all in RAM as "
-           "'all_ram'), never as an unexplained negative number."),
+       doc="Requested batch-size semantics: 'auto' | '1' (Boring) | '<n>' "
+           "(explicit).  Canonical Auto is 0 (legacy negative spellings are "
+           "normalized to 0 at the compatibility boundary), never recorded as "
+           "an unexplained negative number."),
     _f("batch_size_effective", Section.SCIENTIFIC, KIND_INT,
        presence=PRESENCE_OPTIONAL, backend_mapped=False, restore=False,
-       doc="Concrete batch size the run executed (>=1; 0 = single all-in-RAM "
-           "batch).  Always recorded alongside batch_size_requested."),
+       doc="Frozen B_resolved the run executed (>=1; 0 means the engine has "
+           "not resolved the Auto request yet).  Always recorded alongside "
+           "batch_size_requested."),
 
     # --- scientific: classic runtime-effective aliases (A2) ---
     # The requested values live in the plain qt/backend fields above; these

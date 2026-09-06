@@ -16,97 +16,93 @@ except ImportError:
     print("Optional dependency 'psutil' not found. Automatic batch size estimation may be limited.")
 
 
-def estimate_batch_size(sample_image_path=None, available_memory_percentage=70):
+def estimate_batch_size(sample_image_path=None, available_memory_percentage=70,
+                        queue_length=None):
     """
     Estime la taille de lot optimale en fonction de la mémoire disponible.
-    CORRIGÉ: Gère correctement le tuple retourné par load_and_validate_fits.
+
+    Phase B1 (canonical batch contract): this legacy entry point is now a thin
+    wrapper over the independently-testable AutoBatch planner
+    (``seestar.core.batch_contract.AutoBatchPlanner`` / ``plan_auto_batch``).
+    The wrapper preserves the historical numeric behavior exactly
+    (memory_factor=6, safety_factor=1.5, clamp [3, 50], fallback 10, ~4 MP
+    fallback footprint) while the planner kernel itself is injectable,
+    backend-independent and conservative on memory-discovery failure.
 
     Parameters:
         sample_image_path: Chemin vers une image exemple pour estimer la taille mémoire
         available_memory_percentage: Pourcentage de la mémoire disponible à utiliser (0-100)
+        queue_length: Nombre connu d'échantillons (file statique).  Quand il est
+            fourni, B_resolved ne dépasse jamais ce nombre d'échantillons.
 
     Returns:
         int: Taille de lot estimée, au moins 3 et au plus 50
     """
-    # Default batch size if estimation fails
+    from .batch_contract import AutoBatchPlanner
+
+    # Legacy-compatible window: historical ``estimate_batch_size`` returned at
+    # least 3 and at most 50 for every Auto resolution.
+    min_batch = 3
+    max_batch = 50
+    # Default batch size if estimation fails (conservative fallback)
     default_batch_size = 10
 
     if not _psutil_available:
         print("psutil not available, using default batch size:", default_batch_size)
-        return default_batch_size
+        return min(default_batch_size, max_batch)
+
+    def _memory_query():
+        # Obtenir la mémoire disponible (en octets)
+        return int(psutil.virtual_memory().available)
 
     try:
-        # Obtenir la mémoire disponible (en octets)
-        mem = psutil.virtual_memory()
-        available_memory = mem.available
-
-        # N'utiliser qu'un pourcentage de la mémoire disponible
-        usable_memory = available_memory * (available_memory_percentage / 100.0)
-
-        # Estimer la taille d'une image en mémoire pendant le traitement
-        single_image_size_bytes = 0
+        image_hw = None
         if sample_image_path and os.path.exists(sample_image_path):
-            img_data_for_estimation = None # Initialiser
             try:
-                # Load image to get dimensions and type (returns float32 0-1)
-                loaded_tuple = load_and_validate_fits(sample_image_path) # APPEL MODIFIÉ
-
-                # --- DÉBUT DE LA CORRECTION ---
+                loaded_tuple = load_and_validate_fits(sample_image_path)
                 if loaded_tuple and loaded_tuple[0] is not None:
-                    img_data_for_estimation = loaded_tuple[0] # Déballer l'array image
+                    img_data_for_estimation = loaded_tuple[0]
+                    image_hw = tuple(int(v) for v in img_data_for_estimation.shape[:2])
                 else:
-                    # Si load_and_validate_fits retourne None ou si les données sont None,
-                    # img_data_for_estimation restera None.
-                    # Le ValueError sera levé plus bas si img_data_for_estimation est None.
-                    pass # img_data_for_estimation est déjà None
-                # --- FIN DE LA CORRECTION ---
-
-                if img_data_for_estimation is None: # Vérifier après la tentative de déballage
-                    raise ValueError(f"Failed to load sample image: {sample_image_path}")
-
-                # Estimate memory usage during processing (alignment + stacking buffer)
-                memory_factor = 6
-                h, w = img_data_for_estimation.shape[:2] # Utiliser img_data_for_estimation
-                channels_out = 3 # Assume color output for worst-case size
-                bytes_per_float = 4
-                single_image_size_bytes = h * w * channels_out * bytes_per_float * memory_factor
-
+                    raise ValueError(
+                        f"Failed to load sample image: {sample_image_path}"
+                    )
             except Exception as img_e:
-                 print(f"Warning: Could not load/analyze sample image {sample_image_path} for size estimation: {img_e}")
-                 single_image_size_bytes = 0 # Fallback
+                print(
+                    f"Warning: Could not load/analyze sample image "
+                    f"{sample_image_path} for size estimation: {img_e}"
+                )
+                image_hw = None  # Fallback footprint
         else:
             print("Warning: No valid sample image path provided for size estimation.")
-            single_image_size_bytes = 0 # Fallback
 
+        try:
+            percentage = float(available_memory_percentage)
+        except (TypeError, ValueError):
+            percentage = 70.0
+        fraction = max(0.0, min(100.0, percentage)) / 100.0
 
-        # Fallback estimation if image loading failed or no path provided
-        if single_image_size_bytes <= 0:
-            print("Using fallback image size estimation (approx. 4MP color image).")
-            single_image_size_bytes = 2000 * 2000 * 3 * 4 * 6
-
-
-        # Safety factor for other system usage and Python overhead
-        safety_factor = 1.5
-
-        if single_image_size_bytes <= 0:
-             print("Error: Calculated image size is zero or negative.")
-             return default_batch_size
-
-        estimated_batch = int(usable_memory / (single_image_size_bytes * safety_factor))
-        estimated_batch = max(3, min(50, estimated_batch)) # Limites raisonnables
-
-        print(f"Mémoire disponible: {available_memory / (1024**3):.2f} Go "
-              f"(Utilisable: {usable_memory / (1024**3):.2f} Go)")
-        print(f"Taille estimée par image (avec overhead): {single_image_size_bytes / (1024**2):.2f} Mo")
-        print(f"Taille de lot estimée: {estimated_batch}")
-
-        return estimated_batch
+        # Memory discovery is delegated to the planner kernel through the
+        # injectable query; a failed query returns the conservative fallback.
+        planner = AutoBatchPlanner(
+            memory_query=_memory_query,
+            image_hw=image_hw,
+            memory_factor=6,
+            safety_factor=1.5,
+            min_batch=min_batch,
+            max_batch=max_batch,
+            fallback_batch=default_batch_size,
+            usable_memory_fraction=fraction,
+        )
+        estimated = planner.resolve(queue_length=queue_length)
+        print(f"Taille de lot estimée: {estimated}")
+        return estimated
 
     except Exception as e:
         print(f"Erreur lors de l'estimation de la taille de lot: {e}")
         traceback.print_exc()
         print(f"Utilisation de la taille de lot par défaut : {default_batch_size}")
-        return default_batch_size
+        return min(default_batch_size, max_batch)
 
 
 def downsample_image(image: np.ndarray, factor: int = 2) -> np.ndarray:
