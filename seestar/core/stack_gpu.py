@@ -33,6 +33,9 @@ is the scientific authority and is never modified.
 
 from __future__ import annotations
 
+import os as _os
+import time as _time
+
 import numpy as np
 
 __all__ = [
@@ -43,6 +46,116 @@ __all__ = [
 ]
 
 _cupy_module = None
+
+
+# ---------------------------------------------------------------------------
+# Opt-in stage profiler (env ZSSS_GPU_PROFILE=1) - recording ONLY.
+#
+# Every ``_p_*`` call is a hard no-op when the env var is unset, so the
+# kernels behave exactly as before (same ops, same order, same values).
+# When enabled the probes never alter data, dtypes, control flow or return
+# contracts: they only record (a) host monotonic wall stamps for pure-host /
+# synchronization segments and (b) stream-ordered CuPy events for device
+# stage durations (elapsed between consecutive events after a final sync).
+# The standalone profiler driver (profiling/) additionally drives memory
+# snapshots through ``snap_mem``.  Nothing here can change reduction
+# results; the driver proves that bit-for-bit (instrumented vs plain).
+# ---------------------------------------------------------------------------
+
+_PROBE = None
+
+
+class _StageProbe:
+    """Collector for opt-in stage observations (single-threaded use)."""
+
+    def __init__(self, cp):
+        self.cp = cp
+        self.marks = []  # [(name, wall_seconds, cp.cuda.Event or None)]
+        self.wall = []  # [(name, start_s, end_s)] host/sync segments
+        self.mem = []  # [(name, free, total, p_used, p_free, p_total)]
+        self.notes = []  # free-form run facts (iterations, n_rej, ...)
+        self.snap_mem = False
+        self._wall_open = None
+
+    def reset(self):
+        self.marks = []
+        self.wall = []
+        self.mem = []
+        self.notes = []
+        self.snap_mem = False
+        self._wall_open = None
+
+    def event(self, name):
+        """Record a stream-ordered event marking the end of device work up
+        to this point (plus a host wall stamp)."""
+        ev = self.cp.cuda.Event()
+        ev.record()
+        self.marks.append((name, _time.perf_counter(), ev))
+        if self.snap_mem:
+            self._snapshot(name)
+
+    def wall_start(self, name):
+        self._wall_open = (name, _time.perf_counter())
+
+    def wall_end(self):
+        if self._wall_open is not None:
+            name, t0 = self._wall_open
+            self._wall_open = None
+            self.wall.append((name, t0, _time.perf_counter()))
+
+    def note(self, text):
+        self.notes.append(str(text))
+
+    def _snapshot(self, name):
+        """Synchronize and snapshot driver + pool memory state."""
+        try:
+            self.cp.cuda.Stream.null.synchronize()
+            free, total = self.cp.cuda.runtime.memGetInfo()
+            pool = self.cp.get_default_memory_pool()
+            self.mem.append(
+                (
+                    name,
+                    int(free),
+                    int(total),
+                    int(pool.used_bytes()),
+                    int(pool.free_bytes()),
+                    int(pool.total_bytes()),
+                )
+            )
+        except Exception:
+            self.mem.append((name, -1, -1, -1, -1, -1))
+
+
+def _ensure_probe():
+    """Create the probe lazily when ZSSS_GPU_PROFILE=1 (GPU required)."""
+    global _PROBE
+    if _PROBE is None and _os.getenv("ZSSS_GPU_PROFILE") == "1":
+        _PROBE = _StageProbe(_get_cupy())
+    return _PROBE
+
+
+def _p_event(name):
+    probe = _PROBE
+    if probe is not None:
+        probe.event(name)
+
+
+def _p_wall_start(name):
+    probe = _PROBE
+    if probe is not None:
+        probe.wall_start(name)
+
+
+def _p_wall_end():
+    probe = _PROBE
+    if probe is not None:
+        probe.wall_end()
+
+
+def _p_note(text):
+    probe = _PROBE
+    if probe is not None:
+        probe.note(text)
 
 
 def _get_cupy():
@@ -208,18 +321,24 @@ def _winsorize_bounds_cp(cp, arr, limits):
     low, high = limits
     valid = ~cp.isnan(arr)
     n_valid = cp.count_nonzero(valid, axis=0)
+    _p_event("bounds_valid_count")
     sort_key = cp.where(valid, arr, cp.float32(cp.inf))
+    _p_event("bounds_sort_key")
     order = cp.argsort(sort_key, axis=0)
+    _p_event("bounds_argsort")
     sorted_vals = cp.take_along_axis(sort_key, order, axis=0)
+    _p_event("bounds_take_along")
 
     max_idx = cp.maximum(n_valid - 1, 0)
     lowidx = cp.clip(cp.floor(low * n_valid).astype(cp.int64), 0, max_idx)
     highidx = cp.clip(
         n_valid - 1 - cp.floor(high * n_valid).astype(cp.int64), 0, max_idx
     )
+    _p_event("bounds_idx")
 
     low_b = cp.take_along_axis(sorted_vals, lowidx[cp.newaxis], axis=0)
     high_b = cp.take_along_axis(sorted_vals, highidx[cp.newaxis], axis=0)
+    _p_event("bounds_lo_hi")
     return low_b, high_b
 
 
@@ -239,21 +358,31 @@ def _winsorize_axis0_cp(cp, arr, limits):
     low, high = limits
     arr = arr.astype(cp.float32, copy=False)
     result = arr.copy()
+    _p_event("winsor_copy_result")
 
     valid = ~cp.isnan(arr)
     n_valid = cp.count_nonzero(valid, axis=0)
+    _p_event("winsor_valid_count")
 
-    if not bool(cp.any(n_valid > 0)):
+    _p_wall_start("sync_any_nvalid")
+    _has_valid = bool(cp.any(n_valid > 0))
+    _p_wall_end()
+    if not _has_valid:
+        _p_note("winsorize_all_invalid_column_set")
         return result
 
     # Sort ascending with NaN pushed to the end (NaN -> +inf).
     sort_key = cp.where(valid, arr, cp.float32(cp.inf))
+    _p_event("winsor_sort_key")
     order = cp.argsort(sort_key, axis=0)
+    _p_event("winsor_argsort")
     sorted_vals = cp.take_along_axis(sort_key, order, axis=0)
+    _p_event("winsor_take_along")
 
     # ``rank`` is the inverse permutation of ``order``: ``rank[i, ...]`` is the
     # sorted position (0 = smallest) of original sample ``i`` along axis 0.
     rank = cp.argsort(order, axis=0)
+    _p_event("winsor_rank_argsort")
 
     if low > 0:
         lowidx = cp.clip(cp.floor(low * n_valid).astype(cp.int64), 0, None)
@@ -263,7 +392,10 @@ def _winsorize_axis0_cp(cp, arr, limits):
         # silently wraps out-of-range indices, so the twin must raise
         # explicitly to reproduce the CPU reference failure instead of
         # diverging into wrapped-index garbage.
-        if bool(cp.any(lowidx >= arr.shape[0])):
+        _p_wall_start("sync_lowidx_oob_check")
+        _lowidx_oob = bool(cp.any(lowidx >= arr.shape[0]))
+        _p_wall_end()
+        if _lowidx_oob:
             raise IndexError(
                 f"index {int(cp.max(lowidx))} is out of bounds for axis 0 "
                 f"with size {arr.shape[0]}"
@@ -271,11 +403,16 @@ def _winsorize_axis0_cp(cp, arr, limits):
         low_bound = cp.take_along_axis(
             sorted_vals, lowidx[cp.newaxis], axis=0
         )
+        _p_event("winsor_low_bound")
         low_sel = valid & (rank < lowidx[cp.newaxis])
-        if bool(cp.any(low_sel)):
+        _p_wall_start("sync_low_sel")
+        _has_low_sel = bool(cp.any(low_sel))
+        _p_wall_end()
+        if _has_low_sel:
             result[low_sel] = cp.broadcast_to(
                 low_bound, result.shape
             )[low_sel]
+        _p_event("winsor_low_replace")
 
     if high > 0:
         highidx = cp.clip(cp.floor(high * n_valid).astype(cp.int64), 0, None)
@@ -284,12 +421,18 @@ def _winsorize_axis0_cp(cp, arr, limits):
         high_bound = cp.take_along_axis(
             sorted_vals, keep_idx[cp.newaxis], axis=0
         )
+        _p_event("winsor_high_bound")
         high_sel = valid & (rank >= upidx[cp.newaxis])
-        if bool(cp.any(high_sel)):
+        _p_wall_start("sync_high_sel")
+        _has_high_sel = bool(cp.any(high_sel))
+        _p_wall_end()
+        if _has_high_sel:
             result[high_sel] = cp.broadcast_to(
                 high_bound, result.shape
             )[high_sel]
+        _p_event("winsor_high_replace")
 
+    _p_event("winsor_return")
     return result
 
 
@@ -327,19 +470,40 @@ def stack_winsorized_sigma_gpu(
     (``cp.asnumpy`` before return), rejected_pct a Python float.
     """
     cp = _get_cupy()
-    arr = _stacked(images)
+    _ensure_probe()
+    _p_event("gpu_fn_start")
+    if _PROBE is None:
+        arr = _stacked(images)
+    else:
+        # Probe path: same two steps as ``_stacked`` split so the host
+        # stack-packing wall time and the H2D device copy can be measured
+        # separately.  Identical values, identical dtype, identical result.
+        _p_wall_start("host_stack_pack")
+        _host_stack = np.stack([im for im in images], axis=0).astype(
+            np.float32
+        )
+        _p_wall_end()
+        _p_event("h2d_transfer")
+        arr = cp.asarray(_host_stack)
+    _p_event("h2d_arr_ready")
 
     # Missing samples are excluded from the very first iteration.
     mask = ~cp.isnan(arr)
     valid = mask
+    _p_event("mask_prep")
     kappa_iter = float(kappa)
 
     for itr in range(int(max_iters)):
+        _p_event("iter%d_loop_top" % itr)
         arr_masked = cp.where(mask, arr, cp.float32(cp.nan))
+        _p_event("iter%d_masked" % itr)
         arr_w_data = _winsorize_axis0_cp(cp, arr_masked, winsor_limits)
+        _p_event("iter%d_winsorized" % itr)
 
         mu_w = cp.nanmean(arr_w_data, axis=0)
+        _p_event("iter%d_nanmean" % itr)
         sigma_w = cp.nanstd(arr_w_data, axis=0, ddof=1)
+        _p_event("iter%d_nanstd" % itr)
 
         # Columns with <= 1 valid sample have undefined ddof=1 std -> treat as
         # no-rejection identity (sigma == 0), identical to the CPU guard.
@@ -347,16 +511,25 @@ def stack_winsorized_sigma_gpu(
         sigma_w = cp.where(
             n_valid_col <= 1, cp.float32(0.0), sigma_w
         )
+        _p_event("iter%d_sigma_guard" % itr)
 
         low = mu_w - cp.float32(kappa_iter) * sigma_w
         high = mu_w + cp.float32(kappa_iter) * sigma_w
         new_mask = mask & (arr >= low) & (arr <= high)
+        _p_event("iter%d_new_mask" % itr)
+        _p_wall_start("iter%d_sync_nrej" % itr)
         n_rej = int(cp.count_nonzero(mask)) - int(cp.count_nonzero(new_mask))
+        _p_wall_end()
+        _p_note("iter=%d n_rej=%d" % (itr, n_rej))
+        _p_event("iter%d_nrej_sync" % itr)
         mask = new_mask
         if n_rej == 0:
+            _p_note("early_exit_iteration=%d" % itr)
             break
         if kappa_decay < 1.0:
             kappa_iter = kappa * (kappa_decay ** (itr + 1))
+    else:
+        _p_note("max_iters_reached=%d" % int(max_iters))
 
     if apply_rewinsor:
         # Rejected-but-valid samples are substituted with the winsorized bound
@@ -365,15 +538,20 @@ def stack_winsorized_sigma_gpu(
         low_b, high_b = _winsorize_bounds_cp(
             cp, cp.where(mask, arr, cp.float32(cp.nan)), winsor_limits
         )
+        _p_event("rewinsor_bounds_done")
         clipped = cp.clip(arr, low_b, high_b)
+        _p_event("rewinsor_clip")
         arr_final = cp.where(
             mask, arr, cp.where(valid, clipped, cp.float32(cp.nan))
         )
+        _p_event("rewinsor_final")
     else:
         arr_final = cp.where(mask, arr, cp.float32(cp.nan))
+        _p_event("no_rewinsor_final")
 
     # arr_final is NaN exactly where a sample does NOT contribute to the mean.
     contrib = ~cp.isnan(arr_final)
+    _p_event("contrib")
 
     if weights is not None:
         w = _broadcast_weights_cp(cp, arr, weights)
@@ -386,16 +564,23 @@ def stack_winsorized_sigma_gpu(
             sum_d / cp.maximum(sum_w, 1e-6),
             cp.zeros_like(sum_d),
         )
+        _p_event("final_reduce_weighted")
     else:
         result = cp.nanmean(arr_final, axis=0)
         result = cp.where(
             cp.any(contrib, axis=0), result, cp.float32(0.0)
         )
         sum_w = cp.count_nonzero(contrib, axis=0).astype(cp.float32)
+        _p_event("final_reduce_unweighted")
 
+    _p_wall_start("sync_rejected_pct")
     rejected_pct = _winsorized_rejected_pct_cp(cp, mask, valid)
+    _p_wall_end()
+    _p_event("rejected_pct")
 
+    _p_event("result_astype")
     result_np = cp.asnumpy(result.astype(cp.float32))
+    _p_event("d2h_done")
     if return_weights:
         return result_np, cp.asnumpy(sum_w.astype(cp.float32)), rejected_pct
     return result_np, rejected_pct

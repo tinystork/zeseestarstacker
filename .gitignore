@@ -60,3 +60,6 @@ dist/
 !fixture/master/
 !fixture/master/*.fit
 !fixture/master/*.fits
+
+# === Phase A GPU profiling generated artifacts (raw evidence on disk; numbers mirrored in .a2a-reports) ===
+profiling/results_phaseA/
