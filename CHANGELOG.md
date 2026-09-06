@@ -2,6 +2,19 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.3.0] — Phoenix consedit
+
+- run provenance closure: the durable `DRIZZLE_CONFIG` log line now records the
+  requested kernel/scale/pixfrac/WHT threshold alongside the runtime-effective
+  values, so any requested ≠ effective divergence is visible in one
+  machine-readable record
+- Drizzle-kernel consistency: the Qt and Tk GUIs and the kernel allowlists no
+  longer offer `tophat` (unsupported by drizzle 2.2.0); every user-facing list
+  now matches the engine's `VALID_DRIZZLE_KERNELS` exactly
+- Winsorized GPU qualification: placeholder — the CuPy backend for the
+  sorting-based stacking reductions is not yet re-qualified for Winsorized
+  kernels (Track B)
+
 ## [Unreleased]
 
 ### Removed

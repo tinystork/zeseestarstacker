@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import importlib
 
-__version__ = "8.2.3"
+__version__ = "8.3.0"
 __codename__ = "Phoenix consedit"  # including zenalyser and hierarchical auto stacking
 __author__ = "Tinystork"
 
