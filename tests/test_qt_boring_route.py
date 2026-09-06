@@ -255,14 +255,17 @@ def test_build_boring_request_no_save_as_float32_flag():
 # --------------------------------------------------------------------------
 # Checkbox <-> batch size synchronisation (Tk parity)
 # --------------------------------------------------------------------------
-def test_checkbox_sets_batch_to_one_and_locks_spinbox(qapp):
+def test_checkbox_sets_batch_to_one_and_keeps_spinbox_enabled(qapp):
     win = MainWindow()
     try:
         assert win.batch_spin.value() == 0
         assert win.batch_spin.isEnabled()
         win.boring_check.setChecked(True)
         assert win.batch_spin.value() == 1
-        assert not win.batch_spin.isEnabled()
+        # Phase B2 (canonical batch contract): the spinner is NEVER disabled.
+        # Boring mode is expressed by the value 1 + the checked box, while the
+        # spinner stays navigable (0 -> 1 -> 2 and 1 -> 0 both work).
+        assert win.batch_spin.isEnabled()
     finally:
         win.shutdown()
 
@@ -307,27 +310,39 @@ def test_boring_mode_gates_drizzle_controls(qapp):
         win.drizzle_check.setChecked(True)
         assert win.drizzle_check.isEnabled()
         win.boring_check.setChecked(True)
-        # Drizzle is incompatible with boring mode: disabled + unchecked.
+        # Drizzle is incompatible with boring mode: while the boring episode is
+        # active the checkbox is gated (visually cleared + disabled), but the
+        # user request is REMEMBERED (Phase B2 non-destructive gating), never
+        # erased.
         assert not win.drizzle_check.isEnabled()
         assert not win.drizzle_check.isChecked()
         assert not win.drizzle_mode_combo.isEnabled()
         assert not win.drizzle_group_spin.isEnabled()
-        # Un-checking boring re-enables the drizzle *checkbox* only.  The
-        # sub-options stay gated by the (now force-unchecked) drizzle flag —
-        # M16 added Tk-parity drizzle gating (`_update_drizzle_options_state`),
-        # so ``drizzle_mode_combo`` / ``drizzle_group_spin`` are enabled by the
-        # Enable-drizzle flag, not merely by "not boring".
+        # Leaving boring RESTORES the remembered drizzle request…
         win.boring_check.setChecked(False)
         assert win.drizzle_check.isEnabled()
-        assert not win.drizzle_mode_combo.isEnabled()
-        assert not win.drizzle_group_spin.isEnabled()
-        # Re-checking drizzle re-enables the mode combo; the group-size spin is
-        # enabled only in the Large-dataset (Incremental) mode.
-        win.drizzle_check.setChecked(True)
+        assert win.drizzle_check.isChecked()
+        # …and the sub-options are gated by the (restored) Enable-drizzle
+        # flag: the mode combo is enabled again, the group-size spin only in
+        # the Large-dataset (Incremental) mode (M16/Tk-parity gating).
         assert win.drizzle_mode_combo.isEnabled()
         assert not win.drizzle_group_spin.isEnabled()
         win.drizzle_mode_combo.setCurrentText("Large dataset")
         assert win.drizzle_group_spin.isEnabled()
+    finally:
+        win.shutdown()
+
+
+def test_boring_round_trip_without_drizzle_request_keeps_it_off(qapp):
+    win = MainWindow()
+    try:
+        # No drizzle request: a boring round trip must not invent one.
+        assert not win.drizzle_check.isChecked()
+        win.boring_check.setChecked(True)
+        assert not win.drizzle_check.isChecked()
+        win.boring_check.setChecked(False)
+        assert not win.drizzle_check.isChecked()
+        assert win.drizzle_check.isEnabled()
     finally:
         win.shutdown()
 

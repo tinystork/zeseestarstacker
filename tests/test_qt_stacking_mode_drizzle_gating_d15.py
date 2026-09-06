@@ -16,8 +16,10 @@ These tests pin, on a REAL offscreen ``MainWindow``:
   and ``collect_settings_state()`` / ``build_run_request()`` still transmit the
   exact same stacking-mode value (a Classic run keeps its requested reducer,
   and the Drizzle provenance records the requested mode faithfully);
-* the boring single-batch route forces Drizzle off, which re-enables the combo
-  (a Classic reducer still applies there);
+* the boring single-batch route temporarily GATES the Enable-drizzle checkbox
+  off (Phase B2: the user request is remembered and restored when boring mode
+  is left), which re-enables the combo during the boring episode (a Classic
+  reducer still applies there);
 * the new localization key carries full en/fr parity.
 
 No stacking, no engine, no FITS.
@@ -121,9 +123,11 @@ def test_any_stacking_mode_value_is_still_transmitted_unchanged(window):
     assert window.collect_settings_state().stacking_mode == "winsorized-sigma-clip"
 
 
-def test_boring_route_forces_drizzle_off_and_reenables_selector(window):
-    # Boring (single-batch) mode forces the Enable-drizzle checkbox off, so the
-    # Classic reducer still applies and the selector must be usable again.
+def test_boring_route_gates_drizzle_and_reenables_selector(window):
+    # Boring (single-batch) mode gates the Enable-drizzle checkbox (visually
+    # cleared while the episode is active, request remembered), so the Classic
+    # reducer applies and the selector must be usable again during the boring
+    # episode.
     window.drizzle_check.setChecked(True)
     assert window.stacking_mode_combo.isEnabled() is False
     assert window.stacking_mode_combo.toolTip() != ""
@@ -133,8 +137,11 @@ def test_boring_route_forces_drizzle_off_and_reenables_selector(window):
     assert window.stacking_mode_combo.isEnabled() is True
     assert window.stacking_mode_combo.toolTip() == ""
 
+    # Leaving boring restores the requested drizzle NON-destructively, so the
+    # selector is gated again — no manual re-check is needed and the user
+    # request survived the whole boring episode.
     window.boring_check.setChecked(False)
-    window.drizzle_check.setChecked(True)
+    assert window.drizzle_check.isChecked() is True
     assert window.stacking_mode_combo.isEnabled() is False
     assert window.stacking_mode_combo.toolTip() != ""
 
