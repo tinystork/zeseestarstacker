@@ -319,101 +319,171 @@ def save_fits_image(image, output_path, header=None, overwrite=True):
 
 # --- DANS seestar/core/image_processing.py ---
 
+def stretch_display_data(image_data, enhanced_stretch=False, primary=True):
+    """DISPLAY-ONLY robust percentile stretch, signed-input capable (D4).
+
+    Pure mapping float32 -> float32 ``[0, 1]`` for preview PNGs.  Never
+    touches scientific data (the caller decides what it feeds in).
+
+    Root-cause context (D4 zero-wall / near-black previews): the legacy
+    stretch sampled ONLY strictly positive pixels (``> 0.001``) for its black
+    point.  When the frame carried legitimate negative values (Drizzle
+    Lanczos2/3 kernel ringing, signed science) or a large exact-zero
+    population (no-data support / output-domain clip), the black point landed
+    inside the faint positive signal and every pixel at or below it collapsed
+    to pure black -- an artificial giant zero wall with the faint diffuse
+    signal erased.  This helper therefore selects the percentile basis from
+    the FULL finite SIGNED distribution (zeros and negatives included)
+    whenever signed content or a significant zero population is present, so
+    the black point sits at/under the background floor and zeros, faint
+    signal and sources separate.  For clean non-negative inputs the legacy
+    positive-only basis is kept unchanged (byte-stable behaviour).
+
+    Returns ``(display_01, params)`` where ``params`` carries the stretch
+    diagnostics (basis kind, black/white point, negative/zero fractions,
+    secondary stretch bounds) for witnesses and debugging.
+    """
+    arr = _ensure_hwc(np.asarray(image_data, dtype=np.float32)).copy()
+    params: dict = {}
+    flat_finite = arr[np.isfinite(arr)]
+    if flat_finite.size == 0:
+        params["flat"] = True
+        return np.zeros_like(arr), params
+    if float(np.nanmax(arr)) <= float(np.nanmin(arr)) + 1e-6:
+        params["flat"] = True
+        return np.zeros_like(arr), params
+
+    n_total = float(flat_finite.size)
+    n_neg = int(np.sum(flat_finite < 0))
+    n_zero = int(np.sum(flat_finite == 0))
+    params["negative_fraction"] = n_neg / n_total
+    params["zero_fraction"] = n_zero / n_total
+
+    if not primary:
+        # No primary black/white stretch: the data are used as-is and only
+        # the legacy secondary/anti-white guards run below.
+        stretched_data = arr
+        params["basis"] = "none"
+    else:
+        positive = flat_finite[flat_finite > 0.001]
+        use_inclusive = (
+            (n_neg > 0) or (n_zero / n_total >= 0.02) or (positive.size < 20)
+        )
+        if use_inclusive:
+            basis = flat_finite
+            params["basis"] = "signed_inclusive"
+        else:
+            basis = positive
+            params["basis"] = "positive_only_legacy"
+        lo_p = 0.1 if enhanced_stretch else 1.0
+        hi_p = 99.5 if enhanced_stretch else 99.0
+        if basis.size >= 20:
+            bp = float(np.percentile(basis, lo_p))
+            wp = float(np.percentile(basis, hi_p))
+        else:
+            bp = float(np.nanmin(flat_finite))
+            wp = float(np.nanmax(flat_finite))
+        if wp <= bp + 1e-7:
+            min_v, max_v = float(np.nanmin(flat_finite)), float(
+                np.nanmax(flat_finite)
+            )
+            if max_v > min_v + 1e-7:
+                bp, wp = min_v, max_v
+            else:
+                bp, wp = 0.0, max(1e-7, max_v)
+        params["black_point"] = bp
+        params["white_point"] = wp
+        stretched_data = (arr - bp) / (wp - bp + 1e-9)
+
+    # Secondary robust percentile re-stretch (legacy guard against dark PNGs).
+    finite_s = stretched_data[np.isfinite(stretched_data)]
+    if finite_s.size > 0:
+        lo = float(np.nanpercentile(finite_s, 0.5))
+        hi = float(np.nanpercentile(finite_s, 99.5))
+        if hi - lo > 1e-3:
+            stretched_data = np.clip(
+                (stretched_data - lo) / (hi - lo + 1e-9), 0, 1
+            )
+            params["secondary"] = (lo, hi)
+
+    # Anti-white-out fallback (legacy guard).
+    rng = float(np.nanmax(stretched_data) - np.nanmin(stretched_data))
+    if rng < 5e-3 and np.nanmean(stretched_data) > 0.97:
+        base = flat_finite[flat_finite > 0]
+        if base.size > 50:
+            bp = float(np.nanpercentile(base, 0.1))
+            wp = float(np.nanpercentile(base, 99.9))
+            if wp > bp + 1e-7:
+                stretched_data = np.clip(
+                    (arr - bp) / (wp - bp + 1e-9), 0, 1
+                )
+                params["anti_white_fallback"] = (bp, wp)
+
+    out = np.clip(stretched_data, 0.0, 1.0).astype(np.float32)
+    out_finite = out[np.isfinite(out)]
+    if out_finite.size:
+        params["zero_fraction_out"] = float(np.mean(out_finite == 0))
+    params["output_range"] = (
+        float(np.nanmin(out)),
+        float(np.nanmax(out)),
+    )
+    return out, params
+
+
 def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced_stretch=False):
     """
     Sauvegarde l'image (0-1 float) en PNG/JPG, avec option de stretch.
-    MODIFIED: Ajout de logs détaillés pour le debug du stretch.
-    Version: SavePreview_DebugStretch_1
+    MODIFIED (D4): le stretch d'affichage passe par
+    :func:`stretch_display_data` (support des entrées SIGNÉES et des grandes
+    populations de zéros -- pas de mur de zéros artificiel).
+    Version: SavePreview_SignedStretch_D4
     """
-    print(f"DEBUG save_preview_image (V_SavePreview_DebugStretch_1): Appel pour '{os.path.basename(output_path)}'")
+    print(f"DEBUG save_preview_image (V_SavePreview_SignedStretch_D4): Appel pour '{os.path.basename(output_path)}'")
     print(f"  Initial params: apply_stretch={apply_stretch}, enhanced_stretch={enhanced_stretch}")
 
     if image_data_01 is None:
         print(f"  Error: Cannot save None data to {output_path}"); return False
-    
+
     print(f"  image_data_01 (entrée) - Shape: {image_data_01.shape}, Dtype: {image_data_01.dtype}, Range: [{np.nanmin(image_data_01):.4g} - {np.nanmax(image_data_01):.4g}]")
 
     try:
         display_data = _ensure_hwc(image_data_01).astype(np.float32, copy=False)
-
-        if np.nanmax(display_data) <= np.nanmin(display_data) + 1e-6 :
-             print(f"  Warning save_preview_image: Image is flat. Saving as black for {output_path}")
-             display_data = np.zeros_like(display_data)
-
-        stretched_data = display_data # Par défaut, si pas de stretch
-
         if apply_stretch:
-            print(f"  DEBUG save_preview_image: apply_stretch=True. Applying stretch. enhanced_stretch={enhanced_stretch}")
-            finite_data_for_stretch = display_data[np.isfinite(display_data)]
-            finite_nonzero = finite_data_for_stretch[finite_data_for_stretch > 0.001]
-
-            if finite_nonzero.size < 20:
-                print(f"  Warning save_preview_image: Not enough finite pixels for stretch. Using min/max for {output_path}")
-                bp, wp = np.nanmin(display_data), np.nanmax(display_data)
-            elif enhanced_stretch:
-                print(f"    Applying ENHANCED stretch for {output_path}")
-                bp = np.percentile(finite_nonzero, 0.1) # Ignorer les pixels très noirs pour bp
-                wp = np.percentile(finite_nonzero, 99.5)
-            else:
-                print(f"    Applying STANDARD stretch for {output_path}")
-                bp = np.percentile(finite_nonzero, 1.0)
-                wp = np.percentile(finite_nonzero, 99.0)
-
-            if wp <= bp + 1e-7: 
-                min_val_stretch, max_val_stretch = np.nanmin(display_data), np.nanmax(display_data)
-                if max_val_stretch > min_val_stretch + 1e-7 :
-                    bp, wp = min_val_stretch, max_val_stretch
-                else: 
-                    bp, wp = 0.0, max(1e-7, max_val_stretch) 
-            
-            print(f"    Stretch params for PNG: BP={bp:.4g}, WP={wp:.4g}")
-            stretched_data = (display_data - bp) / (wp - bp + 1e-9) 
-            print(f"  stretched_data (après stretch si appliqué) - Range: [{np.nanmin(stretched_data):.4g} - {np.nanmax(stretched_data):.4g}]")
+            display_data, _params = stretch_display_data(
+                display_data, enhanced_stretch=enhanced_stretch, primary=True
+            )
+            print(
+                f"  DEBUG save_preview_image: stretch appliqué (D4 signed-aware). "
+                f"BP={_params.get('black_point', float('nan')):.4g}, "
+                f"WP={_params.get('white_point', float('nan')):.4g}, "
+                f"basis={_params.get('basis')}, "
+                f"neg_frac={_params.get('negative_fraction', float('nan')):.4g}, "
+                f"zero_frac={_params.get('zero_fraction', float('nan')):.4g}"
+            )
         else:
             print(f"  DEBUG save_preview_image: apply_stretch=False. Using data as is (expected 0-1) for {output_path}")
-            # stretched_data est déjà display_data
+            display_data, _params = stretch_display_data(
+                display_data, enhanced_stretch=enhanced_stretch, primary=False
+            )
 
-        # Simple percentile stretch to avoid overly dark PNGs
-        finite = np.isfinite(stretched_data)
-        if finite.any():
-            lo = np.nanpercentile(stretched_data[finite], 0.5)
-            hi = np.nanpercentile(stretched_data[finite], 99.5)
-            # Guard against tiny dynamic ranges that would blow up contrast
-            if hi - lo > 1e-3:
-                stretched_data = np.clip((stretched_data - lo) / (hi - lo + 1e-9), 0, 1)
-            else:
-                print(f"  DEBUG save_preview_image: Skipping secondary stretch due to tiny range (hi-lo={hi-lo:.3g}).")
-
-        # If the image is still nearly flat and bright (white-out), re‑compute
-        # a conservative stretch from robust percentiles of the original data
-        rng = float(np.nanmax(stretched_data) - np.nanmin(stretched_data))
-        if rng < 5e-3 and np.nanmean(stretched_data) > 0.97:
-            base = display_data[np.isfinite(display_data) & (display_data > 0)]
-            if base.size > 50:
-                bp = np.nanpercentile(base, 0.1)
-                wp = np.nanpercentile(base, 99.9)
-                if wp > bp + 1e-7:
-                    stretched_data = np.clip((display_data - bp) / (wp - bp + 1e-9), 0, 1)
-                    print("  DEBUG save_preview_image: Applied fallback anti-white stretch.")
-
-        final_image_data_clipped = np.clip(stretched_data, 0.0, 1.0)
+        final_image_data_clipped = np.clip(display_data, 0.0, 1.0)
         print(f"  final_image_data_clipped (avant *255) - Range: [{np.nanmin(final_image_data_clipped):.4g} - {np.nanmax(final_image_data_clipped):.4g}]")
-        
+
         final_image_data_to_save = (final_image_data_clipped * 255).astype(np.uint8)
         print(f"  final_image_data_to_save (uint8) - Range: [{np.min(final_image_data_to_save)} - {np.max(final_image_data_to_save)}]")
 
-
         if final_image_data_to_save.ndim == 3 and final_image_data_to_save.shape[2] == 3:
             pil_image = Image.fromarray(final_image_data_to_save, 'RGB')
-        elif final_image_data_to_save.ndim == 2: 
-            pil_image = Image.fromarray(final_image_data_to_save, 'L').convert('RGB') 
+        elif final_image_data_to_save.ndim == 2:
+            pil_image = Image.fromarray(final_image_data_to_save, 'L').convert('RGB')
         else:
             print(f"  Error saving preview: Unsupported image shape {final_image_data_to_save.shape} for {output_path}.")
             return False
-        
+
         output_dir = os.path.dirname(output_path)
-        if output_dir: os.makedirs(output_dir, exist_ok=True)
-        
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         pil_image.save(output_path)
         print(f"  Preview image saved to {output_path}")
         return True
@@ -421,5 +491,4 @@ def save_preview_image(image_data_01, output_path, apply_stretch=False, enhanced
         print(f"Error saving preview image to {output_path}: {e}")
         traceback.print_exc(limit=2)
         return False
-
 
