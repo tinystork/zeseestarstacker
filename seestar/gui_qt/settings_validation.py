@@ -18,12 +18,13 @@ Policy (kept deliberately small):
   for the offscreen smoke path and returns no errors.
 * ``backend_mode == "seestar"`` applies the real-backend preflight: empty
   ``input_folder``/``output_folder`` are rejected, ``batch_size`` must be
-  integer-like and ``>= -1`` (``-1`` = auto), and ``drizzle_group_size`` must be
-  ``> 0``.  ``batch_size == 1`` is the historical boring/single-batch path and
-  is **not** rejected here: the Qt real backend simply passes it through (its
-  CSV single-batch handling is a later milestone, not a preflight concern).
-  Callers normalise the UI ``0`` value via :func:`normalize_batch_size` before
-  building the request.
+  integer-like and ``>= -1`` (legacy negative spellings are tolerated at this
+  seam and normalized to canonical Auto ``0`` by :func:`normalize_batch_size`
+  / the engine), and ``drizzle_group_size`` must be ``> 0``.  ``batch_size ==
+  1`` is the historical boring/single-batch path and is **not** rejected here:
+  the Qt real backend simply passes it through (its CSV single-batch handling
+  is a later milestone, not a preflight concern).  Callers normalise the UI
+  ``0`` value via :func:`normalize_batch_size` before building the request.
 * In ``backend_mode == "seestar"``, when either ``reproject_between_batches``
   or ``reproject_coadd_final`` is true, a *solver* is required before start
   (reproducing ``resolve_solver_gate`` semantics):
@@ -59,30 +60,27 @@ SOLVER_ZESOLVER = "zesolver"
 def normalize_batch_size(batch_size, reproject_coadd_final: bool = False):
     """Return the effective backend batch size for a UI batch-size value.
 
-    Reproduces the historical Tk ``validate_settings`` contract so the Qt
-    shell hands the backend the same sentinel/special values:
+    Phase B1 (canonical batch contract): the GUI value is normalized to the
+    canonical requested vocabulary the backend understands:
 
-    * ``0`` + not ``reproject_coadd_final``  -> ``-1`` (Auto sentinel: the
-      queue manager estimates the batch size dynamically),
-    * ``0`` + ``reproject_coadd_final``      -> ``0``  (special batch-zero /
-      "Reproject & Coadd" single in-memory batch — must NOT become Auto),
-    * ``1``                                  -> ``1``  (boring/single-batch
+    * ``0`` (and any legacy negative Auto spelling such as ``-1``) -> ``0``
+      (canonical Auto: the engine resolves and freezes ``B_resolved`` once),
+    * ``1``                                  -> ``1`` (boring/single-batch
       historical path — not refused by preflight),
     * ``>= 2``                               -> unchanged (explicit batch).
 
-    Negative values (other than ``-1``) also become ``-1`` (Auto), matching the
-    historical ``<= 0`` coercion.  Non-integer values pass through unchanged so
-    validation can report them.
+    ``reproject_coadd_final`` is retained for call-site compatibility only and
+    no longer changes the outcome: Reproject&Coadd is an independent mode flag
+    and no longer depends on a special batch-zero sentinel.
+
+    Non-integer values pass through unchanged so validation can report them.
     """
     try:
         requested = int(batch_size)
     except (TypeError, ValueError):
         return batch_size
-    allow_mode_zero = bool(reproject_coadd_final)
-    if requested == 0 and allow_mode_zero:
-        return 0
     if requested <= 0:
-        return -1
+        return 0
     return requested
 
 
@@ -239,7 +237,8 @@ def validate_settings_for_backend(
         errors.append(f"Batch size must be an integer, got {batch_size!r}.")
     elif batch_int < -1:
         errors.append(
-            f"Batch size must be -1 (auto) or greater, got {batch_int!r}."
+            f"Batch size must be -1 (auto, legacy) / 0 (auto) or greater, "
+            f"got {batch_int!r}."
         )
 
     drizzle_group_size = _read(

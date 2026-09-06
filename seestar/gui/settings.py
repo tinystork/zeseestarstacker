@@ -1475,27 +1475,34 @@ class SettingsManager:
 
             try:
                 requested_batch_size = int(self.batch_size)
-                final_combine_raw = str(
-                    getattr(self, "stack_final_combine", "")
-                ).strip().lower()
-                allow_mode_zero = bool(getattr(self, "reproject_coadd_final", False))
-                if not allow_mode_zero and final_combine_raw == "reproject_coadd":
-                    allow_mode_zero = True
+                # Phase B1 (canonical batch contract): 0 = Auto is the single
+                # canonical Auto value; 1 = Boring; >= 2 = explicit capacity.
+                # Legacy negative spellings of Auto (-1, ...) are normalized to
+                # 0 HERE, at the compatibility boundary — new code must never
+                # generate -1 again.  Reproject&Coadd is an independent mode
+                # (reproject_coadd_final / stack_final_combine) and no longer
+                # depends on the batch-size sentinel.
+                try:  # real package context
+                    from ..core.batch_contract import normalize_batch_requested
+                except ImportError:  # standalone (flat) module load in tests
+                    from seestar.core.batch_contract import normalize_batch_requested  # noqa: F401
 
-                if requested_batch_size == 0 and allow_mode_zero:
+                canonical = normalize_batch_requested(requested_batch_size)
+                if canonical != requested_batch_size:
+                    self.batch_size = canonical
+                    messages.append(
+                        "Taille Lot ("
+                        + str(requested_batch_size)
+                        + ") normalisée en mode Auto canonique (0)."
+                    )
+                elif canonical == 0:
                     self.batch_size = 0
                     messages.append(
-                        "Taille Lot 0 conservée pour le mode Reproject&Coadd (lot unique en mémoire)."
+                        "Taille Lot 0 : mode Auto (taille de lot résolue puis "
+                        "gelée au démarrage du traitement)."
                     )
-                elif requested_batch_size <= 0:
-                    messages.append(
-                        "Taille Lot (<=0) interprétée comme mode Auto "
-                        "(estimation dynamique de la taille de lot)."
-                    )
-                    # on force une sentinelle négative si le QM attend <0 pour Auto
-                    self.batch_size = -1
                 else:
-                    self.batch_size = requested_batch_size
+                    self.batch_size = canonical
             except (ValueError, TypeError):
                 original = self.batch_size
                 self.batch_size = defaults_fallback["batch_size"]

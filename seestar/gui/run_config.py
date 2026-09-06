@@ -12,7 +12,9 @@ tests exercise the exact backend-kwargs mapping without a Tk root.
 
 Semantics preserved (see P0 audit):
 
-* ``batch_size`` < 0 / == 0 / == 1 / >= 2  (align-on-disk / chunk-size logic),
+* canonical batch contract (Phase B1): ``batch_size`` 0 = Auto / 1 = Boring /
+  >= 2 = explicit (align-on-disk / chunk-size logic keys on the *batch mode*
+  derived from the canonical value, never on an all-in-RAM sentinel),
 * drizzle ``Final`` / ``Incremental`` and ``drizzle_group_size`` propagation,
 * solver preference ``none`` / ``astap`` / ``zesolver``,
 * the exact backend ``start_processing(**kwargs)`` surface.
@@ -68,7 +70,10 @@ class RunRequest:
         change the run request.
     align_on_disk:
         Value to assign to ``SeestarQueuedStacker.align_on_disk`` before the
-        worker thread starts (``batch_size >= 1``).
+        worker thread starts.  Derived from the *batch mode* (canonical
+        contract): explicit and Boring batches align on disk; Auto keeps the
+        in-RAM aligned pipeline (historical Auto behavior, see
+        :func:`compute_align_on_disk`).
     special_single:
         ``True`` when the batch_size==1 CSV single-batch mode was prepared by
         ``SeestarStackerGUI._prepare_single_batch_if_needed``.  Used by the GUI
@@ -90,15 +95,51 @@ class RunRequest:
 
 
 def compute_align_on_disk(batch_size: Any) -> bool:
-    """Return the ``align_on_disk`` flag for a given (validated) batch size.
+    """Return the ``align_on_disk`` flag for a given (canonical) batch value.
 
-    Mirrors the previous inline logic exactly: ``int(batch_size) >= 1``, with a
-    defensive fallback to ``False`` when the value cannot be coerced.
+    Phase B1 (canonical batch contract): the decision is keyed on the explicit
+    *batch mode* derived from the canonical requested value, never on the raw
+    integer — in particular ``0`` now means Auto, not an all-in-RAM
+    Reproject&Coadd sentinel, so ``0`` can no longer be read as "everything in
+    RAM because a special mode was requested".  Historical routing is
+    preserved exactly:
+
+    * Auto (``0``, and any legacy negative spelling)  -> ``False`` (Auto runs
+      keep the historical in-RAM aligned pipeline; the frozen ``B_resolved``
+      bounds the population in RAM),
+    * Boring (``1``) / explicit (``>= 2``)            -> ``True`` (batched
+      flows write aligned temporaries to disk).
+
+    Uncoercible values defensively fall back to ``False`` (in-RAM), exactly
+    like the historical inline ``int(batch_size) >= 1`` guard did for
+    non-integers.
     """
+    # Lazy import: this seam module must stay importable without pulling the
+    # engine (Qt import-hygiene contract).  The canonical kernel is pure
+    # stdlib; relative import works in the real package, an absolute fallback
+    # covers the standalone (flat-module) loads used by the M0 seam tests.
     try:
-        return int(batch_size) >= 1
+        from ..core.batch_contract import (  # noqa: F401
+            batch_requested_mode,
+            normalize_batch_requested,
+            BATCH_MODE_AUTO,
+            BATCH_MODE_BORING,
+            BATCH_MODE_EXPLICIT,
+        )
+    except ImportError:  # pragma: no cover - standalone flat module load
+        from seestar.core.batch_contract import (  # noqa: F401
+            batch_requested_mode,
+            normalize_batch_requested,
+            BATCH_MODE_AUTO,
+            BATCH_MODE_BORING,
+            BATCH_MODE_EXPLICIT,
+        )
+    try:
+        requested = normalize_batch_requested(batch_size)
     except Exception:
         return False
+    mode = batch_requested_mode(requested)
+    return mode in (BATCH_MODE_BORING, BATCH_MODE_EXPLICIT)
 
 
 def _copy_list_or_none(value: Any) -> Any:
