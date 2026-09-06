@@ -43,6 +43,36 @@ all-invalid survivor columns keep the ``+inf`` sentinel on both sides).  The
 fast path is provably bit-identical to the slow path in that regime and is
 only selected on the population bound ``N_batch`` (never on the frozen
 ``B_resolved``); every other input keeps the original slow path untouched.
+
+Rank/order-temporary elimination (Track P2, phase D): the slow path
+(``_winsorize_axis0_cp`` / ``_winsorize_bounds_cp``) no longer materializes
+the two full-size int64 temporaries ``order = argsort(sort_key)`` and
+``rank = argsort(order)`` (the largest VRAM consumers of the slow path).
+Sorted values come from a direct ``cp.sort`` (bitwise the sorted multiset of
+``argsort`` + ``take_along_axis``) and replacement is expressed as VALUE
+clipping instead of rank replacement:
+
+* the CPU replaces exactly the samples strictly below the ``lowidx`` order
+  statistic with ``low_bound`` and strictly above the ``keep_idx`` order
+  statistic with ``high_bound`` (rank ``>= upidx``); samples equal to a
+  boundary order statistic that the CPU would "replace" keep the identical
+  bit pattern, so rank replacement and value clipping agree bit-for-bit;
+* the CPU's extreme-limit ``IndexError`` (``lowidx >= N``, e.g. ``(1.0, 0.0)``
+  on an all-valid column) is preserved verbatim (explicit out-of-bounds
+  check, same message);
+* the only case value clipping cannot reproduce is the degenerate OVERLAP
+  corner where both sides are active and the two replaced rank ranges
+  intersect on a column (``floor(low * n) + floor(high * n) > n`` ->
+  ``lowidx > upidx``): there the sequential low-then-high rank replacement
+  can split a boundary tie group between the two bounds, which no value
+  test can express.  Such inputs fall back to the exact pre-Phase-D
+  rank-based implementation (``_winsorize_axis0_rank_path_cp``, retained
+  verbatim) so the CPU-defined behavior is preserved for every input;
+* ``_winsorize_bounds_cp`` (no rank, clamped ``lowidx``/``highidx``) gets the
+  same direct-sort swap with its ``max_idx`` clamp semantics unchanged.
+
+The Phase C zero-rank fast path is untouched: in that regime both functions
+are skipped entirely, so there is no interaction.
 """
 
 from __future__ import annotations
@@ -332,6 +362,13 @@ def _winsorize_bounds_cp(cp, arr, limits):
     order statistic ``n_valid - 1 - floor(high * n_valid)`` (scipy
     ``inclusive=(True, True)`` index convention), with the CPU's own
     ``max_idx = max(n_valid - 1, 0)`` clamp.
+
+    Track P2 (phase D): the sorted values come from a direct ``cp.sort`` of
+    the NaN-sentinel ``sort_key`` instead of ``argsort`` + ``take_along_axis``
+    (the int64 ``order`` temporary is gone).  ``sorted_vals`` is the same
+    sorted multiset, bit-for-bit, so ``lowidx``/``highidx`` (small HxW int64,
+    clamped to ``max_idx`` exactly like the CPU) read the same order
+    statistics as before.
     """
     low, high = limits
     valid = ~cp.isnan(arr)
@@ -339,10 +376,8 @@ def _winsorize_bounds_cp(cp, arr, limits):
     _p_event("bounds_valid_count")
     sort_key = cp.where(valid, arr, cp.float32(cp.inf))
     _p_event("bounds_sort_key")
-    order = cp.argsort(sort_key, axis=0)
-    _p_event("bounds_argsort")
-    sorted_vals = cp.take_along_axis(sort_key, order, axis=0)
-    _p_event("bounds_take_along")
+    sorted_vals = cp.sort(sort_key, axis=0)
+    _p_event("bounds_direct_sort")
 
     max_idx = cp.maximum(n_valid - 1, 0)
     lowidx = cp.clip(cp.floor(low * n_valid).astype(cp.int64), 0, max_idx)
@@ -410,18 +445,18 @@ def _winsorize_bounds_minmax_cp(cp, arr, mask):
     return low_b, high_b
 
 
-def _winsorize_axis0_cp(cp, arr, limits):
-    """CuPy twin of ``stack_methods._winsorize_axis0_numpy``.
+def _winsorize_axis0_rank_path_cp(cp, arr, limits):
+    """Exact pre-Phase-D rank-based winsorization (retained verbatim).
 
-    Vectorized winsorization along the first axis with the exact CPU index
-    semantics (``floor(limit * n_valid)`` truncation, rank-based replacement,
-    NaN samples never touched / preserved as NaN).  The CPU also uses
-    ``np.where(valid, arr, inf)`` then sorts: sorted_vals rows at/after
-    ``n_valid`` are ``inf`` (missing samples), and the rank-based masks
-    exclude invalid samples via ``valid``, so missing values are never
-    replaced.  This twin reproduces the same index arithmetic bit-for-bit
-    (identical floor/clip/rank ops); only the float reduction order may
-    differ by ULPs (covered by the parity tolerances).
+    Used ONLY by ``_winsorize_axis0_cp`` for the degenerate OVERLAP corner
+    (both winsor sides active with ``floor(low * n) + floor(high * n) > n``
+    on some column, i.e. the replaced rank ranges intersect): there the
+    sequential low-then-high rank replacement can split a boundary tie group
+    between the two bounds, which no value comparison can express, so the
+    original ``argsort``/inverse-rank machinery is kept for those inputs to
+    preserve the CPU-defined behavior exactly.  This is the verbatim
+    pre-Phase-D implementation (``order`` and ``rank`` full-size int64
+    temporaries included) and stays bit-identical to it.
     """
     low, high = limits
     arr = arr.astype(cp.float32, copy=False)
@@ -491,6 +526,153 @@ def _winsorize_axis0_cp(cp, arr, limits):
         )
         _p_event("winsor_high_bound")
         high_sel = valid & (rank >= upidx[cp.newaxis])
+        _p_wall_start("sync_high_sel")
+        _has_high_sel = bool(cp.any(high_sel))
+        _p_wall_end()
+        if _has_high_sel:
+            result[high_sel] = cp.broadcast_to(
+                high_bound, result.shape
+            )[high_sel]
+        _p_event("winsor_high_replace")
+
+    _p_event("winsor_return")
+    return result
+
+
+def _winsorize_axis0_cp(cp, arr, limits):
+    """CuPy twin of ``stack_methods._winsorize_axis0_numpy``.
+
+    Vectorized winsorization along the first axis with the exact CPU index
+    semantics (``floor(limit * n_valid)`` truncation, NaN samples never
+    touched / preserved as NaN).  Track P2 (phase D): replacement is
+    expressed as VALUE clipping against the order-statistic bounds instead of
+    rank-based scatter, and the sorted values come from a direct ``cp.sort``
+    of the NaN-sentinel key -- the two full-size int64 temporaries
+    ``order = argsort(sort_key)`` and ``rank = argsort(order)`` (the largest
+    VRAM consumers of the slow path) are gone.
+
+    Equivalence proof (rank replacement == value clipping): the CPU replaces
+    the samples with ``rank < lowidx`` by ``low_bound = sorted[lowidx]`` and
+    the samples with ``rank >= upidx`` by ``high_bound = sorted[keep_idx]``
+    (``keep_idx = upidx - 1``).  A sample with ``x < low_bound`` always has
+    ``rank < lowidx`` and vice versa up to the tie group AT the boundary,
+    whose members the CPU would "replace" with their own bit pattern (a
+    no-op); symmetrically ``x > high_bound`` iff ``rank >= upidx`` up to
+    same-bit boundary ties.  NaN samples never compare True, so missing
+    samples are untouched either way.  Hence the value tests ``valid &
+    (arr < low_bound)`` / ``valid & (arr > high_bound)`` select exactly the
+    samples whose replacement changes the value, and the writes are
+    bit-identical to the rank-based scatter (ties at the boundary included;
+    the only residual difference class is a mixed ``-0.0``/``+0.0`` boundary
+    tie, which flips a zero's sign bit only -- numerically zero, and the CPU
+    tie order there is itself backend-arbitrary).
+
+    The CPU's extreme-limit ``IndexError`` (``lowidx >= N``, e.g. ``low =
+    1.0`` on an all-valid column, where NumPy's ``take_along_axis`` raises)
+    is preserved verbatim via the explicit out-of-bounds check below -- the
+    twin never silently clips ``lowidx``.  The ONLY case value clipping
+    cannot reproduce is the degenerate OVERLAP corner (both sides active
+    with ``floor(low * n) + floor(high * n) > n`` on some column -> the
+    replaced rank ranges intersect): those inputs fall back to
+    ``_winsorize_axis0_rank_path_cp`` (the exact pre-Phase-D implementation)
+    so the CPU-defined behavior is preserved for every input.
+    """
+    low, high = limits
+    arr = arr.astype(cp.float32, copy=False)
+    result = arr.copy()
+    _p_event("winsor_copy_result")
+
+    valid = ~cp.isnan(arr)
+    n_valid = cp.count_nonzero(valid, axis=0)
+    _p_event("winsor_valid_count")
+
+    _p_wall_start("sync_any_nvalid")
+    _has_valid = bool(cp.any(n_valid > 0))
+    _p_wall_end()
+    if not _has_valid:
+        _p_note("winsorize_all_invalid_column_set")
+        return result
+
+    # Sort ascending with NaN pushed to the end (NaN -> +inf).  Direct value
+    # sort: no int64 ``order`` permutation is materialized; ``sorted_vals``
+    # is bitwise the multiset ``argsort`` + ``take_along_axis`` would gather.
+    sort_key = cp.where(valid, arr, cp.float32(cp.inf))
+    _p_event("winsor_sort_key")
+    sorted_vals = cp.sort(sort_key, axis=0)
+    _p_event("winsor_direct_sort")
+
+    if low > 0:
+        lowidx = cp.clip(cp.floor(low * n_valid).astype(cp.int64), 0, None)
+        # Mirror NumPy exactly: an index >= the axis length makes
+        # ``np.take_along_axis`` raise IndexError (e.g. ``low=1.0`` on an
+        # all-valid column -> floor(1.0 * n_valid) == n_valid == N).  CuPy
+        # silently wraps out-of-range indices, so the twin must raise
+        # explicitly to reproduce the CPU reference failure instead of
+        # diverging into wrapped-index garbage.  This check runs BEFORE the
+        # overlap fallback, exactly like the CPU's low branch precedes the
+        # high branch.
+        _p_wall_start("sync_lowidx_oob_check")
+        _lowidx_oob = bool(cp.any(lowidx >= arr.shape[0]))
+        _p_wall_end()
+        if _lowidx_oob:
+            raise IndexError(
+                f"index {int(cp.max(lowidx))} is out of bounds for axis 0 "
+                f"with size {arr.shape[0]}"
+            )
+        low_bound = cp.take_along_axis(
+            sorted_vals, lowidx[cp.newaxis], axis=0
+        )
+        _p_event("winsor_low_bound")
+    else:
+        lowidx = None
+        low_bound = None
+
+    if high > 0:
+        highidx = cp.clip(cp.floor(high * n_valid).astype(cp.int64), 0, None)
+        upidx = cp.clip(n_valid - highidx, 0, None)
+        keep_idx = cp.clip(upidx - 1, 0, None)
+        high_bound = cp.take_along_axis(
+            sorted_vals, keep_idx[cp.newaxis], axis=0
+        )
+        _p_event("winsor_high_bound")
+    else:
+        upidx = None
+        high_bound = None
+
+    # Degenerate overlap corner: with both sides active, the replaced rank
+    # ranges ``[0, lowidx)`` and ``[upidx, n_valid)`` intersect on a column
+    # exactly when ``lowidx > upidx`` (``floor(low * n) + floor(high * n) >
+    # n``).  There the sequential low-then-high replacement can give two
+    # members of one boundary tie group DIFFERENT bounds, which no value
+    # comparison can express -- fall back to the exact pre-Phase-D
+    # rank-based implementation for the whole call.
+    if low > 0 and high > 0:
+        _p_wall_start("sync_overlap_check")
+        _overlap = bool(cp.any(lowidx > upidx))
+        _p_wall_end()
+        if _overlap:
+            _p_note("winsorize_overlap_rank_fallback")
+            return _winsorize_axis0_rank_path_cp(cp, arr, limits)
+
+    if low_bound is not None:
+        # Value-clip low side: replace exactly the samples strictly below the
+        # ``lowidx`` order statistic with it.  Boundary-tie members are not
+        # written (their replacement would be a same-bit no-op).  NaN
+        # samples never compare True, so missing samples stay NaN.
+        low_sel = valid & (arr < low_bound)
+        _p_wall_start("sync_low_sel")
+        _has_low_sel = bool(cp.any(low_sel))
+        _p_wall_end()
+        if _has_low_sel:
+            result[low_sel] = cp.broadcast_to(
+                low_bound, result.shape
+            )[low_sel]
+        _p_event("winsor_low_replace")
+
+    if high_bound is not None:
+        # Value-clip high side: replace exactly the samples strictly above
+        # the ``keep_idx`` order statistic (``rank >= upidx``) with it.
+        high_sel = valid & (arr > high_bound)
         _p_wall_start("sync_high_sel")
         _has_high_sel = bool(cp.any(high_sel))
         _p_wall_end()
