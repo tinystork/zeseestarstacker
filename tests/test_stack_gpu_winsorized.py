@@ -239,3 +239,176 @@ def test_defaults_match_cpu_wrapper_defaults():
     for name in ("kappa", "winsor_limits", "apply_rewinsor", "max_iters",
                  "kappa_decay"):
         assert gpu_sig.parameters[name].default == cpu_sig.parameters[name].default
+
+
+# ---------------------------------------------------------------------------
+# B7: production dispatcher wiring (real _stack_batch -> _gpu_reduce)
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+import astropy.io.fits as fits  # noqa: E402
+
+import seestar.queuep.queue_manager as queue_manager_module  # noqa: E402
+from seestar.core.gpu import GpuCapabilities  # noqa: E402
+from seestar.queuep.queue_manager import SeestarQueuedStacker  # noqa: E402
+
+_WINSOR_HEADER = fits.Header()
+
+
+def _gpu_winsor_stack(shape=(2, 2), request_gpu=True):
+    """Lightweight SeestarQueuedStacker for the REAL ``_stack_batch``
+    winsorized non-tiled dispatch (no ``__init__``; same attribute set as the
+    HSI ``make_stack`` harness plus GPU intent/capabilities)."""
+    o = SeestarQueuedStacker.__new__(SeestarQueuedStacker)
+    o.update_progress = lambda *a, **k: None
+    o.stacking_mode = "winsorized-sigma-clip"
+    o.normalize_method = "none"
+    o.weighting_method = "none"
+    o.use_quality_weighting = False
+    o.weight_by_snr = False
+    o.weight_by_stars = False
+    o.snr_exponent = 1.0
+    o.stars_exponent = 0.5
+    o.min_weight = 0.0
+    o.apply_batch_feathering = False
+    o.reproject_between_batches = False
+    o.reproject_coadd_final = False
+    o.drizzle_active_session = False
+    o.is_mosaic_run = False
+    o.stack_kappa_low = 3.0
+    o.stack_kappa_high = 3.0
+    o.winsor_limits = (0.2, 0.2)
+    o.stack_reject_algo = "none"
+    o.max_hq_mem = 1_000_000_000
+    o.batch_size = 10
+    o.settings = None
+    o.reference_header_for_wcs = None
+    o.reference_wcs_object = None
+    o.interbatch_norm_active = False
+    o.max_stack_workers = 1
+    o._current_batch_paths = []
+    o._quality_reference_scale = 1.0
+    o.logger = logging.getLogger("zsss.gpu.winsorized.dispatch")
+    o.request_gpu = request_gpu
+    o._acceleration_policy = None  # re-resolved from caps + intent below
+    o._gpu_capabilities = GpuCapabilities(
+        gpu_detected=True,
+        cuda_runtime_ready=True,
+        cupy_ready=True,
+        opencv_cuda_ready=False,
+        backend_ready=True,
+        device_name="Dispatch Test GPU",
+        device_vram_mb=2048,
+        compute_capability="6.1",
+        failure_reason=None,
+        state="ready",
+    )
+    return o
+
+
+def _winsor_item(value, shape=(2, 2)):
+    """One batch item: constant float32 image + full-validity mask."""
+    img = np.full(shape, value, dtype=np.float32)
+    mask = np.ones(shape, dtype=bool)
+    return (img, _WINSOR_HEADER, {"snr": 1.0, "stars": 0.0}, None, mask)
+
+
+def _winsor_batch(shape=(2, 2)):
+    # 4 inlier frames + 1 outlier: winsorized (0.2, 0.2) kappa=3 gives
+    # V == 10.0 and W == 5 on both the CPU reference and the GPU twin.
+    return [_winsor_item(10.0, shape) for _ in range(4)] + [
+        _winsor_item(1000.0, shape)
+    ]
+
+
+def test_stack_batch_winsorized_reaches_gpu_twin(monkeypatch):
+    """B7: stacking_mode=winsorized-sigma-clip + request_gpu=True + cupy ready
+    + workload fits -> the production ``_stack_batch`` non-tiled path invokes
+    ``stack_winsorized_sigma_gpu`` (spy) through ``_gpu_reduce``."""
+    calls = []
+
+    real_gpu = queue_manager_module.stack_winsorized_sigma_gpu
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real_gpu(*args, **kwargs)
+
+    monkeypatch.setattr(queue_manager_module, "stack_winsorized_sigma_gpu", spy)
+    stack = _gpu_winsor_stack(request_gpu=True)
+    assert stack.effective_backend == "cupy"
+    V, _hdr, W = stack._stack_batch(_winsor_batch(), 1, 1)
+    assert len(calls) == 1, "GPU twin must be invoked when backend=cupy"
+    assert np.isclose(V[0, 0], 10.0, rtol=1e-3), V[0, 0]
+    assert np.isclose(W[0, 0], 5.0, rtol=1e-3), W[0, 0]
+
+
+def test_stack_batch_winsorized_uses_cpu_when_gpu_not_requested(monkeypatch):
+    """B7: same workload + request_gpu=False -> CPU reference path executes
+    and the GPU twin is NOT invoked."""
+    calls = []
+    real_gpu = queue_manager_module.stack_winsorized_sigma_gpu
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("GPU kernel must not run without GPU intent")
+
+    monkeypatch.setattr(queue_manager_module, "stack_winsorized_sigma_gpu", spy)
+    stack = _gpu_winsor_stack(request_gpu=False)
+    assert stack.effective_backend == "cpu"
+    V, _hdr, W = stack._stack_batch(_winsor_batch(), 1, 1)
+    assert calls == []
+    assert np.isclose(V[0, 0], 10.0, rtol=1e-3), V[0, 0]
+    assert np.isclose(W[0, 0], 5.0, rtol=1e-3), W[0, 0]
+
+
+def test_stack_batch_winsorized_vram_no_fit_falls_back_cpu(
+    monkeypatch, caplog
+):
+    """B7: request_gpu=True but the workload does NOT fit VRAM -> CPU fallback
+    + durable fallback diagnostic (vram_reject), GPU twin never invoked."""
+    import cupy as _cp
+
+    class _EmptyPool:
+        def free_bytes(self):
+            return 0
+
+    monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _EmptyPool())
+    monkeypatch.setattr(
+        _cp.cuda.runtime, "memGetInfo", lambda: (512 * 1024, 2 * 1024 ** 3)
+    )
+    calls = []
+    real_gpu = queue_manager_module.stack_winsorized_sigma_gpu
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("GPU must not run when VRAM does not fit")
+
+    monkeypatch.setattr(queue_manager_module, "stack_winsorized_sigma_gpu", spy)
+    caplog.set_level(logging.WARNING, logger="zsss.gpu.winsorized.dispatch")
+    stack = _gpu_winsor_stack(request_gpu=True)
+    # A genuinely non-fitting winsorized workload (6x footprint on 2 GiB).
+    V, _hdr, W = stack._stack_batch(_winsor_batch(shape=(1080, 1920)), 1, 1)
+    assert calls == []
+    assert "vram_reject" in stack._gpu_fallback_logged
+    assert "reduction needs" in caplog.text
+    assert V.shape == (1080, 1920)
+    assert np.isclose(W[0, 0], 5.0, rtol=1e-3), W[0, 0]
+
+
+def test_stack_batch_winsorized_backend_error_falls_back_cpu(monkeypatch):
+    """B7: the GPU twin raises a recoverable failure -> CPU fallback with the
+    correct output and a visible diagnostic (warning)."""
+    calls = []
+
+    def boom(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("simulated GPU kernel failure")
+
+    monkeypatch.setattr(queue_manager_module, "stack_winsorized_sigma_gpu", boom)
+    stack = _gpu_winsor_stack(request_gpu=True)
+    assert stack.effective_backend == "cupy"
+    V, _hdr, W = stack._stack_batch(_winsor_batch(), 1, 1)
+    assert len(calls) == 1
+    assert np.isclose(V[0, 0], 10.0, rtol=1e-3), V[0, 0]
+    assert np.isclose(W[0, 0], 5.0, rtol=1e-3), W[0, 0]

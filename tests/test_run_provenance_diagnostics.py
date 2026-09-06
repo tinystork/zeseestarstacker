@@ -11,8 +11,8 @@ Proves:
   the REAL engine at an accepted run and carry the requested + effective
   values,
 * ``GPU_DECISION`` carries an explicit ``fallback_reason`` when GPU was
-  requested but not used, and ``not_eligible`` with the Track-B reason for
-  winsorized-sigma (not yet GPU-qualified),
+  requested but not used, and ``used`` for winsorized-sigma once GPU-qualified
+  (M3 twin + M4 production dispatch).
 * ``run_config.cfg`` records ``batch_size_requested=auto`` next to a concrete
   ``batch_size_effective=<N>`` (no unexplained -1 sentinel).
 
@@ -235,9 +235,11 @@ def test_gpu_decision_fallback_reason_when_requested_but_unavailable(
     assert "fallback_reason=cupy unavailable" in line
 
 
-def test_gpu_decision_not_eligible_for_winsorized(monkeypatch, tmp_path):
-    # GPU available (cupy ready) but winsorized-sigma has no GPU reducer yet:
-    # Track B qualification pending -> not_eligible with explicit reason.
+def test_gpu_decision_used_for_winsorized(monkeypatch, tmp_path):
+    # GPU available (cupy ready) + winsorized-sigma GPU-qualified (M3 twin +
+    # M4 dispatcher): the run-level decision is ``used`` on the cupy backend
+    # (per-batch VRAM rejections surface as throttled durable fallback
+    # warnings during _stack_batch).
     caps = GpuCapabilities(
         gpu_detected=True,
         cuda_runtime_ready=True,
@@ -261,11 +263,10 @@ def test_gpu_decision_not_eligible_for_winsorized(monkeypatch, tmp_path):
     assert len(decisions) == 1, events
     line = decisions[0]
     assert "requested=true" in line
+    assert "operation=stacking_reduction:winsorized_sigma_clip" in line
     assert "effective_backend=cupy" in line
-    assert "execution=not_eligible" in line
-    assert (
-        "fallback_reason=winsorized_gpu_qualification_pending_track_b" in line
-    )
+    assert "execution=used" in line
+    assert "fallback_reason=none" in line
 
 
 # ---------------------------------------------------------------------------

@@ -280,6 +280,7 @@ from seestar.core.stack_gpu import (
     stack_kappa_sigma_gpu,
     stack_linear_fit_clip_gpu,
     stack_median_gpu,
+    stack_winsorized_sigma_gpu,
 )
 from seestar.core.streaming_stack import stack_disk_streaming
 
@@ -438,6 +439,24 @@ def _batch_requested_token(batch_size: Any) -> str:
         return "all_ram"
     return str(requested)
 _BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
+
+# ----------------------------------------------------------------------
+# GPU VRAM footprint model (B4, Track B)
+# ----------------------------------------------------------------------
+# Each reduction's peak device footprint is estimated as ``stack_bytes *
+# factor`` where the factor models the sorting temporaries of that specific
+# operation:
+#
+# * kappa-sigma / linear-fit-clip / median: ~4x the float32 stack (single
+#   ``nanmedian``-style sort chain, measured on the 2 GiB MX150).
+# * winsorized-sigma clip: ~6x the float32 stack (full axis-0 ``argsort`` x2
+#   with int64 index arrays + ``take_along_axis`` + re-winsor bounds on the
+#   survivor distribution, measured with the CuPy pool in M3).
+#
+# Eligibility is derived from shape x dtype x expected temporaries of the
+# ACTUAL operation at call time (never from hardware names, never a fixed N).
+_GPU_FOOTPRINT_FACTOR_DEFAULT = 4.0
+_GPU_FOOTPRINT_FACTOR_WINSORIZED = 6.0
 
 # ----------------------------------------------------------------------
 # Type aliases
@@ -2436,7 +2455,7 @@ class SeestarQueuedStacker:
         """Resolved backend for this run: "cpu" | "cupy" (frozen at run start)."""
         return self.acceleration_policy.backend
 
-    def _reduction_xp(self, images):
+    def _reduction_xp(self, images, footprint_factor=_GPU_FOOTPRINT_FACTOR_DEFAULT):
         """Return the cupy module when a GPU reduction is safe, else None (CPU).
 
         VRAM eligibility is evaluated DYNAMICALLY for every call against the
@@ -2450,6 +2469,14 @@ class SeestarQueuedStacker:
         selection is VRAM-gated today; transfer/execution-cost tuning for tiny
         stacks is intentionally NOT encoded as a fixed threshold (to avoid
         excluding larger GPUs).
+
+        ``footprint_factor`` (B4, Track B): expected peak device footprint of
+        the SPECIFIC reduction expressed in multiples of the float32 stack
+        (default ~4 for the nanmedian-based kernels; winsorized-sigma clip
+        passes ~6 for its double full-``argsort`` + int64 index temporaries).
+        The eligibility model is therefore derived from the actual operation's
+        shape x dtype x temporaries, not from hardware names and not a fixed
+        stack count.
 
         Diagnostics (R2-F5): returning None because the policy is CPU is NOT
         a fallback (no diagnostic); CuPy import failure, VRAM reject and
@@ -2472,13 +2499,13 @@ class SeestarQueuedStacker:
             return None
         try:
             # Dynamic, pool-aware VRAM guard (no N threshold): estimate the
-            # stack plus the sorting kernels' peak footprint (~4x the float32
-            # stack, measured on the 2 GiB MX150, Nono review F1) and require
-            # 60% headroom against the CURRENTLY available device memory
-            # (driver free + reusable CuPy pool blocks).
+            # stack plus the sorting kernels' peak footprint (``footprint_
+            # factor`` x the float32 stack, measured on the 2 GiB MX150) and
+            # require 60% headroom against the CURRENTLY available device
+            # memory (driver free + reusable CuPy pool blocks).
             n = len(images)
             elem = int(n) * int(np.prod(images[0].shape))
-            need = elem * 4 * 4  # float32 * ~4x sorting peak
+            need = elem * 4 * footprint_factor  # float32 bytes x operation peak
             free, _total = cp.cuda.runtime.memGetInfo()
             try:
                 pool_free = cp.get_default_memory_pool().free_bytes()
@@ -2531,9 +2558,29 @@ class SeestarQueuedStacker:
         logged.add(reason)
         self.logger.warning(message, *args)
 
-    def _gpu_reduce(self, fn_cpu, fn_gpu, images, weights=None, **kwargs):
-        """Run a reduction on CuPy when beneficial, else CPU; GPU failure -> CPU fallback."""
-        cp = self._reduction_xp(images)
+    def _gpu_reduce(
+        self,
+        fn_cpu,
+        fn_gpu,
+        images,
+        weights=None,
+        footprint_factor=_GPU_FOOTPRINT_FACTOR_DEFAULT,
+        **kwargs,
+    ):
+        """Run a reduction on CuPy when beneficial, else CPU; GPU failure -> CPU fallback.
+
+        ``footprint_factor`` (B4, Track B) is forwarded to ``_reduction_xp`` as
+        the per-operation VRAM footprint model of the SPECIFIC reduction (see
+        ``_reduction_xp``).  The default (4.0) is passed positionally only
+        when the caller overrides it: the nanmedian-based kernels keep the
+        historical single-argument ``_reduction_xp(images)`` call shape, and
+        the winsorized-sigma kernel (factor ~6) opts into the factor-aware
+        eligibility check.
+        """
+        if footprint_factor == _GPU_FOOTPRINT_FACTOR_DEFAULT:
+            cp = self._reduction_xp(images)
+        else:
+            cp = self._reduction_xp(images, footprint_factor=footprint_factor)
         if cp is None:
             return fn_cpu(images, weights, **kwargs)
         try:
@@ -12815,12 +12862,30 @@ class SeestarQueuedStacker:
                         _nan_mask_image(img, mask)
                         for img, mask in zip(image_data_list, coverage_maps_list)
                     ]
-                    winsor_res = self._stack_winsorized_sigma(
+
+                    def _cpu_winsorized(imgs, w=None, **_kw):
+                        # Existing CPU path, unchanged: worker/executor +
+                        # max_mem_bytes guard + durable per-call messages.
+                        return self._stack_winsorized_sigma(
+                            imgs,
+                            w,
+                            max_mem_bytes=self.max_hq_mem,
+                            **_kw,
+                        )
+
+                    # B7 (Track B): when the policy backend is cupy and the
+                    # workload fits VRAM under the winsorized footprint model
+                    # (full-argsort x2 temporaries, factor ~6), execute the
+                    # CuPy scientific twin through the shared dispatcher;
+                    # otherwise fall back to the CPU path above unchanged.
+                    winsor_res = self._gpu_reduce(
+                        _cpu_winsorized,
+                        stack_winsorized_sigma_gpu,
                         images_for_stack,
                         quality_weights,
+                        footprint_factor=_GPU_FOOTPRINT_FACTOR_WINSORIZED,
                         kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                         winsor_limits=self.winsor_limits,
-                        max_mem_bytes=self.max_hq_mem,
                         return_weights=True,
                     )
                     if isinstance(winsor_res, tuple) and len(winsor_res) == 3:
@@ -19133,11 +19198,12 @@ class SeestarQueuedStacker:
 
         ``requested=true operation=<op> effective_backend=<cpu|cupy>
         execution=<used|fallback|not_eligible> fallback_reason=<reason|none>``
-        For M2 the operation is the run's stacking reduction family: the
-        existing kappa-sigma / linear-fit-clip / median reducers populate
-        ``used``/``fallback`` from the resolved backend; winsorized-sigma is
-        not yet GPU-qualified (Track B) and is reported ``not_eligible`` with
-        the explicit reason.
+        The operation is the run's stacking reduction family: kappa-sigma /
+        linear-fit-clip / median / winsorized-sigma-clip now all have GPU
+        reducers (winsorized landed in M3, dispatched in B7); ``used`` is
+        reported when the resolved backend is cupy (per-batch VRAM rejections
+        during ``_stack_batch`` additionally emit their own throttled durable
+        fallback warning with the real reason), ``fallback`` otherwise.
         """
         if not getattr(self, "request_gpu", False):
             return
@@ -19146,11 +19212,14 @@ class SeestarQueuedStacker:
         caps = getattr(self, "_gpu_caps", lambda: None)()
         stacking_key = self._stacking_mode_effective()
         operation = f"stacking_reduction:{stacking_key}"
-        gpu_capable = stacking_key in ("kappa_sigma", "linear_fit_clip", "median")
+        gpu_capable = stacking_key in (
+            "kappa_sigma",
+            "linear_fit_clip",
+            "median",
+            "winsorized_sigma_clip",
+        )
         if not gpu_capable:
-            reason = "winsorized_gpu_qualification_pending_track_b" if (
-                stacking_key == "winsorized_sigma_clip"
-            ) else f"no_gpu_reducer_for_mode:{stacking_key}"
+            reason = f"no_gpu_reducer_for_mode:{stacking_key}"
             self._emit_provenance_block(
                 "GPU_DECISION",
                 {
@@ -19276,13 +19345,12 @@ class SeestarQueuedStacker:
             if not gpu_requested:
                 out["gpu_execution"] = "not_requested"
             elif stacking_key2 not in (
-                "kappa_sigma", "linear_fit_clip", "median"
+                "kappa_sigma", "linear_fit_clip", "median",
+                "winsorized_sigma_clip",
             ):
                 out["gpu_execution"] = "not_eligible"
                 out["gpu_fallback_reason"] = (
-                    "winsorized_gpu_qualification_pending_track_b"
-                    if stacking_key2 == "winsorized_sigma_clip"
-                    else f"no_gpu_reducer_for_mode:{stacking_key2}"
+                    f"no_gpu_reducer_for_mode:{stacking_key2}"
                 )
             elif effective_backend == "cupy":
                 out["gpu_execution"] = "used"
