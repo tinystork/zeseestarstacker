@@ -411,9 +411,9 @@ FITS_FILE_FILTER = "FITS files (*.fit *.fits)"
 NORM_METHODS = ["none", "linear_fit", "sky_mean"]
 WEIGHT_METHODS = ["none", "noise_variance", "noise_fwhm", "snr", "stars"]
 # Drizzle kernel choices offered to the user (Qt combo + mosaic kernel combo).
-# MUST stay in sync with ``seestar.core.drizzle_core.VALID_DRIZZLE_KERNELS``
-# (the drizzle 2.2.0 engine set): ``tophat`` is NOT supported by the engine and
-# is deliberately never offered.  Enforced by
+# MUST stay in sync with the engine's ``VALID_DRIZZLE_KERNELS`` (the drizzle
+# 2.2.0 engine set) in the core ``drizzle_core`` module: ``tophat`` is NOT
+# supported by the engine and is deliberately never offered.  Enforced by
 # ``tests/test_drizzle_kernel_list_consistency.py``.
 DRIZZLE_KERNELS = [
     "square",
