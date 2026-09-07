@@ -341,6 +341,19 @@ from ..core.normalization import (
     _normalize_images_linear_fit,
     _normalize_images_sky_mean,
 )
+# Phase-1 support-aware overlap (zsss-support-overlap-p1-20260907): the
+# neutral paired-overlap estimators shared by the plain-Classic seam.
+# They replace the legacy full-frame percentile helpers ONLY for plain
+# Classic ``linear_fit``/``sky_mean`` normalization (the legacy helpers stay
+# imported for the historical non-plain batch-local paths below).
+from ..core.overlap_normalization import (
+    apply_linear_fit as _p1_apply_linear_fit,
+    apply_sky_mean_offset as _p1_apply_sky_mean_offset,
+    content_validity_after_loader as _p1_content_validity,
+    estimate_linear_fit_from_geometry as _p1_estimate_linear_fit,
+    estimate_sky_mean_from_geometry as _p1_estimate_sky_mean,
+    REASON_ACCEPTED as _P1_REASON_ACCEPTED,
+)
 from ..core.reprojection import reproject_to_reference_wcs
 from ..core.weights import (
     _calculate_image_weights_noise_fwhm,
@@ -1128,6 +1141,19 @@ _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
 # Channel-invariant 2-D (H, W) float64 accumulators, transactional with the
 # classic checkpoint.  ``_SUPPORT_STATE_SCHEMA`` is the manifest metadata tag;
 # its presence distinguishes a support-carrying checkpoint from a legacy one.
+#
+# Phase-1 support-aware overlap (zsss-support-overlap-p1-20260907): a minimal
+# scalar Classic normalization science contract.  Plain-classic sky_mean /
+# linear_fit now normalize on common reliable support with the neutral
+# paired-overlap estimators, and the hidden batch_size==1 sky subtraction is
+# bypassed for plain classic.  A checkpoint written by pre-Phase-1 code must
+# never silently mix SUM/WHT built with the old full-frame semantics with
+# frames normalized by the new seam, so the manifest carries this scalar and
+# Resume refuses on mismatch / on a missing marker when the current session's
+# science actually changed.  ``none`` + batch_size!=1 keeps identical science
+# (marker ``legacy-unchanged``).
+_CLASSIC_NORM_SCIENCE_OVERLAP = "classic-overlap-v1"
+_CLASSIC_NORM_SCIENCE_LEGACY_UNCHANGED = "legacy-unchanged"
 _SUPPORT_W1_FILENAME = "coverage_SUP_W1.npy"
 _SUPPORT_W2_FILENAME = "coverage_SUP_W2.npy"
 _SUPPORT_DTYPE = np.dtype(np.float64)
@@ -4457,6 +4483,14 @@ class SeestarQueuedStacker:
         # P1-FIX (HSI closure): immutable float32 session normalization
         # reference (captured once in ``_worker``).  ``None`` until captured.
         self._norm_reference = None
+        # Phase-1 support-aware overlap: session reference content validity
+        # (truthful loader-original validity of the fixed reference), transient
+        # per-thread source-support carrier slot for ``_process_file`` ->
+        # ``_stack_batch``, and bounded per-frame scalar diagnostics (never
+        # masks).
+        self._norm_reference_content = None
+        self._p1_tls = threading.local()
+        self._p1_norm_diagnostics = []
         # P5-FIX (HSI closure): immutable session quality reference scale
         # ``q_ref`` (captured once in ``start_processing`` from the actual
         # session reference image).  ``None`` until captured/restored.
@@ -7556,8 +7590,21 @@ class SeestarQueuedStacker:
             # it (their historical batch-local normalization needs no session
             # reference).
             if self._should_capture_norm_reference():
+                # Phase-1 support-aware overlap: capture the reference WITH its
+                # truthful loader-original content validity (never an all-valid
+                # guess).  The reference canvas is the identity frame, so the
+                # content mask needs no M warp.  Search order: the reference
+                # scan folder, the current folder, the output folder, then the
+                # additional folders.
+                _p1_ref_search = [folder_for_ref_scan, self.current_folder]
+                _p1_ref_search += [self.output_folder]
+                _p1_ref_search += list(getattr(self, "additional_folders", None) or [])
+                _p1_ref_content = self._p1_reference_content_mask(
+                    reference_header_for_global_alignment, _p1_ref_search
+                )
                 self._capture_normalization_reference(
-                    reference_image_data_for_global_alignment
+                    reference_image_data_for_global_alignment,
+                    content_mask=_p1_ref_content,
                 )
 
             # Préparation du header qui sera utilisé pour le WCS de référence global
@@ -8400,6 +8447,15 @@ class SeestarQueuedStacker:
                                     valid_mask_val,
                                 ) = item_result_tuple
 
+                                # Phase-1 support-aware overlap: consume the
+                                # per-frame support carrier published by
+                                # ``_process_file`` in this SAME thread
+                                # (transient; cleared immediately so it can
+                                # never leak to the next file).  ``None`` for
+                                # every non-support-aware path.
+                                _p1_carrier = self._p1_read_carrier()
+                                self._p1_carrier_slot().support_carrier = None
+
                                 if (
                                     self.drizzle_active_session
                                 ):  # Drizzle Standard (non-mosaïque) — M3
@@ -8501,6 +8557,7 @@ class SeestarQueuedStacker:
                                                     scores_val,
                                                     wcs_gen_val,
                                                     mask_p,
+                                                    _p1_carrier,
                                                 )
                                                 self.aligned_temp_paths.append(img_p)
                                             else:
@@ -8527,6 +8584,7 @@ class SeestarQueuedStacker:
                                                 scores_val,
                                                 wcs_gen_val,
                                                 valid_mask_val,
+                                                _p1_carrier,
                                             )
                                             self._current_batch_paths.append(file_path)
                                     else:
@@ -8536,6 +8594,7 @@ class SeestarQueuedStacker:
                                             scores_val,
                                             wcs_gen_val,
                                             valid_mask_val,
+                                            _p1_carrier,
                                         )
                                         self._current_batch_paths.append(file_path)
                                     if classic_stack_item is not None:
@@ -10484,12 +10543,35 @@ class SeestarQueuedStacker:
         matrice_M_calculee = None
         align_method_log_msg = "Unknown"
         tmp_align_in_path = None
+        # Phase-1 support-aware overlap: per-frame transient evidence published
+        # into the calling thread's carrier slot just before the successful
+        # return (see ``_p1_carrier_slot``).  Cleared up-front so a stale
+        # carrier from a previous file can never leak into this one.
+        _p1_active = self._should_capture_norm_reference()
+        _p1_invalid_raw = None
+        _p1_debayered = False
+        _p1_content_valid = None
+        _p1_src_shape_hw = None
+        self._p1_carrier_slot().support_carrier = None
 
         try:
             logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
-            loaded_data_tuple = load_and_validate_fits(file_path)
+            if _p1_active:
+                # Opt-in loader invalidity report (truthful ORIGINAL non-finite
+                # before repair).  The returned science is bit-identical to the
+                # default path; only the extra spatial mask is added.
+                loaded_data_tuple = load_and_validate_fits(
+                    file_path, report_invalidity=True
+                )
+            else:
+                loaded_data_tuple = load_and_validate_fits(file_path)
             if loaded_data_tuple and loaded_data_tuple[0] is not None:
-                img_data_array_loaded, header_from_load = loaded_data_tuple
+                if _p1_active:
+                    img_data_array_loaded, header_from_load, _p1_invalid_raw = (
+                        loaded_data_tuple
+                    )
+                else:
+                    img_data_array_loaded, header_from_load = loaded_data_tuple
                 header_final_pour_retour = (
                     header_from_load.copy() if header_from_load else fits.Header()
                 )
@@ -10544,6 +10626,7 @@ class SeestarQueuedStacker:
                         prepared_img_after_initial_proc, pattern_upper
                     )
                     is_color_after_preprocessing = True
+                    _p1_debayered = True
                     logger.debug(
                         f"     - (b) Image débayerisée. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]"
                     )
@@ -10580,6 +10663,29 @@ class SeestarQueuedStacker:
                 )
                 logger.debug(
                     f"     - (d) Correction HP. Range: [{np.min(prepared_img_after_initial_proc):.4g}, {np.max(prepared_img_after_initial_proc):.4g}]"
+                )
+
+            # Phase-1 support-aware overlap: derive the truthful content-valid
+            # mask from the loader opt-in invalidity report (original
+            # non-finite before repair) once the debayer decision is known.
+            # The mask lives in the ORIGINAL source spatial frame (spatial
+            # dims are preserved by debayer/WB/HP), exactly the frame the 2x3
+            # affine M maps onto the reference canvas.  ``bayer=True`` applies
+            # the documented conservative CFA->RGB influence dilation for
+            # debayered inputs; RGB/3D and mono inputs keep per-pixel
+            # semantics.  Never an all-valid guess: absent loader evidence
+            # stays ``None`` (the estimator then answers neutral+reason).
+            if _p1_active:
+                _p1_src_shape_hw = tuple(
+                    prepared_img_after_initial_proc.shape[:2]
+                )
+                if _p1_invalid_raw is not None:
+                    _p1_content_valid = _p1_content_validity(
+                        _p1_invalid_raw, bayer=_p1_debayered
+                    )
+                logger.debug(
+                    f"     - (P1) support carrier evidence: src_shape={_p1_src_shape_hw}, "
+                    f"content_valid={'present' if _p1_content_valid is not None else 'MISSING (loader report absent)'}"
                 )
 
             is_drizzle_or_mosaic_mode = (
@@ -10828,10 +10934,19 @@ class SeestarQueuedStacker:
                 # matrice de transformation effectivement utilisée par
                 # warpAffine pour alimenter le tf du noyau drizzle, via le
                 # contrat transform-only (pas de rééchantillonnage : l'image
-                # warpée est de toute façon jetée).  Classique inchangé
-                # (return_M=False) mais avec diagnostics passifs.
+                # warpée est de toute façon jetée).  Support-aware overlap
+                # (Phase 1): le classique demande aussi return_M=True (mais
+                # garde transform_only=False : le warp réel est conservé) pour
+                # que la géométrie vraie (footprint du détecteur) alimente la
+                # normalisation Classique, jamais une inférence de brillance.
                 _want_M = is_drizzle_or_mosaic_mode and not self.is_mosaic_run
-                if _want_M:
+                _support_norm_active = (
+                    self._is_plain_classic()
+                    and getattr(self, "normalize_method", "none")
+                    in ("linear_fit", "sky_mean")
+                )
+                _request_M = _want_M or _support_norm_active
+                if _request_M:
                     (
                         aligned_img_astroalign,
                         align_success_astroalign,
@@ -10844,7 +10959,7 @@ class SeestarQueuedStacker:
                         force_same_shape_as_ref=True,
                         use_disk=align_on_disk,
                         return_M=True,
-                        transform_only=True,
+                        transform_only=bool(_want_M),
                         return_diagnostics=True,
                     )
                 else:
@@ -10897,9 +11012,11 @@ class SeestarQueuedStacker:
                     raise RuntimeError(
                         f"Échec Alignement Astroalign standard pour {file_name}."
                     )
-                if _want_M and align_success_astroalign:
+                if (_want_M or _support_norm_active) and align_success_astroalign:
                     # M3: le tf pour le noyau drizzle = la matrice warpAffine
                     # (mapping pixels ORIGINAUX -> grille de référence).
+                    # Support-aware overlap (Phase 1): le classique conserve la
+                    # même matrice réelle pour la géométrie de normalisation.
                     matrice_M_calculee = M_astroalign
                 else:
                     matrice_M_calculee = None
@@ -10960,7 +11077,18 @@ class SeestarQueuedStacker:
                     )
 
             # --- Background equalization for batch_size == 1 -------------------
-            if self.batch_size == 1 and valid_pixel_mask_2d is not None:
+            # Phase-1 (support-aware overlap): the hidden additive sky
+            # subtraction below is a COMPETING plain-Classic correction that
+            # contradicts end-to-end ``none`` and immutable-reference
+            # normalization.  It is bypassed for plain Classic only (all
+            # Classic correction must come from the immutable-anchor seam);
+            # every other path (drizzle/reproject/mosaic/…) preserves the
+            # historical behaviour.
+            if (
+                self.batch_size == 1
+                and valid_pixel_mask_2d is not None
+                and not self._is_plain_classic()
+            ):
                 # Align behaviour with batch_size=0: remove only a robust sky
                 # offset; avoid multiplicative scaling and hard clipping which
                 # can amplify noise and saturate highlights.
@@ -11070,6 +11198,24 @@ class SeestarQueuedStacker:
             if self.drizzle_active_session and not self.is_mosaic_run:
                 data_final_pour_retour = image_for_alignment_or_drizzle_input.astype(
                     np.float32
+                )
+
+            # Phase-1 support-aware overlap: publish the per-frame support
+            # carrier (real M, truthful content validity, original source
+            # shape) into the calling thread's slot.  Only plain-Classic
+            # support-aware sessions do this; every other path leaves the slot
+            # ``None`` (already cleared at entry).  The carrier is transient
+            # (never serialized, never retained past batch reduction).
+            if _p1_active:
+                _carrier_M = (
+                    np.array(matrice_M_calculee, dtype=np.float64, copy=True)
+                    if matrice_M_calculee is not None
+                    else None
+                )
+                self._p1_carrier_slot().support_carrier = (
+                    _carrier_M,
+                    _p1_content_valid,
+                    _p1_src_shape_hw,
                 )
 
             return (
@@ -13364,18 +13510,26 @@ class SeestarQueuedStacker:
         valid_scores_for_quality_weights = []
         valid_pixel_masks_for_coverage = []  # Liste des masques 2D (HW bool)
         valid_wcs_objs_for_ccdproc = []
+        # Phase-1 support-aware overlap: per-frame transient support carriers
+        # kept in LOCKSTEP with ``valid_images_for_ccdproc`` (only for items
+        # that actually join the reduction).  Each entry is ``None`` (no
+        # evidence -> neutral+reason) or ``(M, src_content_valid, src_shape)``.
+        support_carriers_for_ccdproc = []
 
         ref_shape_check = None  # Shape de la première image valide (HWC ou HW)
         is_color_batch = False  # Sera déterminé par la première image valide
 
         for idx, item_tuple in enumerate(batch_items_with_masks):
-            if len(item_tuple) != 5:  # S'assurer qu'on a bien les 5 éléments
+            if len(item_tuple) < 5:  # S'assurer qu'on a bien les 5 éléments
                 self.update_progress(
                     f"   -> Item {idx+1} du lot {current_batch_num} ignoré (format de tuple incorrect)."
                 )
                 continue
 
-            img_np, hdr, score, _wcs_obj, mask_2d = item_tuple  # Déballer
+            img_np, hdr, score, _wcs_obj, mask_2d = item_tuple[:5]  # Déballer
+            # Optional Phase-1 transient support carrier (6th element, set only
+            # by the plain-Classic support-aware worker seam; never serialized).
+            _p1_carrier = item_tuple[5] if len(item_tuple) > 5 else None
 
             # ``img_np`` et ``mask_2d`` peuvent être soit des tableaux numpy déjà
             # en mémoire, soit des chemins vers des fichiers ``.npy`` temporaires
@@ -13491,6 +13645,7 @@ class SeestarQueuedStacker:
                 valid_scores_for_quality_weights.append(score)
                 valid_pixel_masks_for_coverage.append(mask_2d)
                 valid_wcs_objs_for_ccdproc.append(_wcs_obj)
+                support_carriers_for_ccdproc.append(_p1_carrier)
             else:
                 self.update_progress(
                     f"   -> Item {idx+1} du lot {current_batch_num} ignoré (shape image {img_np.shape} ou masque {mask_2d.shape} incompatible avec réf {ref_shape_check})."
@@ -13521,7 +13676,7 @@ class SeestarQueuedStacker:
         # normalized here.
         if self._is_plain_classic():
             valid_images_for_ccdproc = self._normalize_sources_against_reference(
-                valid_images_for_ccdproc
+                valid_images_for_ccdproc, support_carriers_for_ccdproc
             )
 
         # Optimization for batch_size == 1 and mean stacking: if only one image
@@ -14407,7 +14562,215 @@ class SeestarQueuedStacker:
             self, "normalize_method", "none"
         ) in ("linear_fit", "sky_mean")
 
-    def _capture_normalization_reference(self, reference_data) -> None:
+    # ------------------------------------------------------------------
+    # Phase-1 support-aware overlap: per-thread support carrier + bounded
+    # fail-open normalization diagnostics (never retained canvas masks).
+    # ------------------------------------------------------------------
+    def _p1_carrier_slot(self):
+        """Per-thread transient slot for the source-support carrier.
+
+        ``_process_file`` publishes the per-frame support evidence (real 2x3
+        affine ``M``, truthful content-validity mask derived from the loader
+        opt-in invalidity report, original pre-warp source shape) into the
+        CALLING thread's slot immediately before returning; the worker append
+        site in the SAME thread consumes it right after ``_process_file``
+        returns and clears it.  Thread-local storage keeps concurrent workers
+        race-free (no instance-level transient that a second worker could
+        overwrite).
+        """
+        tls = getattr(self, "_p1_tls", None)
+        if tls is None:
+            tls = threading.local()
+            self._p1_tls = tls
+        return tls
+
+    def _p1_record_diagnostics(self, frame_label, diag):
+        """Append ONE bounded scalar per-frame diagnostic entry.
+
+        Only scalar/structured values are retained (frame, method, geometry
+        availability, effective/common counts, fractions, estimator, reason,
+        offset).  Full-frame masks are never kept past the reduction; the
+        caller drops its references after ``_normalize_sources_against_reference``
+        returns.  The list is bounded by the number of processed frames.
+        """
+        try:
+            d = dict(diag or {})
+            d["frame"] = str(frame_label)[-120:]
+            self._p1_norm_diagnostics.append(d)
+        except Exception:
+            # Diagnostics are fail-open by design: never let bookkeeping break
+            # the scientific path.
+            pass
+
+    def _p1_read_carrier(self):
+        """Read (without clearing) this thread's published support carrier.
+
+        ``None`` when no carrier was published in this thread (fresh worker,
+        non-support-aware path, or after a consume).
+        """
+        return getattr(self._p1_carrier_slot(), "support_carrier", None)
+
+    def _p1_diagnostics_summary(self):
+        """Bounded fail-open summary counters over the current session.
+
+        Returns a dict of scalar counts; clears nothing (the per-frame list is
+        cleared by the next session reference capture / release).
+        """
+        rows = list(getattr(self, "_p1_norm_diagnostics", []) or [])
+        summary = {"frames": len(rows), "accepted": 0, "neutral": 0}
+        for r in rows:
+            if r.get("reason") == _P1_REASON_ACCEPTED:
+                summary["accepted"] += 1
+            else:
+                summary["neutral"] += 1
+        return summary
+
+    def _p1_clear_diagnostics(self):
+        try:
+            self._p1_norm_diagnostics = []
+        except Exception:
+            pass
+
+    def _p1_reference_content_mask(self, ref_header, search_dirs):
+        """Truthful content validity of the FIXED normalization reference.
+
+        Resolution order (mirrors the resume machinery exactly):
+
+        1. the persisted resume-reference identity
+           (``self._resume_reference_identity``, resolved via
+           :meth:`_resolve_source_path` which verifies original -> moved-to-
+           ``stacked/`` counterpart by size+mtime);
+        2. the header provenance (``_SOURCE_PATH`` /
+           ``HIERARCH SEESTAR REF SRCFILE``): absolute path if present, then
+           each search dir (original + ``stacked/`` subfolder), each verified
+           through the SAME identity resolution (:meth:`_resolve_source_path`)
+           so a reference that was moved to ``<src_dir>/stacked/`` on a clean
+           resume is found again.
+
+        The resolved file is re-read once with the opt-in loader invalidity
+        report.  Returns a ``bool`` ``(H, W)`` content-valid mask
+        (conservative Bayer influence when the file is CFA, mirroring the
+        per-source seam) or ``None`` when the evidence cannot be re-derived —
+        NEVER an all-valid guess: with ``None`` the paired estimators answer
+        neutral with a stable reason and the bounded diagnostics record it.
+        When the OVERLAP contract (plain-classic ``linear_fit``/``sky_mean``)
+        requires that evidence and it cannot be re-derived, a session-level
+        WARN is emitted (logger.warning + update_progress) while remaining
+        fail-open: the run is never aborted.  The reference canvas is the
+        identity frame, so no M warp is needed for the reference side.
+        """
+        resolved = None
+
+        # 1) Persisted resume-reference identity (authoritative on resume).
+        rid = getattr(self, "_resume_reference_identity", None)
+        if isinstance(rid, dict):
+            try:
+                resolved = self._resolve_source_path(rid)
+            except Exception:  # pragma: no cover - defensive fail-open
+                resolved = None
+
+        # 2) Header provenance -> candidate original/stacked paths, verified by
+        #    the SAME size+mtime identity resolution as the pinned reference.
+        if resolved is None and ref_header is not None:
+            cand = None
+            for key in ("_SOURCE_PATH", "HIERARCH SEESTAR REF SRCFILE"):
+                raw = ref_header.get(key)
+                if raw:
+                    cand = str(raw)
+                    break
+            if cand:
+                base = os.path.basename(cand)
+                dirs = [str(d) for d in (search_dirs or []) if d]
+                if not os.path.isabs(cand) and os.path.dirname(cand):
+                    # basename-only provenance: nothing extra to add; the
+                    # search dirs are the source folders.
+                    pass
+                candidates = []
+                if os.path.isabs(cand):
+                    candidates.append(cand)
+                for d in dirs:
+                    candidates.append(os.path.join(d, base))
+                    candidates.append(
+                        os.path.join(
+                            d,
+                            getattr(self, "stacked_subdir_name", "stacked"),
+                            base,
+                        )
+                    )
+                for c in candidates:
+                    if not os.path.isfile(c):
+                        continue
+                    try:
+                        ident = self._stat_identity(c)
+                    except Exception:  # pragma: no cover - defensive
+                        ident = None
+                    if ident is None:
+                        continue
+                    try:
+                        r = self._resolve_source_path(ident)
+                    except Exception:  # pragma: no cover - defensive
+                        r = None
+                    if r and os.path.isfile(r):
+                        resolved = r
+                        break
+
+        if resolved is None:
+            logger.debug(
+                "P1: reference content evidence not re-derivable "
+                "(header provenance %r); ref content unknown",
+                (ref_header.get("_SOURCE_PATH") if ref_header is not None else None),
+            )
+            # F2: session-level WARN — the OVERLAP contract requires reference
+            # content evidence; without it every frame answers deterministic
+            # NEUTRAL (no correction) and resume equivalence cannot be
+            # guaranteed.  Fail-open by design: the run is never aborted.
+            try:
+                if self._should_capture_norm_reference():
+                    _msg = (
+                        "[P1] Reference content-validity evidence cannot be "
+                        "re-derived (reference source file not found at its "
+                        "original or verified stacked/ location); support-aware "
+                        "normalization frames will be NEUTRAL (no correction, "
+                        "reason no_reference_content) — resume equivalence is "
+                        "not guaranteed for this session."
+                    )
+                    logger.warning(_msg)
+                    try:
+                        self.update_progress(f"⚠️ {_msg}", "WARN")
+                    except Exception:  # pragma: no cover - fail-open
+                        pass
+            except Exception:  # pragma: no cover - fail-open
+                pass
+            return None
+
+        try:
+            _img, hdr, invalid = load_and_validate_fits(
+                resolved, report_invalidity=True
+            )
+        except Exception as exc:  # pragma: no cover - defensive fail-open
+            logger.debug("P1: reference reload failed (%s); ref content unknown", exc)
+            return None
+        if invalid is None:
+            return None
+        try:
+            pat_raw = hdr.get("BAYERPAT") if hdr is not None else None
+            pat = str(pat_raw or "").upper()
+            bayer = pat in ("GRBG", "RGGB", "GBRG", "BGGR")
+            cm = _p1_content_validity(invalid, bayer=bayer)
+        except Exception as exc:  # pragma: no cover - defensive fail-open
+            logger.debug("P1: reference content conversion failed (%s)", exc)
+            return None
+        cm = np.asarray(cm, dtype=bool)
+        logger.debug(
+            "P1: reference content mask captured shape=%s invalid_before=%d "
+            "(resolved=%s)",
+            cm.shape,
+            int((~cm).sum()),
+            resolved,
+        )
+        return cm
+
+    def _capture_normalization_reference(self, reference_data, content_mask=None) -> None:
         """Capture the immutable float32 normalization reference for a session.
 
         Called once per worker/session immediately after the real global classic
@@ -14415,34 +14778,90 @@ class SeestarQueuedStacker:
         replaced by intermediate stacks (reproject path).  The stored reference
         is a private float32 copy: it is never mutated and costs exactly one
         frame of memory regardless of observation count.  ``None`` clears it.
+
+        ``content_mask`` (optional ``(H, W)`` bool, transient) records the
+        reference content validity derived from the loader opt-in invalidity
+        report (original non-finite before repair, conservative Bayer
+        influence).  It is session-scoped like the reference and is NEVER used
+        to alter image science — only to exclude repaired reference pixels from
+        the same-coordinate paired estimators.
         """
         if reference_data is None:
             self._norm_reference = None
+            self._norm_reference_content = None
             return
         self._norm_reference = np.array(reference_data, dtype=np.float32, copy=True)
+        if content_mask is not None:
+            cm = np.asarray(content_mask, dtype=bool)
+            if cm.shape != self._norm_reference.shape[:2]:
+                raise ValueError(
+                    "reference content mask shape mismatch: "
+                    f"{cm.shape} vs {self._norm_reference.shape[:2]}"
+                )
+            self._norm_reference_content = np.array(cm, dtype=bool, copy=True)
+        else:
+            self._norm_reference_content = None
 
     def _release_norm_reference(self) -> None:
         """Release the session-scoped normalization reference (idempotent).
 
         Called from the worker ``finally`` block so the one-frame full-frame
         copy never outlives the worker, regardless of success/failure or the
-        cleanup setting.
+        cleanup setting.  End-of-run fail-open reporting (F3 wiring): when the
+        session recorded per-frame support-aware normalization diagnostics, a
+        bounded summary (accepted / neutral counts) is reported before the
+        state is cleared; a session with neutral frames additionally emits a
+        session-level WARN (update_progress + logger.warning) so an
+        operationally silent no-correction run is visible.  Never aborts the
+        scientific run.
         """
+        try:
+            summary = self._p1_diagnostics_summary()
+            if summary.get("frames", 0):
+                _msg = (
+                    "P1 support-aware normalization summary: "
+                    f"{summary['accepted']}/{summary['frames']} frames accepted, "
+                    f"{summary['neutral']} neutral (no correction)"
+                )
+                logger.info(_msg)
+                if summary.get("neutral", 0):
+                    logger.warning(_msg)
+                    try:
+                        self.update_progress(f"⚠️ {_msg}", "WARN")
+                    except Exception:  # pragma: no cover - fail-open
+                        pass
+        except Exception:  # pragma: no cover - fail-open
+            pass
         self._norm_reference = None
+        self._norm_reference_content = None
+        self._p1_clear_diagnostics()
 
-    def _normalize_sources_against_reference(self, image_data_list):
+    def _normalize_sources_against_reference(self, image_data_list, support_carriers=None):
         """Normalize aligned source arrays against the immutable session reference.
 
         ``normalize_method == "none"`` is a strict no-op that returns the list
         unchanged.  For ``linear_fit`` / ``sky_mean`` the immutable session
         reference is *mandatory*: if it has not been captured, a deterministic
         ``RuntimeError`` is raised (fail closed) rather than silently returning
-        unnormalized inputs.  Every aligned source observation is normalized
-        independently against the same fixed reference using the existing
-        helpers: the immutable reference is placed at index 0 (so it is the
-        reference argument) and discarded from the returned list.  Unknown
-        normalization methods retain their existing no-op behavior.  The stored
-        reference is never mutated.
+        unnormalized inputs.
+
+        Plain-Classic Phase-1 support-aware overlap: every aligned source is
+        normalized INDEPENDENTLY against the same fixed reference with the
+        neutral paired-overlap estimators (``estimate_sky_mean_from_geometry``
+        / ``estimate_linear_fit_from_geometry``).  Each source's estimator
+        support is its REAL geometry (the 2x3 affine M that produced its warp)
+        AND its truthful loader-original content validity AND the reference
+        content validity — never a luminance/brightness inference and never an
+        all-valid guess.  ``support_carriers`` is a parallel list (lockstep
+        with ``image_data_list``); entry ``None`` or missing evidence means the
+        correction is explicitly NEUTRAL (offset 0 / identity a=1,b=0) with a
+        stable reason — there is NO fallback to the legacy full-frame helpers.
+        The legacy formulas stay byte-identical (full P25/P90 per-channel model
+        and aligned-luminance sky location); only the SAMPLE SUPPORT changed.
+
+        Unknown normalization methods retain their existing no-op behavior.
+        The stored reference is never mutated.  All estimator/application
+        calls are non-mutating (read-only/memmap sources safe).
         """
         method = getattr(self, "normalize_method", "none")
         if method == "none" or not image_data_list:
@@ -14457,12 +14876,131 @@ class SeestarQueuedStacker:
                 "session reference, but none was captured "
                 f"(normalize_method={method!r})"
             )
-        combined = [ref] + list(image_data_list)
-        if method == "linear_fit":
-            normalized = _normalize_images_linear_fit(combined, 0)
-        else:
-            normalized = _normalize_images_sky_mean(combined, 0)
-        return normalized[1:]
+        ref_arr = np.asarray(ref, dtype=np.float32)
+        ref_shape_hw = tuple(ref_arr.shape[:2])
+        ref_content = getattr(self, "_norm_reference_content", None)
+        ref_content = (
+            np.asarray(ref_content, dtype=bool) if ref_content is not None else None
+        )
+
+        carriers = (
+            list(support_carriers) if support_carriers is not None else [None] * len(image_data_list)
+        )
+        normalized = []
+        accepted = 0
+        neutral = 0
+        for i, src in enumerate(image_data_list):
+            src_arr = np.asarray(src)
+            canvas_shape_hw = tuple(src_arr.shape[:2])
+            carrier = carriers[i] if i < len(carriers) else None
+            M = None
+            src_content = None
+            src_shape_hw = None
+            if carrier is not None:
+                try:
+                    M, src_content, src_shape_hw = carrier
+                except Exception:
+                    M, src_content, src_shape_hw = None, None, None
+            if src_shape_hw is None:
+                src_shape_hw = canvas_shape_hw
+            M_arr = None if M is None else np.asarray(M, dtype=np.float64)
+            src_content_bool = (
+                np.asarray(src_content, dtype=bool) if src_content is not None else None
+            )
+
+            # Geometry decides support, never brightness; content evidence is
+            # never silently assumed (missing => estimator answers neutral with
+            # a stable reason).  Shape mismatches between a source canvas and
+            # the reference canvas are programming invariants (classic aligns
+            # with force_same_shape_as_ref) and raise loudly rather than being
+            # hidden behind a neutral fallback.
+            if canvas_shape_hw != ref_shape_hw:
+                raise ValueError(
+                    "plain-classic support-aware normalization requires source "
+                    f"canvas shape {canvas_shape_hw} == reference shape "
+                    f"{ref_shape_hw} (frame index {i})"
+                )
+
+            try:
+                if method == "sky_mean":
+                    offset, diag = _p1_estimate_sky_mean(
+                        src_arr,
+                        ref_arr,
+                        tuple(src_shape_hw),
+                        M_arr,
+                        src_content_mask_01=src_content_bool,
+                        ref_content_mask=ref_content,
+                    )
+                    corrected = _p1_apply_sky_mean_offset(src_arr, offset)
+                else:  # linear_fit
+                    (a, b), diag = _p1_estimate_linear_fit(
+                        src_arr,
+                        ref_arr,
+                        tuple(src_shape_hw),
+                        M_arr,
+                        src_content_mask_01=src_content_bool,
+                        ref_content_mask=ref_content,
+                    )
+                    corrected = _p1_apply_linear_fit(src_arr, a, b)
+            except ValueError:
+                # Estimator validation failure (e.g. bad geometry on a carrier
+                # that slipped through) must never silently skip a frame: the
+                # neutral+reason contract is enforced INSIDE the estimators;
+                # an exception here is a genuine invariant break.
+                raise
+
+            if diag.get("reason") == _P1_REASON_ACCEPTED:
+                accepted += 1
+            else:
+                neutral += 1
+            # Bounded scalar fail-open diagnostics (never masks): frame index,
+            # method, geometry availability, counts/fractions, estimator,
+            # reason, correction.
+            try:
+                area = float(ref_shape_hw[0] * ref_shape_hw[1]) or 1.0
+                n_eff = float(diag.get("n_effective", 0) or 0)
+                enriched = dict(diag)
+                enriched["frame_index"] = int(i)
+                enriched["method"] = method
+                enriched["geometry"] = M_arr is not None
+                enriched["src_shape"] = [int(v) for v in src_shape_hw]
+                enriched["canvas_area"] = int(area)
+                enriched["effective_fraction"] = n_eff / area
+            except Exception:
+                enriched = dict(diag)
+            self._p1_record_diagnostics(f"batch_frame_{i}", enriched)
+            normalized.append(corrected)
+
+        logger.debug(
+            "P1 support-aware normalization: %d/%d frames accepted, %d neutral "
+            "(method=%s)",
+            accepted,
+            len(image_data_list),
+            neutral,
+            method,
+        )
+        return normalized
+
+    def _classic_norm_science_contract(self) -> str:
+        """Scalar Classic normalization-science contract for this session.
+
+        ``_CLASSIC_NORM_SCIENCE_OVERLAP`` marks sessions whose accumulated
+        science changed under Phase-1 support-aware overlap (plain classic with
+        ``sky_mean``/``linear_fit``, or plain classic ``batch_size == 1`` whose
+        hidden sky subtraction is bypassed).  All other classic sessions keep
+        byte-identical legacy science (``none`` with batch_size != 1, non-plain
+        paths never write a classic manifest) and carry
+        ``_CLASSIC_NORM_SCIENCE_LEGACY_UNCHANGED`` so legacy checkpoints stay
+        resumable when nothing actually changed.
+        """
+        if not self._is_plain_classic():
+            return _CLASSIC_NORM_SCIENCE_LEGACY_UNCHANGED
+        method = getattr(self, "normalize_method", "none")
+        if method in ("linear_fit", "sky_mean"):
+            return _CLASSIC_NORM_SCIENCE_OVERLAP
+        if int(getattr(self, "batch_size", 0) or 0) == 1:
+            return _CLASSIC_NORM_SCIENCE_OVERLAP
+        return _CLASSIC_NORM_SCIENCE_LEGACY_UNCHANGED
 
     def _scientific_fingerprint(self) -> str:
         """Deterministic fingerprint of the settings that change the classic
@@ -15015,6 +15553,13 @@ class SeestarQueuedStacker:
                 if getattr(self, "use_quality_weighting", False)
                 else None
             ),
+            # Phase-1 support-aware overlap: minimal scalar Classic
+            # normalization-science contract.  Written BEFORE the manifest is
+            # persisted; Resume refuses when the marker is missing/mismatched
+            # and the current session's normalization science changed, so
+            # pre/post-fix SUM/WHT can never mix silently.  No M/full masks are
+            # ever serialized (transient per-frame artifacts only).
+            "classic_norm_science": self._classic_norm_science_contract(),
             # Phase B1 (canonical batch contract): the frozen requested +
             # resolved batch contract.  ``resolved`` (B_resolved >= 1) is the
             # capacity frozen for the run; a Resume reuses it verbatim instead
@@ -15284,6 +15829,39 @@ class SeestarQueuedStacker:
         fp = manifest.get("fingerprint")
         if not fp or fp != self._scientific_fingerprint():
             return (False, "scientific configuration mismatch", None)
+
+        # --- Phase-1 normalization-science contract (fail-closed) ----------
+        # A checkpoint produced by pre-Phase-1 code (missing marker) or by a
+        # different normalization contract must not mix SUM/WHT with frames
+        # normalized by the current session when the science actually changed
+        # (plain classic sky_mean/linear_fit support-aware estimators, or the
+        # plain classic batch_size==1 hidden sky subtraction bypass).  Legacy
+        # ``none`` / batch>1 sessions keep identical science and remain
+        # resumable; a missing legacy marker is never fabricate as new
+        # semantics (it is only accepted when the current contract is
+        # ``legacy-unchanged``).  Validation happens read-only BEFORE any
+        # SUM/WHT memmap is opened and BEFORE any manifest write.
+        stored_marker = manifest.get("classic_norm_science")
+        current_marker = self._classic_norm_science_contract()
+        if stored_marker is None:
+            # Legacy/pre-Phase-1 checkpoint: only compatible when the current
+            # session's normalization science is unchanged (no support-aware
+            # estimators, no BS1 bypass in play).
+            if current_marker != _CLASSIC_NORM_SCIENCE_LEGACY_UNCHANGED:
+                return (
+                    False,
+                    "checkpoint predates the support-aware Classic "
+                    "normalization science contract; refusing to mix "
+                    "pre/post-fix normalization science",
+                    None,
+                )
+        elif stored_marker != current_marker:
+            return (
+                False,
+                "classic normalization science contract mismatch "
+                f"(manifest {stored_marker!r} vs current {current_marker!r})",
+                None,
+            )
 
         # --- schema v2 canonical config consistency (fail-closed, read-only) ---
         # Schema v1 keeps its exact legacy behavior (fingerprint match above is

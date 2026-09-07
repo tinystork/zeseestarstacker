@@ -157,7 +157,36 @@ def make_stack(
     # does, so the post-fix contract (normalize every observation against it)
     # is exercised end-to-end.
     o._capture_normalization_reference(ref)
+    # Phase-1 support-aware overlap: seed the session reference content
+    # validity.  The synthetic fixtures are fully finite by construction, so
+    # the truthful known-finite state is an all-valid mask (the loader report
+    # of a real fully-finite reference file would produce exactly this); it is
+    # declared EXPLICITLY here, never silently assumed by the estimators.
+    if ref is not None:
+        o._norm_reference_content = np.ones(
+            np.asarray(ref).shape[:2], dtype=bool
+        )
+    else:
+        o._norm_reference_content = None
     return o
+
+
+def _identity_support(img):
+    """Explicit known support for a fully aligned fixture frame.
+
+    Phase-1 support-aware overlap requires REAL geometry + truthful content
+    evidence per source (never an implicit all-valid guess).  These synthetic
+    fixtures are aligned to the reference canvas by construction, with fully
+    finite known content, so the carrier is the IDENTITY affine and a
+    known-finite content mask — the same carrier ``_process_file`` publishes
+    for a real dither=identity frame.  Returning ``None`` would be the honest
+    "no evidence" state, which makes the estimator answer NEUTRAL (offset 0 /
+    identity) — those semantics are exercised separately by the neutral tests.
+    """
+    H, W = img.shape[:2]
+    M = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+    content = np.ones((H, W), dtype=bool)
+    return (M, content, (H, W))
 
 
 def fresh_item(img):
@@ -166,6 +195,9 @@ def fresh_item(img):
     The copy is mandatory: ``_normalize_images_sky_mean`` mutates non-reference
     inputs in place, so reusing the same array object across sub-batches would
     leak normalization state and falsify the decomposition experiment.
+
+    The item carries the explicit known-support carrier (6th tuple element) so
+    the plain-Classic seam can normalize with real geometry/content evidence.
     """
     m = np.ones(img.shape[:2], dtype=bool)
     return (
@@ -174,6 +206,7 @@ def fresh_item(img):
         {"snr": 1.0, "stars": 0.0},
         None,
         m,
+        _identity_support(img),
     )
 
 
@@ -468,12 +501,18 @@ def test_singleton_batch_is_normalized_linear_fit():
 
 def test_singleton_batch_is_normalized_sky_mean():
     D = _build_dataset()
-    A, B = D["A"], D["B"]
+    A, Bs = D["A"], D["Bs"]  # Bs = A + 40 (pure offset)
+    # Phase-1 sky_mean aligns the sky with a PAIRED scalar (robust location of
+    # the aligned-luminance differences on the common support), which is exact
+    # for pure-offset transforms.  It deliberately does NOT claim percentile
+    # equality for affine-gain frames (sky_mean never corrects gain).
     stack = make_stack("mean", norm="sky_mean", ref=A)
-    V, hdr, W = stack._stack_batch([fresh_item(B)], 1, 1)
+    V, hdr, W = stack._stack_batch([fresh_item(Bs)], 1, 1)
     assert hdr.get("STK_NOTE") == "single image"
     sky_A = float(np.percentile(A, 25.0))
     assert np.isclose(float(np.percentile(V, 25.0)), sky_A, atol=NORM_TOL)
+    assert np.allclose(V, A, atol=NORM_TOL), np.abs(V - A).max()
+    assert not np.allclose(V, Bs, atol=NORM_TOL)  # no longer returned verbatim
 
 
 def test_singleton_batch_none_is_unchanged():

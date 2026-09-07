@@ -59,7 +59,7 @@ def sanitize_header_for_wcs(header: fits.Header) -> None:
         pass
 
 
-def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True):
+def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonfinite=True, report_invalidity=False):
     """
     Charge une image FITS, la valide, la normalise en float32 [0,1] et gère la transposition.
     Version: V2.1 (Gère CxHxW et HxWxC, logs améliorés, fallback header)
@@ -68,13 +68,22 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
         filepath (str): Chemin vers le fichier FITS.
         normalize_to_float32 (bool): Si True, normalise l'image en float32 [0,1].
         attempt_fix_nonfinite (bool): Si True, tente de remplacer NaN/Inf par 0.
+        report_invalidity (bool): Opt-in Phase-1 (support-aware overlap).  Si True,
+            retourne ``(image, header, invalid_mask)`` où ``invalid_mask`` est un booléen
+            **spatial ``(H, W)``** valant True aux positions dont au moins un canal
+            (ou la valeur unique en mono) était non-fini **avant** la réparation.
+            Pour les entrées HWC (C=1,3,4) la réduction se fait sur le dernier axe
+            (tout canal invalide => pixel invalide).  La science retournée est
+            bit-identique au mode par défaut (le masque est une information ajoutée,
+            jamais utilisée pour modifier l'image).  Par défaut (False) le retour
+            reste le tuple historique ``(image, header)``.
 
     Returns:
-        tuple: (image_data, header) ou (None, header_fallback) en cas d'échec.
+        tuple: (image_data, header) ou (image_data, header, invalid_mask) si
+               ``report_invalidity=True``.
                image_data est np.ndarray (HxW ou HxWxC) float32 [0,1] si normalisé,
                sinon les données brutes.
                header est l'objet astropy.io.fits.Header.
-               header_fallback est un header (potentiellement partiel ou vide) si la lecture des données échoue.
     """
     filename = os.path.basename(filepath)
     print(f"DEBUG IP (load_and_validate_fits V2.1): Début chargement pour '{filename}'")
@@ -88,6 +97,8 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
         with fits.open(filepath, memmap=False, do_not_scale_image_data=True) as hdul:
             if not hdul:
                 print(f"  REJET (load_and_validate_fits V2.1): Fichier FITS vide ou corrompu: '{filename}'")
+                if report_invalidity:
+                    return None, header_for_fallback, None
                 return None, header_for_fallback
 
             # Essayer de trouver la première HDU image valide
@@ -115,6 +126,8 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
                 # Essayer de récupérer au moins le header primaire s'il existe
                 if len(hdul) > 0 and hdul[0].header:
                     header_for_fallback = hdul[0].header.copy()
+                if report_invalidity:
+                    return None, header_for_fallback, None
                 return None, header_for_fallback
 
             data_raw = hdu_img.data
@@ -143,13 +156,35 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
                     pass 
                 else:
                     print(f"  REJET (load_and_validate_fits V2.1): Shape de données brutes 3D non supportée ({data_raw.shape}) pour '{filename}'. Les axes doivent être clairement (C,H,W) ou (H,W,C) avec C=1,3,4.")
-                    return None, header # Retourner le header lu même si les données sont rejetées
+                    if report_invalidity:
+                        return None, header, None
+                    return None, header  # Retourner le header lu même si les données sont rejetées
             elif data_raw.ndim != 2:
                 print(f"  REJET (load_and_validate_fits V2.1): Shape de données {data_raw.ndim}D non supportée pour '{filename}'. Doit être 2D ou 3D (HxW, HxWxC, ou CxHxW).")
-                return None, header # Retourner le header lu
+                if report_invalidity:
+                    return None, header, None
+                return None, header  # Retourner le header lu
             # Si data_raw.ndim == 2, c'est un format N&B HxW, ce qui est valide.
             
             # --- FIN VALIDATION ET TRANSPOSITION ---
+
+            # Phase-1 opt-in: record the original finite-invalidity BEFORE the
+            # repair below.  The mask is always reduced to the spatial layout
+            # ``(H, W)`` (any-channel invalidity invalidates the pixel for
+            # HWC inputs; 2D mono stays ``(H, W)``).  The science arrays stay
+            # bit-identical; this mask only feeds the content-validity seam of
+            # the support-aware overlap estimators.
+            invalid_mask = None
+            if report_invalidity:
+                invalid_mask = ~np.isfinite(data_raw)
+                if invalid_mask.ndim == 3:
+                    # HWC (any channel count, incl. C=1): spatial invalidity
+                    invalid_mask = invalid_mask.any(axis=-1)
+                if invalid_mask.ndim != 2:
+                    raise ValueError(
+                        "report_invalidity requires 2D or 3D(H,W,C) data "
+                        f"(got ndim={invalid_mask.ndim})"
+                    )
 
             # Gérer les valeurs non finies si demandé
             if attempt_fix_nonfinite and not np.all(np.isfinite(data_raw)):
@@ -191,18 +226,26 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
             mean_val = np.nanmean(image_data)
             std_val = np.nanstd(image_data)
             print(f"  DEBUG IP (load_and_validate_fits V2.1): FIN pour '{filename}'. Shape sortie: {image_data.shape}, Dtype: {image_data.dtype}. Range final: [{np.nanmin(image_data):.4f} - {np.nanmax(image_data):.4f}], Moyenne: {mean_val:.4f}, StdDev: {std_val:.6f}")
+            if report_invalidity:
+                return image_data, header, invalid_mask
             return image_data, header
 
     except FileNotFoundError:
         print(f"  ERREUR IP (load_and_validate_fits V2.1): Fichier non trouvé: '{filepath}'")
-        return None, header_for_fallback # Retourner un header vide si le fichier n'est pas trouvé
+        if report_invalidity:
+            return None, header_for_fallback, None
+        return None, header_for_fallback  # Retourner un header vide si le fichier n'est pas trouvé
     except MemoryError as me:
         print(f"  ERREUR IP (load_and_validate_fits V2.1): ERREUR MÉMOIRE lors du chargement de '{filename}': {me}")
         traceback.print_exc(limit=1)
+        if report_invalidity:
+            return None, header_for_fallback, None
         return None, header_for_fallback
     except Exception as e:
         print(f"  ERREUR IP (load_and_validate_fits V2.1): Erreur inattendue lors du chargement/validation de '{filename}': {e}")
-        traceback.print_exc(limit=2) # Afficher plus de détails pour les erreurs inattendues
+        traceback.print_exc(limit=2)  # Afficher plus de détails pour les erreurs inattendues
+        if report_invalidity:
+            return None, header_for_fallback, None
         return None, header_for_fallback
 
 def debayer_image(img, bayer_pattern="GRBG"):

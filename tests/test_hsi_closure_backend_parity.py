@@ -49,6 +49,7 @@ import glob
 import os
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 
@@ -244,24 +245,43 @@ def make_stack(
     o.max_stack_workers = 1
     o._current_batch_paths = []
     o._norm_reference = None
+    # Phase-1 transient seam state (normally created in __init__)
+    o._p1_tls = threading.local()
+    o._p1_norm_diagnostics = []
+    o._norm_reference_content = None
     # P5-FIX: pin q_ref explicitly (absolute domain, q_ref == 1.0) so the
     # parity harness never relies on the removed raw-domain fallback.
     o._quality_reference_scale = 1.0
     if ref is not None:
         o._capture_normalization_reference(ref)
+        # Phase-1: reference content validity — fixtures are fully finite by
+        # construction, declared EXPLICITLY (never silently assumed).
+        o._norm_reference_content = np.ones(np.asarray(ref).shape[:2], dtype=bool)
     return o
 
 
 def item(arr, snr=1.0, mask=None):
-    """Build one batch item from a fresh copy of ``arr``."""
+    """Build one batch item from a fresh copy of ``arr``.
+
+    The 6th element is the Phase-1 explicit known-support carrier (identity M,
+    known-finite content, source shape) — the exact carrier the worker seam
+    publishes for a fully aligned finite frame.
+    """
     if mask is None:
         mask = np.ones(arr.shape[:2], dtype=bool)
+    H, W = np.asarray(arr).shape[:2]
+    carrier = (
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64),
+        np.ones((H, W), dtype=bool),
+        (H, W),
+    )
     return (
         np.array(arr, dtype=np.float32, copy=True),
         HEADER,
         {"snr": float(snr), "stars": 0.0},
         None,
         np.asarray(mask, dtype=bool).copy(),
+        carrier,
     )
 
 

@@ -1698,8 +1698,10 @@ def test_worker_normalization_reference_uses_pinned_original(tmp_path):
 
     # Behavioral: a distinctive pinned reference is what the normalization
     # reference resolves to, and a different source is normalized *against* it
-    # (not adopted as the reference).
-    orig_ref = np.full((4, 4, 3), 9.0, dtype=np.float32)
+    # (not adopted as the reference).  18x18 keeps the common support above the
+    # documented 200-sample estimator minimum (256 after the 1px erosion) so
+    # the paired-overlap seam actually estimates.
+    orig_ref = np.full((18, 18, 3), 9.0, dtype=np.float32)
 
     class _PinnedRefAligner:
         def __init__(self):
@@ -1717,11 +1719,19 @@ def test_worker_normalization_reference_uses_pinned_original(tmp_path):
 
     ref_data, _ = stack.aligner._get_reference_image(None, None, None)
     stack._capture_normalization_reference(ref_data)
+    # Phase-1: reference content validity — the stub reference is fully finite
+    # by construction, declared EXPLICITLY (never silently assumed).
+    stack._norm_reference_content = np.ones(orig_ref.shape[:2], dtype=bool)
     assert np.array_equal(stack._norm_reference, orig_ref)
 
-    first_source = np.full((4, 4, 3), 2.0, dtype=np.float32)
+    first_source = np.full((18, 18, 3), 2.0, dtype=np.float32)
+    # Phase-1: the aligned source carries its explicit known support (identity
+    # M + known-finite content) exactly as the worker seam publishes it.
+    M = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+    carrier = (M, np.ones((18, 18), dtype=bool), (18, 18))
     normalized = stack._normalize_sources_against_reference(
-        [np.array(first_source, dtype=np.float32, copy=True)]
+        [np.array(first_source, dtype=np.float32, copy=True)],
+        support_carriers=[carrier],
     )
     # The reference is untouched, and the source was mapped onto it (linear_fit
     # of a constant source shifts it to the reference level 9.0), proving the
