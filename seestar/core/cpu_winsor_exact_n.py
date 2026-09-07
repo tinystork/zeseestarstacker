@@ -507,7 +507,7 @@ def stack_winsorized_sigma_cpu_tiled(
             details={"max_mem_bytes": budget, "min_tile_out": int(min_tile_out)},
         )
 
-    last_memory_error = None
+    had_memory_error = False
     attempts = 0
     retry_budget = max(0, int(max_retries))
     max_attempts = retry_budget + 1
@@ -544,8 +544,12 @@ def stack_winsorized_sigma_cpu_tiled(
             if return_weights:
                 return result, sum_w, rejected_pct
             return result, rejected_pct
-        except MemoryError as mem_err:
-            last_memory_error = mem_err
+        except MemoryError:
+            # Do not retain the exception/traceback: its frames can keep the
+            # failed tile cube and reducer temporaries alive during the next
+            # lower-memory attempt.  Only the fact of allocation failure is
+            # required for the terminal refusal.
+            had_memory_error = True
             next_cand = (
                 bounded_candidates[candidate_index + 1]
                 if candidate_index + 1 < len(bounded_candidates)
@@ -561,8 +565,11 @@ def stack_winsorized_sigma_cpu_tiled(
                 )
             continue
 
-    if isinstance(last_memory_error, CpuWinsorMemoryRefused):
-        raise last_memory_error
+    if not had_memory_error:  # defensive: candidates existed but none ran
+        raise CpuWinsorMemoryRefused(
+            REASON_NO_VALID_TILE,
+            details={"attempts": attempts, "n": n},
+        )
     raise CpuWinsorMemoryRefused(
         REASON_MIN_TILE_EXCEEDS_BUDGET,
         details={
