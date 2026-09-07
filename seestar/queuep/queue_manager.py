@@ -489,6 +489,53 @@ _GPU_FOOTPRINT_FACTOR_DEFAULT = 4.0
 _GPU_FOOTPRINT_FACTOR_WINSORIZED = 6.0
 
 # ----------------------------------------------------------------------
+# Phase G (Track P5): post-reduction CuPy memory-pool release policy
+# ----------------------------------------------------------------------
+#
+# Retention threshold of the dispatch-seam release.  After a completed
+# FULL/TILED winsorized reduction the seam releases the retained FREE
+# blocks of the CuPy default pool AT MOST ONCE (never per tile / per
+# iteration) when the retained reusable bytes reach this threshold.
+#
+# Measured on the 2 GiB MX150 (phase G audit, profiling/results_phaseG):
+# the 480x270 class retains 59-327 MiB (3-16% of the device) after a
+# reduction -- left untouched so an immediately following batch reuses the
+# blocks; the 1080p class retains 1638-1732 MiB (82-87% of the device)
+# after a reduction -- a single ``free_all_blocks`` at the seam reclaims
+# ~1658-1746 MiB to the driver in ~42-48 ms (0.2% of a 20-35 s reduction)
+# and does NOT slow a subsequent identical reduction (cold-after-release
+# 22024 ms vs warm 22093 ms on the N=32 1080p tiled witness).
+WINSOR_POOL_RELEASE_MIN_BYTES = 512 * 1024 * 1024  # 512 MiB
+
+
+def release_cupy_pool_retained_blocks(pool, min_release_bytes=WINSOR_POOL_RELEASE_MIN_BYTES):
+    """Release the retained FREE blocks of a CuPy memory pool, once, at a
+    reduction-completion seam (Phase G, Track P5).
+
+    Returns ``(released: bool, reclaimed_bytes: int)`` and NEVER raises:
+    the release is a pure optimization that must be unable to affect
+    reduction results (only ``pool.free_bytes()`` -- the REUSABLE free
+    list -- is ever returned to the driver; live blocks are untouched).
+
+    The caller owns the policy decision of WHEN to call this: at most once
+    after a full reduction completes at the dispatch seam, never per tile
+    or per iteration (per-tile releases would destroy the measured block
+    reuse across tiles/iterations -- the tiled 1080p runs show a frozen
+    pool-total high-water across every subsequent tile once the first tile
+    warmed the pool).
+    """
+    try:
+        retained = int(pool.free_bytes())
+        if retained < int(min_release_bytes):
+            return False, 0
+        free_before = int(pool.free_bytes())
+        pool.free_all_blocks()
+        return True, free_before
+    except Exception:
+        return False, 0
+
+
+# ----------------------------------------------------------------------
 # Type aliases
 # ----------------------------------------------------------------------
 
@@ -2701,6 +2748,15 @@ class SeestarQueuedStacker:
           reason (``vram_no_valid_tile``, ``planner_failure``,
           ``pool_query_failure``, ``meminfo_failure``).
 
+        Phase G (Track P5): after a SUCCESSFUL FULL_GPU / TILED_GPU call the
+        dispatch seam calls ``_release_pool_after_winsorized_reduction`` at
+        most ONCE (never per tile / per iteration), releasing the retained
+        free blocks of the CuPy default pool when they reach 512 MiB
+        (evidence-based: 1080p-class runs retain 1.6-1.7 GiB of the 2 GiB
+        MX150 after the reduction; the release reclaims it in ~45 ms and is
+        strictly orthogonal to the results - env ``ZSSS_GPU_POOL_RELEASE=0``
+        disables it).
+
         Non-planner fallbacks keep their existing semantics: CPU-by-policy
         (``policy_cpu``: no diagnostic) and CuPy import failure
         (``cupy_import``: once-per-run warning).  memGetInfo / pool-query
@@ -2770,13 +2826,15 @@ class SeestarQueuedStacker:
             return fn_cpu(images, weights, **kwargs)
         if decision.kind == FULL_GPU:
             try:
-                return stack_winsorized_sigma_gpu(images, weights, **kwargs)
+                out = stack_winsorized_sigma_gpu(images, weights, **kwargs)
             except Exception:
                 self.logger.warning(
                     "GPU winsorized reduction failed; falling back to CPU",
                     exc_info=True,
                 )
                 return fn_cpu(images, weights, **kwargs)
+            self._release_pool_after_winsorized_reduction(cp)
+            return out
         if decision.kind == TILED_GPU:
             self.update_progress(
                 f"GPU winsorized : exécution tuilée spatiale "
@@ -2785,7 +2843,7 @@ class SeestarQueuedStacker:
                 "INFO",
             )
             try:
-                return stack_winsorized_sigma_gpu_tiled(
+                out = stack_winsorized_sigma_gpu_tiled(
                     images,
                     weights,
                     tile_shape=decision.tile_shape,
@@ -2798,6 +2856,8 @@ class SeestarQueuedStacker:
                     exc_info=True,
                 )
                 return fn_cpu(images, weights, **kwargs)
+            self._release_pool_after_winsorized_reduction(cp)
+            return out
         # CPU_FALLBACK: durable once-per-reason diagnostics.
         reason = decision.reason or REASON_PLANNER_FAILURE
         if reason == REASON_VRAM_NO_VALID_TILE:
@@ -2823,6 +2883,44 @@ class SeestarQueuedStacker:
             decision.reserve_bytes // (1024 * 1024),
         )
         return fn_cpu(images, weights, **kwargs)
+
+    def _release_pool_after_winsorized_reduction(self, cp) -> None:
+        """Phase G (Track P5): dispatch-seam CuPy pool release, AT MOST ONCE
+        per completed FULL/TILED winsorized reduction (NEVER per tile).
+
+        Called only on the success path of a GPU winsorized reduction, once
+        the GPU call has returned its NumPy arrays (every device array of the
+        call is already released, so the pool's free list holds the retained
+        blocks).  Policy (evidence-based, see
+        ``release_cupy_pool_retained_blocks``): when the retained reusable
+        pool bytes reach ``WINSOR_POOL_RELEASE_MIN_BYTES`` (512 MiB) the
+        free list is returned to the driver so ZSSS does not pin nearly all
+        dedicated VRAM after 1080p-class GPU work (measured retention
+        1638-1732 MiB of the 2 GiB MX150, release cost ~45 ms); smaller
+        workloads (measured 59-327 MiB) keep their blocks so the next batch
+        reuses them.  The next planner call counts driver-free + pool-free
+        the same way (R2-F4), so a later reduction plans identically.
+
+        Science-neutrality: the release touches ONLY free-list blocks and is
+        wrapped so any failure is swallowed -- it can never change reduction
+        results (pinned by the phase G tests: results bitwise unchanged with
+        the release on, and the release never fires inside a reduction).
+        Opt-out: env ``ZSSS_GPU_POOL_RELEASE=0`` disables the release.
+        """
+        if os.environ.get("ZSSS_GPU_POOL_RELEASE", "1") == "0":
+            return
+        try:
+            pool = cp.get_default_memory_pool()
+            released, reclaimed = release_cupy_pool_retained_blocks(pool)
+            if released:
+                self.logger.debug(
+                    "Winsorized GPU reduction done: released %d MiB of "
+                    "retained CuPy pool blocks at the dispatch seam",
+                    reclaimed // (1024 * 1024),
+                )
+        except Exception:
+            # A pool release must never affect the reduction outcome.
+            pass
 
     def __getstate__(self):
         """Return picklable state for multiprocessing."""
