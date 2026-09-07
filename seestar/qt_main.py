@@ -29,10 +29,20 @@ import os
 import sys
 from typing import Optional, Sequence, Tuple
 
-from .gui_qt.app import run_qt_app
-
 BACKEND_CHOICES = ("simulated", "seestar")
 DEFAULT_BACKEND_MODE = "seestar"
+
+
+def _print_version() -> None:
+    """Print the stable one-line product identity and exit 0.
+
+    8.4.0 stage F: early CLI ``--version`` / ``-V`` support that runs BEFORE
+    any backend resolution / QApplication launch — this function only touches
+    the cheap ``seestar`` package metadata (no Qt, no engine).
+    """
+    from . import __codename__, __version__
+
+    print(f"ZeSeestarStacker {__version__} ({__codename__})")
 
 
 def parse_qt_args(argv: Optional[Sequence[str]] = None) -> Tuple[str, list]:
@@ -107,9 +117,20 @@ def _run_startup_witness() -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = list(sys.argv if argv is None else argv)
+    # 8.4.0 stage F: early CLI --version / -V, handled BEFORE any backend
+    # resolution or QApplication launch (the Qt shell and the engine are only
+    # imported lazily below, so ``--version`` never constructs Qt).
+    if "--version" in args or "-V" in args:
+        _print_version()
+        return 0
     if os.environ.get("ZSSS_QT_STARTUP_WITNESS") == "1":
         return _run_startup_witness()
     backend_mode, remaining = parse_qt_args(argv)
+    # Lazy import: the heavy Qt shell is only pulled in when a real launch
+    # actually happens (keeps ``--version`` and import hygiene cheap).
+    from .gui_qt.app import run_qt_app
+
     return run_qt_app(remaining, backend_mode=backend_mode)
 
 

@@ -2,6 +2,37 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.4.0] — Phoenix consedit
+
+Candidate / beta release.  These changes have NOT yet been validated on the
+Windows W80 acceptance runs (no W80 / incident-witness execution is claimed
+here).
+
+- support-aware Classic overlap normalization: accepted/neutral
+  `sky_mean` / `linear_fit` events (incl. fallbacks) are attributed to the
+  REAL original FITS identity of each exposure
+- durable per-run normalization diagnostics: bounded, append-only
+  `normalization_diagnostics_<token>.jsonl` per run (real FITS basenames,
+  allowlisted scalar records, fail-open writer)
+- automatic CPU memory policy (AUTO): the engine resolves the Winsorized CPU
+  memory budget at execution from the actual machine/workload state;
+  the legacy "HQ RAM Limit (GB)" control is removed from the normal GUI and
+  replaced by a read-only AUTO status; an expert override remains available
+  ONLY through the explicit CLI/env seam
+  (`ZSSS_CPU_MEMORY_OVERRIDE_BYTES`, provenance-visible)
+- exact-N spatial CPU Winsorized fallback: memory pressure changes the tile
+  GEOMETRY only — the scientific batch N is never reduced or subdivided
+  (the historical N-subgroup heuristic is removed from the Winsorized path)
+- end-to-end resolved memory-budget propagation through the CPU Winsorized
+  chain (policy → batch → queue wrapper → worker → core): no hidden 1/2 GiB
+  deep default on the production path
+- transactional failed-batch handling: a failed Classic reduction is fatal
+  and truthful — sources are never moved/consumed and committed state is
+  never advanced (counter / count-file / partial / resume ledger / meta)
+- improved memory/GPU provenance: `MEMORY_POLICY` per run and
+  `CPU_WINSOR_MEMORY_DECISION` / `_RETRY` / `_REFUSAL` per CPU execution,
+  alongside the existing truthful GPU execution records
+
 ## [8.3.0] — Phoenix consedit
 
 - run provenance closure: the durable `DRIZZLE_CONFIG` log line now records the
