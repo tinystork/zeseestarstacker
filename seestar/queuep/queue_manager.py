@@ -1154,6 +1154,10 @@ _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
 # (marker ``legacy-unchanged``).
 _CLASSIC_NORM_SCIENCE_OVERLAP = "classic-overlap-v1"
 _CLASSIC_NORM_SCIENCE_LEGACY_UNCHANGED = "legacy-unchanged"
+# 8.4.0 stage A: bounded retained in-memory per-frame normalization
+# diagnostics (ring of the most recent rows) with truthful aggregate
+# accepted/neutral counters that survive ring eviction.
+_P1_MEM_DIAG_MAX_ROWS = 4096
 _SUPPORT_W1_FILENAME = "coverage_SUP_W1.npy"
 _SUPPORT_W2_FILENAME = "coverage_SUP_W2.npy"
 _SUPPORT_DTYPE = np.dtype(np.float64)
@@ -13675,8 +13679,19 @@ class SeestarQueuedStacker:
         # batch-local index-0 source normalization (restored below) and are NOT
         # normalized here.
         if self._is_plain_classic():
+            # 8.4.0 stage A: carry the REAL original FITS basename of every
+            # accepted frame into normalization (lockstep with the image
+            # filtering above).  The accepted headers keep ``_SRCFILE`` set by
+            # ``_process_file`` from the true file name, so a rejected/bad item
+            # can never shift the mapping — no synthetic index names.
+            valid_source_names_for_ccdproc = [
+                self._p1_header_srcname(hdr)
+                for hdr in valid_headers_for_ccdproc
+            ]
             valid_images_for_ccdproc = self._normalize_sources_against_reference(
-                valid_images_for_ccdproc, support_carriers_for_ccdproc
+                valid_images_for_ccdproc,
+                support_carriers_for_ccdproc,
+                source_names=valid_source_names_for_ccdproc,
             )
 
         # Optimization for batch_size == 1 and mean stacking: if only one image
@@ -14591,12 +14606,39 @@ class SeestarQueuedStacker:
         availability, effective/common counts, fractions, estimator, reason,
         offset).  Full-frame masks are never kept past the reduction; the
         caller drops its references after ``_normalize_sources_against_reference``
-        returns.  The list is bounded by the number of processed frames.
+        returns.
+
+        8.4.0 stage A: the retained in-memory list is a bounded RING (most
+        recent ``_P1_MEM_DIAG_MAX_ROWS`` rows); aggregate accepted/neutral
+        counters kept in ``_p1_norm_summary`` stay truthful for the whole
+        session even after ring eviction.  Diagnostics remain fail-open.
         """
         try:
             d = dict(diag or {})
             d["frame"] = str(frame_label)[-120:]
-            self._p1_norm_diagnostics.append(d)
+            rows = getattr(self, "_p1_norm_diagnostics", None)
+            if rows is None:
+                rows = []
+                try:
+                    self._p1_norm_diagnostics = rows
+                except Exception:  # pragma: no cover - fail-open
+                    pass
+            rows.append(d)
+            cap = getattr(self, "_p1_mem_diag_max_rows", _P1_MEM_DIAG_MAX_ROWS)
+            if len(rows) > int(cap):
+                del rows[: len(rows) - int(cap)]
+            summary = getattr(self, "_p1_norm_summary", None)
+            if summary is None:
+                summary = {"frames": 0, "accepted": 0, "neutral": 0}
+                try:
+                    self._p1_norm_summary = summary
+                except Exception:  # pragma: no cover - fail-open
+                    pass
+            summary["frames"] = summary.get("frames", 0) + 1
+            if d.get("reason") == _P1_REASON_ACCEPTED:
+                summary["accepted"] = summary.get("accepted", 0) + 1
+            else:
+                summary["neutral"] = summary.get("neutral", 0) + 1
         except Exception:
             # Diagnostics are fail-open by design: never let bookkeeping break
             # the scientific path.
@@ -14614,8 +14656,18 @@ class SeestarQueuedStacker:
         """Bounded fail-open summary counters over the current session.
 
         Returns a dict of scalar counts; clears nothing (the per-frame list is
-        cleared by the next session reference capture / release).
+        cleared by the next session reference capture / release).  Uses the
+        truthful aggregate counters maintained by ``_p1_record_diagnostics``
+        (which survive ring eviction); falls back to a list scan on bare
+        fixtures that never recorded through the helper.
         """
+        summary = getattr(self, "_p1_norm_summary", None)
+        if isinstance(summary, dict) and summary.get("frames", 0):
+            return {
+                "frames": int(summary.get("frames", 0)),
+                "accepted": int(summary.get("accepted", 0)),
+                "neutral": int(summary.get("neutral", 0)),
+            }
         rows = list(getattr(self, "_p1_norm_diagnostics", []) or [])
         summary = {"frames": len(rows), "accepted": 0, "neutral": 0}
         for r in rows:
@@ -14628,8 +14680,164 @@ class SeestarQueuedStacker:
     def _p1_clear_diagnostics(self):
         try:
             self._p1_norm_diagnostics = []
+            self._p1_norm_summary = {"frames": 0, "accepted": 0, "neutral": 0}
         except Exception:
             pass
+
+    @staticmethod
+    def _p1_header_srcname(hdr):
+        """Real original FITS basename recorded on an accepted batch header.
+
+        ``_process_file`` stores the source basename under ``_SRCFILE`` on the
+        returned header; the worker carries that header into the batch item
+        and the filtering loop keeps accepted headers lockstep with the
+        images.  Returns the basename string, or ``None`` when the header
+        carries no identity evidence (bare test fixtures / unknown) — never a
+        synthetic index label.
+        """
+        try:
+            if hdr is None:
+                return None
+            v = hdr.get("_SRCFILE") if hasattr(hdr, "get") else None
+            if isinstance(v, (tuple, list)):
+                v = v[0] if v else None
+            if v is None:
+                return None
+            s = str(v)
+            return s if s.strip() else None
+        except Exception:  # pragma: no cover - fail-open identity
+            return None
+
+    def _p1_normalization_diagnostics_path(self):
+        """Per-run durable normalization-diagnostics artifact path, or ``None``.
+
+        The artifact is session-suffixed (``normalization_diagnostics_<token>``
+        ``.jsonl``) and only exists when this session has an output folder and
+        a live run token (rotated at every fresh reference capture).  Returns
+        ``None`` when there is nothing to write to — the durable sink then
+        stays a silent no-op (fail-open).  The artifact path is logged once
+        per run token (logger.info), never per event.
+        """
+        try:
+            out_dir = getattr(self, "output_folder", None)
+            if not out_dir:
+                return None
+            token = getattr(self, "_p1_norm_diag_run_token", None)
+            if not token:
+                return None
+            from seestar.core.normalization_diagnostics import (
+                artifact_filename,
+            )
+
+            path = getattr(self, "_p1_norm_diag_path", None)
+            if path is None:
+                path = os.path.join(str(out_dir), artifact_filename(token))
+                try:
+                    self._p1_norm_diag_path = path
+                except Exception:  # pragma: no cover - fail-open
+                    pass
+                if getattr(self, "_p1_norm_diag_logged_token", None) != token:
+                    logger.info(
+                        "P1 normalization diagnostics artifact (per-run): %s",
+                        path,
+                    )
+                    try:
+                        self._p1_norm_diag_logged_token = token
+                    except Exception:  # pragma: no cover - fail-open
+                        pass
+            return path
+        except Exception:  # pragma: no cover - fail-open
+            return None
+
+    def _p1_persist_normalization_diagnostics(self, frame_name, method, enriched):
+        """Durable fail-open per-run JSONL append for ONE normalization event.
+
+        8.4.0 stage A: persists every support-aware plain-Classic
+        sky_mean/linear_fit accepted/neutral event into the session-suffixed
+        ``normalization_diagnostics_<token>.jsonl`` artifact (see
+        :mod:`seestar.core.normalization_diagnostics` for the allowlist and
+        the documented count/fraction denominators).  The real original FITS
+        basename is carried when identity evidence exists; otherwise the
+        record is written with an explicit unknown frame — never a synthetic
+        index name.  Any writer/serialization/bookkeeping failure is caught:
+        diagnostics must never affect a valid normalization or abort a run.
+        """
+        try:
+            path = self._p1_normalization_diagnostics_path()
+            if path is None:
+                return
+            from seestar.core.normalization_diagnostics import (
+                EVIDENCE_HEADER_SRCFILE,
+                EVIDENCE_UNKNOWN,
+                STATUS_ACCEPTED,
+                STATUS_NEUTRAL,
+                append_record,
+                build_record,
+            )
+
+            token = getattr(self, "_p1_norm_diag_run_token", None)
+            d = dict(enriched or {})
+            reason = d.get("reason")
+            accepted = reason == _P1_REASON_ACCEPTED
+            method_str = str(method or d.get("method") or "")
+            area = float(d.get("canvas_area") or 0.0) or None
+            n_geom = d.get("n_geometric")
+            if n_geom is not None:
+                n_geom = float(n_geom)
+            n_eff = d.get("n_effective")
+            n_ov = d.get("n_overlap")
+            if n_geom is None:
+                # Geometry was never derived (missing/degenerate M, or content
+                # evidence missing before the mask could be built): support is
+                # EXPLICITLY UNKNOWN — never fabricated as 0/all-valid, so the
+                # estimator's placeholder zero counts are not asserted as real.
+                n_eff = None
+                n_ov = None
+            else:
+                n_eff = float(n_eff) if n_eff is not None else None
+                n_ov = float(n_ov) if n_ov is not None else None
+
+            def _frac(num, den):
+                if num is None or not den:
+                    return None
+                return num / den
+
+            geometric_frac = _frac(n_geom, area)
+            effective_frac = _frac(n_eff, area)
+            overlap_frac = _frac(n_eff, n_geom) if n_geom else None
+            frame = str(frame_name) if frame_name not in (None, "") else None
+            record = build_record(
+                frame=frame,
+                frame_evidence=(
+                    EVIDENCE_HEADER_SRCFILE if frame is not None else EVIDENCE_UNKNOWN
+                ),
+                normalization_method=method_str,
+                status=STATUS_ACCEPTED if accepted else STATUS_NEUTRAL,
+                reason=str(reason) if reason is not None else None,
+                neutral_reason=None if accepted else str(reason) if reason is not None else None,
+                estimator=str(d.get("estimator") or "") or None,
+                estimator_reason=str(reason) if reason is not None else None,
+                canvas_area=area,
+                geometric_support_pixel_count=n_geom,
+                geometric_support_fraction=geometric_frac,
+                effective_support_pixel_count=n_eff,
+                effective_support_fraction=effective_frac,
+                overlap_pixel_count=n_eff,
+                overlap_fraction=overlap_frac,
+                sampled_estimator_count=n_ov,
+                sky_offset=(
+                    float(d["offset"]) if method_str == "sky_mean" and d.get("offset") is not None else None
+                ),
+                linear_a=(d.get("a") if method_str == "linear_fit" else None),
+                linear_b=(d.get("b") if method_str == "linear_fit" else None),
+                session_id=token,
+            )
+            append_record(path, record)
+        except Exception:
+            logger.debug(
+                "normalization diagnostics durable write failed (non-fatal)",
+                exc_info=True,
+            )
 
     def _p1_reference_content_mask(self, ref_header, search_dirs):
         """Truthful content validity of the FIXED normalization reference.
@@ -14791,6 +14999,18 @@ class SeestarQueuedStacker:
             self._norm_reference_content = None
             return
         self._norm_reference = np.array(reference_data, dtype=np.float32, copy=True)
+        # 8.4.0 stage A: a fresh support-aware run starts a NEW durable
+        # normalization-diagnostics artifact/session.  Capture happens once per
+        # worker/session (fresh and resume), so every run appends to its own
+        # session-suffixed JSONL and resume never overwrites prior evidence.
+        try:
+            seq = int(getattr(self, "_p1_norm_diag_run_seq", 0) or 0) + 1
+            self._p1_norm_diag_run_seq = seq
+            self._p1_norm_diag_run_token = f"{time.time_ns()}-{seq}"
+            self._p1_norm_diag_path = None
+            self._p1_norm_diag_logged_token = None
+        except Exception:  # pragma: no cover - fail-open bookkeeping
+            pass
         if content_mask is not None:
             cm = np.asarray(content_mask, dtype=bool)
             if cm.shape != self._norm_reference.shape[:2]:
@@ -14832,11 +15052,23 @@ class SeestarQueuedStacker:
                         pass
         except Exception:  # pragma: no cover - fail-open
             pass
+        # 8.4.0 stage A: end of run.  Clear the durable run token/path cache so
+        # a later run on the same stacker starts a distinct artifact (fresh
+        # capture rotates it again anyway).
+        try:
+            self._p1_norm_diag_run_token = None
+            self._p1_norm_diag_path = None
+            self._p1_norm_diag_logged_token = None
+            self._p1_norm_diag_run_seq = 0
+        except Exception:  # pragma: no cover - fail-open
+            pass
         self._norm_reference = None
         self._norm_reference_content = None
         self._p1_clear_diagnostics()
 
-    def _normalize_sources_against_reference(self, image_data_list, support_carriers=None):
+    def _normalize_sources_against_reference(
+        self, image_data_list, support_carriers=None, source_names=None
+    ):
         """Normalize aligned source arrays against the immutable session reference.
 
         ``normalize_method == "none"`` is a strict no-op that returns the list
@@ -14858,6 +15090,13 @@ class SeestarQueuedStacker:
         stable reason — there is NO fallback to the legacy full-frame helpers.
         The legacy formulas stay byte-identical (full P25/P90 per-channel model
         and aligned-luminance sky location); only the SAMPLE SUPPORT changed.
+
+        ``source_names`` (optional, lockstep with ``image_data_list``) carries
+        the REAL original FITS basename of each accepted frame (the production
+        ``_stack_batch`` seam derives it from the accepted headers' ``_SRCFILE``
+        while those headers are still lockstep with the filtered images).  It
+        feeds the durable per-run normalization diagnostics; missing evidence
+        is recorded as an explicit unknown, never a synthetic index name.
 
         Unknown normalization methods retain their existing no-op behavior.
         The stored reference is never mutated.  All estimator/application
@@ -14886,6 +15125,7 @@ class SeestarQueuedStacker:
         carriers = (
             list(support_carriers) if support_carriers is not None else [None] * len(image_data_list)
         )
+        names = list(source_names) if source_names is not None else [None] * len(image_data_list)
         normalized = []
         accepted = 0
         neutral = 0
@@ -14966,9 +15206,20 @@ class SeestarQueuedStacker:
                 enriched["src_shape"] = [int(v) for v in src_shape_hw]
                 enriched["canvas_area"] = int(area)
                 enriched["effective_fraction"] = n_eff / area
+                # Real identity evidence for the durable artifact: the accepted
+                # header's ``_SRCFILE`` basename is captured lockstep at the
+                # ``_stack_batch`` seam (never an index-to-path guess after a
+                # rejected frame).  Missing evidence stays an explicit unknown.
+                frame_name = names[i] if i < len(names) else None
+                enriched["frame"] = frame_name
             except Exception:
                 enriched = dict(diag)
-            self._p1_record_diagnostics(f"batch_frame_{i}", enriched)
+            self._p1_record_diagnostics(
+                enriched.get("frame") or f"batch_frame_{i}", enriched
+            )
+            self._p1_persist_normalization_diagnostics(
+                enriched.get("frame"), method, enriched
+            )
             normalized.append(corrected)
 
         logger.debug(

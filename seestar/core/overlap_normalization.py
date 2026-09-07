@@ -499,10 +499,16 @@ def estimate_sky_mean_offset(
         ref_finite=ref_finite,
         max_samples=max_samples,
     )
+    # Diagnostic-only scalar evidence (never a science input): the number of
+    # canvas pixels inside the eroded geometry-support mask, attached while
+    # the mask is alive.  It is NOT retained past this function and never
+    # changes sample selection or the estimator math.
+    n_geometric = int(np.count_nonzero(np.asarray(src_geom, dtype=bool)))
     diag = {
         "reason": REASON_NO_VALID_SAMPLES,
         "n_overlap": n_overlap,
         "n_effective": n_eff,
+        "n_geometric": n_geometric,
         "n_used": 0,
         "offset": 0.0,
         "estimator": "drizzle_robust_location",
@@ -601,10 +607,14 @@ def estimate_linear_fit(
         ref_finite=ref_finite,
         max_samples=max_samples,
     )
+    # Diagnostic-only scalar evidence (never a science input): geometric
+    # support pixel count attached while the mask is alive; never retained.
+    n_geometric = int(np.count_nonzero(np.asarray(src_geom, dtype=bool)))
     diag = {
         "reason": REASON_NO_VALID_SAMPLES,
         "n_overlap": n_overlap,
         "n_effective": n_eff,
+        "n_geometric": n_geometric,
         "estimator": "percentile_p25_p90",
         "min_overlap_samples": int(min_overlap_samples),
         "method": "linear_fit",
@@ -671,10 +681,13 @@ def apply_linear_fit(src_canvas, a, b):
 # Geometry-level seam estimators (mask derivation + neutral on bad geometry)
 # ---------------------------------------------------------------------------
 def _neutral_sky_diag(reason, method="sky_mean"):
+    # Geometric support is explicitly UNKNOWN (never fabricated as 0 or as
+    # all-valid) whenever the neutral path never derived a geometry mask.
     return {
         "reason": reason,
         "n_overlap": 0,
         "n_effective": 0,
+        "n_geometric": None,
         "n_used": 0,
         "offset": 0.0,
         "estimator": "drizzle_robust_location",
@@ -690,6 +703,7 @@ def _neutral_linear_diag(reason, n_ch, method="linear_fit"):
         "reason": reason,
         "n_overlap": 0,
         "n_effective": 0,
+        "n_geometric": None,  # geometry never derived -> explicitly unknown
         "estimator": "percentile_p25_p90",
         "min_overlap_samples": int(DEFAULT_MIN_OVERLAP_SAMPLES),
         "method": method,
