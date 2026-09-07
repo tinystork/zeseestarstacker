@@ -239,11 +239,13 @@ def test_gpu_decision_fallback_reason_when_requested_but_unavailable(
     assert "fallback_reason=cupy unavailable" in line
 
 
-def test_gpu_decision_used_for_winsorized(monkeypatch, tmp_path):
+def test_gpu_decision_eligible_for_winsorized(monkeypatch, tmp_path):
     # GPU available (cupy ready) + winsorized-sigma GPU-qualified (M3 twin +
-    # M4 dispatcher): the run-level decision is ``used`` on the cupy backend
-    # (per-batch VRAM rejections surface as throttled durable fallback
-    # warnings during _stack_batch).
+    # M4 dispatcher): the run-level GPU_DECISION is the POLICY admission
+    # record (``eligible`` on the cupy backend), NOT an execution claim.  The
+    # actual per-reduction execution truth (eligible/attempted/executed/
+    # fallback) is recorded at the dispatch seam and aggregated in
+    # GPU_EXECUTION_SUMMARY.
     caps = GpuCapabilities(
         gpu_detected=True,
         cuda_runtime_ready=True,
@@ -269,7 +271,7 @@ def test_gpu_decision_used_for_winsorized(monkeypatch, tmp_path):
     assert "requested=true" in line
     assert "operation=stacking_reduction:winsorized_sigma_clip" in line
     assert "effective_backend=cupy" in line
-    assert "execution=used" in line
+    assert "execution=eligible" in line
     assert "fallback_reason=none" in line
 
 

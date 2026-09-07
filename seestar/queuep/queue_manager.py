@@ -536,6 +536,86 @@ def release_cupy_pool_retained_blocks(pool, min_release_bytes=WINSOR_POOL_RELEAS
 
 
 # ----------------------------------------------------------------------
+# Phase H (Track P6): truthful GPU execution provenance -- stable catalog
+# ----------------------------------------------------------------------
+#
+# Execution truth is captured AT THE REDUCTION-DISPATCH SEAM (``_gpu_reduce``
+# for the classic accelerated reducers, ``_gpu_reduce_winsorized`` for the
+# planner-driven winsorized path), once per reduction call, and aggregated
+# into the single durable ``GPU_EXECUTION_SUMMARY`` line at run completion.
+#
+# Truth model (per reduction):
+#
+# * ``eligible``   -- the frozen ``AccelerationPolicy`` admits GPU for this
+#                     reduction (policy backend == cupy).  Policy truth only:
+#                     nothing about actual execution is claimed here.
+# * ``attempted``  -- the dispatch seam invoked the GPU path (a CuPy kernel
+#                     call was made for this reduction).
+# * ``executed``   -- FINAL truth of the reduction: ``gpu`` only when the GPU
+#                     call actually completed AND returned; ``cpu`` when the
+#                     CPU reducer executed (successfully); ``none`` when no
+#                     reducer completed (only reachable when the CPU reducer
+#                     itself raises -- no record is emitted in that case, so
+#                     the stored vocabulary is ``gpu`` | ``cpu``).
+# * ``fallback``   -- CPU executed (``executed == cpu``), with the stable
+#                     ``fallback_reason`` catalog below.  A CuPy exception
+#                     followed by a successful CPU execution therefore leaves
+#                     the final truth as ``executed=cpu`` + reason, NEVER
+#                     ``executed=gpu``.
+#
+# ``AccelerationPolicy`` (``seestar/core/gpu.py``) is NOT repurposed: it stays
+# the frozen request/capability policy.  These tokens are the stable catalog
+# of WHY the CPU executed (req. 4); the legacy log-level reason codes are
+# mapped onto them by ``_gpu_execution_reason_token`` (single source of
+# truth, no parallel counter system).
+GPU_EXEC_REASON_POLICY_CPU = "policy_cpu"              # GPU not requested
+GPU_EXEC_REASON_BACKEND_UNAVAILABLE = "backend_unavailable"  # requested but capability CPU
+GPU_EXEC_REASON_VRAM_NO_VALID_TILE = "vram_no_valid_tile"    # no FULL/TILED geometry fits
+GPU_EXEC_REASON_CUPY_IMPORT = "cupy_import_failure"
+GPU_EXEC_REASON_RUNTIME_MEMORY = "runtime_memory_failure"    # memGetInfo / pool-query failure
+GPU_EXEC_REASON_GPU_KERNEL = "gpu_kernel_failure"            # CuPy kernel raised
+GPU_EXEC_REASON_PLANNER = "planner_failure"
+
+# Ordered stable fallback-reason catalog (req. 4) -- every reason a
+# per-reduction record can carry when ``fallback`` is true.
+GPU_EXEC_FALLBACK_REASONS = (
+    GPU_EXEC_REASON_POLICY_CPU,
+    GPU_EXEC_REASON_BACKEND_UNAVAILABLE,
+    GPU_EXEC_REASON_VRAM_NO_VALID_TILE,
+    GPU_EXEC_REASON_CUPY_IMPORT,
+    GPU_EXEC_REASON_RUNTIME_MEMORY,
+    GPU_EXEC_REASON_GPU_KERNEL,
+    GPU_EXEC_REASON_PLANNER,
+)
+
+# Legacy log-level reason codes -> canonical catalog token (mapping used by
+# the dispatch seams; never a second provenance system).
+_GPU_EXEC_REASON_MAP = {
+    "policy_cpu": GPU_EXEC_REASON_POLICY_CPU,
+    "backend_unavailable": GPU_EXEC_REASON_BACKEND_UNAVAILABLE,
+    "cupy_import": GPU_EXEC_REASON_CUPY_IMPORT,
+    "cupy_import_failure": GPU_EXEC_REASON_CUPY_IMPORT,
+    "vram_reject": GPU_EXEC_REASON_VRAM_NO_VALID_TILE,
+    REASON_VRAM_NO_VALID_TILE: GPU_EXEC_REASON_VRAM_NO_VALID_TILE,
+    REASON_PLANNER_FAILURE: GPU_EXEC_REASON_PLANNER,
+    "planner_failure": GPU_EXEC_REASON_PLANNER,
+    REASON_MEMINFO_FAILURE: GPU_EXEC_REASON_RUNTIME_MEMORY,
+    "mem_query": GPU_EXEC_REASON_RUNTIME_MEMORY,
+    REASON_POOL_QUERY_FAILURE: GPU_EXEC_REASON_RUNTIME_MEMORY,
+    "pool_query": GPU_EXEC_REASON_RUNTIME_MEMORY,
+    "pool_query_failure": GPU_EXEC_REASON_RUNTIME_MEMORY,
+    "gpu_kernel_failure": GPU_EXEC_REASON_GPU_KERNEL,
+}
+
+
+def _gpu_execution_reason_token(code):
+    """Map a legacy/log-level reason code onto the stable catalog (or None)."""
+    if code is None:
+        return None
+    return _GPU_EXEC_REASON_MAP.get(str(code), str(code))
+
+
+# ----------------------------------------------------------------------
 # Type aliases
 # ----------------------------------------------------------------------
 
@@ -2615,11 +2695,18 @@ class SeestarQueuedStacker:
         per run (``_gpu_fallback_logged``, reset at each accepted run
         boundary).
         """
+        # Phase H (P6): the seam reads this after the call to record the
+        # modeled peak footprint of THIS reduction (single formula source,
+        # same estimate the eligibility guard consumes).  Reset at entry so a
+        # stale value from a previous call is never replayed.
+        self._gpu_xp_need_bytes = None
+        self._gpu_xp_fallback_code = None
         if getattr(self, "effective_backend", "cpu") != "cupy":
             return None  # CPU by policy — not a fallback (no diagnostic)
         try:
             import cupy as cp
         except Exception as exc:
+            self._gpu_xp_fallback_code = "cupy_import"
             self._log_gpu_fallback_once(
                 "cupy_import",
                 "GPU acceleration requested but CuPy import failed (%s: %s); "
@@ -2637,6 +2724,7 @@ class SeestarQueuedStacker:
             n = len(images)
             elem = int(n) * int(np.prod(images[0].shape))
             need = elem * 4 * footprint_factor  # float32 bytes x operation peak
+            self._gpu_xp_need_bytes = int(need)
             free, _total = cp.cuda.runtime.memGetInfo()
             try:
                 pool_free = cp.get_default_memory_pool().free_bytes()
@@ -2645,6 +2733,7 @@ class SeestarQueuedStacker:
                 # VRAM conservatively with driver-visible memory only, but
                 # report the query failure truthfully (once per reason).
                 pool_free = 0
+                self._gpu_xp_fallback_code = "pool_query"
                 self._log_gpu_fallback_once(
                     "pool_query",
                     "CuPy memory-pool query failed (%s: %s); evaluating VRAM "
@@ -2654,6 +2743,7 @@ class SeestarQueuedStacker:
                 )
             effective_free = int(free) + int(pool_free)
             if need > 0.6 * effective_free:
+                self._gpu_xp_fallback_code = "vram_reject"
                 self._log_gpu_fallback_once(
                     "vram_reject",
                     "GPU acceleration enabled but reduction needs ~%d MiB vs "
@@ -2664,6 +2754,7 @@ class SeestarQueuedStacker:
                 return None
             return cp
         except Exception as exc:
+            self._gpu_xp_fallback_code = "mem_query"
             self._log_gpu_fallback_once(
                 "mem_query",
                 "GPU memory query failed (%s: %s); using CPU",
@@ -2707,20 +2798,96 @@ class SeestarQueuedStacker:
         historical single-argument ``_reduction_xp(images)`` call shape, and
         the winsorized-sigma kernel (factor ~6) opts into the factor-aware
         eligibility check.
+
+        Phase H (P6): this seam records the ACTUAL execution truth of the
+        reduction (eligible / attempted / executed / fallback) once per call
+        -- see ``_record_gpu_execution``.  A CuPy exception followed by a
+        successful CPU execution leaves the final truth as ``executed=cpu``
+        with ``fallback_reason=gpu_kernel_failure``, NEVER ``executed=gpu``.
+        If the CPU reducer itself raises, no record is emitted (nothing
+        completed; the error propagates exactly as before).
         """
+        operation = self._canonical_stacking_reducer_key(
+            getattr(self, "stacking_mode", "")
+            or getattr(self, "stack_reject_algo", "")
+            or "unknown"
+        )
+        n_batch = int(len(images)) if images is not None else 0
+        workload_shape = (
+            tuple(images[0].shape) if images is not None and len(images) else None
+        )
+        requested = bool(getattr(self, "request_gpu", False))
+        eligible = getattr(self, "effective_backend", "cpu") == "cupy"
+        backend_requested = "cupy" if requested else "cpu"
         if footprint_factor == _GPU_FOOTPRINT_FACTOR_DEFAULT:
             cp = self._reduction_xp(images)
         else:
             cp = self._reduction_xp(images, footprint_factor=footprint_factor)
         if cp is None:
-            return fn_cpu(images, weights, **kwargs)
+            # CPU executed (eligible is False only for the CPU-by-policy and
+            # backend-unavailable routes -- the truthful reason catalog keeps
+            # them distinct from the VRAM/import fallbacks).
+            out = fn_cpu(images, weights, **kwargs)
+            if not eligible:
+                reason = (
+                    GPU_EXEC_REASON_POLICY_CPU
+                    if not requested
+                    else GPU_EXEC_REASON_BACKEND_UNAVAILABLE
+                )
+            else:
+                reason = _gpu_execution_reason_token(
+                    getattr(self, "_gpu_xp_fallback_code", None)
+                ) or GPU_EXEC_REASON_VRAM_NO_VALID_TILE
+            self._record_gpu_execution(
+                operation=operation,
+                scientific_N_batch=n_batch,
+                workload_shape=workload_shape,
+                backend_requested=backend_requested,
+                eligible=eligible,
+                attempted=False,
+                executed="cpu",
+                gpu_memory_mode=("fallback" if eligible else "none"),
+                fallback_reason=reason,
+                estimated_peak_vram_bytes=getattr(
+                    self, "_gpu_xp_need_bytes", None
+                ),
+            )
+            return out
         try:
-            return fn_gpu(images, weights, **kwargs)
+            out = fn_gpu(images, weights, **kwargs)
         except Exception:
             self.logger.warning(
                 "GPU reduction failed; falling back to CPU", exc_info=True
             )
-            return fn_cpu(images, weights, **kwargs)
+            out_cpu = fn_cpu(images, weights, **kwargs)
+            self._record_gpu_execution(
+                operation=operation,
+                scientific_N_batch=n_batch,
+                workload_shape=workload_shape,
+                backend_requested=backend_requested,
+                eligible=True,
+                attempted=True,
+                executed="cpu",
+                gpu_memory_mode="fallback",
+                fallback_reason=GPU_EXEC_REASON_GPU_KERNEL,
+                estimated_peak_vram_bytes=getattr(
+                    self, "_gpu_xp_need_bytes", None
+                ),
+            )
+            return out_cpu
+        self._record_gpu_execution(
+            operation=operation,
+            scientific_N_batch=n_batch,
+            workload_shape=workload_shape,
+            backend_requested=backend_requested,
+            eligible=True,
+            attempted=True,
+            executed="gpu",
+            gpu_memory_mode="full",
+            fallback_reason="none",
+            estimated_peak_vram_bytes=getattr(self, "_gpu_xp_need_bytes", None),
+        )
+        return out
 
     def _gpu_reduce_winsorized(
         self,
@@ -2765,10 +2932,68 @@ class SeestarQueuedStacker:
         CPU with the historical warning (same as ``_gpu_reduce``).  The
         planner never participates in AutoBatch resolution: it receives the
         frozen actual N_batch of THIS reduction and never alters it.
+
+        Phase H (P6): this seam records the ACTUAL execution truth of the
+        reduction once per call (eligible / attempted / executed / fallback)
+        with the planner context (mode full|tiled|fallback, tile shape,
+        modeled demand, effective VRAM budget) -- see
+        ``_record_gpu_execution``.  A CuPy exception after a FULL/TILED choice
+        followed by a successful CPU execution leaves the final truth as
+        ``executed=cpu`` with ``fallback_reason=gpu_kernel_failure``, NEVER
+        ``executed=gpu`` (the planner mode stays ``full``/``tiled`` -- the
+        planned-but-failed strategy is not conflated with what executed).  No
+        record is emitted when the CPU reducer itself raises (nothing
+        completed; the error propagates exactly as before).
         """
-        n_batch = int(len(images))
-        if getattr(self, "effective_backend", "cpu") != "cupy":
-            return fn_cpu(images, weights, **kwargs)  # CPU by policy
+        n_batch = int(len(images)) if images is not None else 0
+        operation = self._canonical_stacking_reducer_key(
+            getattr(self, "stacking_mode", "")
+            or getattr(self, "stack_reject_algo", "")
+            or "winsorized_sigma_clip"
+        )
+        workload_shape = (
+            tuple(images[0].shape) if images is not None and len(images) else None
+        )
+        requested = bool(getattr(self, "request_gpu", False))
+        eligible = getattr(self, "effective_backend", "cpu") == "cupy"
+        backend_requested = "cupy" if requested else "cpu"
+
+        def _record_cpu(reason, *, attempted=False, planner_mode="none",
+                        gpu_memory_mode=None, decision=None, cp_module=None):
+            """Record executed=cpu AFTER the CPU reducer completed."""
+            out = fn_cpu(images, weights, **kwargs)
+            self._record_gpu_execution(
+                operation=operation,
+                scientific_N_batch=n_batch,
+                workload_shape=workload_shape,
+                backend_requested=backend_requested,
+                eligible=eligible,
+                attempted=attempted,
+                executed="cpu",
+                gpu_memory_mode=(
+                    gpu_memory_mode
+                    if gpu_memory_mode is not None
+                    else ("fallback" if eligible else "none")
+                ),
+                fallback_reason=reason,
+                planner_mode=planner_mode,
+                tile_shape=getattr(decision, "tile_shape", None),
+                n_tiles=getattr(decision, "n_tiles", None),
+                estimated_peak_vram_bytes=getattr(
+                    decision, "demand_full_bytes", None
+                ),
+                effective_vram_budget_bytes=getattr(
+                    decision, "effective_budget_bytes", None
+                ),
+            )
+            return out
+
+        if not eligible:
+            return _record_cpu(
+                GPU_EXEC_REASON_POLICY_CPU
+                if not requested
+                else GPU_EXEC_REASON_BACKEND_UNAVAILABLE
+            )
         try:
             import cupy as cp
         except Exception as exc:
@@ -2779,7 +3004,7 @@ class SeestarQueuedStacker:
                 type(exc).__name__,
                 exc,
             )
-            return fn_cpu(images, weights, **kwargs)
+            return _record_cpu(GPU_EXEC_REASON_CUPY_IMPORT)
         try:
             free, _total = cp.cuda.runtime.memGetInfo()
         except Exception as exc:
@@ -2790,7 +3015,7 @@ class SeestarQueuedStacker:
                 type(exc).__name__,
                 exc,
             )
-            return fn_cpu(images, weights, **kwargs)
+            return _record_cpu(GPU_EXEC_REASON_RUNTIME_MEMORY)
         try:
             pool_free = cp.get_default_memory_pool().free_bytes()
         except Exception as exc:
@@ -2801,7 +3026,7 @@ class SeestarQueuedStacker:
                 type(exc).__name__,
                 exc,
             )
-            return fn_cpu(images, weights, **kwargs)
+            return _record_cpu(GPU_EXEC_REASON_RUNTIME_MEMORY)
         try:
             frame = images[0].shape
             decision = plan_winsorized_gpu_execution(
@@ -2823,7 +3048,7 @@ class SeestarQueuedStacker:
                 type(exc).__name__,
                 exc,
             )
-            return fn_cpu(images, weights, **kwargs)
+            return _record_cpu(GPU_EXEC_REASON_PLANNER, planner_mode="fallback")
         if decision.kind == FULL_GPU:
             try:
                 out = stack_winsorized_sigma_gpu(images, weights, **kwargs)
@@ -2832,8 +3057,29 @@ class SeestarQueuedStacker:
                     "GPU winsorized reduction failed; falling back to CPU",
                     exc_info=True,
                 )
-                return fn_cpu(images, weights, **kwargs)
+                return _record_cpu(
+                    GPU_EXEC_REASON_GPU_KERNEL,
+                    attempted=True,
+                    planner_mode="full",
+                    decision=decision,
+                )
             self._release_pool_after_winsorized_reduction(cp)
+            self._record_gpu_execution(
+                operation=operation,
+                scientific_N_batch=n_batch,
+                workload_shape=workload_shape,
+                backend_requested=backend_requested,
+                eligible=True,
+                attempted=True,
+                executed="gpu",
+                gpu_memory_mode="full",
+                fallback_reason="none",
+                planner_mode="full",
+                tile_shape=None,
+                n_tiles=None,
+                estimated_peak_vram_bytes=decision.demand_full_bytes,
+                effective_vram_budget_bytes=decision.effective_budget_bytes,
+            )
             return out
         if decision.kind == TILED_GPU:
             self.update_progress(
@@ -2855,8 +3101,29 @@ class SeestarQueuedStacker:
                     "CPU",
                     exc_info=True,
                 )
-                return fn_cpu(images, weights, **kwargs)
+                return _record_cpu(
+                    GPU_EXEC_REASON_GPU_KERNEL,
+                    attempted=True,
+                    planner_mode="tiled",
+                    decision=decision,
+                )
             self._release_pool_after_winsorized_reduction(cp)
+            self._record_gpu_execution(
+                operation=operation,
+                scientific_N_batch=n_batch,
+                workload_shape=workload_shape,
+                backend_requested=backend_requested,
+                eligible=True,
+                attempted=True,
+                executed="gpu",
+                gpu_memory_mode="tiled",
+                fallback_reason="none",
+                planner_mode="tiled",
+                tile_shape=decision.tile_shape,
+                n_tiles=decision.n_tiles,
+                estimated_peak_vram_bytes=decision.demand_tile_bytes,
+                effective_vram_budget_bytes=decision.effective_budget_bytes,
+            )
             return out
         # CPU_FALLBACK: durable once-per-reason diagnostics.
         reason = decision.reason or REASON_PLANNER_FAILURE
@@ -2882,7 +3149,11 @@ class SeestarQueuedStacker:
             decision.effective_budget_bytes // (1024 * 1024),
             decision.reserve_bytes // (1024 * 1024),
         )
-        return fn_cpu(images, weights, **kwargs)
+        return _record_cpu(
+            _gpu_execution_reason_token(reason) or GPU_EXEC_REASON_PLANNER,
+            planner_mode="fallback",
+            decision=decision,
+        )
 
     def _release_pool_after_winsorized_reduction(self, cp) -> None:
         """Phase G (Track P5): dispatch-seam CuPy pool release, AT MOST ONCE
@@ -8787,6 +9058,12 @@ class SeestarQueuedStacker:
                 f"DEBUG QM [_worker V_NoDerotation]: Fin du bloc FINALLY principal. Flag processing_active mis à False."
             )
             self.update_progress("🚪 Thread de traitement principal terminé.")
+            # Phase H (Track P6): worker tail -- emit the ONE per-run
+            # GPU_EXECUTION_SUMMARY block (every real-run exit path: success,
+            # user stop, fatal error all funnel through this finally).  No-op
+            # when no accelerated-reducer reduction was dispatched, and
+            # at-most-once per run by construction.
+            self._emit_gpu_execution_summary()
             # ZSSS-LIFECYCLE-01: record ENGINE_PROCESSING_RETURNING only *after*
             # the required cleanup (autotuner stop, executor shutdown,
             # norm-reference release, memmap close, gc) has completed and
@@ -19819,6 +20096,254 @@ class SeestarQueuedStacker:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Phase H (P6): truthful GPU execution provenance (eligible / attempted /
+    # executed / fallback) -- single per-run source of execution truth.
+    # ------------------------------------------------------------------
+    #
+    # ``GPU_DECISION`` (run start) is the POLICY record: it states admission
+    # (``eligible``) or the policy-level refusal, never execution.  The
+    # dispatch seams (``_gpu_reduce`` / ``_gpu_reduce_winsorized``) record the
+    # ACTUAL per-reduction outcome here, once per reduction call, and the run
+    # emits ONE aggregate ``GPU_EXECUTION_SUMMARY`` line at completion.  No
+    # field of this store ever enters run_config.cfg / the resume scientific
+    # fingerprint (req. 7): dynamic execution telemetry lives in the durable
+    # run log and this in-memory store only.
+
+    def _reset_gpu_execution_telemetry(self) -> None:
+        """Start a fresh per-run execution-truth store (accepted-run seam)."""
+        self._gpu_execution_events = []
+        self._gpu_execution_summary_emitted = False
+
+    def _gpu_execution_store(self) -> list:
+        """Lazily-initialised per-run execution-truth store (list of records).
+
+        Duck-typed / ``__new__``-constructed stackers (direct-dispatch test
+        harnesses) never pass through the accepted-run seam, so the store is
+        created on first use instead of requiring the reset call.
+        """
+        events = getattr(self, "_gpu_execution_events", None)
+        if events is None:
+            events = []
+            self._gpu_execution_events = events
+            self._gpu_execution_summary_emitted = False
+        return events
+
+    def _gpu_batch_provenance_tokens(self) -> dict:
+        """Batch-contract context of the CURRENT reduction (req. 6).
+
+        Distinguishes requested / resolved / current: ``batch_size_requested``
+        is the frozen canonical B_requested (0=auto, 1=boring, >=2 explicit),
+        ``batch_size_resolved`` the frozen B_resolved (>= 1), ``batch_mode``
+        its semantic token (auto|boring|explicit) and ``batch_size_reason``
+        the deterministic reason token when the semantics resolve/derive.
+        ``scientific_N_batch`` (the actual frame count of each reduction) is
+        NEVER a spatial GPU tile -- tile shape is recorded separately.
+        """
+        try:  # lazy import: keep engine module-import order baseline-stable
+            from ..core.batch_contract import (
+                BATCH_AUTO,
+                batch_requested_mode,
+            )
+        except ImportError:  # pragma: no cover - flat/standalone loads
+            from seestar.core.batch_contract import (
+                BATCH_AUTO,
+                batch_requested_mode,
+            )
+        tokens: dict = {
+            "batch_size_requested": None,
+            "batch_mode": None,
+            "batch_size_resolved": None,
+            "batch_size_reason": None,
+        }
+        resolved = getattr(self, "batch_resolved", None)
+        if resolved is None:
+            resolved = getattr(self, "batch_size", None)
+        if resolved is not None:
+            try:
+                resolved = max(1, int(resolved))
+            except (TypeError, ValueError):
+                resolved = None
+        b_req = getattr(self, "batch_requested", None)
+        if b_req is None:
+            # Duck harness without the canonical requested token: derive the
+            # requested semantics from the executed capacity (1 == Boring by
+            # the canonical contract; a frozen multi-image capacity that was
+            # not canonicalised is reported as explicit).  Real accepted runs
+            # always carry ``batch_requested``, so production records are
+            # exact.
+            try:
+                from ..core.batch_contract import normalize_batch_requested
+
+                b_req = (
+                    normalize_batch_requested(resolved)
+                    if resolved is not None
+                    else BATCH_AUTO
+                )
+            except ImportError:  # pragma: no cover
+                b_req = BATCH_AUTO if resolved is None else int(resolved)
+            derived = True
+        else:
+            derived = False
+        if b_req is not None:
+            tokens["batch_size_requested"] = int(b_req)
+            tokens["batch_mode"] = batch_requested_mode(b_req)
+        if resolved is not None:
+            tokens["batch_size_resolved"] = int(resolved)
+        if derived:
+            tokens["batch_size_reason"] = "requested_derived_from_resolved"
+        elif b_req == BATCH_AUTO and resolved is not None:
+            tokens["batch_size_reason"] = "auto_resolved_frozen"
+        elif b_req is not None and b_req != resolved:
+            tokens["batch_size_reason"] = (
+                f"requested={b_req}->effective={resolved}"
+            )
+        else:
+            tokens["batch_size_reason"] = "requested_frozen"
+        return tokens
+
+    def _record_gpu_execution(
+        self,
+        *,
+        operation,
+        scientific_N_batch,
+        workload_shape,
+        backend_requested,
+        eligible,
+        attempted,
+        executed,
+        gpu_memory_mode,
+        fallback_reason="none",
+        planner_mode="none",
+        tile_shape=None,
+        n_tiles=None,
+        estimated_peak_vram_bytes=None,
+        effective_vram_budget_bytes=None,
+    ) -> None:
+        """Append ONE per-reduction execution-truth record (dispatch seam).
+
+        ``executed`` is the FINAL truth of the reduction: ``gpu`` only after
+        the GPU call completed and returned, ``cpu`` after the CPU reducer
+        completed.  A CuPy exception + successful CPU fallback therefore
+        records ``executed=cpu`` with ``fallback_reason`` -- never
+        ``executed=gpu``.  ``gpu_memory_mode`` is the executed memory
+        strategy: ``full`` (untiled GPU), ``tiled`` (spatial GPU tiles),
+        ``fallback`` (CPU executed although GPU was eligible), ``none`` (CPU
+        executed under a CPU policy).  ``planner_mode`` records the
+        winsorized planner decision (full|tiled|fallback) separately so a
+        planned-but-failed FULL/TILED (kernel exception) is never conflated
+        with what executed.  Never raises: provenance is strictly
+        observational and must not alter a reduction outcome.
+        """
+        try:
+            record = {
+                "operation": operation,
+                "scientific_N_batch": int(scientific_N_batch or 0),
+                "workload_shape": tuple(workload_shape)
+                if workload_shape
+                else None,
+            }
+            record.update(self._gpu_batch_provenance_tokens())
+            record.update(
+                {
+                    "backend_requested": backend_requested,
+                    "eligible": bool(eligible),
+                    "attempted": bool(attempted),
+                    "executed": executed,
+                    "gpu_memory_mode": gpu_memory_mode,
+                    "fallback": executed == "cpu",
+                    "fallback_reason": fallback_reason or "none",
+                    "planner_mode": planner_mode or "none",
+                    "tile_shape": tuple(tile_shape) if tile_shape else None,
+                    "n_tiles": int(n_tiles) if n_tiles else None,
+                    "estimated_peak_vram_bytes": (
+                        int(estimated_peak_vram_bytes)
+                        if estimated_peak_vram_bytes
+                        else None
+                    ),
+                    "effective_vram_budget_bytes": (
+                        int(effective_vram_budget_bytes)
+                        if effective_vram_budget_bytes
+                        else None
+                    ),
+                }
+            )
+            self._gpu_execution_store().append(record)
+        except Exception:
+            # Observational only: a provenance failure never breaks a reduction.
+            pass
+
+    def _gpu_execution_summary_tokens(self) -> Optional[dict]:
+        """ONE concise aggregate of the run's execution truth (req. 5).
+
+        Returns None when no accelerated-reducer reduction was dispatched
+        (nothing executed -- no summary is emitted, mirroring the fact that
+        no execution claim is made).  Aggregate fields:
+        operation / reductions / gpu_full / gpu_tiled / cpu_fallback /
+        max_N_batch / peak_vram (bytes) / fallback_reasons (ordered, dedup).
+        """
+        events = self._gpu_execution_store()
+        if not events:
+            return None
+        ops = []
+        seen_ops = set()
+        gpu_full = gpu_tiled = cpu_fallback = 0
+        max_n_batch = 0
+        peak_vram = None
+        reasons = []
+        seen_reasons = set()
+        for ev in events:
+            op = ev.get("operation")
+            if op and op not in seen_ops:
+                seen_ops.add(op)
+                ops.append(op)
+            executed = ev.get("executed")
+            mode = ev.get("gpu_memory_mode")
+            if executed == "gpu" and mode == "full":
+                gpu_full += 1
+            elif executed == "gpu" and mode == "tiled":
+                gpu_tiled += 1
+            elif executed == "cpu":
+                cpu_fallback += 1
+                reason = ev.get("fallback_reason") or "none"
+                if reason != "none" and reason not in seen_reasons:
+                    seen_reasons.add(reason)
+                    reasons.append(reason)
+            n_batch = ev.get("scientific_N_batch") or 0
+            if n_batch > max_n_batch:
+                max_n_batch = n_batch
+            peak = ev.get("estimated_peak_vram_bytes")
+            if peak and (peak_vram is None or peak > peak_vram):
+                peak_vram = peak
+        operation = ops[0] if len(ops) == 1 else ops
+        return {
+            "operation": operation,
+            "reductions": len(events),
+            "gpu_full": gpu_full,
+            "gpu_tiled": gpu_tiled,
+            "cpu_fallback": cpu_fallback,
+            "max_N_batch": max_n_batch,
+            "peak_vram": peak_vram,
+            "fallback_reasons": reasons if reasons else None,
+        }
+
+    def _emit_gpu_execution_summary(self) -> None:
+        """Emit the ONE per-run ``GPU_EXECUTION_SUMMARY`` block at completion.
+
+        Called from the worker tail (every real-run exit path).  Emits at
+        most once per run (never per batch / per tile), and emits NOTHING
+        when no accelerated-reducer reduction was dispatched (a CPU-only or
+        Drizzle-bypass run makes no execution claim).
+        """
+        if getattr(self, "_gpu_execution_summary_emitted", False):
+            return
+        tokens = self._gpu_execution_summary_tokens()
+        if tokens is None:
+            self._gpu_execution_summary_emitted = True
+            return
+        self._emit_provenance_block("GPU_EXECUTION_SUMMARY", tokens)
+        self._gpu_execution_summary_emitted = True
+
     def _capture_run_provenance_requested(self, **requested) -> None:
         """Snapshot the REQUESTED config and emit the RUN_REQUEST block.
 
@@ -20075,18 +20600,29 @@ class SeestarQueuedStacker:
     def _emit_gpu_decision_block(self) -> None:
         """Emit GPU_DECISION when GPU was requested (A3).
 
+        POLICY-ADMISSION record only (Phase H, Track P6): this block states
+        the run-start ACCEPTANCE of the GPU request by the frozen
+        ``AccelerationPolicy``, never actual execution.  The per-reduction
+        execution truth (eligible / attempted / executed / fallback) is
+        recorded at the dispatch seams and aggregated once per run in
+        ``GPU_EXECUTION_SUMMARY``.
+
         ``requested=true operation=<op> effective_backend=<cpu|cupy>
-        execution=<used|fallback|not_eligible|not_executed>
+        execution=<eligible|fallback|not_eligible|not_executed>
         fallback_reason=<reason|none>``
         The operation is the run's stacking reduction family: kappa-sigma /
         linear-fit-clip / median / winsorized-sigma-clip now all have GPU
-        reducers (winsorized landed in M3, dispatched in B7); ``used`` is
-        reported when the resolved backend is cupy (per-batch VRAM rejections
-        during ``_stack_batch`` additionally emit their own throttled durable
-        fallback warning with the real reason), ``fallback`` otherwise.
+        reducers (winsorized landed in M3, dispatched in B7); ``eligible`` is
+        the POLICY truth when the resolved backend is cupy -- GPU is admitted
+        for the run's Classic reducers, nothing about execution is claimed
+        here (per-batch VRAM rejections / CuPy failures surface truthfully as
+        ``executed=cpu`` + reason in the per-reduction records and the
+        ``GPU_EXECUTION_SUMMARY`` block); ``fallback`` is the policy-level
+        refusal when the backend resolved to cpu with an explicit reason.
         D1.4: on a Drizzle direct-accumulation run the Classic stacking
         reducer never executes, so the decision is ``not_executed`` with
-        ``fallback_reason=reducer_bypassed_by_drizzle_path`` (never ``used``).
+        ``fallback_reason=reducer_bypassed_by_drizzle_path`` (never
+        ``eligible`` -- no execution claim is ever made there).
         """
         if not getattr(self, "request_gpu", False):
             return
@@ -20097,7 +20633,7 @@ class SeestarQueuedStacker:
         operation = f"stacking_reduction:{stacking_key}"
         # D1.4: in a Drizzle direct-accumulation run the Classic stacking
         # reducer is never executed (frames go straight to the Drizzle
-        # accumulators), so NO Classic GPU reducer can have been ``used`` --
+        # accumulators), so the policy record makes NO execution claim --
         # whatever the resolved backend says.  The requested operation is
         # reported as ``not_executed`` with the explicit bypass reason.  The
         # operation keeps the REQUESTED Classic reducer key (from the
@@ -20143,13 +20679,20 @@ class SeestarQueuedStacker:
             )
             return
         if effective_backend == "cupy":
+            # Policy admission ONLY (Phase H, Track P6): the resolved backend
+            # admits GPU for this operation, so the truthful token is
+            # ``eligible`` -- never ``used``, which would claim that a GPU
+            # reduction actually executed.  The dispatch seams
+            # (``_gpu_reduce`` / ``_gpu_reduce_winsorized``) record the
+            # per-reduction execution truth and ``GPU_EXECUTION_SUMMARY``
+            # aggregates it once per run.
             self._emit_provenance_block(
                 "GPU_DECISION",
                 {
                     "requested": True,
                     "operation": operation,
                     "effective_backend": "cupy",
-                    "execution": "used",
+                    "execution": "eligible",
                     "fallback_reason": "none",
                 },
             )
@@ -20234,6 +20777,11 @@ class SeestarQueuedStacker:
         the classic runtime-effective aliases.  Batch semantics and the frozen
         reference origin/path are deliberately excluded — they may legitimately
         differ between the original run and its resume continuation.
+        Phase H (Track P6): the GPU fields mirrored here are POLICY-ADMISSION
+        diagnostics only (deterministic for the same machine + request), never
+        per-reduction execution truth -- the dynamic telemetry store and the
+        ``GPU_EXECUTION_SUMMARY`` block stay in the durable run log and NEVER
+        enter this cfg or any resume fingerprint.
         """
         if getattr(self, "_run_prov_requested", None) is None:
             return {}
@@ -20277,8 +20825,8 @@ class SeestarQueuedStacker:
             if not gpu_requested:
                 out["gpu_execution"] = "not_requested"
             elif self._drizzle_direct_accumulation_active():
-                # D1.4 mirror: no Classic GPU reducer can be ``used`` when the
-                # Drizzle path bypasses the Classic reducers entirely.
+                # D1.4 mirror: no execution claim is made when the Drizzle
+                # path bypasses the Classic reducers entirely.
                 out["gpu_execution"] = "not_executed"
                 out["gpu_fallback_reason"] = "reducer_bypassed_by_drizzle_path"
             elif stacking_key2 not in (
@@ -20290,7 +20838,12 @@ class SeestarQueuedStacker:
                     f"no_gpu_reducer_for_mode:{stacking_key2}"
                 )
             elif effective_backend == "cupy":
-                out["gpu_execution"] = "used"
+                # Policy admission mirror (Phase H): the resolved backend
+                # admits GPU for the Classic reducers -- ``eligible`` never
+                # claims a GPU reduction actually executed (per-reduction
+                # execution truth is in the run-log telemetry store +
+                # ``GPU_EXECUTION_SUMMARY``, never in this cfg).
+                out["gpu_execution"] = "eligible"
             else:
                 out["gpu_execution"] = "fallback"
                 reason = None
@@ -21051,6 +21604,13 @@ class SeestarQueuedStacker:
             coverage_render=bool(self.apply_coverage_render),
             low_wht_mask=bool(self.apply_low_wht_mask),
         )
+
+        # Phase H (Track P6): accepted-run seam -- fresh per-run execution-
+        # truth store exactly once per ACCEPTED run (the dispatch seams
+        # append per-reduction records; the worker tail emits the single
+        # GPU_EXECUTION_SUMMARY at completion).  Reset sits after every
+        # refusal/early-return gate so a refused start never wipes state.
+        self._reset_gpu_execution_telemetry()
 
         # A3: durable requested-config block, emitted once for every ACCEPTED
         # run (policy frozen, session args applied, before heavy reference
