@@ -1239,6 +1239,25 @@ class _QualityReferenceError(RuntimeError):
     closed through the established processing-error path instead.
     """
 
+
+class BatchReductionError(RuntimeError):
+    """A Classic batch reduction (or its durable commit) failed truthfully.
+
+    Stage D transactional lifecycle: a failed reduction must be FATAL and
+    never interpreted as a successful or ignorable batch.  Raised by
+    ``_stack_batch`` for genuine reducer failures (FULL_CPU / SPATIAL_TILED /
+    GPU->CPU fallback / minimum-tile CPU refusal / MemoryError / any reducer
+    exception) and by the transactional completion helper when
+    ``_combine_batch_result`` reports that the batch was NOT committed.
+    ``reason`` carries a stable, truthful description; ``cause`` optionally
+    chains the original exception.
+    """
+
+    def __init__(self, reason, *, cause=None):
+        self.reason = str(reason)
+        self.cause = cause
+        super().__init__(f"BatchReductionError: {self.reason}")
+
 # Scientific settings that, if changed, invalidate a classic SUM/W checkpoint.
 # Purely cosmetic final-output settings (SCNR, colour balance, background
 # neutralisation, photometric calibration) are intentionally excluded: they do
@@ -8369,84 +8388,33 @@ class SeestarQueuedStacker:
                                     len(current_batch_items_with_masks_for_stack_batch)
                                     >= trigger
                                 ):
-                                    self.stacked_batches_count += 1
-                                    num_in_batch = len(
-                                        current_batch_items_with_masks_for_stack_batch
-                                    )
-
-                                    # 1. Stack the batch (classic SUM/W)
-                                    stacked_np, hdr, wht_2d = self._stack_batch(
+                                    # Stage D: transactional completion through
+                                    # the shared helper.  In reproject mode the
+                                    # mid-run flush persists+solves the batch but
+                                    # does NOT move sources (they are consumed at
+                                    # the final partial flush, after a committed
+                                    # reduction); committed counter / partial /
+                                    # WCS-grid side effects run only after the
+                                    # durable commit.
+                                    _committed = self._process_completed_batch(
                                         current_batch_items_with_masks_for_stack_batch,
-                                        self.stacked_batches_count,
+                                        self.stacked_batches_count + 1,
                                         self.total_batches_estimated,
+                                        self.reference_wcs_object,
+                                        reproject_batch=True,
+                                        move_sources=False,
+                                        save_partial=True,
+                                        update_count_file=False,
+                                        clear_paths=True,
                                     )
-                                    if stacked_np is None:
+                                    if not _committed:
+                                        # Non-fatal no-commit (empty / all items
+                                        # filtered out / reproject missing-WCS /
+                                        # unsolved batch): historical drop of the
+                                        # in-memory batch only; sources are NOT
+                                        # moved and the committed counter is NOT
+                                        # advanced.
                                         current_batch_items_with_masks_for_stack_batch.clear()
-                                        if getattr(self, "batch_size", 1) == 1:
-                                            getattr(self, "_indices_cache", {}).clear()
-                                        gc.collect()
-                                    else:
-                                        # 2. Ensure WCS on the stacked image
-                                        (
-                                            solved_path,
-                                            _,
-                                        ) = self._save_and_solve_classic_batch(
-                                            stacked_np,
-                                            wht_2d,
-                                            hdr,
-                                            self.stacked_batches_count,
-                                        )
-                                        batch_wcs = None
-                                        try:
-                                            batch_wcs = WCS(hdr, naxis=2)
-                                            ensure_wcs_pixel_shape(
-                                                batch_wcs,
-                                                int(hdr.get("NAXIS2")),
-                                                int(hdr.get("NAXIS1")),
-                                            )
-                                        except Exception:
-                                            batch_wcs = None
-
-                                        # 3. Accumulate if astrometric solve succeeded or not reprojecting
-                                        if (
-                                            not (
-                                                self.reproject_between_batches
-                                                or self.reproject_coadd_final
-                                            )
-                                            or self._last_classic_batch_solved
-                                        ):
-                                            self._combine_batch_result(
-                                                stacked_np,
-                                                hdr,
-                                                wht_2d,
-                                                batch_wcs=batch_wcs,
-                                            )
-                                        else:
-                                            self.update_progress(
-                                                "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
-                                                "WARN",
-                                            )
-                                        if hasattr(self.cumulative_sum_memmap, "flush"):
-                                            self.cumulative_sum_memmap.flush()
-                                        if hasattr(self.cumulative_wht_memmap, "flush"):
-                                            self.cumulative_wht_memmap.flush()
-                                        if not self.drizzle_active_session:
-                                            self._update_preview_sum_w()
-
-                                        # After accumulation, solve the cumulative
-                                        # stack (grid/WCS side effect only).
-                                        # RF2: the registration target is the
-                                        # initially-selected reference image and
-                                        # stays immutable for the whole run.  The
-                                        # cumulative stack is NEVER used as the
-                                        # registration target; only its WCS/grid
-                                        # update side effect is preserved.
-                                        if self.reproject_between_batches:
-                                            self._solve_cumulative_stack()
-
-                                        current_batch_items_with_masks_for_stack_batch.clear()
-                                        self._current_batch_paths = []
-                                        self._save_partial_stack()
                                         if getattr(self, "batch_size", 1) == 1:
                                             getattr(self, "_indices_cache", {}).clear()
                                         gc.collect()
@@ -8624,24 +8592,22 @@ class SeestarQueuedStacker:
                                     len(current_batch_items_with_masks_for_stack_batch)
                                     >= trigger
                                 ):
-                                    self.stacked_batches_count += 1
-                                    self._send_eta_update()
                                     # M3: le Drizzle standard n'utilise plus de
                                     # lots (accumulateur unique) ; seul le
                                     # stacking classique passe par ce déclencheur.
+                                    # Stage D: single transactional completion
+                                    # path — the committed counter advances and
+                                    # sources are moved ONLY after the durable
+                                    # commit; a reducer/commit failure raises
+                                    # BatchReductionError (terminal FAILED); a
+                                    # non-fatal no-commit leaves the batch
+                                    # retryable.
                                     self._process_completed_batch(
                                         current_batch_items_with_masks_for_stack_batch,
-                                        self.stacked_batches_count,
+                                        self.stacked_batches_count + 1,
                                         self.total_batches_estimated,
                                         self.reference_wcs_object,
                                     )
-
-                                    self._move_to_stacked(self._current_batch_paths)
-                                    self._save_partial_stack()
-                                    self._update_batch_count_file()
-                                    self._current_batch_paths = []
-
-                                    current_batch_items_with_masks_for_stack_batch = []
 
                         else:  # _process_file a échoué
                             self.failed_align_count += 1
@@ -8908,103 +8874,50 @@ class SeestarQueuedStacker:
                     self.reproject_between_batches
                     and current_batch_items_with_masks_for_stack_batch
                 ):
-                    self.stacked_batches_count += 1
-                    self._send_eta_update()
                     num_in_batch = len(current_batch_items_with_masks_for_stack_batch)
                     self.update_progress(
                         f"⚙️ Traitement classique du dernier lot partiel ({num_in_batch} images)..."
                     )
-
-                    stacked_np, hdr, wht_2d = self._stack_batch(
+                    # Stage D: transactional completion through the shared
+                    # helper (reproject final partial: persist+solve, move
+                    # sources and advance committed state ONLY after the
+                    # durable commit).
+                    _committed = self._process_completed_batch(
                         current_batch_items_with_masks_for_stack_batch,
-                        self.stacked_batches_count,
+                        self.stacked_batches_count + 1,
                         self.total_batches_estimated,
+                        self.reference_wcs_object,
+                        reproject_batch=True,
+                        move_sources=True,
+                        save_partial=True,
+                        update_count_file=True,
+                        update_meta=True,
+                        clear_paths=True,
                     )
-                    if stacked_np is not None:
-                        solved_path, _ = self._save_and_solve_classic_batch(
-                            stacked_np, wht_2d, hdr, self.stacked_batches_count
-                        )
-                        batch_wcs = None
-                        try:
-                            batch_wcs = WCS(hdr, naxis=2)
-                            ensure_wcs_pixel_shape(
-                                batch_wcs,
-                                int(hdr.get("NAXIS2")),
-                                int(hdr.get("NAXIS1")),
-                            )
-                        except Exception:
-                            batch_wcs = None
-
-                        if (
-                            not (
-                                self.reproject_between_batches
-                                or self.reproject_coadd_final
-                            )
-                            or self._last_classic_batch_solved
-                        ):
-                            self._combine_batch_result(
-                                stacked_np,
-                                hdr,
-                                wht_2d,
-                                batch_wcs=batch_wcs,
-                            )
-                        else:
-                            self.update_progress(
-                                "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
-                                "WARN",
-                            )
-
-                        # RF2: registration target stays immutable; preserve only
-                        # the cumulative-stack WCS/grid update side effect.
-                        if self.reproject_between_batches:
-                            self._solve_cumulative_stack()
-
-                        if hasattr(self.cumulative_sum_memmap, "flush"):
-                            self.cumulative_sum_memmap.flush()
-                        if hasattr(self.cumulative_wht_memmap, "flush"):
-                            self.cumulative_wht_memmap.flush()
-                        self._update_preview_sum_w()
-                        self._move_to_stacked(self._current_batch_paths)
-                        self._save_partial_stack()
-                        self._update_batch_count_file()
-                        self._current_batch_paths = []
-                    else:
-                        self.update_progress(
-                            "   -> Échec combinaison du dernier lot partiel", "ERROR"
-                        )
-
-                    if self.move_stacked and self._current_batch_paths:
-                        move_to_stacked(
-                            self._current_batch_paths,
-                            self.update_progress,
-                            self.stacked_subdir_name,
-                        )
-                        self._current_batch_paths = []
-                    self._update_batches_meta()
-                    self._save_partial_stack()
-                    current_batch_items_with_masks_for_stack_batch = []
+                    if not _committed:
+                        # Non-fatal no-commit: nothing advanced/moved; the
+                        # sources stay in their input location for retry.
+                        current_batch_items_with_masks_for_stack_batch = []
                     gc.collect()
 
                 elif (
                     not self.reproject_between_batches
                     and current_batch_items_with_masks_for_stack_batch
                 ):
-                    self.stacked_batches_count += 1
-                    self._send_eta_update()
                     self.update_progress(
                         f"⚙️ Traitement classique du dernier lot partiel ({len(current_batch_items_with_masks_for_stack_batch)} images)..."
                     )
+                    # Stage D: single transactional completion path (the
+                    # helper advances the committed counter and moves sources
+                    # only after the durable commit; a failure raises
+                    # BatchReductionError / terminal FAILED, a non-fatal
+                    # no-commit leaves the batch retryable in place).
                     self._process_completed_batch(
                         current_batch_items_with_masks_for_stack_batch,
-                        self.stacked_batches_count,
+                        self.stacked_batches_count + 1,
                         self.total_batches_estimated,
                         self.reference_wcs_object,
                     )
-                    self._move_to_stacked(self._current_batch_paths)
-                    self._save_partial_stack()
-                    self._update_batch_count_file()
-                    self._current_batch_paths = []
-
                     current_batch_items_with_masks_for_stack_batch = []
 
                 if self.reproject_between_batches:
@@ -11324,18 +11237,51 @@ class SeestarQueuedStacker:
         current_batch_num,
         total_batches_est,
         reference_wcs_for_reprojection,
+        *,
+        reproject_batch=False,
+        move_sources=True,
+        clear_paths=True,
+        save_partial=True,
+        update_count_file=True,
+        update_meta=False,
     ):
-        """Traite un lot d'images complété en mode classique SUM/W.
+        """Transactional Classic batch completion — the SINGLE shared path for
+        every Classic full-batch, final-partial, flush and (mechanically)
+        reproject completion caller (Stage D).
 
-        La logique de reprojection est maintenant gérée directement dans
-        ``_worker`` et n'est plus traitée ici.
+        A source exposure is marked consumed (moved to stacked/ / ledgered /
+        checkpointed / counted) ONLY after its scientific contribution is
+        durably committed.  Ordering enforced here:
+
+        * REDUCE via ``_stack_batch`` — a genuine reducer failure
+          (``BatchReductionError``: FULL_CPU / SPATIAL_TILED_CPU / GPU->CPU
+          fallback / minimum-tile CPU refusal / MemoryError / generic reducer
+          exception) propagates and is terminal: nothing was committed, nothing
+          is moved, the committed counter is never advanced.
+        * Persist+solve the batch when reprojecting (``reproject_coadd_final``
+          or ``reproject_batch``).
+        * COMMIT via ``_combine_batch_result(..., strict_commit=True)`` — the
+          committed-batch counter is advanced exactly once, immediately before
+          the durable accumulation + resume checkpoint; a commit failure rolls
+          the transient counter advance back and RAISES (terminal, truthful).
+        * ONLY AFTER the durable commit: source movement
+          (``_move_to_stacked``), ``_save_partial_stack``,
+          ``_update_batch_count_file``, ``_update_batches_meta`` and batch
+          ledger clears run.
+
+        Returns True when the batch was durably committed (and consumed per the
+        caller's policy flags).  Returns False for NON-FATAL no-commit
+        conditions (empty batch, every item filtered out, reproject
+        missing-WCS, unsolved reproject batch skipped): no reducer output was
+        committed, sources are NOT moved and committed state is NOT advanced —
+        the batch list is left intact for retry (callers that historically
+        dropped the in-memory batch may do so after a False return).
         """
-
         num_items_in_this_batch = (
             len(batch_items_to_stack) if batch_items_to_stack else 0
         )
         logger.debug(
-            f"DEBUG QM [_process_completed_batch (Classic SUM/W only)]: Début pour lot #{current_batch_num} "
+            f"DEBUG QM [_process_completed_batch (Classic SUM/W transactional)]: Début pour lot #{current_batch_num} "
             f"avec {num_items_in_this_batch} items."
         )
 
@@ -11344,11 +11290,10 @@ class SeestarQueuedStacker:
                 f"⚠️ Tentative de traiter un lot vide (Lot #{current_batch_num}). Ignoré.",
                 None,
             )
-            return
+            return False
 
         progress_info_log = f"(Lot {current_batch_num}/{total_batches_est if total_batches_est > 0 else '?'})"
 
-        # --- LOGIQUE EXISTANTE POUR LE MODE CLASSIQUE (NON-REPROJECTION) ---
         self.update_progress(
             f"⚙️ Traitement classique du batch {progress_info_log} ({num_items_in_this_batch} images)..."
         )
@@ -11360,62 +11305,129 @@ class SeestarQueuedStacker:
             batch_items_to_stack, current_batch_num, total_batches_est
         )
 
-        if stacked_batch_data_np is not None and batch_coverage_map_2d is not None:
-            if self.reproject_coadd_final:
-                self._save_and_solve_classic_batch(
-                    stacked_batch_data_np,
-                    batch_coverage_map_2d,
-                    stack_info_header,
-                    current_batch_num,
-                )
-            batch_wcs = None
-            try:
-                batch_wcs = (
-                    WCS(stack_info_header, naxis=2) if stack_info_header else None
-                )
-            except Exception:
-                pass
-
-            if (
-                not (self.reproject_between_batches or self.reproject_coadd_final)
-                or self._last_classic_batch_solved
-            ):
-                self._combine_batch_result(
-                    stacked_batch_data_np,
-                    stack_info_header,
-                    batch_coverage_map_2d,
-                    batch_wcs,
-                )
-            else:
-                self.update_progress(
-                    "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
-                    "WARN",
-                )
-            if hasattr(self.cumulative_sum_memmap, "flush"):
-                self.cumulative_sum_memmap.flush()
-            if hasattr(self.cumulative_wht_memmap, "flush"):
-                self.cumulative_wht_memmap.flush()
-            if not self.drizzle_active_session:
-                self._update_preview_sum_w()
-
-            if hasattr(stacked_batch_data_np, "_mmap"):
-                try:
-                    stacked_batch_data_np.flush()
-                    stacked_batch_data_np._mmap.close()
-                    if hasattr(stacked_batch_data_np, "filename") and os.path.exists(
-                        stacked_batch_data_np.filename
-                    ):
-                        os.remove(stacked_batch_data_np.filename)
-                except Exception:
-                    pass
-        else:
+        # A genuine reducer failure raises BatchReductionError here and
+        # propagates: the batch was NOT committed, NOT counted, NOT moved.
+        # A (None, None, None) return is a distinct NON-FATAL no-commit
+        # (no reducer ran): empty / all items filtered out / reproject
+        # missing-WCS — nothing may be consumed or advanced either.
+        if stacked_batch_data_np is None or batch_coverage_map_2d is None:
             num_failed_in_stack_batch = len(batch_items_to_stack)
             self.failed_stack_count += num_failed_in_stack_batch
             self.update_progress(
                 f"❌ Échec combinaison du lot {progress_info_log}. {num_failed_in_stack_batch} images ignorées.",
                 None,
             )
+            self._classic_batch_epilogue(batch_items_to_stack, current_batch_num)
+            return False
 
+        # Persist + solve the batch for the reproject completion paths
+        # (reproject_coadd_final is detected internally; reproject_between
+        # batches callers pass reproject_batch=True).
+        if self.reproject_coadd_final or reproject_batch:
+            self._save_and_solve_classic_batch(
+                stacked_batch_data_np,
+                batch_coverage_map_2d,
+                stack_info_header,
+                current_batch_num,
+            )
+        batch_wcs = None
+        try:
+            batch_wcs = (
+                WCS(stack_info_header, naxis=2) if stack_info_header else None
+            )
+            if batch_wcs is not None and reproject_batch:
+                ensure_wcs_pixel_shape(
+                    batch_wcs,
+                    int(stack_info_header.get("NAXIS2", 0)),
+                    int(stack_info_header.get("NAXIS1", 0)),
+                )
+        except Exception:
+            pass
+
+        if (
+            not (self.reproject_between_batches or self.reproject_coadd_final)
+            or self._last_classic_batch_solved
+        ):
+            # --- COMMIT --- the committed-batch counter advances exactly once,
+            # immediately before the durable accumulation + resume checkpoint
+            # (the checkpoint ledger/counters must include this batch).  Any
+            # commit failure rolls the transient advance back and is terminal.
+            self.stacked_batches_count += 1
+            self._send_eta_update()
+            try:
+                self._combine_batch_result(
+                    stacked_batch_data_np,
+                    stack_info_header,
+                    batch_coverage_map_2d,
+                    batch_wcs,
+                    strict_commit=True,
+                )
+            except BatchReductionError:
+                self.stacked_batches_count -= 1
+                raise
+            except Exception as e:
+                self.stacked_batches_count -= 1
+                self.processing_error = f"Échec commit du batch: {e}"
+                self.stop_processing = True
+                raise BatchReductionError(
+                    f"batch commit failed: {type(e).__name__}: {e}", cause=e
+                ) from e
+
+            if hasattr(self.cumulative_sum_memmap, "flush"):
+                self.cumulative_sum_memmap.flush()
+            if hasattr(self.cumulative_wht_memmap, "flush"):
+                self.cumulative_wht_memmap.flush()
+            if not self.drizzle_active_session:
+                self._update_preview_sum_w()
+            if reproject_batch and self.reproject_between_batches:
+                # RF2: registration target stays immutable; preserve only the
+                # cumulative-stack WCS/grid update side effect.
+                self._solve_cumulative_stack()
+
+            if hasattr(stacked_batch_data_np, "_mmap") and not reproject_batch:
+                try:
+                    stacked_batch_data_np.flush()
+                    stacked_batch_data_np._mmap.close()
+                    if (
+                        hasattr(stacked_batch_data_np, "filename")
+                        and os.path.exists(stacked_batch_data_np.filename)
+                    ):
+                        os.remove(stacked_batch_data_np.filename)
+                except Exception:
+                    pass
+
+            # --- CONSUMPTION, ONLY after the durable commit ---
+            if move_sources:
+                self._move_to_stacked(self._current_batch_paths)
+            if save_partial:
+                self._save_partial_stack()
+            if update_count_file:
+                self._update_batch_count_file()
+            if update_meta:
+                self._update_batches_meta()
+            if clear_paths:
+                self._current_batch_paths = []
+            batch_items_to_stack.clear()
+        else:
+            # Reproject batch skipped (astrometric solve failed / deferred):
+            # NOT committed — nothing advanced, nothing moved; warn and leave
+            # the batch retryable (historical WARN text preserved).
+            self.update_progress(
+                "   -> Batch sans r\xe9solution ignor\xe9 pour le reproject",
+                "WARN",
+            )
+            self._classic_batch_epilogue(batch_items_to_stack, current_batch_num)
+            return False
+
+        self._classic_batch_epilogue(batch_items_to_stack, current_batch_num)
+        return True
+
+    def _classic_batch_epilogue(self, batch_items_to_stack, current_batch_num):
+        """Shared non-fatal epilogue of the transactional Classic completion
+        path (Stage D): bounded cache clear, gc, end-of-batch log and legacy
+        temporary aligned-file cleanup.  Never runs on a fatal path (the run
+        ends FAILED and the worker ``finally`` owns the cleanup there).
+        """
         if getattr(self, "batch_size", 1) == 1:
             getattr(self, "_indices_cache", {}).clear()
         gc.collect()
@@ -11532,21 +11544,18 @@ class SeestarQueuedStacker:
 
         # --- Classic only (M3: le Drizzle standard utilise un accumulateur
         # unique ; les poses sont ajoutées directement dans la boucle worker) ---
-        self.stacked_batches_count += 1
-        self._send_eta_update()
+        # Stage D: single transactional completion path.  The committed counter
+        # advances and sources are moved ONLY after the durable commit; a
+        # reducer/commit failure raises BatchReductionError (terminal FAILED,
+        # sources stay in place, nothing advanced); a non-fatal no-commit
+        # leaves the batch retryable.
         self._process_completed_batch(
             batch_items,
-            self.stacked_batches_count,
+            self.stacked_batches_count + 1,
             self.total_batches_estimated,
             self.reference_wcs_object,
+            update_meta=True,
         )
-
-        self._move_to_stacked(self._current_batch_paths)
-        self._save_partial_stack()
-        self._update_batch_count_file()
-        self._current_batch_paths = []
-        self._update_batches_meta()
-        batch_items.clear()
         gc.collect()
         return ref_img, ref_hdr
 
@@ -12471,6 +12480,7 @@ class SeestarQueuedStacker:
         stack_info_header,
         batch_coverage_map_2d,
         batch_wcs=None,
+        strict_commit=False,
     ):
         """
         [MODE SUM/W - CLASSIQUE] Accumule le résultat d'un batch classique
@@ -12482,6 +12492,16 @@ class SeestarQueuedStacker:
             stack_info_header (fits.Header): En-tête info du lot (contient NIMAGES physiques).
             batch_coverage_map_2d (np.ndarray): Carte de poids/couverture 2D (HW, float32)
                                                 pour ce lot spécifique.
+            strict_commit (bool): Stage D transactional lifecycle.  When True,
+                every failure to durably commit this batch (checkpoint persist
+                failure, memory error, generic accumulation failure, missing
+                memmaps) RAISES ``BatchReductionError`` after the historical
+                failure side effects (``processing_error`` / ``stop_processing``)
+                have been set, so the transactional completion helper can never
+                mistake a failed commit for a success and must not move sources
+                or advance committed state.  Default False preserves the
+                historical swallow-and-stop behaviour for out-of-scope callers
+                (Drizzle cached reprojection, direct unit calls).
         """
         # COV-01B: the support payload travels bound to this exact batch result
         # (attached to ``stack_info_header`` by ``_stack_batch``).  When support
@@ -12550,6 +12570,17 @@ class SeestarQueuedStacker:
                 f"header is None? {stack_info_header is None}, "
                 f"coverage is None? {batch_coverage_map_2d is None}"
             )
+            if strict_commit:
+                # A reduced batch whose result cannot be accumulated is a
+                # truthful commit failure: nothing may be consumed afterwards.
+                self.processing_error = (
+                    "Accumulation refusée: données ou couverture manquantes"
+                )
+                self.stop_processing = True
+                raise BatchReductionError(
+                    "batch commit refused: stacked data / header / coverage "
+                    "missing after reduction"
+                )
             return
 
         if (
@@ -12569,6 +12600,10 @@ class SeestarQueuedStacker:
             )
             self.processing_error = "Memmap non initialisé"
             self.stop_processing = True
+            if strict_commit:
+                raise BatchReductionError(
+                    "batch commit refused: SUM/WHT memmaps not initialised"
+                )
             return
 
         # --- Ajustement dynamique de la taille des memmaps si nécessaire ---
@@ -12678,6 +12713,21 @@ class SeestarQueuedStacker:
                     self.failed_stack_count += batch_n_error
                 except:
                     self.failed_stack_count += 1  # Au moins une image
+                if strict_commit:
+                    # Stage D rework-1: a reduced batch whose coverage cannot
+                    # be committed is a truthful commit failure (terminal),
+                    # never a silent "ignored" batch that still consumes
+                    # sources / advances the committed counter.
+                    self.processing_error = (
+                        "Accumulation refusée: shape carte couverture "
+                        f"{batch_coverage_map_2d.shape} au lieu de "
+                        f"{expected_shape_hw}"
+                    )
+                    self.stop_processing = True
+                    raise BatchReductionError(
+                        "batch commit refused: coverage shape mismatch "
+                        f"{batch_coverage_map_2d.shape} != {expected_shape_hw}"
+                    )
                 return
 
         # S'assurer que stacked_batch_data_np a la bonne dimension pour la multiplication (HWC ou HW)
@@ -12715,6 +12765,17 @@ class SeestarQueuedStacker:
                     self.failed_stack_count += batch_n_error
                 except:
                     self.failed_stack_count += 1
+                if strict_commit:
+                    self.processing_error = (
+                        "Accumulation refusée: image couleur shape "
+                        f"{stacked_batch_data_np.shape} au lieu de "
+                        f"{self.memmap_shape}"
+                    )
+                    self.stop_processing = True
+                    raise BatchReductionError(
+                        "batch commit refused: colour image shape mismatch "
+                        f"{stacked_batch_data_np.shape} != {self.memmap_shape}"
+                    )
                 return
         elif (
             not is_color_batch_data
@@ -12742,6 +12803,17 @@ class SeestarQueuedStacker:
                     self.failed_stack_count += batch_n_error
                 except:
                     self.failed_stack_count += 1
+                if strict_commit:
+                    self.processing_error = (
+                        "Accumulation refusée: image N&B shape "
+                        f"{stacked_batch_data_np.shape} au lieu de "
+                        f"{expected_shape_hw}"
+                    )
+                    self.stop_processing = True
+                    raise BatchReductionError(
+                        "batch commit refused: gray image shape mismatch "
+                        f"{stacked_batch_data_np.shape} != {expected_shape_hw}"
+                    )
                 return
         elif (
             not is_color_batch_data and stacked_batch_data_np.ndim != 2
@@ -12758,6 +12830,16 @@ class SeestarQueuedStacker:
                 self.failed_stack_count += batch_n_error
             except:
                 self.failed_stack_count += 1
+            if strict_commit:
+                self.processing_error = (
+                    "Accumulation refusée: dimensions image N&B inattendues "
+                    f"{stacked_batch_data_np.shape}"
+                )
+                self.stop_processing = True
+                raise BatchReductionError(
+                    "batch commit refused: unexpected gray image dimensions "
+                    f"{stacked_batch_data_np.shape}"
+                )
             return
 
         try:
@@ -12784,6 +12866,19 @@ class SeestarQueuedStacker:
                     f"sum={np.sum(batch_coverage_map_2d):.3e}"
                 )
                 self.failed_stack_count += num_physical_images_in_batch  # Compter ces images comme échec d'empilement
+                if strict_commit:
+                    # Stage D rework-1: near-zero coverage means this batch has
+                    # no scientific contribution to commit — a truthful commit
+                    # failure (terminal), never a silent ignore that consumes.
+                    self.processing_error = (
+                        "Accumulation refusée: somme de couverture quasi nulle "
+                        f"({np.sum(batch_coverage_map_2d):.3e})"
+                    )
+                    self.stop_processing = True
+                    raise BatchReductionError(
+                        "batch commit refused: near-zero coverage "
+                        f"(sum={np.sum(batch_coverage_map_2d):.3e})"
+                    )
                 return
 
             # Préparer les données pour l'accumulation (types et shapes)
@@ -12826,6 +12921,18 @@ class SeestarQueuedStacker:
                 self.logger.warning(warn_msg)
                 self.update_progress(warn_msg, "WARN")
                 self.failed_stack_count += num_physical_images_in_batch
+                if strict_commit:
+                    # Stage D rework-1: non-finite / zero-weight batch science
+                    # cannot be durably committed — truthful terminal failure.
+                    self.processing_error = (
+                        "Accumulation refusée: somme non valide ou poids nul "
+                        "(non-finite / zero-weight batch)"
+                    )
+                    self.stop_processing = True
+                    raise BatchReductionError(
+                        "batch commit refused: non-finite or zero-weight "
+                        "batch sum/weight"
+                    )
                 return
 
             pre_sum_min = float(np.min(self.cumulative_sum_memmap))
@@ -13056,6 +13163,10 @@ class SeestarQueuedStacker:
             )
             self.processing_error = str(ckpt_err)
             self.stop_processing = True
+            if strict_commit:
+                raise BatchReductionError(
+                    f"batch commit failed (checkpoint): {ckpt_err}", cause=ckpt_err
+                ) from ckpt_err
         except MemoryError as mem_err:
             logger.debug(
                 f"ERREUR QM [_combine_batch_result SUM/W]: ERREUR MÉMOIRE - {mem_err}"
@@ -13066,7 +13177,17 @@ class SeestarQueuedStacker:
             traceback.print_exc(limit=1)
             self.processing_error = "Erreur Mémoire Accumulation"
             self.stop_processing = True
+            if strict_commit:
+                raise BatchReductionError(
+                    f"batch commit failed (memory): {mem_err}", cause=mem_err
+                ) from mem_err
         except Exception as e:
+            if isinstance(e, BatchReductionError):
+                # Raised by a strict pre-mutation guard INSIDE the try (stage D
+                # rework-1: near-zero coverage / non-finite zero-weight batch):
+                # already counted and already terminal — propagate unchanged
+                # (no double count, no double wrap).
+                raise
             logger.debug(
                 f"ERREUR QM [_combine_batch_result SUM/W]: Exception inattendue - {e}"
             )
@@ -13081,6 +13202,16 @@ class SeestarQueuedStacker:
             except:
                 batch_n_error_acc = 1
             self.failed_stack_count += batch_n_error_acc
+            if strict_commit:
+                # Stage D: an unexpected accumulation failure is a truthful
+                # commit failure (terminal), never a silent partial batch.
+                self.processing_error = (
+                    f"Erreur pendant l'accumulation du résultat du batch: {e}"
+                )
+                self.stop_processing = True
+                raise BatchReductionError(
+                    f"batch commit failed (accumulation): {e}", cause=e
+                ) from e
 
     ################################################################################################################################################
     def _move_to_stacked(self, paths: list[str]):
@@ -14313,7 +14444,14 @@ class SeestarQueuedStacker:
             )
             logger.error(f"Erreur stacking NumPy batch #{current_batch_num}: {e}")
             traceback.print_exc(limit=2)
-            return None, None, None
+            # Stage D transactional lifecycle: a genuine reducer failure is a
+            # TRUTHFUL FATAL signal, never an ambiguous (None, None, None)
+            # that callers could mistake for an empty / ignorable batch.
+            raise BatchReductionError(
+                f"reducer failure for batch #{current_batch_num}: "
+                f"{type(e).__name__}: {e}",
+                cause=e,
+            ) from e
         _log_mem("after_stack")
         if getattr(self, "interbatch_norm_active", False):
             if self._should_use_final_combine_ibn():
