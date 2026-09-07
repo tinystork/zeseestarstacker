@@ -174,7 +174,7 @@ def test_gpu_decision_not_executed_under_drizzle_even_when_cupy_ready():
     assert "execution=used" not in line
 
 
-def test_gpu_decision_used_for_classic_winsorized_unchanged():
+def test_gpu_decision_eligible_for_classic_winsorized():
     s, events = _emission_stack(
         use_drizzle=False, request_gpu=True, caps=_ready_caps()
     )
@@ -183,7 +183,7 @@ def test_gpu_decision_used_for_classic_winsorized_unchanged():
     assert len(decisions) == 1, events
     line = decisions[0]
     assert "operation=stacking_reduction:winsorized_sigma_clip" in line
-    assert "execution=used" in line
+    assert "execution=eligible" in line
     assert "fallback_reason=none" in line
 
 

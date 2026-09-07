@@ -615,6 +615,23 @@ def _gpu_execution_reason_token(code):
     return _GPU_EXEC_REASON_MAP.get(str(code), str(code))
 
 
+
+def _record_gpu_execution_safely(stacker, **record):
+    """Duck-safe execution-truth recorder (provenance is observational).
+
+    Direct-dispatch test harnesses (``_ProbeStacker`` in test_stack_gpu.py)
+    expose only the minimal ``_gpu_reduce`` contract and do not bind
+    ``_record_gpu_execution``.  A missing recorder is silently skipped so
+    provenance can never break a reduction.
+    """
+    recorder = getattr(stacker, "_record_gpu_execution", None)
+    if callable(recorder):
+        try:
+            recorder(**record)
+        except Exception:
+            pass
+
+
 # ----------------------------------------------------------------------
 # Type aliases
 # ----------------------------------------------------------------------
@@ -2807,10 +2824,14 @@ class SeestarQueuedStacker:
         If the CPU reducer itself raises, no record is emitted (nothing
         completed; the error propagates exactly as before).
         """
-        operation = self._canonical_stacking_reducer_key(
+        _reducer_key_fn = getattr(self, "_canonical_stacking_reducer_key", None)
+        _raw_mode = (
             getattr(self, "stacking_mode", "")
             or getattr(self, "stack_reject_algo", "")
             or "unknown"
+        )
+        operation = (
+            _reducer_key_fn(_raw_mode) if callable(_reducer_key_fn) else _raw_mode
         )
         n_batch = int(len(images)) if images is not None else 0
         workload_shape = (
@@ -2838,7 +2859,7 @@ class SeestarQueuedStacker:
                 reason = _gpu_execution_reason_token(
                     getattr(self, "_gpu_xp_fallback_code", None)
                 ) or GPU_EXEC_REASON_VRAM_NO_VALID_TILE
-            self._record_gpu_execution(
+            _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
                 workload_shape=workload_shape,
@@ -2860,7 +2881,7 @@ class SeestarQueuedStacker:
                 "GPU reduction failed; falling back to CPU", exc_info=True
             )
             out_cpu = fn_cpu(images, weights, **kwargs)
-            self._record_gpu_execution(
+            _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
                 workload_shape=workload_shape,
@@ -2875,7 +2896,7 @@ class SeestarQueuedStacker:
                 ),
             )
             return out_cpu
-        self._record_gpu_execution(
+        _record_gpu_execution_safely(self,
             operation=operation,
             scientific_N_batch=n_batch,
             workload_shape=workload_shape,
@@ -2946,10 +2967,14 @@ class SeestarQueuedStacker:
         completed; the error propagates exactly as before).
         """
         n_batch = int(len(images)) if images is not None else 0
-        operation = self._canonical_stacking_reducer_key(
+        _reducer_key_fn = getattr(self, "_canonical_stacking_reducer_key", None)
+        _raw_mode = (
             getattr(self, "stacking_mode", "")
             or getattr(self, "stack_reject_algo", "")
             or "winsorized_sigma_clip"
+        )
+        operation = (
+            _reducer_key_fn(_raw_mode) if callable(_reducer_key_fn) else _raw_mode
         )
         workload_shape = (
             tuple(images[0].shape) if images is not None and len(images) else None
@@ -2962,7 +2987,7 @@ class SeestarQueuedStacker:
                         gpu_memory_mode=None, decision=None, cp_module=None):
             """Record executed=cpu AFTER the CPU reducer completed."""
             out = fn_cpu(images, weights, **kwargs)
-            self._record_gpu_execution(
+            _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
                 workload_shape=workload_shape,
@@ -3064,7 +3089,7 @@ class SeestarQueuedStacker:
                     decision=decision,
                 )
             self._release_pool_after_winsorized_reduction(cp)
-            self._record_gpu_execution(
+            _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
                 workload_shape=workload_shape,
@@ -3108,7 +3133,7 @@ class SeestarQueuedStacker:
                     decision=decision,
                 )
             self._release_pool_after_winsorized_reduction(cp)
-            self._record_gpu_execution(
+            _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
                 workload_shape=workload_shape,
