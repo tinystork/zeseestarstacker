@@ -1,0 +1,216 @@
+{
+  "host_gpu": "NVIDIA GeForce MX150",
+  "cupy": "14.2.0",
+  "note": "Phase E spatial tiling profiler (exact-N_batch) - merged",
+  "sections": {
+    "equivalence_480x270": {
+      "bitwise": [
+        {
+          "n": 20,
+          "tile_shape": 128,
+          "bitwise": true
+        },
+        {
+          "n": 20,
+          "tile_shape": 7,
+          "bitwise": true
+        },
+        {
+          "n": 20,
+          "tile_shape": [
+            64,
+            96
+          ],
+          "bitwise": true
+        },
+        {
+          "n": 32,
+          "tile_shape": 128,
+          "bitwise": true
+        },
+        {
+          "n": 32,
+          "tile_shape": 7,
+          "bitwise": true
+        },
+        {
+          "n": 32,
+          "tile_shape": [
+            64,
+            96
+          ],
+          "bitwise": true
+        },
+        {
+          "n": 50,
+          "tile_shape": 128,
+          "bitwise": true
+        },
+        {
+          "n": 50,
+          "tile_shape": 7,
+          "bitwise": true
+        },
+        {
+          "n": 50,
+          "tile_shape": [
+            64,
+            96
+          ],
+          "bitwise": true
+        }
+      ],
+      "cpu_parity_tiled": [
+        {
+          "n": 20,
+          "ok": true,
+          "note": ""
+        },
+        {
+          "n": 32,
+          "ok": true,
+          "note": "bounded-ulp 1 px max 1.258"
+        },
+        {
+          "n": 50,
+          "ok": true,
+          "note": "bounded-ulp 2 px max 1.759"
+        }
+      ],
+      "rejected_pct": {
+        "n20": 18.10079079232331,
+        "n32": 22.409651948413224,
+        "n50": 24.383287898827085
+      }
+    },
+    "fit1080p_n20": {
+      "bitwise": true,
+      "tile_h": 192,
+      "full": {
+        "wall_ms": 7310.9,
+        "mem": {
+          "peak_live_mib": 1289.36,
+          "peak_pool_total_mib": 1638.5,
+          "min_driver_free_mib": 295.62
+        }
+      },
+      "tiled": {
+        "wall_ms": 13278.7,
+        "mem": {
+          "peak_live_mib": 239.06,
+          "peak_pool_total_mib": 413.89,
+          "min_driver_free_mib": 1519.62
+        },
+        "overhead_x": 1.816
+      }
+    },
+    "fit1080p_oom": [
+      {
+        "n": 32,
+        "full": {
+          "outcome": "OutOfMemoryError",
+          "run": null
+        },
+        "tiled_candidates": [
+          {
+            "tile_h": 540,
+            "outcome": "OK",
+            "wall_ms": 21124.0,
+            "mem": {
+              "peak_live_mib": 1028.32,
+              "peak_pool_total_mib": 1204.91,
+              "min_driver_free_mib": 731.62
+            },
+            "rejected_pct": 22.439
+          }
+        ],
+        "chosen": {
+          "tile_h": 540,
+          "outcome": "OK",
+          "wall_ms": 21124.0,
+          "mem": {
+            "peak_live_mib": 1028.32,
+            "peak_pool_total_mib": 1204.91,
+            "min_driver_free_mib": 731.62
+          },
+          "rejected_pct": 22.439
+        },
+        "cpu_parity_480x270": {
+          "ok": true,
+          "note": ""
+        }
+      },
+      {
+        "n": 50,
+        "full": {
+          "outcome": "OutOfMemoryError",
+          "run": null
+        },
+        "tiled_candidates": [
+          {
+            "tile_h": 384,
+            "outcome": "OK",
+            "wall_ms": 32597.0,
+            "mem": {
+              "peak_live_mib": 1110.94,
+              "peak_pool_total_mib": 1390.5,
+              "min_driver_free_mib": 543.62
+            },
+            "rejected_pct": 24.377
+          },
+          {
+            "tile_h": 270,
+            "outcome": "OK",
+            "wall_ms": 34270.0,
+            "mem": {
+              "peak_live_mib": 781.13,
+              "peak_pool_total_mib": 990.34,
+              "min_driver_free_mib": 943.62
+            },
+            "rejected_pct": 24.377,
+            "cross_shape_bitwise_vs_first": true
+          },
+          {
+            "tile_h": 192,
+            "outcome": "OK",
+            "wall_ms": 33909.0,
+            "mem": {
+              "peak_live_mib": 555.47,
+              "peak_pool_total_mib": 768.97,
+              "min_driver_free_mib": 1163.62
+            },
+            "rejected_pct": 24.377,
+            "cross_shape_bitwise_vs_first": true
+          },
+          {
+            "tile_h": 96,
+            "outcome": "OK",
+            "wall_ms": 33976.0,
+            "mem": {
+              "peak_live_mib": 277.73,
+              "peak_pool_total_mib": 493.35,
+              "min_driver_free_mib": 1443.62
+            },
+            "rejected_pct": 24.377,
+            "cross_shape_bitwise_vs_first": true
+          }
+        ],
+        "chosen": {
+          "tile_h": 270,
+          "outcome": "OK",
+          "wall_ms": 34270.0,
+          "mem": {
+            "peak_live_mib": 781.13,
+            "peak_pool_total_mib": 990.34,
+            "min_driver_free_mib": 943.62
+          },
+          "rejected_pct": 24.377
+        },
+        "cpu_parity_480x270": {
+          "ok": true,
+          "note": "bounded-ulp 1 px max 1.465 (strict-allclose would flag; documented ULP-boundary class)"
+        }
+      }
+    ]
+  }
+}
