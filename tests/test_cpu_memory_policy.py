@@ -157,7 +157,7 @@ def _policy_stack(tmp_path=None, *, request_gpu=False, available=64 * GIB,
 
 def _winsor_item(value, shape=(2, 2)):
     img = np.full(shape, value, dtype=np.float32)
-    mask = np.ones(shape, dtype=bool)
+    mask = np.ones(shape[:2], dtype=bool)
     hdr = __import__("astropy.io.fits", fromlist=["Header"]).Header()
     return (img, hdr, {"snr": 1.0, "stars": 0.0}, None, mask)
 
@@ -493,6 +493,13 @@ def test_spatial_tiled_dispatch_uses_exact_n_driver_with_planner_tile(
     def spy_tiled(images, weights=None, **_kw):
         seen["tile_shape"] = _kw.get("tile_shape")
         seen["max_mem_bytes"] = _kw.get("max_mem_bytes")
+        _kw["_retry_callback"](
+            attempt=1,
+            old_tile_shape=_kw["tile_shape"],
+            new_tile_shape=(max(1, int(_kw["tile_shape"][0]) // 2),),
+            reason="allocation_failure",
+            outcome="retrying",
+        )
         img0 = np.asarray(images[0])
         return (
             np.zeros(img0.shape, dtype=np.float32),
@@ -516,6 +523,119 @@ def test_spatial_tiled_dispatch_uses_exact_n_driver_with_planner_tile(
     assert len(dec_lines) == 1
     assert "strategy=spatial_tiled" in dec_lines[0]
     assert f"tile_shape={seen['tile_shape'][0]}" in dec_lines[0]
+    retry_lines = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_RETRY ")]
+    assert len(retry_lines) == 1
+    assert "attempt=1" in retry_lines[0]
+    assert "outcome=retrying" in retry_lines[0]
+
+
+def test_real_spatial_retry_recovers_and_batch_commits(
+    tmp_path, monkeypatch
+):
+    """The real spatial driver may recover by shrinking geometry; the queue
+    records that recovery and commits the successful batch normally."""
+    import seestar.core.cpu_winsor_exact_n as cw
+
+    o = _policy_stack(tmp_path, available=64 * GIB, total=64 * GIB,
+                      name="retry-commit")
+    o._cpu_memory_override_bytes_attr = 24 * MIB  # force RGB spatial tiling
+
+    # Match the transaction accumulators to this compact RGB witness.
+    shape = (64, 128, 3)
+    o.cumulative_sum_memmap = np.lib.format.open_memmap(
+        o.sum_memmap_path, mode="w+", dtype=np.float32, shape=shape
+    )
+    o.cumulative_wht_memmap = np.lib.format.open_memmap(
+        o.wht_memmap_path, mode="w+", dtype=np.float32, shape=shape
+    )
+    o.cumulative_sum_memmap[:] = 0.0
+    o.cumulative_wht_memmap[:] = 0.0
+    o.memmap_shape = shape
+    o.current_stack_header = None
+    o.correct_hot_pixels = False
+    o.total_exposure_seconds = 0.0
+    o._exposure_unknown_count = 0
+    o._exposure_min = None
+    o._exposure_max = None
+    o._checkpoint_mark_dirty = lambda: None
+    o._checkpoint_commit_batch = lambda: None
+
+    source_dir = tmp_path / "retry-input"
+    source_dir.mkdir()
+    paths = []
+    for i in range(20):
+        path = source_dir / f"obs-{i}.fit"
+        path.write_bytes(b"FITS")
+        paths.append(str(path))
+    o._current_batch_paths = paths
+
+    original_run = cw._run_tiled_geometry
+    calls = []
+
+    def fail_initial_then_run(images, frame_shape, spatial, *args, **kwargs):
+        calls.append((len(images), spatial[0]))
+        if len(calls) == 1:
+            raise MemoryError("deterministic initial tile allocation failure")
+        return original_run(images, frame_shape, spatial, *args, **kwargs)
+
+    monkeypatch.setattr(cw, "_run_tiled_geometry", fail_initial_then_run)
+    lines = _lines(o)
+    items = _winsor_batch(shape=shape, n_in=19)
+    o._process_completed_batch(items, 1, 1, None)
+
+    assert len(calls) == 2, lines
+    assert calls[0][0] == calls[1][0] == 20
+    assert o.stacked_batches_count == 1
+    assert o.images_in_cumulative_stack == 20
+    assert np.any(o.cumulative_wht_memmap > 0)
+    assert any(
+        line.startswith("CPU_WINSOR_MEMORY_RETRY ")
+        and "outcome=recovered" in line
+        for line in lines
+    )
+
+
+def test_real_spatial_retry_exhaustion_is_unconsumed(
+    tmp_path, monkeypatch
+):
+    """All legal allocation attempts fail: bounded refusal reaches the
+    transactional seam and leaves every source and committed counter intact."""
+    import seestar.core.cpu_winsor_exact_n as cw
+
+    o = _policy_stack(tmp_path, available=64 * GIB, total=64 * GIB,
+                      name="retry-exhaust")
+    o._cpu_memory_override_bytes_attr = 24 * MIB
+    source_dir = tmp_path / "exhaust-input"
+    source_dir.mkdir()
+    paths = []
+    for i in range(20):
+        path = source_dir / f"obs-{i}.fit"
+        path.write_bytes(b"FITS")
+        paths.append(str(path))
+    o._current_batch_paths = paths
+
+    calls = []
+
+    def always_oom(images, frame_shape, spatial, *args, **kwargs):
+        calls.append((len(images), spatial[0]))
+        raise MemoryError("deterministic allocation exhaustion")
+
+    monkeypatch.setattr(cw, "_run_tiled_geometry", always_oom)
+    lines = _lines(o)
+    items = _winsor_batch(shape=(64, 128, 3), n_in=19)
+    with pytest.raises(BatchReductionError):
+        o._process_completed_batch(items, 1, 1, None)
+
+    assert len(calls) == 5  # initial + default max_retries=4
+    assert all(n == 20 for n, _ in calls)
+    assert o.stacked_batches_count == 0
+    assert o.images_in_cumulative_stack == 0
+    assert all(os.path.exists(path) for path in paths)
+    assert not (source_dir / "stacked").exists()
+    retry_lines = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_RETRY ")]
+    assert len(retry_lines) == 5
+    assert "outcome=exhausted" in retry_lines[-1]
+    assert any(l.startswith("CPU_WINSOR_MEMORY_REFUSAL ") for l in lines)
 
 
 def test_refusal_raises_truthfully_through_stack_batch(tmp_path):

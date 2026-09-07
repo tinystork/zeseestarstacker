@@ -265,6 +265,8 @@ def cpu_winsor_retry_tokens(
     old_tile_shape,
     new_tile_shape,
     reason: str = "allocation_failure",
+    attempt: Optional[int] = None,
+    outcome: Optional[str] = None,
 ) -> dict:
     """CPU_WINSOR_MEMORY_RETRY record tokens (only on a bounded allocation
     retry; spatial tile shapes only)."""
@@ -275,11 +277,16 @@ def cpu_winsor_retry_tokens(
             return ",".join(str(int(d)) for d in shape)
         return str(int(shape))
 
-    return {
+    tokens = {
         "old_tile_shape": _shape_token(old_tile_shape),
         "new_tile_shape": _shape_token(new_tile_shape),
         "reason": reason,
     }
+    if attempt is not None:
+        tokens["attempt"] = int(attempt)
+    if outcome is not None:
+        tokens["outcome"] = str(outcome)
+    return tokens
 
 
 def cpu_winsor_refusal_tokens(

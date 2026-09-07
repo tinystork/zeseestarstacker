@@ -367,6 +367,14 @@ def plan_cpu_winsor_execution(
         "pool_workers": int(pool_workers),
         "resident_input_bytes": base_full,
         "input_cube_bytes": base_full,
+        # The empirical factor covers the materialized float32 cube for the
+        # selected execution geometry plus canonical reducer temporaries and
+        # coordination scratch.  SCI/WHT are full-frame outputs and are
+        # protected separately by the named two-frame serialization reserve;
+        # already-resident observations are not allocated or counted again.
+        "modeled_reducer_geometry": "full_or_spatial_tile",
+        "output_sci_wht_bytes": 2 * H * W * C * isz,
+        "output_accounting": "named_reserve",
     }
 
     def _full():

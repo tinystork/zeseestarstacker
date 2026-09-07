@@ -3531,6 +3531,12 @@ class SeestarQueuedStacker:
                 imgs, w, max_mem_bytes=budget, **kw
             )
         # SPATIAL_TILED_CPU -> stage-C exact-N spatial tiled driver.
+        def _record_spatial_retry(**retry):
+            self._emit_provenance_block(
+                "CPU_WINSOR_MEMORY_RETRY",
+                cpu_winsor_retry_tokens(**retry),
+            )
+
         try:
             return stack_winsorized_sigma_cpu_tiled(
                 imgs,
@@ -3538,25 +3544,10 @@ class SeestarQueuedStacker:
                 tile_shape=decision.tile_shape,
                 max_mem_bytes=budget,
                 min_tile_out=CPU_MIN_TILE_OUT,
+                _retry_callback=_record_spatial_retry,
                 **kw,
             )
         except CpuWinsorMemoryRefused as ref:
-            details = dict(getattr(ref, "details", None) or {})
-            attempts = int(details.get("attempts", 0) or 0)
-            if attempts >= 2:
-                # The driver performed a bounded spatial allocation retry
-                # (strictly smaller spatial tiles) before refusing: record the
-                # observed bounded retry exhaustion truthfully (spatial shapes
-                # only — N / reducer / kappa / winsor / weights are never
-                # retry knobs).
-                self._emit_provenance_block(
-                    "CPU_WINSOR_MEMORY_RETRY",
-                    cpu_winsor_retry_tokens(
-                        old_tile_shape=decision.tile_shape,
-                        new_tile_shape=None,
-                        reason="allocation_failure",
-                    ),
-                )
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_REFUSAL",
                 cpu_winsor_refusal_tokens(

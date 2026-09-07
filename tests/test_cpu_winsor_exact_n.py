@@ -279,6 +279,65 @@ def test_tiled_tile_order_invariance():
     assert a[2] == b[2]
 
 
+def test_spatial_path_never_stacks_complete_frames(monkeypatch):
+    """Structural guard: every np.stack request is spatially bounded."""
+    import seestar.core.cpu_winsor_exact_n as cw
+
+    imgs = _dataset(20, (32, 30), color=False, seed=41)
+    original_stack = np.stack
+    requested_shapes = []
+
+    def guarded_stack(arrays, *args, **kwargs):
+        shapes = [np.shape(a) for a in arrays]
+        requested_shapes.append(shapes)
+        assert shapes
+        assert all(shape[0] < 32 or shape[1] < 30 for shape in shapes), shapes
+        return original_stack(arrays, *args, **kwargs)
+
+    monkeypatch.setattr(cw.np, "stack", guarded_stack)
+    out = stack_winsorized_sigma_cpu_tiled(
+        imgs, None, tile_shape=(8,), return_weights=True
+    )
+    assert out[0].shape == (32, 30)
+    assert requested_shapes
+    assert all(len(shapes) == 20 for shapes in requested_shapes)
+
+
+def test_spatial_tile_slices_memmaps_before_materialization(tmp_path, monkeypatch):
+    """Memmapped observations remain full-frame mappings until tile slicing."""
+    import seestar.core.cpu_winsor_exact_n as cw
+
+    paths = []
+    images = []
+    for i in range(5):
+        path = tmp_path / f"obs-{i}.dat"
+        mm = np.memmap(path, mode="w+", dtype=np.float32, shape=(24, 20, 1))
+        mm[:] = i + np.arange(24 * 20, dtype=np.float32).reshape(24, 20, 1)
+        mm.flush()
+        images.append(np.memmap(path, mode="r", dtype=np.float32, shape=(24, 20, 1)))
+        paths.append(path)
+
+    original_stack = np.stack
+    saw_shared_tile_views = []
+
+    def spy_stack(arrays, *args, **kwargs):
+        saw_shared_tile_views.append(
+            all(np.shares_memory(a, images[j]) for j, a in enumerate(arrays))
+        )
+        assert all(np.shape(a) == (6, 20, 1) for a in arrays)
+        return original_stack(arrays, *args, **kwargs)
+
+    monkeypatch.setattr(cw.np, "stack", spy_stack)
+    result, wht, _ = stack_winsorized_sigma_cpu_tiled(
+        images, None, tile_shape=(6,), min_tile_out=96, return_weights=True
+    )
+    assert result.shape == (24, 20, 1)
+    assert wht.shape == (24, 20, 1)
+    assert np.array_equal(result, np.asarray(images[0]) + np.float32(2.0))
+    assert np.all(wht == np.float32(5.0))
+    assert saw_shared_tile_views and all(saw_shared_tile_views)
+
+
 def test_partial_final_band_and_rectangular_partials():
     """Partial last band / last column of a non-divisible frame stay exact."""
     imgs = _dataset(17, (23, 19), color=False, nan_frac=0.01, seed=11)
@@ -340,18 +399,29 @@ def test_memory_error_triggers_bounded_spatial_retry(monkeypatch):
     imgs = _dataset(20, (32, 30), color=False, seed=17)
     weights = np.ones(20, dtype=np.float32)
 
-    def always_oom(arr, mask, kappa_iter, lim):
+    calls = []
+    retries = []
+
+    def always_oom(images, frame_shape, spatial, *args, **kwargs):
+        calls.append((len(images), spatial[0]))
         raise MemoryError("simulated OOM in tile")
 
-    monkeypatch.setattr(cw, "_winsorized_sigma_iteration_body", always_oom)
+    monkeypatch.setattr(cw, "_run_tiled_geometry", always_oom)
     # a full-frame band (32,) would be a single tile and delegate to the
     # untiled twin (no retry vocabulary); use a genuinely multi-tile band so
     # the driver retries spatially until the geometry space is exhausted.
     with pytest.raises(CpuWinsorMemoryRefused) as ei:
         stack_winsorized_sigma_cpu_tiled(
-            imgs, weights, tile_shape=(16,), max_retries=8
+            imgs, weights, tile_shape=(16,), max_retries=2,
+            _retry_callback=lambda **event: retries.append(event),
         )
     assert ei.value.reason == REASON_MIN_TILE_EXCEEDS_BUDGET
+    assert len(calls) == 3  # initial + exactly max_retries smaller attempts
+    assert all(n == 20 for n, _ in calls)
+    assert [r["outcome"] for r in retries] == ["retrying", "retrying", "exhausted"]
+    assert [r["attempt"] for r in retries] == [1, 2, 3]
+    assert ei.value.details["attempts"] == 3
+    assert ei.value.details["max_retries"] == 2
 
 
 def test_memory_error_retry_succeeds_with_smaller_tile(monkeypatch):
@@ -359,6 +429,7 @@ def test_memory_error_retry_succeeds_with_smaller_tile(monkeypatch):
 
     imgs = _dataset(20, (32, 30), color=False, seed=17)
     orig = cw._winsorized_sigma_iteration_body
+    retries = []
 
     def fail_big_tile(arr, mask, kappa_iter, lim):
         # Fail only while the driver is processing the INITIAL 16-row band;
@@ -370,11 +441,40 @@ def test_memory_error_retry_succeeds_with_smaller_tile(monkeypatch):
     monkeypatch.setattr(cw, "_winsorized_sigma_iteration_body", fail_big_tile)
     ref = _full_ref(imgs, None, (0.05, 0.05), True)
     tiled = stack_winsorized_sigma_cpu_tiled(
-        imgs, None, tile_shape=(16,), max_retries=4, return_weights=True
+        imgs, None, tile_shape=(16,), max_retries=4, return_weights=True,
+        _retry_callback=lambda **event: retries.append(event),
     )
     assert np.array_equal(ref[0], tiled[0])
     assert np.array_equal(ref[1], tiled[1])
     assert ref[2] == tiled[2]
+    assert len(retries) == 2
+    assert retries[0]["attempt"] == 1
+    assert retries[0]["old_tile_shape"] == (16,)
+    assert retries[0]["new_tile_shape"] == (8, 30)
+    assert retries[0]["outcome"] == "retrying"
+    assert retries[1]["attempt"] == 2
+    assert retries[1]["new_tile_shape"] == (8, 30)
+    assert retries[1]["outcome"] == "recovered"
+
+
+def test_zero_retry_budget_means_initial_attempt_only(monkeypatch):
+    import seestar.core.cpu_winsor_exact_n as cw
+
+    imgs = _dataset(20, (32, 30), color=False, seed=18)
+    calls = []
+
+    def always_oom(images, frame_shape, spatial, *args, **kwargs):
+        calls.append(len(images))
+        raise MemoryError("initial allocation failure")
+
+    monkeypatch.setattr(cw, "_run_tiled_geometry", always_oom)
+    with pytest.raises(CpuWinsorMemoryRefused) as ei:
+        stack_winsorized_sigma_cpu_tiled(
+            imgs, None, tile_shape=(16,), max_retries=0
+        )
+    assert calls == [20]
+    assert ei.value.details["attempts"] == 1
+    assert ei.value.details["max_retries"] == 0
 
 
 def test_preflight_refusal_when_budget_below_model_demand():

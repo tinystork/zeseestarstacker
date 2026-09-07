@@ -43,9 +43,10 @@ Refusal / retry semantics
 * On a catchable ``MemoryError`` while running a candidate geometry, the
   driver retries with a strictly smaller SPATIAL tile (tile_h / tile_w only —
   N, reducer, kappa, winsor limits, normalization and weights are never
-  retry-mutable).  Retries are bounded (``max_retries``); refusal when the
-  smallest admissible tile (>= ``min_tile_out`` full-cell outputs) still
-  fails.
+  retry-mutable). ``max_retries`` means smaller-geometry attempts AFTER the
+  initial planned attempt, so total execution attempts are bounded by
+  ``max_retries + 1``; refusal follows exhaustion of that bound or of the
+  admissible geometry sequence.
 
 Fast path: the pure rank-0 detector
 (``cpu_memory_planner.winsor_zero_rank_regime``) selects the fast MEMORY
@@ -57,7 +58,7 @@ for both regimes).
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -283,8 +284,20 @@ def _winsorized_tile_finalize_np(
     return np.asarray(result, dtype=np.float32), np.asarray(sum_w, dtype=np.float32)
 
 
+def _materialize_spatial_tile(images, y0, y1, x0, x1):
+    """Materialize exactly one ``N x tile_h x tile_w [x C]`` float32 cube.
+
+    ``np.asarray`` on an ndarray or memmap is a zero-copy view; spatial
+    slicing therefore happens before ``np.stack`` allocates the tile cube.
+    In particular, this helper never asks NumPy to stack complete frames.
+    """
+    views = [np.asarray(image)[y0:y1, x0:x1, ...] for image in images]
+    return np.stack(views, axis=0).astype(np.float32, copy=False)
+
+
 def _run_tiled_geometry(
-    host,
+    images,
+    frame_shape,
     spatial,
     weights,
     kappa,
@@ -295,12 +308,13 @@ def _run_tiled_geometry(
 ):
     """Two-pass exact-N spatial reduction over ``spatial`` slices.
 
-    ``host`` is the stacked ``(N, H, W[, C])`` float32 array.  Returns
+    ``images`` contains the already-resident observations.  Only the current
+    spatial tile is stacked, independently in each pass.  Returns
     ``(result, sum_w, rejected_pct, z_eff)`` with exact placement.
     """
-    H, W = int(host.shape[1]), int(host.shape[2])
-    color = host.ndim == 4
-    out_shape = (H, W) + ((int(host.shape[3]),) if color else ())
+    H, W = int(frame_shape[0]), int(frame_shape[1])
+    trailing_shape = tuple(frame_shape[2:])
+    out_shape = (H, W) + trailing_shape
     result = np.empty(out_shape, dtype=np.float32)
     sum_w = np.empty(out_shape, dtype=np.float32)
 
@@ -311,7 +325,7 @@ def _run_tiled_geometry(
     else:
         global_counts = [0] * int(max_iters)
         for (y0, y1, x0, x1) in spatial:
-            arr_t = np.ascontiguousarray(host[:, y0:y1, x0:x1])
+            arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
             _, counts = _winsorized_tile_iterations_np(
                 arr_t, kappa, winsor_limits, int(max_iters), kappa_decay,
                 collect_counts=True,
@@ -329,7 +343,7 @@ def _run_tiled_geometry(
     n_valid_total = 0
     n_surv_total = 0
     for (y0, y1, x0, x1) in spatial:
-        arr_t = np.ascontiguousarray(host[:, y0:y1, x0:x1])
+        arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
         valid_t = ~np.isnan(arr_t)
         if z_eff == 0:
             mask_t = valid_t  # reference iteration 0 rejected nothing
@@ -369,6 +383,7 @@ def stack_winsorized_sigma_cpu_tiled(
     min_tile_out=CPU_MIN_TILE_OUT,
     max_retries=4,
     _tile_order="rowmajor",
+    _retry_callback: Optional[Callable[..., None]] = None,
 ):
     """Exact-N SPATIAL CPU tiling of the Winsorized sigma reduction.
 
@@ -385,17 +400,23 @@ def stack_winsorized_sigma_cpu_tiled(
     full-width row bands; ``(tile_h, tile_w)`` selects rectangular tiles.
     ``_tile_order`` is a test-only hook (``"rowmajor"`` / ``"reversed"``)
     proving tile-order invariance.  ``max_mem_bytes`` enables the
-    conservative preflight + bounded spatial retry on MemoryError; see the
-    module docstring for the refusal semantics.
+    conservative preflight + bounded spatial retry on MemoryError.
+    ``max_retries`` is the number of smaller-geometry execution attempts
+    allowed after the initial planned attempt (total attempts are therefore
+    at most ``max_retries + 1``).  ``_retry_callback`` is an internal
+    provenance seam called for every allocation recovery transition.
     """
     n = int(len(images))
     if n == 0:  # pragma: no cover - degenerate, mirrors CPU failure
         raise ValueError("tiled winsorized sigma requires at least one image")
-    host = np.stack([im for im in images], axis=0).astype(np.float32)
-    frame = host.shape[1:]
+    first = np.asarray(images[0])
+    if first.ndim not in (2, 3):
+        raise ValueError(
+            "tiled winsorized sigma expects HxW or HxWxC observations"
+        )
+    frame = first.shape
     H, W = int(frame[0]), int(frame[1])
-    color = host.ndim == 4
-    C = int(host.shape[3]) if color else 1
+    C = int(frame[2]) if first.ndim == 3 else 1
     budget = int(max_mem_bytes) if max_mem_bytes is not None else None
     spatial = winsor_tile_slices((H, W), tile_shape)
     if len(spatial) == 1:
@@ -479,25 +500,31 @@ def stack_winsorized_sigma_cpu_tiled(
             REASON_NO_VALID_TILE, details={"min_tile_out": int(min_tile_out)}
         )
 
+    executable_candidates = [cand for cand in candidates if _preflight(cand)]
+    if not executable_candidates:
+        raise CpuWinsorMemoryRefused(
+            REASON_MIN_TILE_EXCEEDS_BUDGET,
+            details={"max_mem_bytes": budget, "min_tile_out": int(min_tile_out)},
+        )
+
     last_memory_error = None
     attempts = 0
-    for cand in candidates:
-        if not _preflight(cand):
-            last_memory_error = CpuWinsorMemoryRefused(
-                REASON_MIN_TILE_EXCEEDS_BUDGET,
-                details={"tile_shape": tuple(cand) if isinstance(cand, (tuple, list)) else cand,
-                         "max_mem_bytes": budget},
-            )
-            continue
+    retry_budget = max(0, int(max_retries))
+    max_attempts = retry_budget + 1
+    attempted_shapes = []
+    bounded_candidates = executable_candidates[:max_attempts]
+    for candidate_index, cand in enumerate(bounded_candidates):
         attempts += 1
-        if attempts > int(max_retries) + len(candidates):
-            break
+        attempted_shapes.append(
+            tuple(cand) if isinstance(cand, (tuple, list)) else (int(cand),)
+        )
         try:
             spatial_cand = winsor_tile_slices((H, W), cand)
             if _tile_order == "reversed" and spatial_cand:
                 spatial_cand = list(reversed(spatial_cand))
             result, sum_w, rejected_pct, z_eff = _run_tiled_geometry(
-                host,
+                images,
+                frame,
                 spatial_cand,
                 weights,
                 kappa,
@@ -506,16 +533,42 @@ def stack_winsorized_sigma_cpu_tiled(
                 max_iters,
                 kappa_decay,
             )
+            if attempts > 1 and _retry_callback is not None:
+                _retry_callback(
+                    attempt=attempts,
+                    old_tile_shape=bounded_candidates[candidate_index - 1],
+                    new_tile_shape=cand,
+                    reason="allocation_failure",
+                    outcome="recovered",
+                )
             if return_weights:
                 return result, sum_w, rejected_pct
             return result, rejected_pct
         except MemoryError as mem_err:
             last_memory_error = mem_err
+            next_cand = (
+                bounded_candidates[candidate_index + 1]
+                if candidate_index + 1 < len(bounded_candidates)
+                else None
+            )
+            if _retry_callback is not None:
+                _retry_callback(
+                    attempt=attempts,
+                    old_tile_shape=cand,
+                    new_tile_shape=next_cand,
+                    reason="allocation_failure",
+                    outcome="retrying" if next_cand is not None else "exhausted",
+                )
             continue
 
     if isinstance(last_memory_error, CpuWinsorMemoryRefused):
         raise last_memory_error
     raise CpuWinsorMemoryRefused(
         REASON_MIN_TILE_EXCEEDS_BUDGET,
-        details={"attempts": attempts, "n": n},
+        details={
+            "attempts": attempts,
+            "max_retries": retry_budget,
+            "attempted_tile_shapes": attempted_shapes,
+            "n": n,
+        },
     )
