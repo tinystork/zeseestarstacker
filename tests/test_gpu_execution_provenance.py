@@ -45,6 +45,16 @@ def test_reason_token_maps_legacy_codes():
     assert _gpu_execution_reason_token("weird_code") == "weird_code"
 
 
+def test_execution_summary_prefix_is_durable():
+    """The GPU_EXECUTION_SUMMARY block must be throttle-exempt (durable) so
+    the shipped run log alone proves actual execution — not only the
+    GPU_DECISION policy admission.  Regression guard for the debounce-drop bug
+    reported on the RTX 3070 witness (summary absent from the durable log)."""
+    from seestar.queuep.queue_manager import _QM_DURABLE_REFERENCE_PREFIXES
+
+    assert "GPU_EXECUTION_SUMMARY " in _QM_DURABLE_REFERENCE_PREFIXES
+
+
 # ---------------------------------------------------------------------------
 # batch provenance tokens (B_requested / B_resolved / N_batch separation)
 # ---------------------------------------------------------------------------

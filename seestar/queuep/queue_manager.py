@@ -411,6 +411,11 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     "RUN_REQUEST ",
     "RUN_EFFECTIVE ",
     "GPU_DECISION ",
+    # Phase H (P6): the run-completion execution-truth aggregate must be
+    # durable too (throttle-exempt) so the shipped run log alone proves what
+    # actually executed (gpu_full/gpu_tiled/cpu_fallback + reasons), not just
+    # the policy admission in GPU_DECISION.
+    "GPU_EXECUTION_SUMMARY ",
 )
 
 
