@@ -506,9 +506,18 @@ def test_mean_has_no_production_tiled_or_memmap_dispatch(tmp_path, monkeypatch):
 
 
 def test_nonmean_families_do_dispatch_to_tiles_and_memmap(tmp_path, monkeypatch):
-    """median/kappa-sigma/linear_fit_clip/winsorized all reach
-    ``_combine_hq_by_tiles`` under tile/memmap conditions (memmap file is
-    created and then fully cleaned up by the release path)."""
+    """median/kappa-sigma/linear_fit_clip reach ``_combine_hq_by_tiles`` under
+    tile/memmap conditions (memmap file is created and then fully cleaned up
+    by the release path).
+
+    8.4.0 closure (E1 migration): winsorized-sigma is intentionally NOT in
+    that set anymore — the E1 automatic CPU memory policy REMOVED the
+    N-subgroup ``_combine_hq_by_tiles`` dispatch for Winsorized; it now
+    dispatches planner-driven FULL_CPU / SPATIAL_TILED_CPU (exact-N) through
+    the automatic CPU policy.  The winsorized row is asserted separately
+    below (policy dispatch reached, subgroup heuristic never called), while
+    the other non-mean families keep their documented-debt tiled/memmap
+    dispatch assertions unchanged."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     _, obs = rejection_set()
     snrs = _snrs(len(obs))
@@ -516,7 +525,6 @@ def test_nonmean_families_do_dispatch_to_tiles_and_memmap(tmp_path, monkeypatch)
         ("median", {}),
         ("kappa-sigma", {"kappa_low": 3.0, "kappa_high": 3.0}),
         ("linear_fit_clip", {}),
-        ("winsorized-sigma", {"winsor_limits": (0.2, 0.2)}),
     ]:
         items = [item(obs[i], snr=snrs[i]) for i in range(len(obs))]
         s = make_stack(
@@ -536,6 +544,46 @@ def test_nonmean_families_do_dispatch_to_tiles_and_memmap(tmp_path, monkeypatch)
         _release(V)
         assert seen.get("called"), f"{mode}: tiled/memmap dispatch not reached"
         _no_hq_files(tmp_path)
+
+    # Winsorized row (8.4.0 stage E1 migration): the same tiled/memmap storage
+    # conditions must route through the automatic CPU memory policy (planner
+    # FULL_CPU / SPATIAL_TILED_CPU, exact-N) — never through the removed
+    # ``_combine_hq_by_tiles`` N-subgroup heuristic.
+    items = [item(obs[i], snr=snrs[i]) for i in range(len(obs))]
+    s_w = make_stack(
+        "winsorized-sigma", norm="none", use_qw=True, max_hq_mem=100_000,
+        batch_size=1,
+        settings=types.SimpleNamespace(TILE_HEIGHT=8, batch_size=1),
+        winsor_limits=(0.2, 0.2),
+    )
+    # Deterministic automatic-policy RAM state (env-independent).
+    s_w._cpu_available_ram_bytes_override = 4 * 1024 ** 3
+    s_w._cpu_total_ram_bytes_override = 8 * 1024 ** 3
+    s_w._cpu_process_rss_bytes_override = 400 * 1024 ** 2
+    s_w._cpu_mem_policy_preflight = None
+    policy_seen = {"calls": 0}
+    policy_orig = s_w._run_cpu_winsor_policy
+
+    def _policy_spy(*a, **k):
+        policy_seen["calls"] += 1
+        return policy_orig(*a, **k)
+
+    s_w._run_cpu_winsor_policy = _policy_spy
+
+    def _explode(*a, **k):
+        raise AssertionError(
+            "winsorized must not dispatch _combine_hq_by_tiles "
+            "(E1 automatic CPU policy removed the N-subgroup path)"
+        )
+
+    s_w._combine_hq_by_tiles = _explode
+    V_w, _, W_w = s_w._stack_batch(items, 1, 1)
+    _release(V_w)
+    assert policy_seen["calls"] >= 1, (
+        "winsorized tiled/memmap conditions must reach the automatic CPU "
+        "policy dispatch"
+    )
+    _no_hq_files(tmp_path)
 
 
 # ===========================================================================

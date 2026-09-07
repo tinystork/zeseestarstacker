@@ -315,6 +315,143 @@ def test_six_silent_paths_legacy_default_unchanged(tmp_path, kind):
 
 
 # ---------------------------------------------------------------------------
+# 9. CLOSURE REWORK-1 (Nono C-2.1): a never-committed batch's source paths
+#    must never be swept (moved/ledgered) by a later commit — the helper
+#    scopes the run-level source ledger to the actually-committed batch.
+# ---------------------------------------------------------------------------
+
+def _valid_stack_result(shape=(4, 5, 3), n=2):
+    hdr = fits.Header()
+    hdr["NIMAGES"] = n
+    return (
+        np.ones(shape, dtype=np.float32),
+        hdr,
+        np.ones((shape[0], shape[1]), dtype=np.float32),
+    )
+
+
+def test_reproject_no_commit_paths_never_swept_by_later_commit(tmp_path):
+    """Nono C-2.1 reproject scenario: a mid-run reproject flush that
+    no-commits (unsolved reproject skip, batch dropped) must NOT have its
+    source paths consumed by a later successful commit (move_sources=True).
+    The never-committed sources stay in their input location, retryable; the
+    committed counter / count-file / cumulative reflect ONLY the committed
+    batch."""
+    o = _tx_stack(tmp_path, "nono_reproj")
+    o.reproject_between_batches = True
+    o.reproject_coadd_final = False
+    o._support_state_available = False
+    o.solve_batches = False
+    o._reproject_support_tracking_enabled = False
+    o.intermediate_classic_batch_files = []
+    o.unsolved_classic_batch_files = set()
+    src_dir = tmp_path / "input"
+    src_dir.mkdir(exist_ok=True)
+
+    def _write(name):
+        p = src_dir / name
+        p.write_bytes(b"\x00" * 32)
+        return str(p)
+
+    a_paths = [_write(f"a{i}.fit") for i in range(2)]
+    b_paths = [_write(f"b{i}.fit") for i in range(2)]
+    state = {"solved": False}
+
+    def fake_save_and_solve(*a, **k):
+        # Reproject solve outcome: mid-run batch unsolved (skip), later batch
+        # solved (commit).
+        o._last_classic_batch_solved = state["solved"]
+        return (None, None)
+
+    o._save_and_solve_classic_batch = fake_save_and_solve
+    o._stack_batch = lambda *a, **k: _valid_stack_result(n=2)
+
+    imgs = _images(n=2)
+    # Phase 1 — mid-run reproject flush: unsolved -> non-fatal no-commit; the
+    # caller (reproject in-loop) drops the in-memory batch.
+    items_a = [_item(im) for im in imgs]
+    o._current_batch_paths = list(a_paths)
+    committed = o._process_completed_batch(
+        items_a, 1, 1, None,
+        reproject_batch=True, move_sources=False, save_partial=True,
+        update_count_file=False, clear_paths=True,
+    )
+    assert committed is False
+    items_a.clear()  # historical in-loop drop of the in-memory batch
+    assert o.stacked_batches_count == 0
+    for p in a_paths:
+        assert os.path.exists(p)  # still in input, never moved
+
+    # Phase 2 — end-of-run reproject final-partial flush: a NEW batch commits
+    # with move_sources=True.  The stale never-committed paths must NOT be
+    # swept.
+    state["solved"] = True
+    o._current_batch_paths = list(a_paths) + list(b_paths)  # stale + new
+    items_b = [_item(im) for im in _images(n=2, seed=5)]
+    committed2 = o._process_completed_batch(
+        items_b, 2, 2, None,
+        reproject_batch=True, move_sources=True, save_partial=True,
+        update_count_file=True, update_meta=True, clear_paths=True,
+    )
+    assert committed2 is True
+    assert o.stacked_batches_count == 1
+    assert Path(o.batch_count_path).read_text(encoding="utf-8").strip() == "1"
+    assert o.images_in_cumulative_stack == 2  # only the committed batch
+    # Committed batch sources moved; never-committed sources REMAIN in input.
+    for p in b_paths:
+        assert not os.path.exists(p), "committed source must be consumed"
+        assert (src_dir / "stacked" / os.path.basename(p)).exists()
+    for p in a_paths:
+        assert os.path.exists(p), "never-committed source must NOT be moved"
+        assert not (src_dir / "stacked" / os.path.basename(p)).exists()
+    # Ledger was scoped to the committed batch then cleared (no stale residue).
+    assert o._current_batch_paths == []
+
+
+def test_classic_no_commit_retry_keeps_legitimate_consumption(tmp_path):
+    """Nono C-2.1 classic counterpart: a classic no-commit batch that is
+    RETAINED for retry must still be consumed by the later successful retry
+    commit (legitimate retry — ledger == items, no stale sweep)."""
+    o = _tx_stack(tmp_path, "nono_classic")
+    o._support_state_available = False
+    src_dir = tmp_path / "input"
+    src_dir.mkdir(exist_ok=True)
+
+    def _write(name):
+        p = src_dir / name
+        p.write_bytes(b"\x00" * 32)
+        return str(p)
+
+    a_path = _write("a.fit")
+    b_path = _write("b.fit")
+    a_img, b_img = _images(n=2)
+
+    # Batch 1: no reducer output (all filtered) -> False; classic keeps the
+    # in-memory batch AND its ledger paths for retry.
+    o._current_batch_paths = [a_path]
+    items = [_item(a_img)]
+    o._stack_batch = lambda *a, **k: (None, None, None)
+    assert o._process_completed_batch(items, 1, 2, None) is False
+    assert o.stacked_batches_count == 0
+    assert os.path.exists(a_path)
+
+    # Caller keeps the item; a second frame is appended; the retry flush now
+    # commits BOTH (ledger == items -> legitimate retry consumption).
+    items.append(_item(b_img))
+    o._current_batch_paths = [a_path, b_path]
+    o._stack_batch = lambda *a, **k: _valid_stack_result(n=2)
+    assert o._process_completed_batch(items, 2, 2, None) is True
+    assert o.stacked_batches_count == 1
+    assert o.images_in_cumulative_stack == 2
+    assert (src_dir / "stacked" / "a.fit").exists()
+    assert (src_dir / "stacked" / "b.fit").exists()
+    assert not os.path.exists(a_path)
+    assert not os.path.exists(b_path)
+
+
+
+
+# ---------------------------------------------------------------------------
 # 1. Real-pipeline conversion: a reducer-stage exception inside the REAL
 #    ``_stack_batch`` (mean path, support staging) is wrapped into
 #    BatchReductionError — never an ambiguous (None, None, None).

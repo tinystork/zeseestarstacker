@@ -96,6 +96,12 @@ def stack_disk_streaming(
 ) -> str:
     """Stack images from ``file_list`` using small row chunks.
 
+    NOTE (8.4.0 closure): standalone disk-streaming API — NOT a production
+    queue/GUI path and NOT part of the exact-N Winsorized guarantee (the
+    production Winsorized path is the planner-driven FULL_CPU / exact-N
+    SPATIAL_TILED_CPU dispatch).  Exercised by its own tests only; the queue
+    manager does not import it.
+
     Parameters
     ----------
     file_list : Sequence[str]

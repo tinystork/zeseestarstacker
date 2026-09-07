@@ -656,3 +656,68 @@ def test_decision_provenance_bounded_small_record():
         and not hasattr(v, "shape")
         for v in rec.values()
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. CLOSURE REWORK-1 (Nono false-cpu_budget_negative): the per-reduction
+#    reserve must never include the process-pool duplication overhead — a
+#    high configured ``max_stack_workers`` must not refuse a valid small batch
+#    on a low-RAM multi-core host.
+# ---------------------------------------------------------------------------
+
+def test_low_ram_high_workers_tiny_batch_never_refused(tmp_path):
+    """Real E1 capture + real ``_run_cpu_winsor_policy`` seam: with
+    ``max_stack_workers = 8`` (8-core-style) and only ~1.5 GiB available RAM,
+    a tiny valid Winsorized batch is NOT refused ``cpu_budget_negative`` — the
+    AUTO ceiling stays positive and the reserve stays <= available RAM (pool
+    duplication overhead is a preflight capability, excluded from the
+    per-reduction reserve)."""
+    o = _policy_stack(tmp_path, available=1500 * MIB, total=8 * GIB)
+    o.max_stack_workers = 8  # high configured worker count (prod default ~6)
+    pre = o._capture_cpu_memory_policy_preflight()
+    assert pre is not None
+    assert pre.mode == MODE_AUTO
+    assert pre.policy_ceiling_bytes > 0, "AUTO ceiling zeroed by pool overhead"
+    assert pre.reserve_bytes <= 1500 * MIB
+    assert pre.requested_budget_bytes is None
+
+    seen = {}
+
+    def spy_wrapper(images, weights=None, **kw):
+        seen["budget"] = kw.get("max_mem_bytes")
+        img0 = np.asarray(images[0])
+        return (
+            np.zeros(img0.shape, dtype=np.float32),
+            np.ones(img0.shape[:2], dtype=np.float32),
+            0.0,
+        )
+
+    o._stack_winsorized_sigma = spy_wrapper
+    imgs = [np.full((2, 2), 10.0, dtype=np.float32) for _ in range(4)] + [
+        np.full((2, 2), 1000.0, dtype=np.float32)
+    ]
+    # Real seam: no exception, FULL_CPU dispatch with a positive explicit
+    # budget (never cpu_budget_negative).
+    o._run_cpu_winsor_policy(
+        imgs, None, kappa=3.0, winsor_limits=(0.2, 0.2), return_weights=True
+    )
+    assert seen.get("budget") is not None
+    assert seen["budget"] > 0
+
+
+def test_preflight_record_excludes_pool_overhead_as_capability(tmp_path):
+    """MEMORY_POLICY records the pool worker count as a CAPABILITY quantity
+    (pool_overhead_excluded=true) — never silently double-counted into the
+    AUTO ceiling reserve."""
+    o = _policy_stack(tmp_path, available=2 * GIB, total=8 * GIB)
+    o.max_stack_workers = 8
+    lines = _lines(o)
+    pre = o._capture_cpu_memory_policy_preflight()
+    assert pre is not None
+    assert pre.policy_ceiling_bytes == max(
+        0, 2 * GIB - recommended_reserve_bytes(2 * GIB, 0, 1)
+    )
+    policy_lines = [l for l in lines if l.startswith("MEMORY_POLICY ")]
+    assert len(policy_lines) == 1
+    assert "pool_workers_capability=8" in policy_lines[0]
+    assert "pool_overhead_excluded=true" in policy_lines[0]

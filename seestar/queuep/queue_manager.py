@@ -317,7 +317,6 @@ from seestar.core.cpu_winsor_exact_n import (
     CpuWinsorMemoryRefused,
     stack_winsorized_sigma_cpu_tiled,
 )
-from seestar.core.streaming_stack import stack_disk_streaming
 
 try:
     from seestar.gui.settings import SettingsManager, TILE_HEIGHT
@@ -3398,16 +3397,24 @@ class SeestarQueuedStacker:
             override = self._cpu_memory_override_bytes()
             mode = MODE_OVERRIDE if override is not None else MODE_AUTO
             rss = self._cpu_process_rss_bytes()
-            pool_workers = max(
+            pool_capability = max(
                 1, int(getattr(self, "max_stack_workers", 1) or 1)
             )
+            # Closure REWORK-1 (Nono false-cpu_budget_negative): the AUTO
+            # ceiling reserve deliberately EXCLUDES the process-pool
+            # duplication overhead (448 MiB per extra worker).  That overhead
+            # is a per-worker capability quantity, NOT part of the per-run
+            # memory reserve: a high configured ``max_stack_workers`` must
+            # never zero the ceiling (or refuse tiny valid batches) on a
+            # low-RAM multi-core host.  It is recorded for provenance, never
+            # double-counted into the runtime reserve (the runtime decision
+            # also resolves with pool_workers=1).
             preflight = resolve_cpu_policy_preflight(
                 available_ram_preflight_bytes=available,
                 total_ram_bytes=total,
                 mode=mode,
                 requested_budget_bytes=override,
                 frame_bytes=0,
-                pool_workers=pool_workers,
             )
             self._cpu_mem_policy_preflight = preflight
             tokens = cpu_memory_policy_tokens(preflight)
@@ -3417,6 +3424,8 @@ class SeestarQueuedStacker:
                 getattr(self, "effective_backend", "cpu") or "cpu"
             )
             tokens["cpu_fallback_viable"] = "true"
+            tokens["pool_workers_capability"] = pool_capability
+            tokens["pool_overhead_excluded"] = "true"
             self._emit_provenance_block("MEMORY_POLICY", tokens)
             return preflight
         except Exception:
@@ -3475,9 +3484,13 @@ class SeestarQueuedStacker:
         if available is None:
             available = 0
         limits = tuple(kw.get("winsor_limits", self.winsor_limits))
-        pool_workers = max(
-            1, int(getattr(self, "max_stack_workers", 1) or 1)
-        )
+        # Closure REWORK-1 (Nono false-cpu_budget_negative): the per-reduction
+        # reserve NEVER includes the process-pool duplication overhead (448 MiB
+        # per extra worker) — a high configured ``max_stack_workers`` must not
+        # refuse a valid small batch on a low-RAM multi-core machine.  Pool
+        # duplication is a capability quantity recorded at preflight
+        # (``pool_workers_capability`` / ``pool_overhead_excluded``), not part
+        # of this reduction's effective budget.
         decision = resolve_cpu_winsor_decision(
             mode=mode,
             n=n,
@@ -3489,7 +3502,6 @@ class SeestarQueuedStacker:
             weighted=w is not None,
             available_ram_bytes=available,
             policy_ceiling_bytes=ceiling,
-            pool_workers=pool_workers,
         )
         self._emit_provenance_block(
             "CPU_WINSOR_MEMORY_DECISION",
@@ -11619,6 +11631,26 @@ class SeestarQueuedStacker:
             not (self.reproject_between_batches or self.reproject_coadd_final)
             or self._last_classic_batch_solved
         ):
+            # --- SCOPE the run-level source ledger to THIS batch before any
+            # commit bookkeeping (Nono C-2.1 closure).  ``_current_batch_paths``
+            # is an append-only run ledger kept in lockstep with the
+            # accumulated batch items since the last commit/clear.  When an
+            # earlier no-commit batch was dropped (e.g. the reproject in-loop
+            # flush drops its in-memory list on a non-fatal no-commit), its
+            # source paths can linger as a STALE PREFIX of this ledger.  Such
+            # never-committed paths must NEVER be ledgered (resume
+            # checkpoint), counted or physically moved by a later commit: only
+            # the trailing entries — this batch's own paths — take part in the
+            # commit.  The stale prefix is dropped here (its sources stay in
+            # their input location and remain retryable).  Classic keep-item
+            # retries keep ledger == items, so the slice is a no-op there and
+            # legitimate retry is preserved.
+            _n_batch = len(batch_items_to_stack)
+            _ledger = getattr(self, "_current_batch_paths", None)
+            if _ledger is not None and _n_batch > 0 and len(_ledger) > _n_batch:
+                self._current_batch_paths = list(
+                    _ledger[len(_ledger) - _n_batch:]
+                )
             # --- COMMIT --- the committed-batch counter advances exactly once,
             # immediately before the durable accumulation + resume checkpoint
             # (the checkpoint ledger/counters must include this batch).  Any

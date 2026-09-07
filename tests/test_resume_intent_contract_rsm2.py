@@ -100,9 +100,15 @@ def test_explicit_resume_flows_through_run_request():
 def test_attach_run_settings_preserves_intent():
     state = QtSettingsState(resume_intent="resume", resume_source="/data/runs")
     request = build_run_request(state)
-    attached = attach_run_settings(request, use_gpu=False, max_hq_mem_gb=8.0)
+    # 8.4.0 stage E2 / closure: attach_run_settings no longer accepts or
+    # forwards the legacy max_hq_mem_gb (AUTO CPU memory policy) — the legacy
+    # value must be absent from the request while intent fields and the
+    # remaining seams (use_gpu / reference_origin_hint) are preserved.
+    attached = attach_run_settings(request, use_gpu=False)
     assert attached.resume_intent == RUN_INTENT_RESUME
     assert attached.resume_source == "/data/runs"
+    assert "max_hq_mem_gb" not in attached.backend_kwargs
+    assert "max_hq_mem" not in attached.backend_kwargs
     # The original request is untouched.
     assert request.resume_intent == RUN_INTENT_RESUME
 
@@ -140,9 +146,13 @@ def test_backend_forwards_resume_intent_to_start_processing():
 
     backend = SeestarQueuedStackerBackend(stacker_factory=factory, poll_interval=0.001)
     state = QtSettingsState(resume_intent="resume", resume_source="/data/runs")
+    # 8.4.0 stage E2 / closure: max_hq_mem_gb is no longer a seam field — the
+    # legacy value is never attached or forwarded; intent fields and the
+    # remaining seams are preserved.
     request = attach_run_settings(
-        build_run_request(state), use_gpu=state.use_gpu, max_hq_mem_gb=state.max_hq_mem_gb
+        build_run_request(state), use_gpu=state.use_gpu
     )
+    assert "max_hq_mem_gb" not in request.backend_kwargs
 
     result = backend.run(request, lambda p: None, lambda m: None, lambda: False)
 
