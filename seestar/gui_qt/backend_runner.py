@@ -339,10 +339,14 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
         * ``use_gpu`` — GPU acceleration intent; the engine reads
           ``stacker.request_gpu`` and resolves its backend via
           ``AccelerationPolicy`` (GPU capability module ``core.gpu``).
-        * ``max_hq_mem_gb`` — HQ RAM limit in GB; the engine reads
-          ``stacker.max_hq_mem`` in bytes, so the GB value is converted here.
         * ``reference_origin_hint`` — ephemeral provenance for an explicit
           reference returned by ZeAnalyser versus one entered by the user.
+
+        8.4.0 stage E2: ``max_hq_mem_gb`` is deliberately NOT applied here —
+        AUTO is the CPU memory policy (stage E1 resolves the budget at
+        execution); a legacy persisted HQ RAM value must never silently become
+        the runtime budget.  An expert budget only enters through the explicit
+        ``ZSSS_CPU_MEMORY_OVERRIDE_BYTES`` env seam.
         """
         combine = seam_kwargs.get("stack_final_combine")
         if combine is not None:
@@ -358,9 +362,6 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
 
         if "use_gpu" in seam_kwargs:
             stacker.request_gpu = bool(seam_kwargs["use_gpu"])
-
-        if "max_hq_mem_gb" in seam_kwargs:
-            stacker.max_hq_mem = int(float(seam_kwargs["max_hq_mem_gb"]) * 1024 ** 3)
 
         stacker.reference_origin_hint = seam_kwargs.get("reference_origin_hint")
 

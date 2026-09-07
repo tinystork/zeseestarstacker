@@ -99,6 +99,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "boring_check": {"en": "Threaded Boring Stack", "fr": "Empilement Boring en thread"},
     "drizzle_check": {"en": "Enable drizzle", "fr": "Activer le drizzle"},
     "hq_ram_limit": {"en": "HQ RAM limit (GB)", "fr": "Limite RAM HQ (Go)"},
+    # 8.4.0 stage E2: HQ RAM limit is no longer a user-facing scientific
+    # control; AUTO is the CPU memory policy (read-only status row).
+    "cpu_memory_policy": {"en": "CPU memory policy", "fr": "Politique mémoire CPU"},
+    "cpu_memory_auto_status": {
+        "en": "Automatic (re-evaluated at execution)",
+        "fr": "Automatique (réévaluée à l'exécution)",
+    },
     "drizzle_use_gpu": {"en": "Use GPU", "fr": "Utiliser le GPU"},
     # Right panel.
     "preview_group": {"en": "Preview", "fr": "Aperçu"},

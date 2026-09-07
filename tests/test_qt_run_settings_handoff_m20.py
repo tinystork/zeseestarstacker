@@ -1,8 +1,8 @@
-"""M20 seam tests: Qt run-settings handoff (``use_gpu`` / ``max_hq_mem_gb``).
+"""M20 seam tests: Qt run-settings handoff (``use_gpu`` / ``reference_origin_hint``).
 
 Backend E2E part 1: the Qt run flow must consume the Qt-collected settings —
-at minimum ``use_gpu`` and ``max_hq_mem_gb`` (checklist 15.15 / 15.30 backend
-halves).  These tests pin, without touching the engine:
+at minimum ``use_gpu`` (checklist 15.15 / 15.30 backend halves).  These tests
+pin, without touching the engine:
 
 * the Qt handoff attaches the collected seam fields to the canonical
   ``RunRequest`` (inspectable in ``backend_kwargs``),
@@ -13,6 +13,11 @@ halves).  These tests pin, without touching the engine:
 * the Qt backend adapter applies the seam fields to the stacker *instance*
   (never forwards them to ``start_processing``),
 * the new handoff module preserves the gui_qt import-hygiene invariant.
+
+8.4.0 stage E2 migration: ``max_hq_mem_gb`` is NO LONGER a seam field — AUTO
+is the CPU memory policy; a legacy persisted HQ RAM value must never become
+the runtime budget (deliberate migration of the pre-E2 assertions that
+encoded the old default forwarding).
 
 No real stacking, no engine, no Tk, no FITS/PNG writes.
 """
@@ -87,21 +92,23 @@ def test_attach_run_settings_injects_seam_fields():
     attached = attach_run_settings(
         request,
         use_gpu=state.use_gpu,
-        max_hq_mem_gb=state.max_hq_mem_gb,
         reference_origin_hint="ZEANALYSER_V1",
     )
     assert attached.backend_kwargs["use_gpu"] is True
-    assert attached.backend_kwargs["max_hq_mem_gb"] == 16.0
     assert attached.backend_kwargs["reference_origin_hint"] == "ZEANALYSER_V1"
     # The seam fields are the Qt-collected values, verbatim.
     assert attached.backend_kwargs["use_gpu"] is state.use_gpu
+    # 8.4.0 stage E2: the legacy max_hq_mem_gb is NOT a seam field — AUTO is
+    # the CPU memory policy; a persisted legacy value never reaches the run.
+    assert "max_hq_mem_gb" not in attached.backend_kwargs
+    assert "max_hq_mem" not in attached.backend_kwargs
 
 
 def test_attach_run_settings_does_not_mutate_original_request():
     state = QtSettingsState(use_gpu=True, max_hq_mem_gb=16.0)
     request = build_run_request(state)
     before = dict(request.backend_kwargs)
-    attach_run_settings(request, use_gpu=True, max_hq_mem_gb=16.0)
+    attach_run_settings(request, use_gpu=True)
     # The original snapshot is untouched (still immutable, still no seam fields).
     assert dict(request.backend_kwargs) == before
     assert "use_gpu" not in request.backend_kwargs
@@ -109,13 +116,12 @@ def test_attach_run_settings_does_not_mutate_original_request():
 
 def test_main_window_build_run_request_carries_seam_settings(window):
     window.use_gpu_check.setChecked(True)
-    window.max_hq_mem_spin.setValue(32)
 
     request = window.build_run_request()
     assert isinstance(request, RunRequest)
     assert request.backend_kwargs["use_gpu"] is True
-    assert request.backend_kwargs["max_hq_mem_gb"] == 32.0
-    # The bytes conversion is NOT done in the snapshot (backend adapter's job).
+    # 8.4.0 stage E2: max_hq_mem_gb is no longer collected/forwarded.
+    assert "max_hq_mem_gb" not in request.backend_kwargs
     assert "max_hq_mem" not in request.backend_kwargs
 
 
@@ -174,13 +180,14 @@ def test_fallback_defaults_unchanged():
     attached = attach_run_settings(request)
     # A bare surface degrades to the Qt/Tk defaults.
     assert attached.backend_kwargs["use_gpu"] is False
-    assert attached.backend_kwargs["max_hq_mem_gb"] == 8.0
+    # Stage E2: no legacy HQ-RAM default is attached to the run request.
+    assert "max_hq_mem_gb" not in attached.backend_kwargs
 
 
 def test_main_window_defaults_carry_default_seam_settings(window):
     request = window.build_run_request()
     assert request.backend_kwargs["use_gpu"] is False
-    assert request.backend_kwargs["max_hq_mem_gb"] == 8.0
+    assert "max_hq_mem_gb" not in request.backend_kwargs
 
 
 # --------------------------------------------------------------------------
@@ -279,7 +286,7 @@ class _FakeStacker:
         self._running = False
 
 
-def test_backend_applies_seam_gpu_and_mem_to_stackers_instance():
+def test_backend_applies_seam_gpu_and_hint_to_stackers_instance():
     instances = []
 
     def factory(**kwargs):
@@ -292,7 +299,6 @@ def test_backend_applies_seam_gpu_and_mem_to_stackers_instance():
     request = attach_run_settings(
         build_run_request(state),
         use_gpu=state.use_gpu,
-        max_hq_mem_gb=state.max_hq_mem_gb,
         reference_origin_hint="ZEANALYSER_V1",
     )
 
@@ -302,14 +308,16 @@ def test_backend_applies_seam_gpu_and_mem_to_stackers_instance():
     stacker = instances[0]
     # Seam fields reached the stacker instance...
     assert stacker.request_gpu is True
-    assert stacker.max_hq_mem == 16 * 1024 ** 3
     assert stacker.reference_origin_hint == "ZEANALYSER_V1"
+    # 8.4.0 stage E2: the legacy HQ RAM value is NOT applied to the stacker
+    # (AUTO is the CPU memory policy; no silent legacy budget).
+    assert not hasattr(stacker, "max_hq_mem") or stacker.max_hq_mem is None
     # ...and were filtered out of the start_processing surface.
     assert "use_gpu" not in stacker.start_kwargs
     assert "max_hq_mem_gb" not in stacker.start_kwargs
 
 
-def test_backend_seam_defaults_leave_gpu_off_and_default_mem():
+def test_backend_seam_defaults_leave_gpu_off():
     instances = []
 
     def factory(**kwargs):
@@ -325,7 +333,8 @@ def test_backend_seam_defaults_leave_gpu_off_and_default_mem():
     assert result is BackendRunResult.FINISHED
     stacker = instances[0]
     assert stacker.request_gpu is False
-    assert stacker.max_hq_mem == 8 * 1024 ** 3
+    # Stage E2: no legacy max_hq_mem is forced on the instance.
+    assert not hasattr(stacker, "max_hq_mem") or stacker.max_hq_mem is None
 
 
 # --------------------------------------------------------------------------
@@ -346,12 +355,11 @@ class _RecordingBackend(BaseRunBackend):
         pass
 
 
-def test_offscreen_smoke_gpu_and_mem_reach_backend(qapp):
+def test_offscreen_smoke_gpu_reaches_backend(qapp):
     backend = _RecordingBackend()
     win = MainWindow(backend_factory=lambda: backend)
     try:
         win.use_gpu_check.setChecked(True)
-        win.max_hq_mem_spin.setValue(24)
         win.start_button.click()
         assert _pump_until(qapp, lambda: backend.request is not None)
         assert _pump_until(qapp, lambda: win.is_running is False)
@@ -359,18 +367,17 @@ def test_offscreen_smoke_gpu_and_mem_reach_backend(qapp):
         request = backend.request
         assert isinstance(request, RunRequest)
         assert request.backend_kwargs["use_gpu"] is True
-        assert request.backend_kwargs["max_hq_mem_gb"] == 24.0
+        # Stage E2: no HQ-RAM field on the run request (AUTO policy).
+        assert "max_hq_mem_gb" not in request.backend_kwargs
+        assert "max_hq_mem" not in request.backend_kwargs
     finally:
         win.shutdown()
 
 
 # --------------------------------------------------------------------------
-# (7) no new localization surface
+# (7) seam-field set pinned (stage E2: max_hq_mem_gb removed)
 # --------------------------------------------------------------------------
-def test_handoff_adds_no_localization_keys():
-    """The handoff layer adds no user-facing strings (nothing to localize)."""
-    assert QT_SEAM_FIELDS == (
-        "use_gpu",
-        "max_hq_mem_gb",
-        "reference_origin_hint",
-    )
+def test_handoff_seam_fields_exclude_legacy_mem():
+    """The handoff layer adds no user-facing strings (nothing to localize);
+    the seam-field set excludes the legacy max_hq_mem_gb (stage E2)."""
+    assert QT_SEAM_FIELDS == ("use_gpu", "reference_origin_hint")

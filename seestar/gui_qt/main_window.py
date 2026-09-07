@@ -1349,13 +1349,17 @@ class MainWindow(QMainWindow):
         )
         self.final_combine_combo.setCurrentText(default_label)
 
-        # HQ RAM limit (GB) — Tk ``max_hq_mem_var`` (Stacking tab).  Forwarded
-        # to the boring single-batch subprocess as ``--max-mem`` (M25) and to
-        # the regular run path as the M20 seam field ``max_hq_mem_gb``.
-        self.max_hq_mem_spin = QSpinBox()
-        self.max_hq_mem_spin.setRange(1, 64)
-        self.max_hq_mem_spin.setSingleStep(1)
-        self.max_hq_mem_spin.setValue(int(self.settings_state.max_hq_mem_gb))
+        # CPU memory policy (8.4.0 stage E2): AUTO is the product policy —
+        # the backend resolves the CPU memory budget at execution from the
+        # actual machine state (stage E1 policy engine), never from a
+        # user-estimated NumPy/SciPy working-set value.  The historical
+        # "HQ RAM limit (GB)" spinbox is REMOVED as a user-facing scientific
+        # control (not kept disabled: no code path may keep consuming its
+        # persisted value).  Read-only status only — no fixed byte-count
+        # promise, no new tuning knob.  Expert override stays an explicit
+        # CLI/env seam (ZSSS_CPU_MEMORY_OVERRIDE_BYTES), never a GUI knob.
+        self.cpu_memory_status_label = QLabel(self._tr("cpu_memory_auto_status"))
+        self._bind_text(self.cpu_memory_status_label, "cpu_memory_auto_status")
 
         self.drizzle_check = QCheckBox(self._tr("drizzle_check"))
         self._bind_text(self.drizzle_check, "drizzle_check")
@@ -1448,7 +1452,7 @@ class MainWindow(QMainWindow):
         form.addRow("", self.boring_check)
         self._add_form_row(form, "stacking_mode", self.stacking_mode_combo)
         self._add_form_row(form, "final_combine", self.final_combine_combo)
-        self._add_form_row(form, "hq_ram_limit", self.max_hq_mem_spin)
+        self._add_form_row(form, "cpu_memory_policy", self.cpu_memory_status_label)
         form.addRow("", self.drizzle_check)
         self._add_form_row(form, "drizzle_mode", self.drizzle_mode_combo)
         self._add_form_row(form, "drizzle_group_size", self.drizzle_group_spin)
@@ -2221,7 +2225,6 @@ class MainWindow(QMainWindow):
         self.batch_spin.valueChanged.connect(self._sync_state_from_controls)
         self.batch_spin.valueChanged.connect(self._on_batch_size_changed)
         self.boring_check.stateChanged.connect(self._on_boring_check_changed)
-        self.max_hq_mem_spin.valueChanged.connect(self._sync_state_from_controls)
         self.stacking_mode_combo.currentIndexChanged.connect(
             self._sync_state_from_controls
         )
@@ -2389,7 +2392,6 @@ class MainWindow(QMainWindow):
             normalize_method=str(state.stack_norm_method or "none"),
             save_final_as_float32=bool(state.save_final_as_float32),
             final_combine=str(state.stack_final_combine or "mean"),
-            max_mem_gb=float(state.max_hq_mem_gb),
             # F7: propagate only the BOOLEAN user intent across the process
             # boundary; the subprocess resolves its own probe/policy.
             request_gpu=bool(state.use_gpu),
@@ -5454,7 +5456,9 @@ class MainWindow(QMainWindow):
         state.drizzle_kernel = self.drizzle_kernel_combo.currentText()
         state.drizzle_pixfrac = self.drizzle_pixfrac_spin.value()
         state.use_gpu = self.use_gpu_check.isChecked()
-        state.max_hq_mem_gb = float(self.max_hq_mem_spin.value())
+        # 8.4.0 stage E2: the legacy HQ RAM value (``state.max_hq_mem_gb``) is
+        # read for migration/diagnostics only and is intentionally NOT synced
+        # from a removed UI control — AUTO is the CPU memory policy.
         state.local_solver_preference = self.solver_combo.currentText()
 
         # Final-combination business control drives the derived reproject flags
@@ -5559,7 +5563,6 @@ class MainWindow(QMainWindow):
             self.batch_spin,
             self.stacking_mode_combo,
             self.final_combine_combo,
-            self.max_hq_mem_spin,
             self.drizzle_check,
             self.drizzle_mode_combo,
             self.drizzle_group_spin,
@@ -5588,7 +5591,6 @@ class MainWindow(QMainWindow):
             label = FINAL_COMBINE_LABELS.get(state.stack_final_combine)
             if label is not None:
                 self.final_combine_combo.setCurrentText(label)
-            self.max_hq_mem_spin.setValue(int(state.max_hq_mem_gb))
             self.drizzle_check.setChecked(bool(state.use_drizzle))
             if state.drizzle_mode in DRIZZLE_MODES:
                 self.drizzle_mode_combo.setCurrentIndex(
@@ -5724,9 +5726,12 @@ class MainWindow(QMainWindow):
         This does **not** start the backend: it only collects the visible
         controls into a :class:`QtSettingsState` and forwards it to the
         Qt/Tk-independent ``run_config.build_run_request``, then attaches the
-        Qt-collected seam settings (``use_gpu`` / ``max_hq_mem_gb``) that the
-        canonical builder intentionally does not emit (M20).  The canonical
-        builder's output is unchanged, so the Tk flow stays byte-identical.
+        Qt-collected seam settings (``use_gpu`` / ``reference_origin_hint``)
+        that the canonical builder intentionally does not emit (M20).  The
+        canonical builder's output is unchanged, so the Tk flow stays
+        byte-identical.  8.4.0 stage E2: the legacy ``max_hq_mem_gb`` seam is
+        removed — AUTO is the CPU memory policy; an expert budget only enters
+        through the explicit ``ZSSS_CPU_MEMORY_OVERRIDE_BYTES`` env seam.
         """
         state = self._effective_settings_state()
         request = _build_run_request(
@@ -5738,7 +5743,6 @@ class MainWindow(QMainWindow):
         return attach_run_settings(
             request,
             use_gpu=bool(state.use_gpu),
-            max_hq_mem_gb=float(state.max_hq_mem_gb),
             reference_origin_hint=self._reference_origin_hint,
         )
 

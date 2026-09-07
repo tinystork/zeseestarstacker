@@ -621,7 +621,12 @@ def parse_args():
         "--max-mem",
         type=float,
         default=None,
-        help="Maximum HQ memory in GB (overrides SEESTAR_MAX_MEM)",
+        help=(
+            "Explicit expert CPU-memory override in GB (8.4.0: forwarded as "
+            "the provenance-visible OVERRIDE via "
+            "ZSSS_CPU_MEMORY_OVERRIDE_BYTES; normal runs use the automatic "
+            "CPU memory policy and omit this flag)"
+        ),
     )
     p.add_argument("--batch-size", type=int, default=1, help="Batch size")
     p.add_argument(
@@ -789,6 +794,13 @@ def _run_stack(args, progress_cb) -> int:
     if args.max_mem is not None:
         try:
             bytes_limit = int(float(args.max_mem) * 1024**3)
+            # 8.4.0 stage E2: an EXPLICIT --max-mem is an expert override —
+            # forward it through the provenance-visible OVERRIDE seam so the
+            # automatic CPU memory policy records mode=override /
+            # requested_budget_bytes and never silently treats it as the
+            # normal AUTO budget.  The legacy SEESTAR_MAX_MEM write is kept
+            # for the documented non-Winsorized debt path only.
+            os.environ["ZSSS_CPU_MEMORY_OVERRIDE_BYTES"] = str(bytes_limit)
             os.environ["SEESTAR_MAX_MEM"] = str(bytes_limit)
         except (ValueError, TypeError):
             bytes_limit = None

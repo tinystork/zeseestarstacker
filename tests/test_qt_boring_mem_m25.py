@@ -1,17 +1,14 @@
-"""M25 boring ``--max-mem`` delta tests.
+"""M25 boring ``--max-mem`` delta tests (8.4.0 stage E2 migration).
 
-The boring (single-batch CSV) route used to hardcode ``max_mem_gb=8.0``, so the
-user-configured "HQ RAM limit (GB)" (``QtSettingsState.max_hq_mem_gb``) was
-ignored by the subprocess launch even though the regular run path already
-forwarded it (M20 seam).  The Tk boring branch *does* forward the configured
-value::
-
-    "--max-mem", str(getattr(self.settings, "max_hq_mem_gb", 8)),
-
-where ``self.settings.max_hq_mem_gb`` is a float read from the ``max_hq_mem_var``
-``tk.DoubleVar`` (default ``8.0``).  So the Qt hardcode was a deviation from Tk,
-not a parity match.  This lot wires ``max_hq_mem_gb`` into the boring request
-while preserving the ``8.0`` default for callers that pass nothing.
+The boring (single-batch CSV) route historically forwarded the user-configured
+"HQ RAM limit (GB)" as ``--max-mem`` (Qt M25 wiring / Tk ``boring_stack``
+branch).  8.4.0 stage E2 removes HQ RAM as a user-facing scientific control:
+AUTO is the product CPU memory policy, so a NORMAL boring launch does NOT
+forward any memory value and the subprocess resolves its own automatic policy.
+Only an EXPLICIT expert override (``build_boring_request(max_mem_gb=...)``,
+CI/test/debug/RAM simulation) emits ``--max-mem``; the boring subprocess turns
+it into the provenance-visible OVERRIDE env seam
+(``ZSSS_CPU_MEMORY_OVERRIDE_BYTES``), never a silent default.
 
 No subprocess is ever spawned: every window under test injects a fake runner
 and asserts the argv built into the ``BoringRunRequest``.
@@ -100,85 +97,66 @@ def _start_and_get_request(win, fakes) -> BoringRunRequest:
 
 
 # --------------------------------------------------------------------------
-# (1) default: no memory value provided -> 8.0 fallback preserved
+# (1) normal boring: no memory value forwarded -> AUTO (--max-mem omitted)
 # --------------------------------------------------------------------------
-def test_build_boring_request_default_max_mem_fallback():
+def test_build_boring_request_default_omits_max_mem():
     req = build_boring_request(
         csv_path="/in/stack_plan.csv",
         output_dir="/out",
         python_executable="/usr/bin/python3",
     )
-    assert req.max_mem_gb == 8.0
-    assert _arg_after(req.command, "--max-mem") == "8.0"
-    # The structured field matches the argv value exactly.
-    assert _arg_after(req.command, "--max-mem") == str(req.max_mem_gb)
+    assert req.max_mem_gb is None
+    assert "--max-mem" not in req.command
 
 
-def test_boring_route_default_window_forwards_8_0(qapp, tmp_path):
-    """A bare window (untouched HQ-RAM spin) forwards the 8.0 default."""
+def test_boring_route_default_window_omits_max_mem(qapp, tmp_path):
+    """A bare window (normal product policy) launches boring under AUTO — no
+    HQ-RAM value is forwarded to the subprocess."""
     win, fakes = _prepare(tmp_path)
     try:
         req = _start_and_get_request(win, fakes)
-        assert req.max_mem_gb == 8.0
-        assert _arg_after(req.command, "--max-mem") == "8.0"
+        assert req.max_mem_gb is None
+        assert "--max-mem" not in req.command
     finally:
         win.shutdown()
 
 
 # --------------------------------------------------------------------------
-# (2) settings provide a value -> argv contains that value
+# (2) env override never leaks into argv (it is inherited by the subprocess
+#     and read by the engine as the provenance-visible OVERRIDE seam)
 # --------------------------------------------------------------------------
-def test_boring_route_forwards_configured_max_mem(qapp, tmp_path):
+def test_boring_route_env_override_does_not_add_argv_flag(qapp, tmp_path, monkeypatch):
     win, fakes = _prepare(tmp_path)
     try:
-        win.max_hq_mem_spin.setValue(4)
+        monkeypatch.setenv("ZSSS_CPU_MEMORY_OVERRIDE_BYTES", str(4 * 1024 ** 3))
         req = _start_and_get_request(win, fakes)
-        assert req.max_mem_gb == 4.0
-        assert _arg_after(req.command, "--max-mem") == "4.0"
-    finally:
-        win.shutdown()
-
-
-def test_boring_route_forwards_configured_max_mem_12(qapp, tmp_path):
-    win, fakes = _prepare(tmp_path)
-    try:
-        win.max_hq_mem_spin.setValue(12)
-        req = _start_and_get_request(win, fakes)
-        assert req.max_mem_gb == 12.0
-        assert _arg_after(req.command, "--max-mem") == "12.0"
+        # The explicit override travels through the environment (inherited by
+        # the boring subprocess), never through a normal GUI argv flag.
+        assert req.max_mem_gb is None
+        assert "--max-mem" not in req.command
     finally:
         win.shutdown()
 
 
 # --------------------------------------------------------------------------
-# (3) parity statement: Qt boring argv matches the Tk reference
+# (3) explicit expert override still forwards --max-mem
 # --------------------------------------------------------------------------
-def test_boring_max_mem_matches_tk_reference(qapp, tmp_path):
-    """Qt boring ``--max-mem`` == the Tk boring branch, value-for-value.
-
-    The Tk reference is ``str(getattr(self.settings, "max_hq_mem_gb", 8))``
-    with ``max_hq_mem_gb`` a float (default ``8.0``): Tk *always* forwards the
-    configured HQ-RAM value and never omits ``--max-mem``.  Qt must forward
-    ``float(state.max_hq_mem_gb)`` (default ``8.0``) — asserted here for both
-    the default and a configured value.
-    """
-    # Default case == Tk default 8.0 (float).
-    win1, fakes1 = _prepare(tmp_path)
+def test_boring_route_explicit_override_forwards_max_mem(qapp, tmp_path):
+    """An EXPLICIT expert override (CI/test/debug/RAM simulation) still emits
+    ``--max-mem``; the boring subprocess turns it into the provenance-visible
+    OVERRIDE seam — never a silent default."""
+    win, fakes = _prepare(tmp_path)
     try:
-        req = _start_and_get_request(win1, fakes1)
-        assert _arg_after(req.command, "--max-mem") == str(float(8))
-    finally:
-        win1.shutdown()
-
-    # Configured case is forwarded identically to Tk (float formatting).
-    win2, fakes2 = _prepare(tmp_path)
-    try:
-        win2.max_hq_mem_spin.setValue(16)
-        req = _start_and_get_request(win2, fakes2)
-        assert _arg_after(req.command, "--max-mem") == str(float(16))
+        req = build_boring_request(
+            csv_path=str(tmp_path / "inputs" / "stack_plan.csv"),
+            output_dir=str(tmp_path / "outputs"),
+            max_mem_gb=16.0,
+            python_executable="/py",
+        )
+        assert req.max_mem_gb == 16.0
         assert _arg_after(req.command, "--max-mem") == "16.0"
     finally:
-        win2.shutdown()
+        win.shutdown()
 
 
 # --------------------------------------------------------------------------

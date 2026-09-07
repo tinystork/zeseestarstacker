@@ -93,7 +93,7 @@ class BoringRunRequest:
     normalize_method: str = "none"
     save_final_as_float32: bool = False
     final_combine: str = "mean"
-    max_mem_gb: float = 8.0
+    max_mem_gb: Optional[float] = None
     request_gpu: bool = False
 
 
@@ -248,7 +248,7 @@ def build_boring_request(
     normalize_method: str = "none",
     save_final_as_float32: bool = False,
     final_combine: str = "mean",
-    max_mem_gb: float = 8.0,
+    max_mem_gb: Optional[float] = None,
     request_gpu: bool = False,
     python_executable: Optional[str] = None,
 ) -> BoringRunRequest:
@@ -259,7 +259,7 @@ def build_boring_request(
     * ``--csv`` / ``--out`` / ``--batch-size 1`` / ``--chunk-size`` (auto
       chunk logic) / ``--log-dir`` (``<output>/logs``) / ``--norm``
       (normalization) / ``--save-as-float32`` or ``--no-save-as-float32`` /
-      ``--final-combine`` (final-combine key) / ``--max-mem``.
+      ``--final-combine`` (final-combine key).
     * GPU intent (F7): only the BOOLEAN user intent crosses the subprocess
       boundary as ``--gpu`` / ``--no-gpu``; the subprocess resolves its OWN
       probe/policy (``SeestarQueuedStacker(gpu=...)`` →
@@ -268,11 +268,14 @@ def build_boring_request(
     ``python_executable`` defaults to :data:`sys.executable` (overridable in
     tests so the assertion never depends on the interpreter path).
 
-    ``max_mem_gb`` (default ``8.0``) is the HQ RAM limit forwarded verbatim as
-    ``--max-mem``.  The Tk boring branch always passes this value
-    (``str(getattr(self.settings, "max_hq_mem_gb", 8))``), so the Qt shell
-    passes ``float(state.max_hq_mem_gb)`` (default ``8.0``) for byte-identical
-    parity; the ``8.0`` default here only applies when a caller passes nothing.
+    8.4.0 stage E2: ``max_mem_gb`` is ``None`` by default and ``--max-mem`` is
+    then OMITTED — the boring subprocess runs under the automatic CPU memory
+    policy (AUTO), exactly like every normal product run.  The legacy HQ RAM
+    value is never forwarded as the normal policy.  Only an EXPLICIT expert
+    override (CI/test/debug/RAM simulation) sets ``max_mem_gb``, which emits
+    ``--max-mem``; the subprocess turns it into the provenance-visible
+    OVERRIDE seam (``ZSSS_CPU_MEMORY_OVERRIDE_BYTES``) — never a silent
+    default.
     """
     script_path = resolve_boring_script_path()
     command = [
@@ -284,8 +287,6 @@ def build_boring_request(
         output_dir,
         "--batch-size",
         str(batch_size),
-        "--max-mem",
-        str(max_mem_gb),
         "--chunk-size",
         str(chunk_size),
         "--log-dir",
@@ -297,6 +298,8 @@ def build_boring_request(
         str(final_combine),
         "--gpu" if request_gpu else "--no-gpu",
     ]
+    if max_mem_gb is not None:
+        command += ["--max-mem", str(max_mem_gb)]
     return BoringRunRequest(
         command=command,
         script_path=script_path,

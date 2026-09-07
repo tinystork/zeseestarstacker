@@ -186,9 +186,12 @@ class QtSettingsState:
     # the Tk ``SettingsManager.update_from_ui`` derivation.
     stack_final_combine: str = "mean"
     batch_size: int = 0
-    # HQ RAM limit (GB) for the single-batch / boring stack subprocess (Tk
-    # ``max_hq_mem_var``).  Forwarded to the boring CLI ``--max-mem`` (M25) and
-    # to the regular run path as the M20 seam field ``max_hq_mem_gb``.
+    # DEPRECATED (8.4.0 stage E2): historical "HQ RAM limit (GB)" value,
+    # kept ONLY for deterministic migration/diagnostics of persisted legacy
+    # configurations.  It is never forwarded to the run request / backend and
+    # never becomes the runtime budget — AUTO is the product CPU memory
+    # policy (stage E1); an expert budget only enters through the explicit
+    # ``ZSSS_CPU_MEMORY_OVERRIDE_BYTES`` env seam.
     max_hq_mem_gb: float = 8.0
     order_file_list: List[str] = field(default_factory=list)
 

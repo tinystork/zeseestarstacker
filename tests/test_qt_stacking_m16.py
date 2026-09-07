@@ -2,9 +2,11 @@
 
 Offscreen tests for the Stacking-tab closure (Tk ``tab_stacking`` → Qt):
 
-* every Stacking-tab control (including the newly added ``Use GPU`` checkbox
-  and the ``HQ RAM limit (GB)`` spinbox) exists as a real widget with the Tk
-  type / range / ``QtSettingsState`` default,
+* every Stacking-tab control (including the ``Use GPU`` checkbox) exists as a
+  real widget with the Tk type / range / ``QtSettingsState`` default,
+* 8.4.0 stage E2: the ``HQ RAM limit (GB)`` spinbox is REMOVED as a
+  user-facing scientific control and replaced by a read-only AUTO status row
+  (``cpu_memory_status_label``); no new tuning knob is introduced,
 * the Enable-drizzle checkbox gates the drizzle mode / group-size / GPU and the
   Stacking-tab Drizzle-advanced sub-options (scale / WHT threshold / kernel /
   pixfrac) exactly like the Tk ``_update_drizzle_options_state`` method, and
@@ -14,10 +16,11 @@ Offscreen tests for the Stacking-tab closure (Tk ``tab_stacking`` → Qt):
   preserve-luminosity sub-options (Tk ``_update_final_scnr_options_state``),
 * the newly added labels localize FR/EN via the Qt-local ``localization``
   module,
-* engine-coupled items (``use_gpu`` / ``max_hq_mem_gb``) exist in
+* engine-coupled items (``use_gpu``) exist in
   ``QtSettingsState``, round-trip through persistence, and (M20) are wired into
   the Qt run request as seam-only fields while ``build_backend_kwargs`` itself
-  stays unchanged (Tk parity),
+  stays unchanged (Tk parity); the legacy ``max_hq_mem_gb`` model field is kept
+  ONLY for migration/diagnostics and is never forwarded to a run request,
 * the Stacking tab has no reset button (the Tk Stacking tab has none).
 
 No real stacking, no engine, no Tk.  ``QT_QPA_PLATFORM=offscreen`` is set
@@ -79,11 +82,13 @@ def test_stacking_controls_exist_with_tk_ranges_and_defaults(window):
     assert isinstance(window.use_gpu_check, QCheckBox)
     assert window.use_gpu_check.isChecked() is defaults["use_gpu"]  # False
 
-    assert isinstance(window.max_hq_mem_spin, QSpinBox)
-    assert window.max_hq_mem_spin.minimum() == 1
-    assert window.max_hq_mem_spin.maximum() == 64
-    assert window.max_hq_mem_spin.singleStep() == 1
-    assert window.max_hq_mem_spin.value() == int(defaults["max_hq_mem_gb"])  # 8
+    # 8.4.0 stage E2: the HQ RAM spinbox is REMOVED as a user-facing control...
+    assert not hasattr(window, "max_hq_mem_spin")
+    # ...and replaced by a read-only AUTO status row (no new tuning knob).
+    from PySide6.QtWidgets import QLabel
+
+    assert isinstance(window.cpu_memory_status_label, QLabel)
+    assert not hasattr(window, "cpu_memory_status_combo")  # no new knob
 
     # Part C: the architecture hint ("Standard and Large dataset share the same
     # M3 accumulator...") was removed from the Qt UI; the attribute must not
@@ -197,8 +202,18 @@ def test_drizzle_scale_supports_runtime_effective_x1_through_x4(window):
 # (1b) newly added labels localize FR/EN
 # --------------------------------------------------------------------------
 def test_stacking_new_labels_localize_fr_en(window):
-    assert localization.translate("hq_ram_limit", "en") == "HQ RAM limit (GB)"
-    assert localization.translate("hq_ram_limit", "fr") == "Limite RAM HQ (Go)"
+    assert localization.translate(
+        "cpu_memory_policy", "en"
+    ) == "CPU memory policy"
+    assert localization.translate(
+        "cpu_memory_policy", "fr"
+    ) == "Politique mémoire CPU"
+    assert localization.translate(
+        "cpu_memory_auto_status", "en"
+    ) == "Automatic (re-evaluated at execution)"
+    assert localization.translate(
+        "cpu_memory_auto_status", "fr"
+    ) == "Automatique (réévaluée à l'exécution)"
     assert localization.translate("drizzle_use_gpu", "en") == "Use GPU"
     assert localization.translate("drizzle_use_gpu", "fr") == "Utiliser le GPU"
 
@@ -216,7 +231,12 @@ def test_stacking_new_labels_localize_fr_en(window):
 
 
 def test_stacking_localization_keys_have_full_parity():
-    for key in ("hq_ram_limit", "drizzle_use_gpu", "drizzle_group_size"):
+    for key in (
+        "cpu_memory_policy",
+        "cpu_memory_auto_status",
+        "drizzle_use_gpu",
+        "drizzle_group_size",
+    ):
         entry = localization.TRANSLATIONS[key]
         assert set(entry) == {"en", "fr"}, key
         assert entry["en"] and entry["fr"], key
@@ -327,25 +347,26 @@ def test_scnr_enabler_gating(window):
 # --------------------------------------------------------------------------
 def test_engine_coupled_items_are_wired_into_run_request(window):
     window.use_gpu_check.setChecked(True)
-    window.max_hq_mem_spin.setValue(32)
 
     state = window.collect_settings_state()
-    # They exist in the model (persisted/collected like Tk)...
+    # ``use_gpu`` exists in the model (persisted/collected like Tk)...
     assert state.use_gpu is True
-    assert state.max_hq_mem_gb == 32.0
+    # ...the legacy HQ-RAM model field is retained for migration only and is
+    # never set from a removed UI control (stays at its persisted/default
+    # value; it is never forwarded to the run request).
 
-    # ...and M20 wires them into the Qt run request as seam-only fields.  The
-    # byte conversion (``max_hq_mem``) happens in the backend adapter, not in
-    # the snapshot, so the request still carries the GB value.
+    # ...and M20 wires the GPU intent into the Qt run request as a seam-only
+    # field.  The legacy max_hq_mem_gb is NOT forwarded (stage E2).
     kw = window.build_run_request().backend_kwargs
     assert kw["use_gpu"] is True
-    assert kw["max_hq_mem_gb"] == 32.0
+    assert "max_hq_mem_gb" not in kw
     assert "max_hq_mem" not in kw
 
 
 def test_engine_coupled_fields_persist_round_trip():
     defaults = QtSettingsState.defaults()
     assert defaults["use_gpu"] is False
+    # Legacy migration carrier still round-trips (diagnostics only).
     assert defaults["max_hq_mem_gb"] == 8.0
 
     state = QtSettingsState()
@@ -360,7 +381,6 @@ def test_engine_coupled_fields_do_not_mutate_preview_source(window):
     """Exercising the new controls never touches ``_preview_source``."""
     before = window._preview_source
     window.use_gpu_check.setChecked(True)
-    window.max_hq_mem_spin.setValue(16)
     window.drizzle_check.setChecked(True)
     window.drizzle_mode_combo.setCurrentText("Large dataset")
     window.drizzle_group_spin.setValue(99)
