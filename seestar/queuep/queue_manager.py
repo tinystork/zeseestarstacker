@@ -1917,7 +1917,18 @@ def _reproject_worker(
 
 
 def _stack_worker(args):
-    """Worker for heavy stacking computations."""
+    """Worker for heavy stacking computations.
+
+    The args tuple is ``(mode, images, weights, kappa_low, kappa_high,
+    winsor_limits, apply_rewinsor, return_weights[, max_mem_bytes])``.  The
+    optional 9th field carries the RESOLVED byte budget of the production
+    queue Winsorized wrapper; the worker forwards it VERBATIM to the core
+    ``_stack_winsorized_sigma`` (stage C budget contract) so the deep core
+    guard sees the exact outer value (no silent 1/2 GiB / env fallback on
+    the production path).  An 8-field tuple is tolerated ONLY for legacy
+    non-production direct callers (``max_mem_bytes=None`` -> core resolves
+    its documented standalone env default).
+    """
     (
         mode,
         images,
@@ -1927,7 +1938,8 @@ def _stack_worker(args):
         winsor_limits,
         apply_rewinsor,
         return_weights,
-    ) = args
+    ) = args[:8]
+    max_mem_bytes = args[8] if len(args) >= 9 else None
 
     from seestar.core.stack_methods import (
         _stack_kappa_sigma,
@@ -1944,6 +1956,7 @@ def _stack_worker(args):
             kappa=max(kappa_low, kappa_high),
             winsor_limits=winsor_limits,
             apply_rewinsor=apply_rewinsor,
+            max_mem_bytes=max_mem_bytes,
             return_weights=return_weights,
         )
         gc.collect()  # FIX MEMLEAK
@@ -13131,13 +13144,27 @@ class SeestarQueuedStacker:
         kappa=3.0,
         winsor_limits=(0.05, 0.05),
         apply_rewinsor=True,
-        max_mem_bytes=int(os.getenv("SEESTAR_MAX_MEM", 1_000_000_000)),
+        max_mem_bytes=None,
         return_weights=False,
     ):
-        """Run winsorized sigma clipping in a separate process."""
+        """Run winsorized sigma clipping in a separate process.
+
+        Stage C budget contract: the byte budget is resolved ONCE here
+        (explicit argument wins; only a non-production caller that omits it
+        reaches the documented ``SEESTAR_MAX_MEM`` / 1 GiB fallback) and is
+        threaded through the worker tuple as an explicit 9th field, so the
+        direct call and the ``ProcessPoolExecutor`` submit carry the SAME
+        resolved value into the core primitive (no silent 2 GiB default at
+        the deep boundary).
+        """
         self.update_progress(
             f"RejWinsor: kappa={kappa}, limits={winsor_limits}, apply_rewinsor={apply_rewinsor}",
             None,
+        )
+        budget = (
+            int(max_mem_bytes)
+            if max_mem_bytes is not None
+            else int(os.getenv("SEESTAR_MAX_MEM", 1_000_000_000))
         )
         stack_args = (
             "winsorized-sigma",
@@ -13148,12 +13175,13 @@ class SeestarQueuedStacker:
             winsor_limits,
             apply_rewinsor,
             return_weights,
+            budget,
         )
 
         cube_bytes = sum(img.nbytes for img in images)
-        if cube_bytes > max_mem_bytes:
+        if cube_bytes > budget:
             raise RuntimeError(
-                f"Stack exceeds max_mem_bytes ({cube_bytes} > {max_mem_bytes})"
+                f"Stack exceeds max_mem_bytes ({cube_bytes} > {budget})"
             )
         total_bytes = sum(getattr(img, "nbytes", 0) for img in images)
 

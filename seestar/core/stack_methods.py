@@ -1,6 +1,7 @@
 # Stacking algorithms duplicated from ZeMosaic
 
 import os
+import math
 import numpy as np
 import logging
 import warnings
@@ -253,6 +254,101 @@ def _stack_linear_fit_clip(images, weights=None, sigma=3.0, return_weights=False
     return result, rejected_pct
 
 
+def _winsor_schedule_kappas(kappa, kappa_decay, n_iters):
+    """Kappa of every scheduled iteration, bitwise as in the reference.
+
+    The reference narrows kappa ONLY when ``kappa_decay < 1.0`` and only
+    after a rejecting iteration, so along a run that never stopped early
+    iteration ``i`` uses ``kappa * kappa_decay**i`` (``i = 0`` uses the
+    bare ``float(kappa)`` initialisation, bitwise identical to the
+    ``* 1.0`` product).  With ``kappa_decay >= 1.0`` the band never
+    narrows and every iteration uses ``float(kappa)``.
+
+    This is the neutral schedule seam used by the exact-N spatial tiled
+    driver (pass 1 schedule discovery / pass 2 replay); the FULL_CPU loop
+    consumes the same schedule with its historical early-exit semantics.
+    """
+    k = float(kappa)
+    if not (float(kappa_decay) < 1.0):
+        return [k] * int(n_iters)
+    return [k * (float(kappa_decay) ** i) for i in range(int(n_iters))]
+
+
+def _winsorized_sigma_iteration_body(arr, mask, kappa_iter, winsor_limits):
+    """One neutral Winsorized-sigma schedule iteration (no early exit).
+
+    Verbatim mirror of the canonical loop body: winsorize (NumPy fallback or
+    SciPy opt-in path) -> NANMEAN/NANSTD with the documented
+    ``n_valid_col <= 1 -> sigma = 0`` rule -> ``low/high`` band -> mask
+    update.  Returns ``(new_mask, n_rej)``; ``n_rej`` is the LOCAL per-
+    iteration rejection count over this array (int).  The FULL_CPU loop
+    keeps its historical early-exit and calls this helper; the exact-N
+    spatial driver calls it on every tile with the full ``N`` stack axis
+    preserved.
+    """
+    if SCIPY_AVAILABLE:
+        arr_masked = np.ma.array(arr, mask=~mask)
+        arr_w = _scipy_winsorize(
+            arr_masked,
+            limits=winsor_limits,
+            axis=0,
+            inclusive=(True, True),
+        )
+        arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
+        # scipy.stats.mstats.winsorize clears the mask and overwrites the
+        # masked (missing / previously rejected) entries with the high
+        # winsor bound.  Restore the current iteration mask so those
+        # entries stay NaN and remain excluded from the location/scale
+        # statistics computed below (matches the NumPy fallback).
+        arr_w_data[~mask] = np.nan
+    else:
+        arr_masked = np.where(mask, arr, np.nan)
+        arr_w_data = _winsorize_axis0_numpy(arr_masked, winsor_limits)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mu_w = NANMEAN(arr_w_data, axis=0)
+        sigma_w = NANSTD(arr_w_data, axis=0, ddof=1)
+
+    # A column with fewer than two valid samples has an undefined sample
+    # standard deviation (``nanstd(..., ddof=1)`` is NaN for a single valid
+    # sample, and NaN for zero).  A NaN sigma would make ``low``/``high``
+    # NaN and reject the only valid sample; rewinsorization over the
+    # resulting empty survivor set then yields non-finite bounds.  Since
+    # statistical clipping is undefined for <=1 valid sample, treat those
+    # columns as a no-rejection identity: sigma == 0 makes low == high == mu
+    # so the lone valid sample is always kept.  Zero-valid columns already
+    # have mask all-False and remain non-contributing regardless.
+    n_valid_col = np.count_nonzero(mask, axis=0)
+    sigma_w = np.where(n_valid_col <= 1, np.float32(0.0), sigma_w)
+
+    low = mu_w - kappa_iter * sigma_w
+    high = mu_w + kappa_iter * sigma_w
+    new_mask = mask & (arr >= low) & (arr <= high)
+    n_rej = int(np.count_nonzero(mask)) - int(np.count_nonzero(new_mask))
+    return new_mask, n_rej
+
+
+def _winsor_zero_rank_regime(limits, n):
+    """Pure rank-0 detector (local equivalent of the planner predicate).
+
+    ``floor(limit * n) == 0`` on both sides => winsorization is the identity
+    on every pixel/iteration (per-pixel ``n_valid <= n``).  Negative or
+    non-finite limits never qualify (mirrors the canonical helper: a
+    negative limit means *no winsorization on that side*).  Weighted /
+    unweighted does not change the regime (weights do not alter valid
+    counts).  Mathematically equivalent to
+    ``seestar.core.cpu_memory_planner.winsor_zero_rank_regime``.
+    """
+    low, high = float(limits[0]), float(limits[1])
+    if not (low >= 0.0 and high >= 0.0):
+        return False
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return False
+    n_int = int(n)
+    return math.floor(low * n_int) == 0 and math.floor(high * n_int) == 0
+
+
 def _stack_winsorized_sigma_iter(
     images: Sequence[np.ndarray],
     weights: Optional[np.ndarray],
@@ -261,7 +357,7 @@ def _stack_winsorized_sigma_iter(
     apply_rewinsor: bool = True,
     max_iters: int = 5,
     kappa_decay: float = 0.9,
-    max_mem_bytes: int = int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000)),
+    max_mem_bytes: Optional[int] = None,
     return_weights: bool = False,
 ) -> Tuple[np.ndarray, float]:
 
@@ -286,7 +382,14 @@ def _stack_winsorized_sigma_iter(
     kappa_decay : float, optional
         Multiplicative decay for ``kappa`` at each iteration.
     max_mem_bytes : int, optional
-        Abort if stacking would exceed this memory usage.
+        Abort if stacking would exceed this memory usage.  ``None`` (the
+        default) resolves to ``int(os.getenv("SEESTAR_MAX_MEM",
+        2_000_000_000))`` — a backward-compatible default intended ONLY for
+        non-production standalone callers (e.g. ``streaming_stack`` and
+        direct tests).  The production queue path always resolves one byte
+        budget in the queue Winsorized wrapper and threads it through the
+        worker tuple verbatim (stage C budget contract), so it can never
+        silently trigger this fallback.
     return_weights : bool, optional
         When ``True`` return ``(result, W, rejected_pct)`` where ``W`` is the
         effective denominator (matching the ``apply_rewinsor`` definition).
@@ -304,9 +407,15 @@ def _stack_winsorized_sigma_iter(
         apply_rewinsor,
     )
 
+    budget = (
+        int(max_mem_bytes)
+        if max_mem_bytes is not None
+        else int(os.getenv("SEESTAR_MAX_MEM", 2_000_000_000))
+    )
+
     shape = images[0].shape
     exp_bytes = len(images) * np.prod(shape) * 4
-    if exp_bytes > max_mem_bytes:
+    if exp_bytes > budget:
         raise MemoryError("Stack exceeds max_mem_bytes")
 
     arr = np.stack([im.astype(np.float32, copy=False) for im in images], axis=0)
@@ -314,49 +423,12 @@ def _stack_winsorized_sigma_iter(
     # Missing samples are excluded from the very first iteration.
     mask = ~np.isnan(arr)
     valid = mask
-    kappa_iter = float(kappa)
+    kappas = _winsor_schedule_kappas(kappa, kappa_decay, max_iters)
 
-    for itr in range(max_iters):
-        if SCIPY_AVAILABLE:
-            arr_masked = np.ma.array(arr, mask=~mask)
-            arr_w = _scipy_winsorize(
-                arr_masked,
-                limits=winsor_limits,
-                axis=0,
-                inclusive=(True, True),
-            )
-            arr_w_data = np.asarray(arr_w.filled(np.nan), dtype=np.float32)
-            # scipy.stats.mstats.winsorize clears the mask and overwrites the
-            # masked (missing / previously rejected) entries with the high
-            # winsor bound.  Restore the current iteration mask so those
-            # entries stay NaN and remain excluded from the location/scale
-            # statistics computed below (matches the NumPy fallback).
-            arr_w_data[~mask] = np.nan
-        else:
-            arr_masked = np.where(mask, arr, np.nan)
-            arr_w_data = _winsorize_axis0_numpy(arr_masked, winsor_limits)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            mu_w = NANMEAN(arr_w_data, axis=0)
-            sigma_w = NANSTD(arr_w_data, axis=0, ddof=1)
-
-        # A column with fewer than two valid samples has an undefined sample
-        # standard deviation (``nanstd(..., ddof=1)`` is NaN for a single valid
-        # sample, and NaN for zero).  A NaN sigma would make ``low``/``high``
-        # NaN and reject the only valid sample; rewinsorization over the
-        # resulting empty survivor set then yields non-finite bounds.  Since
-        # statistical clipping is undefined for <=1 valid sample, treat those
-        # columns as a no-rejection identity: sigma == 0 makes low == high == mu
-        # so the lone valid sample is always kept.  Zero-valid columns already
-        # have mask all-False and remain non-contributing regardless.
-        n_valid_col = np.count_nonzero(mask, axis=0)
-        sigma_w = np.where(n_valid_col <= 1, np.float32(0.0), sigma_w)
-
-        low = mu_w - kappa_iter * sigma_w
-        high = mu_w + kappa_iter * sigma_w
-        new_mask = mask & (arr >= low) & (arr <= high)
-        n_rej = np.count_nonzero(mask) - np.count_nonzero(new_mask)
+    for itr in range(int(max_iters)):
+        new_mask, n_rej = _winsorized_sigma_iteration_body(
+            arr, mask, kappas[itr], winsor_limits
+        )
         logger.debug(
             "WinsorSig iter=%d : rej=%d (%.2f%%)",
             itr + 1,
@@ -366,8 +438,6 @@ def _stack_winsorized_sigma_iter(
         mask = new_mask
         if n_rej == 0:
             break
-        if kappa_decay < 1.0:
-            kappa_iter = kappa * (kappa_decay ** (itr + 1))
 
     if apply_rewinsor:
         # Rejected (valid but clipped) samples are substituted with the
