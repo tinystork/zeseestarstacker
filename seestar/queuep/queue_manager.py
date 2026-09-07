@@ -281,6 +281,18 @@ from seestar.core.stack_gpu import (
     stack_linear_fit_clip_gpu,
     stack_median_gpu,
     stack_winsorized_sigma_gpu,
+    stack_winsorized_sigma_gpu_tiled,
+)
+from seestar.core.gpu_vram_planner import (
+    CPU_FALLBACK,
+    FULL_GPU,
+    REASON_MEMINFO_FAILURE,
+    REASON_PLANNER_FAILURE,
+    REASON_POOL_QUERY_FAILURE,
+    REASON_VRAM_NO_VALID_TILE,
+    TILED_GPU,
+    WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+    plan_winsorized_gpu_execution,
 )
 from seestar.core.streaming_stack import stack_disk_streaming
 
@@ -461,9 +473,15 @@ _BATCH_BREAK_TOKEN = "<BATCH_BREAK>"
 #
 # * kappa-sigma / linear-fit-clip / median: ~4x the float32 stack (single
 #   ``nanmedian``-style sort chain, measured on the 2 GiB MX150).
-# * winsorized-sigma clip: ~6x the float32 stack (full axis-0 ``argsort`` x2
-#   with int64 index arrays + ``take_along_axis`` + re-winsor bounds on the
-#   survivor distribution, measured with the CuPy pool in M3).
+# * winsorized-sigma clip legacy whole-stack model: ~6x the float32 stack
+#   (full axis-0 ``argsort`` x2 with int64 index arrays + ``take_along_axis``
+#   + re-winsor bounds on the survivor distribution, measured with the CuPy
+#   pool in M3).  RETAINED ONLY for the B5 direct-``_reduction_xp``
+#   eligibility tests: since phase F (Track P4) the production winsorized
+#   dispatch no longer uses this coarse whole-stack guard -- it goes through
+#   the algorithm-aware planner (seestar/core/gpu_vram_planner.py) which
+#   decides FULL_GPU / TILED_GPU(tile_shape) / CPU_FALLBACK(reason) from the
+#   measured phase D/E optimized memory model.
 #
 # Eligibility is derived from shape x dtype x expected temporaries of the
 # ACTUAL operation at call time (never from hardware names, never a fixed N).
@@ -2656,6 +2674,155 @@ class SeestarQueuedStacker:
                 "GPU reduction failed; falling back to CPU", exc_info=True
             )
             return fn_cpu(images, weights, **kwargs)
+
+    def _gpu_reduce_winsorized(
+        self,
+        fn_cpu,
+        images,
+        weights=None,
+        reserve_bytes=WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+        **kwargs,
+    ):
+        """Phase F (Track P4): planner-driven GPU dispatch of the winsorized
+        reduction (FULL_GPU / TILED_GPU / CPU_FALLBACK).
+
+        Replaces the coarse whole-stack ``_GPU_FOOTPRINT_FACTOR_WINSORIZED``
+        guard used by the B7-era dispatch.  When the policy backend is cupy
+        the ALGORITHM-AWARE VRAM planner (``seestar/core/gpu_vram_planner.py``,
+        pure host-side, measured phase D/E optimized memory model, no
+        hardware-name tables) receives the live device state -- driver free
+        (``memGetInfo``) + reusable CuPy pool free, minus the explicit
+        reserve -- and chooses:
+
+        * FULL_GPU      -> ``stack_winsorized_sigma_gpu`` (untiled);
+        * TILED_GPU     -> ``stack_winsorized_sigma_gpu_tiled`` with the
+          planner's ``tile_shape`` (spatial-only, N_batch preserved);
+        * CPU_FALLBACK  -> ``fn_cpu``, one durable per-run warning per stable
+          reason (``vram_no_valid_tile``, ``planner_failure``,
+          ``pool_query_failure``, ``meminfo_failure``).
+
+        Non-planner fallbacks keep their existing semantics: CPU-by-policy
+        (``policy_cpu``: no diagnostic) and CuPy import failure
+        (``cupy_import``: once-per-run warning).  memGetInfo / pool-query
+        failures are CONSERVATIVE CPU_FALLBACKs (stable reasons, never a
+        crash).  A runtime GPU failure after a FULL/TILED choice degrades to
+        CPU with the historical warning (same as ``_gpu_reduce``).  The
+        planner never participates in AutoBatch resolution: it receives the
+        frozen actual N_batch of THIS reduction and never alters it.
+        """
+        n_batch = int(len(images))
+        if getattr(self, "effective_backend", "cpu") != "cupy":
+            return fn_cpu(images, weights, **kwargs)  # CPU by policy
+        try:
+            import cupy as cp
+        except Exception as exc:
+            self._log_gpu_fallback_once(
+                "cupy_import",
+                "GPU acceleration requested but CuPy import failed (%s: %s); "
+                "using CPU",
+                type(exc).__name__,
+                exc,
+            )
+            return fn_cpu(images, weights, **kwargs)
+        try:
+            free, _total = cp.cuda.runtime.memGetInfo()
+        except Exception as exc:
+            self._log_gpu_fallback_once(
+                REASON_MEMINFO_FAILURE,
+                "Winsorized VRAM planner: memGetInfo failed (%s: %s); using "
+                "CPU",
+                type(exc).__name__,
+                exc,
+            )
+            return fn_cpu(images, weights, **kwargs)
+        try:
+            pool_free = cp.get_default_memory_pool().free_bytes()
+        except Exception as exc:
+            self._log_gpu_fallback_once(
+                REASON_POOL_QUERY_FAILURE,
+                "Winsorized VRAM planner: CuPy memory-pool query failed "
+                "(%s: %s); using CPU",
+                type(exc).__name__,
+                exc,
+            )
+            return fn_cpu(images, weights, **kwargs)
+        try:
+            frame = images[0].shape
+            decision = plan_winsorized_gpu_execution(
+                n_batch=n_batch,
+                frame_shape=frame[:2],
+                channels=3 if len(frame) >= 3 else 1,
+                dtype_itemsize=int(np.dtype(images[0].dtype).itemsize),
+                winsor_limits=kwargs.get(
+                    "winsor_limits", (0.05, 0.05)
+                ),
+                driver_free_bytes=int(free),
+                pool_free_bytes=int(pool_free),
+                reserve_bytes=int(reserve_bytes),
+            )
+        except Exception as exc:
+            self._log_gpu_fallback_once(
+                REASON_PLANNER_FAILURE,
+                "Winsorized VRAM planner failed (%s: %s); using CPU",
+                type(exc).__name__,
+                exc,
+            )
+            return fn_cpu(images, weights, **kwargs)
+        if decision.kind == FULL_GPU:
+            try:
+                return stack_winsorized_sigma_gpu(images, weights, **kwargs)
+            except Exception:
+                self.logger.warning(
+                    "GPU winsorized reduction failed; falling back to CPU",
+                    exc_info=True,
+                )
+                return fn_cpu(images, weights, **kwargs)
+        if decision.kind == TILED_GPU:
+            self.update_progress(
+                f"GPU winsorized : exécution tuilée spatiale "
+                f"(tile_shape={decision.tile_shape}, {decision.n_tiles} tuiles, "
+                f"N_batch={decision.n_batch} conservé)",
+                "INFO",
+            )
+            try:
+                return stack_winsorized_sigma_gpu_tiled(
+                    images,
+                    weights,
+                    tile_shape=decision.tile_shape,
+                    **kwargs,
+                )
+            except Exception:
+                self.logger.warning(
+                    "GPU winsorized tiled reduction failed; falling back to "
+                    "CPU",
+                    exc_info=True,
+                )
+                return fn_cpu(images, weights, **kwargs)
+        # CPU_FALLBACK: durable once-per-reason diagnostics.
+        reason = decision.reason or REASON_PLANNER_FAILURE
+        if reason == REASON_VRAM_NO_VALID_TILE:
+            # Legacy umbrella (B7 contract): the workload does not fit the
+            # effective VRAM budget in ANY strategy.  Kept so the historical
+            # ``vram_reject`` diagnostic remains stable; the planner-specific
+            # reason below adds the exact decision code.
+            self._log_gpu_fallback_once(
+                "vram_reject",
+                "GPU acceleration enabled but reduction needs ~%d MiB vs ~%d "
+                "MiB free (incl. CuPy pool); using CPU",
+                decision.demand_full_bytes // (1024 * 1024),
+                (int(free) + int(pool_free)) // (1024 * 1024),
+            )
+        self._log_gpu_fallback_once(
+            reason,
+            "Winsorized VRAM planner: %s (needs ~%d MiB full / ~%d MiB tile "
+            "vs ~%d MiB effective budget after ~%d MiB reserve); using CPU",
+            reason,
+            decision.demand_full_bytes // (1024 * 1024),
+            decision.demand_tile_bytes // (1024 * 1024),
+            decision.effective_budget_bytes // (1024 * 1024),
+            decision.reserve_bytes // (1024 * 1024),
+        )
+        return fn_cpu(images, weights, **kwargs)
 
     def __getstate__(self):
         """Return picklable state for multiprocessing."""
@@ -13256,17 +13423,21 @@ class SeestarQueuedStacker:
                             **_kw,
                         )
 
-                    # B7 (Track B): when the policy backend is cupy and the
-                    # workload fits VRAM under the winsorized footprint model
-                    # (full-argsort x2 temporaries, factor ~6), execute the
-                    # CuPy scientific twin through the shared dispatcher;
-                    # otherwise fall back to the CPU path above unchanged.
-                    winsor_res = self._gpu_reduce(
+                    # B7 + phase F (Track P4): when the policy backend is
+                    # cupy, the adaptive VRAM execution planner
+                    # (seestar/core/gpu_vram_planner.py -- pure, algorithm-
+                    # aware, measured phase D/E optimized memory model, NO
+                    # hardware-name tables) chooses FULL_GPU (untiled twin),
+                    # TILED_GPU(tile_shape) (exact-N_batch spatial tiling
+                    # seam) or CPU_FALLBACK(reason).  The coarse
+                    # _GPU_FOOTPRINT_FACTOR_WINSORIZED whole-stack guard is
+                    # no longer used here (the constant survives only for the
+                    # B5 direct-_reduction_xp eligibility tests).  N_batch is
+                    # frozen: the planner never splits the stack axis.
+                    winsor_res = self._gpu_reduce_winsorized(
                         _cpu_winsorized,
-                        stack_winsorized_sigma_gpu,
                         images_for_stack,
                         quality_weights,
-                        footprint_factor=_GPU_FOOTPRINT_FACTOR_WINSORIZED,
                         kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                         winsor_limits=self.winsor_limits,
                         return_weights=True,
