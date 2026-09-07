@@ -294,6 +294,29 @@ from seestar.core.gpu_vram_planner import (
     WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
     plan_winsorized_gpu_execution,
 )
+from seestar.core.cpu_memory_planner import (
+    CPU_MEMORY_REFUSAL,
+    CPU_MIN_TILE_OUT,
+    FULL_CPU,
+    MODE_AUTO,
+    MODE_OVERRIDE,
+    REASON_NO_VALID_TILE,
+    SPATIAL_TILED_CPU,
+    recommended_reserve_bytes,
+)
+from seestar.core.cpu_memory_policy import (
+    CPU_MEMORY_OVERRIDE_ENV,
+    cpu_memory_policy_tokens,
+    cpu_winsor_decision_tokens,
+    cpu_winsor_refusal_tokens,
+    cpu_winsor_retry_tokens,
+    resolve_cpu_policy_preflight,
+    resolve_cpu_winsor_decision,
+)
+from seestar.core.cpu_winsor_exact_n import (
+    CpuWinsorMemoryRefused,
+    stack_winsorized_sigma_cpu_tiled,
+)
 from seestar.core.streaming_stack import stack_disk_streaming
 
 try:
@@ -429,6 +452,14 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     # actually executed (gpu_full/gpu_tiled/cpu_fallback + reasons), not just
     # the policy admission in GPU_DECISION.
     "GPU_EXECUTION_SUMMARY ",
+    # Stage E1: automatic CPU memory policy provenance (bounded, durable,
+    # fail-open) — one MEMORY_POLICY block per accepted run, one
+    # CPU_WINSOR_MEMORY_* block per CPU winsorized reduction / refusal /
+    # bounded allocation retry.
+    "MEMORY_POLICY ",
+    "CPU_WINSOR_MEMORY_DECISION ",
+    "CPU_WINSOR_MEMORY_RETRY ",
+    "CPU_WINSOR_MEMORY_REFUSAL ",
 )
 
 
@@ -3284,6 +3315,246 @@ class SeestarQueuedStacker:
         except Exception:
             # A pool release must never affect the reduction outcome.
             pass
+
+    # ------------------------------------------------------------------
+    # Stage E1: automatic CPU memory policy (production wiring layer).
+    # ------------------------------------------------------------------
+
+    def _cpu_memory_override_bytes(self):
+        """Explicit expert/CI/test/debug/RAM-simulation override (bytes) or
+        ``None``.
+
+        The internal test seam attribute wins over the documented env var
+        ``ZSSS_CPU_MEMORY_OVERRIDE_BYTES``; both are explicit OVERRIDE seams,
+        never the normal GUI policy.  The legacy ``max_hq_mem`` attribute is
+        intentionally NOT consulted here (a persisted legacy HQ RAM value must
+        never silently override AUTO).
+        """
+        attr = getattr(self, "_cpu_memory_override_bytes_attr", None)
+        if attr is not None:
+            try:
+                v = int(attr)
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+        raw = os.environ.get(CPU_MEMORY_OVERRIDE_ENV, "").strip()
+        if not raw:
+            return None
+        try:
+            v = int(raw)
+            return v if v > 0 else None
+        except ValueError:
+            return None
+
+    def _cpu_total_ram_bytes(self):
+        """Physical RAM bytes (injectable override for deterministic tests)."""
+        ov = getattr(self, "_cpu_total_ram_bytes_override", None)
+        if ov is not None:
+            return int(ov)
+        try:
+            return int(psutil.virtual_memory().total)
+        except Exception:
+            return None
+
+    def _cpu_available_ram_bytes_now(self):
+        """Available RAM bytes right now (injectable override for tests)."""
+        ov = getattr(self, "_cpu_available_ram_bytes_override", None)
+        if ov is not None:
+            return int(ov)
+        try:
+            return int(psutil.virtual_memory().available)
+        except Exception:
+            return None
+
+    def _cpu_process_rss_bytes(self):
+        """Current process RSS bytes (injectable override for tests)."""
+        ov = getattr(self, "_cpu_process_rss_bytes_override", None)
+        if ov is not None:
+            return int(ov)
+        try:
+            return int(psutil.Process().memory_info().rss)
+        except Exception:
+            return None
+
+    def _capture_cpu_memory_policy_preflight(self):
+        """Once-per-run CPU memory POLICY capture + ``MEMORY_POLICY`` record.
+
+        Establishes POLICY and capability only — never a frozen promise of
+        future bytes (the runtime re-evaluation at every CPU execution
+        applies).  CPU RAM comes from the actual machine state (injectable
+        for deterministic tests); it is NEVER derived from GPU model / VRAM /
+        CUDA device name.  Even when GPU is requested/available the CPU
+        fallback path is established as a VIABLE policy here (no physical RAM
+        preallocation, only policy + capability).  Fail-open: a missing
+        memory source degrades to a policy-only record and can never abort a
+        valid run.
+        """
+        try:
+            total = self._cpu_total_ram_bytes()
+            available = self._cpu_available_ram_bytes_now()
+            if available is None:
+                available = 0
+            override = self._cpu_memory_override_bytes()
+            mode = MODE_OVERRIDE if override is not None else MODE_AUTO
+            rss = self._cpu_process_rss_bytes()
+            pool_workers = max(
+                1, int(getattr(self, "max_stack_workers", 1) or 1)
+            )
+            preflight = resolve_cpu_policy_preflight(
+                available_ram_preflight_bytes=available,
+                total_ram_bytes=total,
+                mode=mode,
+                requested_budget_bytes=override,
+                frame_bytes=0,
+                pool_workers=pool_workers,
+            )
+            self._cpu_mem_policy_preflight = preflight
+            tokens = cpu_memory_policy_tokens(preflight)
+            tokens["process_rss_bytes"] = rss
+            tokens["gpu_requested"] = bool(getattr(self, "request_gpu", False))
+            tokens["gpu_effective_backend"] = str(
+                getattr(self, "effective_backend", "cpu") or "cpu"
+            )
+            tokens["cpu_fallback_viable"] = "true"
+            self._emit_provenance_block("MEMORY_POLICY", tokens)
+            return preflight
+        except Exception:
+            # Fail-open: never break a valid run because policy capture failed.
+            try:
+                self._emit_provenance_block(
+                    "MEMORY_POLICY",
+                    {"mode": "unavailable", "reason": "preflight_capture_failed"},
+                )
+            except Exception:
+                pass
+            return None
+
+    def _cpu_mem_preflight_record(self):
+        """Per-run policy record; lazy capture for direct-dispatch harnesses
+        that never pass through ``start_processing`` (production always
+        captures once at the accepted-run seam)."""
+        rec = getattr(self, "_cpu_mem_policy_preflight", None)
+        if rec is not None:
+            return rec
+        return self._capture_cpu_memory_policy_preflight()
+
+    def _run_cpu_winsor_policy(self, imgs, w=None, **kw):
+        """Automatic CPU memory policy resolution + dispatch (stage E1).
+
+        Called at EVERY CPU winsorized execution — the plain CPU path AND the
+        GPU ``CPU_FALLBACK`` closure (no hidden legacy memory defaults, no
+        scientific-N subdivision).  Re-reads the RAM available NOW, recomputes
+        the named reserve, resolves ``effective_budget = min(policy_ceiling,
+        available_ram_now - reserve)`` through the pure policy module, emits
+        the per-execution provenance, then dispatches:
+
+        * ``FULL_CPU`` -> queue wrapper ``_stack_winsorized_sigma`` (untiled)
+          with the explicit resolved budget;
+        * ``SPATIAL_TILED_CPU`` -> stage-C exact-N spatial tiled driver with
+          the planner ``tile_shape`` and the explicit budget (bounded spatial
+          retry / minimum-tile refusal preserved inside the driver);
+        * ``CPU_MEMORY_REFUSAL`` -> raises ``CpuWinsorMemoryRefused`` so stage
+          D converts it into a truthful terminal FAILED (never an empty
+          success, never a reduced N, never the subgroup path).
+        """
+        preflight = self._cpu_mem_preflight_record()
+        mode = MODE_AUTO if preflight is None else preflight.mode
+        ceiling = (
+            None if preflight is None else preflight.policy_ceiling_bytes
+        )
+        n = int(len(imgs)) if imgs is not None else 0
+        if n <= 0 or imgs is None:
+            raise CpuWinsorMemoryRefused(
+                REASON_NO_VALID_TILE, details={"n": n}
+            )
+        frame = np.asarray(imgs[0])
+        H, W = int(frame.shape[0]), int(frame.shape[1])
+        C = int(frame.shape[2]) if frame.ndim >= 3 else 1
+        available = self._cpu_available_ram_bytes_now()
+        if available is None:
+            available = 0
+        limits = tuple(kw.get("winsor_limits", self.winsor_limits))
+        pool_workers = max(
+            1, int(getattr(self, "max_stack_workers", 1) or 1)
+        )
+        decision = resolve_cpu_winsor_decision(
+            mode=mode,
+            n=n,
+            frame_shape=(H, W),
+            channels=C,
+            dtype_itemsize=int(np.asarray(frame).dtype.itemsize),
+            winsor_limits=limits,
+            apply_rewinsor=bool(kw.get("apply_rewinsor", True)),
+            weighted=w is not None,
+            available_ram_bytes=available,
+            policy_ceiling_bytes=ceiling,
+            pool_workers=pool_workers,
+        )
+        self._emit_provenance_block(
+            "CPU_WINSOR_MEMORY_DECISION",
+            cpu_winsor_decision_tokens(decision, available),
+        )
+        if decision.is_refusal:
+            self._emit_provenance_block(
+                "CPU_WINSOR_MEMORY_REFUSAL",
+                cpu_winsor_refusal_tokens(
+                    scientific_n=decision.n,
+                    effective_budget_bytes=decision.effective_budget_bytes,
+                    minimum_estimated_bytes=decision.estimated_peak_bytes,
+                    reason=decision.reason or REASON_NO_VALID_TILE,
+                ),
+            )
+            raise CpuWinsorMemoryRefused(
+                decision.reason or REASON_NO_VALID_TILE,
+                details={
+                    "n": decision.n,
+                    "effective_budget_bytes": decision.effective_budget_bytes,
+                    "minimum_estimated_bytes": decision.estimated_peak_bytes,
+                },
+            )
+        budget = decision.effective_budget_bytes
+        if decision.strategy == FULL_CPU:
+            return self._stack_winsorized_sigma(
+                imgs, w, max_mem_bytes=budget, **kw
+            )
+        # SPATIAL_TILED_CPU -> stage-C exact-N spatial tiled driver.
+        try:
+            return stack_winsorized_sigma_cpu_tiled(
+                imgs,
+                weights=w,
+                tile_shape=decision.tile_shape,
+                max_mem_bytes=budget,
+                min_tile_out=CPU_MIN_TILE_OUT,
+                **kw,
+            )
+        except CpuWinsorMemoryRefused as ref:
+            details = dict(getattr(ref, "details", None) or {})
+            attempts = int(details.get("attempts", 0) or 0)
+            if attempts >= 2:
+                # The driver performed a bounded spatial allocation retry
+                # (strictly smaller spatial tiles) before refusing: record the
+                # observed bounded retry exhaustion truthfully (spatial shapes
+                # only — N / reducer / kappa / winsor / weights are never
+                # retry knobs).
+                self._emit_provenance_block(
+                    "CPU_WINSOR_MEMORY_RETRY",
+                    cpu_winsor_retry_tokens(
+                        old_tile_shape=decision.tile_shape,
+                        new_tile_shape=None,
+                        reason="allocation_failure",
+                    ),
+                )
+            self._emit_provenance_block(
+                "CPU_WINSOR_MEMORY_REFUSAL",
+                cpu_winsor_refusal_tokens(
+                    scientific_n=decision.n,
+                    effective_budget_bytes=budget,
+                    minimum_estimated_bytes=decision.estimated_peak_bytes,
+                    reason=ref.reason or decision.reason or REASON_NO_VALID_TILE,
+                ),
+            )
+            raise
 
     def __getstate__(self):
         """Return picklable state for multiprocessing."""
@@ -14124,66 +14395,61 @@ class SeestarQueuedStacker:
             if _is_winsorized_mode(mode) or _is_winsorized_mode(
                 getattr(self, "stack_reject_algo", "")
             ):
-                if use_tile_mode:
-                    self.update_progress(
-                        "HQ combine : trop de RAM, passe 2 par bandes", "INFO"
-                    )
-                    stacked_batch_data_np, batch_coverage_map_2d = self._combine_hq_by_tiles(
-                        tile_inputs,
-                        coverage_maps_list,
-                        max(self.stack_kappa_low, self.stack_kappa_high),
-                        self.winsor_limits,
-                        tile_h=getattr(
-                            getattr(self, "settings", None), "TILE_HEIGHT", TILE_HEIGHT
-                        ),
-                        masks_list=coverage_maps_list,
-                        batch_id=current_batch_num,
-                        use_memmap=use_memmap,
-                        quality_weights=quality_weights,
-                    )
+                # Stage E1: automatic CPU memory policy dispatch.  The legacy
+                # ``use_tile_mode``/``_combine_hq_by_tiles`` N-subgroup
+                # heuristic is REMOVED for the Winsorized path: the CPU
+                # planner decision (FULL_CPU / SPATIAL_TILED_CPU /
+                # CPU_MEMORY_REFUSAL) is computed from the resolved runtime
+                # budget and the exact-N spatial tiled driver (stage C) is
+                # used when the full frame cannot fit.  (The generic
+                # non-Winsorized ``_combine_hq_by_tiles`` callers — median /
+                # kappa-sigma / linear-fit-clip — remain unchanged, documented
+                # debt.)  max_hq_mem is intentionally NOT consulted here.
+                images_for_stack = [
+                    _nan_mask_image(img, mask)
+                    for img, mask in zip(image_data_list, coverage_maps_list)
+                ]
+
+                def _cpu_winsorized_auto(imgs, w=None, **_kw):
+                    # Automatic CPU memory policy closure: FULL_CPU -> untiled
+                    # wrapper with the explicit resolved budget;
+                    # SPATIAL_TILED_CPU -> stage-C exact-N tiled driver;
+                    # CPU_MEMORY_REFUSAL -> raises (stage D turns it into a
+                    # truthful terminal FAILED).  Also the CPU_FALLBACK target
+                    # of the GPU dispatch seam below (same policy, no hidden
+                    # legacy memory defaults, no scientific-N subdivision).
+                    return self._run_cpu_winsor_policy(imgs, w, **_kw)
+
+                # B7 + phase F (Track P4): when the policy backend is
+                # cupy, the adaptive VRAM execution planner
+                # (seestar/core/gpu_vram_planner.py -- pure, algorithm-
+                # aware, measured phase D/E optimized memory model, NO
+                # hardware-name tables) chooses FULL_GPU (untiled twin),
+                # TILED_GPU(tile_shape) (exact-N_batch spatial tiling
+                # seam) or CPU_FALLBACK(reason).  The coarse
+                # _GPU_FOOTPRINT_FACTOR_WINSORIZED whole-stack guard is
+                # no longer used here (the constant survives only for the
+                # B5 direct-_reduction_xp eligibility tests).  N_batch is
+                # frozen: the planner never splits the stack axis.  On
+                # CPU_FALLBACK the SAME automatic CPU memory policy closure
+                # resolves FULL_CPU / SPATIAL_TILED_CPU / CPU_MEMORY_REFUSAL
+                # (stage E1).
+                winsor_res = self._gpu_reduce_winsorized(
+                    _cpu_winsorized_auto,
+                    images_for_stack,
+                    quality_weights,
+                    kappa=max(self.stack_kappa_low, self.stack_kappa_high),
+                    winsor_limits=self.winsor_limits,
+                    return_weights=True,
+                )
+                if isinstance(winsor_res, tuple) and len(winsor_res) == 3:
+                    stacked_batch_data_np, batch_coverage_map_2d, _ = winsor_res
                 else:
-                    images_for_stack = [
-                        _nan_mask_image(img, mask)
-                        for img, mask in zip(image_data_list, coverage_maps_list)
-                    ]
-
-                    def _cpu_winsorized(imgs, w=None, **_kw):
-                        # Existing CPU path, unchanged: worker/executor +
-                        # max_mem_bytes guard + durable per-call messages.
-                        return self._stack_winsorized_sigma(
-                            imgs,
-                            w,
-                            max_mem_bytes=self.max_hq_mem,
-                            **_kw,
-                        )
-
-                    # B7 + phase F (Track P4): when the policy backend is
-                    # cupy, the adaptive VRAM execution planner
-                    # (seestar/core/gpu_vram_planner.py -- pure, algorithm-
-                    # aware, measured phase D/E optimized memory model, NO
-                    # hardware-name tables) chooses FULL_GPU (untiled twin),
-                    # TILED_GPU(tile_shape) (exact-N_batch spatial tiling
-                    # seam) or CPU_FALLBACK(reason).  The coarse
-                    # _GPU_FOOTPRINT_FACTOR_WINSORIZED whole-stack guard is
-                    # no longer used here (the constant survives only for the
-                    # B5 direct-_reduction_xp eligibility tests).  N_batch is
-                    # frozen: the planner never splits the stack axis.
-                    winsor_res = self._gpu_reduce_winsorized(
-                        _cpu_winsorized,
-                        images_for_stack,
-                        quality_weights,
-                        kappa=max(self.stack_kappa_low, self.stack_kappa_high),
-                        winsor_limits=self.winsor_limits,
-                        return_weights=True,
-                    )
-                    if isinstance(winsor_res, tuple) and len(winsor_res) == 3:
-                        stacked_batch_data_np, batch_coverage_map_2d, _ = winsor_res
-                    else:
-                        # Legacy 2-tuple return (no effective denominator):
-                        # fall back to geometric coverage, backwards compatible.
-                        stacked_batch_data_np, _ = winsor_res
-                        batch_coverage_map_2d = None
-                    gc.collect()  # FIX MEMLEAK
+                    # Legacy 2-tuple return (no effective denominator):
+                    # fall back to geometric coverage, backwards compatible.
+                    stacked_batch_data_np, _ = winsor_res
+                    batch_coverage_map_2d = None
+                gc.collect()  # FIX MEMLEAK
                 if batch_coverage_map_2d is None:
                     batch_coverage_map_2d = self._geometric_coverage_map(
                         coverage_maps_list
@@ -22636,6 +22902,17 @@ class SeestarQueuedStacker:
         # GPU_EXECUTION_SUMMARY at completion).  Reset sits after every
         # refusal/early-return gate so a refused start never wipes state.
         self._reset_gpu_execution_telemetry()
+
+        # Stage E1: once-per-run automatic CPU memory POLICY capture (mode /
+        # total+available RAM / reserve / policy ceiling, emitted as the
+        # durable MEMORY_POLICY record).  POLICY + capability only, never a
+        # frozen promise of future bytes (every CPU execution re-evaluates
+        # the effective budget against the RAM available at that moment).
+        # CPU RAM is read from the actual machine state — never derived from
+        # GPU model / VRAM / CUDA name.  Fail-open; a refused start never
+        # reaches this seam.
+        self._cpu_mem_policy_preflight = None
+        self._capture_cpu_memory_policy_preflight()
 
         # A3: durable requested-config block, emitted once for every ACCEPTED
         # run (policy frozen, session args applied, before heavy reference
