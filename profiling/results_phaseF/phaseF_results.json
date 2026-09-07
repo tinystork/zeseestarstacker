@@ -1,0 +1,483 @@
+{
+  "host_gpu": "NVIDIA GeForce MX150",
+  "cupy": "14.2.0",
+  "note": "Phase F adaptive VRAM execution planner validation (Track P4)",
+  "sections": {
+    "decision_table": [
+      {
+        "tag": "480x270_n20",
+        "n_batch": 20,
+        "frame": [
+          270,
+          480
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 293.93,
+        "demand_tile_mib": 293.93,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 1,
+        "tile_outputs": 129600
+      },
+      {
+        "tag": "480x270_n32",
+        "n_batch": 32,
+        "frame": [
+          270,
+          480
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 350.29,
+        "demand_tile_mib": 350.29,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 1,
+        "tile_outputs": 129600
+      },
+      {
+        "tag": "480x270_n50",
+        "n_batch": 50,
+        "frame": [
+          270,
+          480
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 434.83,
+        "demand_tile_mib": 434.83,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 1,
+        "tile_outputs": 129600
+      },
+      {
+        "tag": "1080p_n20",
+        "n_batch": 20,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 1702.93,
+        "demand_tile_mib": 1702.93,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 1,
+        "tile_outputs": 2073600
+      },
+      {
+        "tag": "1080p_n32",
+        "n_batch": 32,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          731
+        ],
+        "fast_path": false,
+        "demand_full_mib": 2604.69,
+        "demand_tile_mib": 1827.62,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 2,
+        "tile_outputs": 1403520
+      },
+      {
+        "tag": "1080p_n50",
+        "n_batch": 50,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          467
+        ],
+        "fast_path": false,
+        "demand_full_mib": 3957.32,
+        "demand_tile_mib": 1824.69,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 3,
+        "tile_outputs": 896640
+      },
+      {
+        "tag": "1080p_n100",
+        "n_batch": 100,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          233
+        ],
+        "fast_path": false,
+        "demand_full_mib": 7714.65,
+        "demand_tile_mib": 1821.22,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 5,
+        "tile_outputs": 447360
+      },
+      {
+        "tag": "4k_n32",
+        "n_batch": 32,
+        "frame": [
+          2160,
+          3840
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          365
+        ],
+        "fast_path": false,
+        "demand_full_mib": 9818.75,
+        "demand_tile_mib": 1825.39,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 6,
+        "tile_outputs": 1401600
+      },
+      {
+        "tag": "4k_n50",
+        "n_batch": 50,
+        "frame": [
+          2160,
+          3840
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          233
+        ],
+        "fast_path": false,
+        "demand_full_mib": 15229.3,
+        "demand_tile_mib": 1821.22,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 10,
+        "tile_outputs": 894720
+      },
+      {
+        "tag": "1080p_rgb_n50",
+        "n_batch": 50,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 3,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          155
+        ],
+        "fast_path": false,
+        "demand_full_mib": 11471.97,
+        "demand_tile_mib": 1817.74,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 7,
+        "tile_outputs": 297600
+      },
+      {
+        "tag": "1080p_n4M_must_fallback",
+        "n_batch": 4000000,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "CPU_FALLBACK",
+        "reason": "vram_no_valid_tile",
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 300586137.5,
+        "demand_tile_mib": 0.0,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 0,
+        "tile_outputs": 0
+      },
+      {
+        "tag": "narrow_64x40_n400k_must_fallback",
+        "n_batch": 400000,
+        "frame": [
+          64,
+          40
+        ],
+        "channels": 1,
+        "kind": "CPU_FALLBACK",
+        "reason": "vram_no_valid_tile",
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 37309.38,
+        "demand_tile_mib": 0.0,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 0,
+        "tile_outputs": 0
+      }
+    ],
+    "execution": [
+      {
+        "tag": "480x270_n20",
+        "n_batch": 20,
+        "frame": [
+          270,
+          480
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 293.93,
+        "demand_tile_mib": 293.93,
+        "effective_budget_mib": 1827.62,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1955.62,
+        "pool_free_mib": 0.0,
+        "n_tiles": 1,
+        "tile_outputs": 129600,
+        "expected_kind": "FULL_GPU",
+        "outcome": "OK",
+        "wall_ms": 693.2,
+        "mem": {
+          "n_boundaries": 102,
+          "peak_live_mib": 80.59,
+          "peak_pool_total_mib": 165.64,
+          "min_driver_free_mib": 1781.62
+        },
+        "rejected_pct": 18.117104284354586
+      },
+      {
+        "tag": "480x270_n32",
+        "n_batch": 32,
+        "frame": [
+          270,
+          480
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 350.29,
+        "demand_tile_mib": 350.29,
+        "effective_budget_mib": 1819.27,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1781.62,
+        "pool_free_mib": 165.64,
+        "n_tiles": 1,
+        "tile_outputs": 129600,
+        "expected_kind": "FULL_GPU",
+        "outcome": "OK",
+        "wall_ms": 668.6,
+        "mem": {
+          "n_boundaries": 102,
+          "peak_live_mib": 123.6,
+          "peak_pool_total_mib": 265.02,
+          "min_driver_free_mib": 1685.62
+        },
+        "rejected_pct": 22.42838719306123
+      },
+      {
+        "tag": "480x270_n50",
+        "n_batch": 50,
+        "frame": [
+          270,
+          480
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 434.83,
+        "demand_tile_mib": 434.83,
+        "effective_budget_mib": 1822.65,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1685.62,
+        "pool_free_mib": 265.02,
+        "n_tiles": 1,
+        "tile_outputs": 129600,
+        "expected_kind": "FULL_GPU",
+        "outcome": "OK",
+        "wall_ms": 992.6,
+        "mem": {
+          "n_boundaries": 102,
+          "peak_live_mib": 188.12,
+          "peak_pool_total_mib": 326.89,
+          "min_driver_free_mib": 1609.62
+        },
+        "rejected_pct": 24.369423856808922
+      },
+      {
+        "tag": "fit1080p_n20",
+        "n_batch": 20,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "FULL_GPU",
+        "reason": null,
+        "tile_shape": null,
+        "fast_path": false,
+        "demand_full_mib": 1702.93,
+        "demand_tile_mib": 1702.93,
+        "effective_budget_mib": 1808.51,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 1609.62,
+        "pool_free_mib": 326.89,
+        "n_tiles": 1,
+        "tile_outputs": 2073600,
+        "expected_kind": "FULL_GPU",
+        "outcome": "OK",
+        "wall_ms": 7440.4,
+        "mem": {
+          "n_boundaries": 102,
+          "peak_live_mib": 1289.36,
+          "peak_pool_total_mib": 1638.5,
+          "min_driver_free_mib": 295.62
+        },
+        "rejected_pct": 18.151765064619635
+      },
+      {
+        "tag": "fit1080p_n32",
+        "n_batch": 32,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          721
+        ],
+        "fast_path": false,
+        "demand_full_mib": 2604.69,
+        "demand_tile_mib": 1805.35,
+        "effective_budget_mib": 1806.12,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 295.62,
+        "pool_free_mib": 1638.5,
+        "n_tiles": 2,
+        "tile_outputs": 1384320,
+        "untiled_outcome": "OutOfMemoryError: Out of memory allocating 265,420,800 bytes (allocated so far: 1,858,716,160 bytes).",
+        "planner_tile_outcome": "OK",
+        "planner_tile_wall_ms": 21787.9,
+        "planner_tile_mem": {
+          "n_boundaries": 220,
+          "peak_live_mib": 1341.23,
+          "peak_pool_total_mib": 1574.63,
+          "min_driver_free_mib": 363.62
+        },
+        "ref_tile_outcome": "OK",
+        "ref_tile_wall_ms": 22898.5,
+        "ref_tile_mem": {
+          "n_boundaries": 220,
+          "peak_live_mib": 1028.32,
+          "peak_pool_total_mib": 1204.91,
+          "min_driver_free_mib": 731.62
+        },
+        "cross_shape_bitwise": true,
+        "planner_pct": 22.438576262986984
+      },
+      {
+        "tag": "fit1080p_n50",
+        "n_batch": 50,
+        "frame": [
+          1080,
+          1920
+        ],
+        "channels": 1,
+        "kind": "TILED_GPU",
+        "reason": null,
+        "tile_shape": [
+          462
+        ],
+        "fast_path": false,
+        "demand_full_mib": 3957.32,
+        "demand_tile_mib": 1807.3,
+        "effective_budget_mib": 1808.53,
+        "reserve_mib": 128.0,
+        "driver_free_mib": 731.62,
+        "pool_free_mib": 1204.91,
+        "n_tiles": 3,
+        "tile_outputs": 887040,
+        "untiled_outcome": "OutOfMemoryError: Out of memory allocating 414,720,000 bytes (allocated so far: 1,969,920,000 bytes).",
+        "planner_tile_outcome": "OK",
+        "planner_tile_wall_ms": 34300.4,
+        "planner_tile_mem": {
+          "n_boundaries": 329,
+          "peak_live_mib": 1336.6,
+          "peak_pool_total_mib": 1713.61,
+          "min_driver_free_mib": 223.62
+        },
+        "ref_tile_outcome": "OK",
+        "ref_tile_wall_ms": 34155.3,
+        "ref_tile_mem": {
+          "n_boundaries": 329,
+          "peak_live_mib": 1110.94,
+          "peak_pool_total_mib": 1390.5,
+          "min_driver_free_mib": 543.62
+        },
+        "cross_shape_bitwise": true,
+        "planner_pct": 24.373699247207476
+      }
+    ]
+  }
+}
