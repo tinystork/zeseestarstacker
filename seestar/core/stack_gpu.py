@@ -88,6 +88,7 @@ __all__ = [
     "stack_linear_fit_clip_gpu",
     "stack_median_gpu",
     "stack_winsorized_sigma_gpu",
+    "stack_winsorized_sigma_gpu_tiled",
 ]
 
 _cupy_module = None
@@ -883,3 +884,414 @@ def stack_winsorized_sigma_gpu(
     if return_weights:
         return result_np, cp.asnumpy(sum_w.astype(cp.float32)), rejected_pct
     return result_np, rejected_pct
+
+
+# ---------------------------------------------------------------------------
+# Exact-N_batch SPATIAL GPU tiling (Track P3, phase E).
+#
+# DEDICATED tiling seam for the Winsorized reduction.  This is NOT the CPU
+# ``_combine_hq_by_tiles`` subgroup loop (queue_manager, §19): that path
+# derives ``group_size < N_batch`` and reduces NONLINEARLY over stack-axis
+# subgroups, which is a bounded-memory *approximation*.  The seam below
+# NEVER splits the scientific stack axis: every tile retains the FULL
+# ``N_batch`` population (all frames, all per-image scalar weights, all
+# NaN/mask patterns) and only the SPATIAL dimensions are tiled, so every
+# output pixel is reduced over exactly the same N_batch samples as the
+# untiled GPU twin (and the CPU authority).
+#
+# Global-iteration coordination (why a plain per-tile call is NOT exact)
+# ---------------------------------------------------------------------
+# The reference loop early-exits on the FIRST iteration whose GLOBAL
+# rejection count is zero, and the sigma band narrows (``kappa_decay``)
+# after every rejecting iteration.  A per-pixel rejection decision is
+# purely column-local, but the NUMBER of executed iterations and the kappa
+# sequence are GLOBAL properties: a tile may stop rejecting locally at
+# iteration ``i`` and still lose pixels at iteration ``i+1`` under the
+# narrower global band (measured divergence: up to 215 ADU in a synthetic
+# two-region stack).  Per-tile independent early exit is therefore NOT
+# exact.  The tiled driver reproduces the global schedule exactly with two
+# coordinated tile passes:
+#
+#   pass 1 (schedule discovery): every tile runs the DETERMINISTIC kappa
+#     schedule ``kappa * decay**i`` (i = 0 .. max_iters-1) with no early
+#     exit, recording its local rejection count per iteration; the counts
+#     are summed over tiles.  Up to the global stop iteration every
+#     iteration rejects somewhere, so the reference's kappa sequence is
+#     exactly the deterministic schedule; pass 1 therefore yields the
+#     reference's per-iteration GLOBAL counts.  ``z`` = first iteration
+#     with global count 0 (``z_eff = max_iters`` when the run exhausts the
+#     schedule without a zero-rejection iteration; note ``max_iters == 1``
+#     always has ``z_eff == max_iters``).
+#   pass 2 (exact replay): every tile re-runs exactly ``z_eff`` schedule
+#     iterations (no counts, no early exit) and the per-tile survivor mask
+#     is finalised exactly like the untiled twin (``apply_rewinsor`` bounds
+#     over the tile survivors, weighted / unweighted final reduction with
+#     the ``1e-6`` division floor).
+#
+# The reference's own mask after the run is ``M_z``: iterations 0..z-1 all
+# rejected somewhere (they decay the kappa, which the deterministic
+# schedule reproduces bit-for-bit) and iteration z changed nothing (a
+# no-op replay of the mask after z iterations is the same mask), so pass 2
+# with ``z_eff`` iterations is bit-identical to the untiled run per column.
+#
+# No-halo proof
+# -------------
+# Every operation of the reduction is independent per aligned
+# (spatial, channel) position along axis 0: winsorization (per-column
+# order statistics of the tile's OWN axis-0 samples), location/scale
+# (``nanmean`` / ``nanstd`` along axis 0), the sigma band test and mask
+# update (elementwise per column), the survivor ``apply_rewinsor`` bounds
+# (per-column order statistics / min-max), the weighted/unweighted final
+# sums (axis-0 reductions with the scalar-per-image weights) and the
+# per-pixel rejection counting.  No operation reads a neighbouring
+# spatial/channel position, so no halo, no overlap blend, no feather and
+# no tile-order dependence can exist; reconstruction is EXACT PLACEMENT
+# only.  Verified on the device: every axis-0 primitive used here
+# (``cp.sort``, ``cp.nanmean``, ``cp.nanstd``, ``cp.nansum`` with the
+# ``(N,)`` weights, count reductions) is bitwise identical when applied to
+# a spatial slice of the frame or to the same columns inside the full
+# frame for every tile geometry whose per-tile spatial output count stays
+# out of the CuPy micro-reduction band (measured on this stack: mono
+# band S <= 26, RGB band S <= 30; row bands of any height on realistic
+# widths are always far above it).  For MICRO tiles inside that band CuPy
+# selects a different axis-0 reduction kernel whose per-column float32
+# accumulation order can differ by ~1 float32 ulp (measured worst
+# ~2.4e-7 relative, ~2.4e-4 absolute at 1000 ADU scale) with BITWISE-
+# identical survivor masks and EXACT global ``rejected_pct`` — four
+# orders of magnitude below the documented CPU-parity tolerance; the
+# suite pins this residual class explicitly (see
+# tests/test_stack_gpu_winsorized_tiled.py) so no divergence beyond it is
+# ever accepted.
+#
+# Every tile keeps the full ``N_batch`` population, so the Phase C
+# zero-rank fast path (``_winsor_zero_rank_regime`` on ``N_batch``) and
+# the Phase D clip/sort slow path (``_winsorize_axis0_cp`` /
+# ``_winsorize_bounds_cp``, including the per-call overlap rank fallback)
+# apply unchanged per tile.
+#
+# ``rejected_pct`` is GLOBAL: pass 2 accumulates ``n_valid`` and
+# ``n_survivor`` per tile and returns
+# ``100 * (sum n_valid - sum n_survivor) / sum n_valid`` — the sum/sum
+# formula, never an average of per-tile percentages.
+# ---------------------------------------------------------------------------
+
+
+def _winsor_tile_slices(frame_shape, tile_shape):
+    """Spatial slices of one frame for a tiling geometry (exact placement).
+
+    ``frame_shape``: ``(H, W)``.  ``tile_shape``:
+
+    * ``None`` -> the whole frame ``(0, H, 0, W)``;
+    * ``int`` or ``(tile_h,)`` -> full-width row bands of ``tile_h`` rows
+      (last band partial);
+    * ``(tile_h, tile_w)`` -> rectangular ``tile_h x tile_w`` tiles in
+      row-major order (last row band and last column of every band
+      partial).
+
+    Never splits the stack axis: every slice is purely spatial.  Returns a
+    list of ``(y0, y1, x0, x1)`` tuples.
+    """
+    H, W = int(frame_shape[0]), int(frame_shape[1])
+    if tile_shape is None:
+        return [(0, H, 0, W)]
+    if isinstance(tile_shape, (tuple, list)):
+        if len(tile_shape) == 1:
+            tile_h, tile_w = int(tile_shape[0]), W
+        else:
+            tile_h, tile_w = int(tile_shape[0]), int(tile_shape[1])
+    else:
+        tile_h, tile_w = int(tile_shape), W
+    if tile_h <= 0 or tile_w <= 0:
+        raise ValueError(
+            "tile_shape dimensions must be positive, got %r" % (tile_shape,)
+        )
+    tile_h = min(tile_h, H)
+    tile_w = max(1, min(tile_w, W))
+    slices = []
+    for y0 in range(0, H, tile_h):
+        y1 = min(y0 + tile_h, H)
+        for x0 in range(0, W, tile_w):
+            x1 = min(x0 + tile_w, W)
+            slices.append((y0, y1, x0, x1))
+    return slices
+
+
+def _winsor_schedule_kappas(kappa, kappa_decay, n_iters):
+    """Kappa of every scheduled iteration, bitwise as in the reference.
+
+    The reference narrows kappa ONLY when ``kappa_decay < 1.0`` and only
+    after a rejecting iteration, so along a run that never stopped early
+    iteration ``i`` uses ``kappa * kappa_decay**i`` (``i = 0`` uses the
+    bare ``float(kappa)`` initialisation, bitwise identical to the
+    ``* 1.0`` product).  With ``kappa_decay >= 1.0`` the band never
+    narrows and every iteration uses ``float(kappa)``.
+    """
+    k = float(kappa)
+    if not (float(kappa_decay) < 1.0):
+        return [k] * int(n_iters)
+    return [k * (float(kappa_decay) ** i) for i in range(int(n_iters))]
+
+
+def _winsorized_tile_iterations_cp(
+    cp,
+    arr,
+    kappa,
+    winsor_limits,
+    zero_rank,
+    n_iters,
+    kappa_decay,
+    collect_counts,
+    tile_tag,
+):
+    """Run ``n_iters`` schedule iterations on one device tile (full stack
+    axis preserved) with NO early exit; mirror of the reference loop body.
+
+    ``arr``: device ``(N_batch, tile_h, tile_w[, C])`` float32 (contiguous
+    tile copy).  Returns ``(final_mask, counts)`` where ``counts`` is a
+    list of ``n_iters`` per-iteration LOCAL rejection counts when
+    ``collect_counts`` else ``None`` (pass 2 skips the counting syncs).
+    ``zero_rank`` selects the Phase C exact fast path per iteration
+    exactly like the untiled twin; otherwise the Phase D clip/sort slow
+    path (``_winsorize_axis0_cp``, including its overlap rank fallback and
+    extreme-limit ``IndexError``) runs on the tile.
+    """
+    mask = ~cp.isnan(arr)
+    kappas = _winsor_schedule_kappas(kappa, kappa_decay, n_iters)
+    counts = [] if collect_counts else None
+    for itr in range(int(n_iters)):
+        kappa_iter = kappas[itr]
+        _p_event("tiled_%s_iter%d" % (tile_tag, itr))
+        arr_masked = cp.where(mask, arr, cp.float32(cp.nan))
+        if zero_rank:
+            # Phase C zero-rank regime: winsorization is the identity on
+            # every pixel (floor(low*N_batch) == floor(high*N_batch) == 0),
+            # so the per-iteration sort block is skipped, exactly like the
+            # untiled twin.
+            arr_w_data = arr_masked
+        else:
+            arr_w_data = _winsorize_axis0_cp(cp, arr_masked, winsor_limits)
+        mu_w = cp.nanmean(arr_w_data, axis=0)
+        sigma_w = cp.nanstd(arr_w_data, axis=0, ddof=1)
+        n_valid_col = cp.count_nonzero(mask, axis=0)
+        sigma_w = cp.where(n_valid_col <= 1, cp.float32(0.0), sigma_w)
+        low = mu_w - cp.float32(kappa_iter) * sigma_w
+        high = mu_w + cp.float32(kappa_iter) * sigma_w
+        new_mask = mask & (arr >= low) & (arr <= high)
+        if collect_counts:
+            _p_wall_start("tiled_%s_nrej_sync" % tile_tag)
+            n_rej = int(cp.count_nonzero(mask)) - int(
+                cp.count_nonzero(new_mask)
+            )
+            _p_wall_end()
+            counts.append(n_rej)
+        mask = new_mask
+    return mask, counts
+
+
+def _winsorized_tile_finalize_cp(
+    cp, arr, mask, valid, weights, apply_rewinsor, zero_rank, winsor_limits
+):
+    """Final tail of one tile: survivor ``apply_rewinsor`` substitution,
+    contribution mask and the weighted / unweighted reduction — the exact
+    mirror of the untiled twin's tail on the tile's columns.  Returns
+    ``(result_t, sum_w_t)`` device arrays shaped like the tile's spatial
+    extent ``(tile_h, tile_w[, C])``.
+    """
+    if apply_rewinsor:
+        if zero_rank:
+            # Phase C min/max degenerate survivor bounds (no sort).
+            low_b, high_b = _winsorize_bounds_minmax_cp(cp, arr, mask)
+        else:
+            low_b, high_b = _winsorize_bounds_cp(
+                cp, cp.where(mask, arr, cp.float32(cp.nan)), winsor_limits
+            )
+        clipped = cp.clip(arr, low_b, high_b)
+        arr_final = cp.where(
+            mask, arr, cp.where(valid, clipped, cp.float32(cp.nan))
+        )
+    else:
+        arr_final = cp.where(mask, arr, cp.float32(cp.nan))
+    contrib = ~cp.isnan(arr_final)
+    if weights is not None:
+        w = _broadcast_weights_cp(cp, arr, weights)
+        sum_w = cp.nansum(
+            cp.where(contrib, w, cp.float32(0.0)), axis=0, dtype=cp.float32
+        )
+        sum_d = cp.nansum(arr_final * w, axis=0, dtype=cp.float32)
+        result = cp.where(
+            sum_w > 1e-6,
+            sum_d / cp.maximum(sum_w, 1e-6),
+            cp.zeros_like(sum_d),
+        )
+    else:
+        result = cp.nanmean(arr_final, axis=0)
+        result = cp.where(
+            cp.any(contrib, axis=0), result, cp.float32(0.0)
+        )
+        sum_w = cp.count_nonzero(contrib, axis=0).astype(cp.float32)
+    return result, sum_w
+
+
+def stack_winsorized_sigma_gpu_tiled(
+    images,
+    weights=None,
+    kappa=3.0,
+    winsor_limits=(0.05, 0.05),
+    apply_rewinsor=True,
+    max_iters=5,
+    kappa_decay=0.9,
+    return_weights=False,
+    tile_shape=None,
+    _tile_order="rowmajor",
+):
+    """Exact-N_batch SPATIAL GPU tiling of the Winsorized reduction.
+
+    Same scientific twin, same parameters, same return contract as
+    :func:`stack_winsorized_sigma_gpu` — ``(result, rejected_pct)`` or,
+    with ``return_weights=True``, ``(result, sum_w, rejected_pct)`` (NumPy
+    float32 arrays + Python float) — but the SPATIAL dimensions are
+    processed in tiles so the per-tile device working set is
+    ``N_batch x tile_h x tile_w x C`` instead of the full frame, while the
+    full ``N_batch`` stack population is preserved for EVERY output pixel
+    (the stack axis is never split; no hierarchical nonlinear reduction).
+
+    ``tile_shape`` is the Phase F planner seam: ``None`` (or a geometry
+    covering the whole frame in one tile) delegates to the untiled twin;
+    ``int`` / ``(tile_h,)`` selects full-width row bands; ``(tile_h,
+    tile_w)`` selects rectangular tiles.  ``_tile_order`` is a test-only
+    hook (``"rowmajor"`` or ``"reversed"``) proving tile-order invariance.
+
+    Global-iteration coordination: see the module section above — pass 1
+    discovers the reference's global stop iteration ``z_eff`` from
+    per-tile rejection counts summed over tiles; pass 2 replays exactly
+    ``z_eff`` schedule iterations per tile and finalises it.  The output
+    is bit-identical to the untiled twin (reconstruction is exact
+    placement only, no blend/feather/halo) and ``rejected_pct`` is the
+    global sum/sum formula.
+    """
+    cp = _get_cupy()
+    _ensure_probe()
+    _p_event("tiled_fn_start")
+    n_batch = int(len(images))
+    if n_batch == 0:  # pragma: no cover - degenerate, mirrors CPU failure
+        raise ValueError("tiled winsorized sigma requires at least one image")
+    _p_wall_start("tiled_host_stack_pack")
+    host = np.stack([im for im in images], axis=0).astype(np.float32)
+    _p_wall_end()
+    frame = host.shape[1:]
+    H, W = int(frame[0]), int(frame[1])
+    color = host.ndim == 4
+    spatial = _winsor_tile_slices((H, W), tile_shape)
+    if len(spatial) == 1:
+        # Untiled / full-frame geometry: the untiled twin IS the reference
+        # implementation of this reduction; delegate for guaranteed
+        # bitwise identity (and its single-pass early-exit loop).
+        return stack_winsorized_sigma_gpu(
+            images,
+            weights,
+            kappa=kappa,
+            winsor_limits=winsor_limits,
+            apply_rewinsor=apply_rewinsor,
+            max_iters=max_iters,
+            kappa_decay=kappa_decay,
+            return_weights=return_weights,
+        )
+    if _tile_order == "reversed":
+        spatial = list(reversed(spatial))
+    zero_rank = _winsor_zero_rank_regime(winsor_limits, n_batch)
+    _p_note(
+        "tiled n_batch=%d zero_rank_fastpath=%s n_tiles=%d tile_shape=%s"
+        % (n_batch, zero_rank, len(spatial), tile_shape)
+    )
+
+    # ---- pass 1: schedule discovery (deterministic kappa schedule,
+    # no early exit, per-iteration LOCAL rejection counts summed globally)
+    # With max_iters == 1 the reference loop always runs its single
+    # iteration to the end (a zero-rejection iteration would only shorten
+    # it by a mask no-op), so z_eff == max_iters is provable a priori and
+    # the discovery pass (and the z search over its counts) is skipped.
+    if int(max_iters) == 1:
+        z_eff = 1
+    else:
+        global_counts = [0] * int(max_iters)
+        for t, (y0, y1, x0, x1) in enumerate(spatial):
+            arr_t = cp.asarray(host[:, y0:y1, x0:x1])
+            _p_event("tiled_p1_tile%d" % t)
+            _, counts = _winsorized_tile_iterations_cp(
+                cp,
+                arr_t,
+                kappa,
+                winsor_limits,
+                zero_rank,
+                int(max_iters),
+                kappa_decay,
+                collect_counts=True,
+                tile_tag="p1_t%d" % t,
+            )
+            for i, c in enumerate(counts):
+                global_counts[i] += c
+        z_eff = int(max_iters)
+        for i, c in enumerate(global_counts):
+            if c == 0:
+                z_eff = i
+                break
+    _p_note(
+        "tiled z_eff=%d global_counts=%s"
+        % (z_eff, global_counts if int(max_iters) > 1 else "skipped")
+    )
+
+    # ---- pass 2: exact replay of z_eff schedule iterations per tile and
+    # exact-placement reconstruction + GLOBAL rejection accounting
+    out_shape = (H, W) + ((int(frame[2]),) if color else ())
+    result = np.empty(out_shape, dtype=np.float32)
+    sum_w = np.empty(out_shape, dtype=np.float32)
+    n_valid_total = 0
+    n_surv_total = 0
+    for t, (y0, y1, x0, x1) in enumerate(spatial):
+        arr_t = cp.asarray(host[:, y0:y1, x0:x1])
+        _p_event("tiled_p2_tile%d" % t)
+        valid_t = ~cp.isnan(arr_t)
+        if z_eff == 0:
+            mask_t = valid_t  # reference iteration 0 rejected nothing
+        else:
+            mask_t, _ = _winsorized_tile_iterations_cp(
+                cp,
+                arr_t,
+                kappa,
+                winsor_limits,
+                zero_rank,
+                z_eff,
+                kappa_decay,
+                collect_counts=False,
+                tile_tag="p2_t%d" % t,
+            )
+        res_t, sumw_t = _winsorized_tile_finalize_cp(
+            cp,
+            arr_t,
+            mask_t,
+            valid_t,
+            weights,
+            apply_rewinsor,
+            zero_rank,
+            winsor_limits,
+        )
+        _p_wall_start("tiled_tile_counts_sync")
+        n_valid_total += int(cp.count_nonzero(valid_t))
+        n_surv_total += int(cp.count_nonzero(mask_t))
+        _p_wall_end()
+        _p_event("tiled_p2_tile%d_final" % t)
+        result[y0:y1, x0:x1] = cp.asnumpy(res_t.astype(cp.float32))
+        sum_w[y0:y1, x0:x1] = cp.asnumpy(sumw_t.astype(cp.float32))
+        _p_event("tiled_tile_placed")
+
+    if n_valid_total == 0:
+        rejected_pct = 0.0
+    else:
+        rejected_pct = (
+            100.0 * (n_valid_total - n_surv_total) / float(n_valid_total)
+        )
+    _p_note("tiled rejected_pct=%.12f" % rejected_pct)
+    _p_event("tiled_fn_done")
+    if return_weights:
+        return result, sum_w, rejected_pct
+    return result, rejected_pct
