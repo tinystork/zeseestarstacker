@@ -22,7 +22,9 @@ here).
   (`ZSSS_CPU_MEMORY_OVERRIDE_BYTES`, provenance-visible)
 - exact-N spatial CPU Winsorized fallback: memory pressure changes the tile
   GEOMETRY only — the scientific batch N is never reduced or subdivided
-  (the historical N-subgroup heuristic is removed from the Winsorized path)
+  (the historical N-subgroup heuristic is removed from the Winsorized path);
+  the spatial driver slices every observation first and materializes only the
+  current `N × tile_h × tile_w × C` cube, never a second full-frame N-cube
 - end-to-end resolved memory-budget propagation through the CPU Winsorized
   chain (policy → batch → queue wrapper → worker → core): no hidden 1/2 GiB
   deep default on the production path
@@ -31,7 +33,8 @@ here).
   never advanced (counter / count-file / partial / resume ledger / meta)
 - improved memory/GPU provenance: `MEMORY_POLICY` per run and
   `CPU_WINSOR_MEMORY_DECISION` / `_RETRY` / `_REFUSAL` per CPU execution,
-  alongside the existing truthful GPU execution records
+  alongside the existing truthful GPU execution records; allocation retries
+  are explicitly bounded and record both recovery and exhaustion outcomes
 
 ## [8.3.0] — Phoenix consedit
 
