@@ -800,6 +800,105 @@ def _emit_lifecycle_failopen(obj, event, **fields) -> None:
         pass
 
 
+def _drizzle_science_diag(obj):
+    """Return the per-run Drizzle science diagnostics collector, or ``None``.
+
+    ZSSS-DRIZZLE-CLOSURE-P1: passive instrumentation only.  Absence of the
+    collector (headless/legacy/refused runs) is a silent no-op at every call
+    site.
+    """
+    try:
+        return getattr(obj, "_drizzle_science_diag", None)
+    except Exception:  # pragma: no cover - fail-open
+        return None
+
+
+def _support_lifecycle_failopen(obj, stage, **fields) -> None:
+    """Record one bounded SUPPORT_LIFECYCLE observation (fail-open).
+
+    Every call site is observational: the record captures the *as-observed*
+    support presence/availability at the seam and the stopped/finalization
+    state so an early release/reset is distinguishable from stale logging.
+    A missing collector or any internal error is a silent no-op; ordering,
+    retention, cleanup and scientific outcome are never changed.
+    """
+    diag = _drizzle_science_diag(obj)
+    if diag is None:
+        return
+    try:
+        from ..core.drizzle_science_diagnostics import lifecycle_record
+
+        diag.add_lifecycle(lifecycle_record(stage, obj, **fields))
+    except Exception:  # noqa: BLE001 - fail-open is the contract
+        pass
+
+
+def _write_drizzle_science_diagnostics(obj, sci_hwc=None, wht_hwc=None) -> None:
+    """Compute (when arrays are supplied) and atomically write the artifact.
+
+    ZSSS-DRIZZLE-CLOSURE-P1: passive, bounded, fail-open instrumentation.
+    When the final M3 science/native-WHT arrays are supplied, the full set of
+    pre-stretch SCI / signed-WHT / threshold / support / boundary /
+    conditioning sections is computed from them *immediately before* any
+    display stretch or FITS conversion.  Any failure is debug-logged and never
+    changes science or control flow.
+    """
+    diag = _drizzle_science_diag(obj)
+    if diag is None:
+        return
+    try:
+        if sci_hwc is not None and wht_hwc is not None:
+            from ..core.drizzle_science_diagnostics import summarize_run
+
+            sup_w1 = None
+            sup_w2 = None
+            try:
+                acc_w1 = getattr(obj, "drizzle_sup_w1", None)
+                acc_w2 = getattr(obj, "drizzle_sup_w2", None)
+                if (
+                    getattr(obj, "_drizzle_support_available", False)
+                    and acc_w1 is not None
+                    and acc_w2 is not None
+                ):
+                    sup_w1 = np.asarray(acc_w1.wht)
+                    sup_w2 = np.asarray(acc_w2.wht)
+            except Exception:  # noqa: BLE001 - fail-open
+                sup_w1 = None
+                sup_w2 = None
+            sections = summarize_run(
+                np.asarray(sci_hwc),
+                np.asarray(wht_hwc),
+                sup_w1=sup_w1,
+                sup_w2=sup_w2,
+            )
+            diag.set_sci_stats(sections["sci_stats"])
+            diag.set_wht_diagnostics(sections["wht_diagnostics"])
+            diag.set_threshold_sweep(sections["threshold_sweep"])
+            diag.set_support(
+                sections["support"], extrema=sections["support_extrema"]
+            )
+            diag.set_boundary_bins(sections["boundary_bins"])
+            diag.set_conditioning(sections["conditioning_candidates"])
+    except Exception as exc:  # noqa: BLE001 - fail-open is the contract
+        logger.debug("drizzle diagnostics summary failed (non-fatal): %s", exc)
+    try:
+        out_path = getattr(obj, "final_stacked_path", None)
+        diag.set_finalization_state(
+            final_stacked_basename=(
+                os.path.basename(str(out_path)) if out_path else None
+            ),
+            coverage_render_status=getattr(obj, "coverage_render_status", None),
+            processing_error=getattr(obj, "processing_error", None),
+            stopped=bool(getattr(obj, "user_requested_stop", False)),
+        )
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+    try:
+        diag.write()
+    except Exception as exc:  # noqa: BLE001 - fail-open
+        logger.debug("drizzle diagnostics write failed (non-fatal): %s", exc)
+
+
 def _emit_coverage_render_result(obj, status, *, reason=None, **fields) -> None:
     """Publish one bounded, machine-searchable final render decision.
 
@@ -815,6 +914,9 @@ def _emit_coverage_render_result(obj, status, *, reason=None, **fields) -> None:
         payload["reason"] = str(reason)
     payload.update(fields)
     _emit_lifecycle_failopen(obj, "COVERAGE_RENDER_RESULT", **payload)
+    _support_lifecycle_failopen(
+        obj, "coverage_render_exited", status=str(status), reason=reason
+    )
 
 
 def _prepare_coverage_render(obj):
@@ -828,6 +930,7 @@ def _prepare_coverage_render(obj):
     """
     requested = bool(getattr(obj, "apply_coverage_render", False))
     obj.coverage_render_applied_in_session = False
+    _support_lifecycle_failopen(obj, "coverage_render_entered")
     if not requested:
         _emit_coverage_render_result(obj, "NOT_REQUESTED")
         return None, "NOT_REQUESTED"
@@ -5032,6 +5135,9 @@ class SeestarQueuedStacker:
         self.drizzle_sup_w2 = None
         self._drizzle_support_available = False
         self._drizzle_support_unavailable_reason = None
+        # ZSSS-DRIZZLE-CLOSURE-P1: passive per-run science diagnostics collector
+        # (created at Standard M3 initialization; never part of science state).
+        self._drizzle_science_diag = None
         # M3 DPIC-01: immutable run-level per-channel background anchor for the
         # additive background match applied before each Drizzle deposition.
         # Captured once from the immutable registration reference (returned by
@@ -5725,6 +5831,20 @@ class SeestarQueuedStacker:
                     )
                 else:
                     logger.info("DRIZZLE POLICY: STANDARD")
+                # ------------------------------------------------------------
+                # ZSSS-DRIZZLE-CLOSURE-P1: passive, fail-open science
+                # diagnostics.  Observes the RESOLVED geometry, the support
+                # lifecycle and (later, once per run) the effective add_image
+                # contract.  It is never passed upstream, never mutates
+                # science and can never abort the run.
+                # ------------------------------------------------------------
+                self._init_drizzle_science_diagnostics(
+                    kernel_eff,
+                    pixfrac_requested,
+                    pixfrac_eff,
+                    scale_eff,
+                    resume_result,
+                )
                 logger.debug(
                     f"  -> {len(self.drizzle_accumulators)} accumulateurs Drizzle (single) créés. Shape={out_shape_hw}"
                 )
@@ -16438,6 +16558,9 @@ class SeestarQueuedStacker:
         self._resume_input_roots = list(restored.session["input_roots"])
         self._resume_reference_identity = restored.session["reference"]
         self._resume_active = True
+        _support_lifecycle_failopen(
+            self, "checkpoint_restore", frame_count=self._drizzle_frame_count
+        )
 
     def _validate_drizzle_resume_headless(self):
         """Validate a native Drizzle checkpoint without mutating disk/runtime.
@@ -19695,11 +19818,16 @@ class SeestarQueuedStacker:
                     "  DEBUG QM [SaveFinalStack M3] Mode: Drizzle Standard (accumulateur unique)"
                 )
                 _emit_lifecycle_failopen(self, "DRIZZLE_FINALIZATION_ENTERED")
+                _support_lifecycle_failopen(self, "drizzle_finalization_entered")
                 accs = self.drizzle_accumulators
                 if not accs or len(accs) != 3:
                     _emit_lifecycle_failopen(
                         self, "DRIZZLE_FINALIZATION_RETURNED", success=False
                     )
+                    _support_lifecycle_failopen(
+                        self, "drizzle_finalization_returned", success=False
+                    )
+                    _write_drizzle_science_diagnostics(self)
                     raise ValueError("Accumulateurs Drizzle invalides ou manquants.")
 
                 logger.info("DRIZZLE FINALIZE: single accumulator (policy-independent)")
@@ -19750,6 +19878,10 @@ class SeestarQueuedStacker:
                     _emit_lifecycle_failopen(
                         self, "DRIZZLE_FINALIZATION_RETURNED", success=False
                     )
+                    _support_lifecycle_failopen(
+                        self, "drizzle_finalization_returned", success=False
+                    )
+                    _write_drizzle_science_diagnostics(self)
                     self.final_stacked_path = None
                     return
 
@@ -19765,6 +19897,10 @@ class SeestarQueuedStacker:
                     _emit_lifecycle_failopen(
                         self, "DRIZZLE_FINALIZATION_RETURNED", success=False
                     )
+                    _support_lifecycle_failopen(
+                        self, "drizzle_finalization_returned", success=False
+                    )
+                    _write_drizzle_science_diagnostics(self)
                     detail = ", ".join(
                         "ch%d: %d samples (max|sci|=%.6g)" % (c, n, m)
                         for c, n, m in support_violations
@@ -19783,9 +19919,21 @@ class SeestarQueuedStacker:
                     final_image_initial_raw, final_wht_map_for_postproc
                 )
 
+                # ZSSS-DRIZZLE-CLOSURE-P1: passive, fail-open diagnostics from
+                # the FINAL M3 science and native signed WHT, captured BEFORE
+                # any display stretch / cosmetic render / FITS conversion.
+                # The arrays below are never mutated.
+                _support_lifecycle_failopen(self, "drizzle_finalization_pre_save")
+                _write_drizzle_science_diagnostics(
+                    self, final_image_initial_raw, final_wht_hwc
+                )
+
                 self._close_memmaps()
                 _emit_lifecycle_failopen(
                     self, "DRIZZLE_FINALIZATION_RETURNED", success=True
+                )
+                _support_lifecycle_failopen(
+                    self, "drizzle_finalization_returned", success=True
                 )
                 self.update_progress(
                     f"    DEBUG QM: Drizzle Std (accumulateur) - final_image_initial_raw - Range: [{np.nanmin(final_image_initial_raw):.4g} - {np.nanmax(final_image_initial_raw):.4g}]"
@@ -20616,6 +20764,9 @@ class SeestarQueuedStacker:
             success=fits_write_success,
             path=os.path.basename(fits_path),
         )
+        _support_lifecycle_failopen(
+            self, "fits_save", success=bool(fits_write_success)
+        )
 
         # D3.6: record the output-serialization evidence ACTUALLY used -- but
         # only when the primary FITS write genuinely completed (never claim a
@@ -20707,6 +20858,7 @@ class SeestarQueuedStacker:
 
     def _close_memmaps(self):
         """Ferme proprement les objets memmap s'ils existent."""
+        _support_lifecycle_failopen(self, "cleanup_reset")
         logger.debug("DEBUG QM [_close_memmaps]: Tentative de fermeture des memmaps...")
         closed_sum = False
         if (
@@ -23881,6 +24033,50 @@ class SeestarQueuedStacker:
                     in_grid_mask=in_grid_mask,
                 )
 
+            # ZSSS-DRIZZLE-CLOSURE-P1: record the ACTUAL add_image contract
+            # exactly once per run (from the resolved accumulator state), and
+            # one first-deposit support lifecycle observation.  Passive and
+            # fail-open; the upstream call above is untouched.
+            _dsd_here = getattr(self, "_drizzle_science_diag", None)
+            if _dsd_here is not None:
+                try:
+                    if getattr(_dsd_here, "contract", None) is None:
+                        from ..core.drizzle_science_diagnostics import (
+                            contract_diagnostic,
+                        )
+
+                        _contract = contract_diagnostic(
+                            accs[0].kernel,
+                            accs[0].pixfrac,
+                            exptime=exptime,
+                            in_units="counts",
+                            fillval=accs[0].fillval,
+                        )
+                        _dsd_here.set_contract(_contract)
+                        logger.info(
+                            "M3: DRIZZLE_ADD_IMAGE_CONTRACT kernel=%s "
+                            "pixfrac=%s iscale_effective=%s iscale_source=%s "
+                            "pixel_scale_ratio_effective=%s "
+                            "pixel_scale_ratio_source=%s in_units=%s "
+                            "exptime=%s wht_scale=%s fillval=%s "
+                            "weight_map_present=%s",
+                            _contract["kernel_effective"],
+                            _contract["pixfrac_effective"],
+                            _contract["iscale_effective"],
+                            _contract["iscale_source"],
+                            _contract["pixel_scale_ratio_effective"],
+                            _contract["pixel_scale_ratio_source"],
+                            _contract["in_units_effective"],
+                            _contract["exptime_effective"],
+                            _contract["wht_scale_effective"],
+                            _contract["fillval_effective"],
+                            _contract["weight_map_present"],
+                        )
+                except Exception:  # noqa: BLE001 - fail-open
+                    pass
+                if int(getattr(self, "_drizzle_frame_count", 0) or 0) == 0:
+                    _support_lifecycle_failopen(self, "first_deposit")
+
             # COV-01C: deposit the positive per-original-exposure support into
             # the separate square-kernel support accumulators (never the native
             # signed WHT).  Support is channel-invariant; q = 1.0 (uniform).
@@ -24217,6 +24413,9 @@ class SeestarQueuedStacker:
             generation,
             self._drizzle_checkpoint_last_committed_frames,
         )
+        _support_lifecycle_failopen(
+            self, "checkpoint_save", generation=generation
+        )
 
     def _drizzle_checkpoint_after_frame(self, source_path):
         """Record an accepted source identity and commit at the group cadence.
@@ -24428,6 +24627,86 @@ class SeestarQueuedStacker:
         except Exception as e:
             logger.debug(f"Error in _update_preview_drizzle_accumulator: {e}")
             traceback.print_exc(limit=2)
+
+    def _init_drizzle_science_diagnostics(
+        self, kernel_eff, pixfrac_requested, pixfrac_eff, scale_eff, resume_result
+    ):
+        """Create the per-run passive Drizzle science-diagnostics collector.
+
+        ZSSS-DRIZZLE-CLOSURE-P1 (Phase 1).  Records the RESOLVED geometry once
+        at Standard-M3 initialization and opens the SUPPORT_LIFECYCLE ring.
+        Purely observational: it is never passed upstream, never mutates
+        science, and any failure is a silent (debug-logged) no-op.
+        """
+        try:
+            from ..core.drizzle_science_diagnostics import (
+                DrizzleScienceDiagnostics,
+                geometry_diagnostic,
+            )
+
+            diag = DrizzleScienceDiagnostics(
+                run_token=f"{time.time_ns()}",
+                output_folder=getattr(self, "output_folder", None),
+            )
+            diag.set_run_config(
+                kernel=kernel_eff,
+                scale=scale_eff,
+                pixfrac_requested=pixfrac_requested,
+                pixfrac_effective=pixfrac_eff,
+            )
+            diag.set_geometry(
+                geometry_diagnostic(
+                    getattr(self, "reference_wcs_object", None),
+                    getattr(self, "drizzle_output_wcs", None),
+                    kernel=kernel_eff,
+                    scale=scale_eff,
+                )
+            )
+            # Record the resolved geometry ONCE per run with the documented,
+            # machine-searchable token.  Unavailable/invalid WCS is reported
+            # fail-open with an explicit reason (never a fabricated ratio).
+            try:
+                geo = diag.geometry or {}
+                if geo.get("available"):
+                    geo_line = (
+                        "DRIZZLE_GEOMETRY_DIAGNOSTIC kernel=%s scale=%s "
+                        "input_pixel_scale=%s output_pixel_scale=%s "
+                        "pixel_scale_ratio_current=1.0 "
+                        "pixel_scale_ratio_candidate=%s candidate_source=wcs_ratio"
+                    ) % (
+                        kernel_eff,
+                        scale_eff,
+                        geo.get("input_pixel_scale_deg"),
+                        geo.get("output_pixel_scale_deg"),
+                        geo.get("pixel_scale_ratio_candidate"),
+                    )
+                else:
+                    geo_line = (
+                        "DRIZZLE_GEOMETRY_DIAGNOSTIC kernel=%s scale=%s "
+                        "pixel_scale_ratio_current=1.0 "
+                        "pixel_scale_ratio_candidate=unavailable "
+                        "candidate_source=wcs_ratio reason=%s"
+                    ) % (kernel_eff, scale_eff, geo.get("reason"))
+                logger.info("M3: %s", geo_line)
+                _up = getattr(self, "update_progress", None)
+                if callable(_up):
+                    _up(geo_line)
+            except Exception:  # noqa: BLE001 - fail-open
+                pass
+            self._drizzle_science_diag = diag
+            _support_lifecycle_failopen(
+                self,
+                "accumulators_ready",
+                readout=("resume" if resume_result is not None else "fresh"),
+                kernel=kernel_eff,
+                pixfrac_effective=pixfrac_eff,
+            )
+            if resume_result is None:
+                _support_lifecycle_failopen(self, "fresh_m3_init")
+        except Exception as exc:  # noqa: BLE001 - fail-open is the contract
+            logger.debug(
+                "drizzle science diagnostics init failed (non-fatal): %s", exc
+            )
 
     def _validate_drizzle_science(self, final_image, final_wht):
         """M3: validate the final drizzle science BEFORE any uint16 conversion.
@@ -24790,6 +25069,7 @@ class SeestarQueuedStacker:
         self.update_progress("⛔ Arrêt demandé...")
         self.user_requested_stop = True
         self.stop_processing = True
+        _support_lifecycle_failopen(self, "stop_requested")
         self.aligner.stop_processing = True
         if self.autotuner:
             self.autotuner.stop()
