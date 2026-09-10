@@ -1,0 +1,445 @@
+{
+ "diagnostic_only": true,
+ "grid": {
+  "impulse": true,
+  "n": 48
+ },
+ "mission_id": "zsss-drizzle-scientific-closure-p2-20260910",
+ "note": "Baseline = pixel_scale_ratio absent (upstream 1.0). Corrected = WCS-derived output/input angular pixel-size ratio. Control = the DISPROVEN psr=scale behaviour, recorded only to prove it is not the corrected value.",
+ "phase": "P2-B (geometry-only qualification probe)",
+ "rows": [
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.25,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.397096907038758,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2256.25,
+    "sum_wht": 2256.25
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.25,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.397096907038758,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2256.25,
+    "sum_wht": 2256.25
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.25,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.397096907038758,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2256.25,
+    "sum_wht": 2256.25
+   },
+   "geometry_effect_on_kernel": false,
+   "kernel": "square",
+   "scale": 1.0,
+   "wcs_derived_ratio": 1.0
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.1660734415054321,
+    "min_wht": 0.25814753770828247,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.443326606948702,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2342.0936148762703,
+    "sum_wht": 2342.0936148762703
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.1660734415054321,
+    "min_wht": 0.25814753770828247,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.443326606948702,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2342.0936148762703,
+    "sum_wht": 2342.0936148762703
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.1660734415054321,
+    "min_wht": 0.25814753770828247,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.443326606948702,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2342.0936148762703,
+    "sum_wht": 2342.0936148762703
+   },
+   "geometry_effect_on_kernel": false,
+   "kernel": "lanczos2",
+   "scale": 1.0,
+   "wcs_derived_ratio": 1.0
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2154641151428223,
+    "min_wht": 0.2459001988172531,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.463599519543195,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2235.5473590940237,
+    "sum_wht": 2235.5473590940237
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2154641151428223,
+    "min_wht": 0.2459001988172531,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.463599519543195,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2235.5473590940237,
+    "sum_wht": 2235.5473590940237
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2154641151428223,
+    "min_wht": 0.2459001988172531,
+    "nonzero": 2304,
+    "rms_radius_out_px": 19.463599519543195,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2235.5473590940237,
+    "sum_wht": 2235.5473590940237
+   },
+   "geometry_effect_on_kernel": false,
+   "kernel": "lanczos3",
+   "scale": 1.0,
+   "wcs_derived_ratio": 1.0
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.25,
+    "min_wht": 0.0625,
+    "nonzero": 9216,
+    "rms_radius_out_px": 38.990366644845444,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2280.0625,
+    "sum_wht": 2280.0625
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.25,
+    "min_wht": 0.0625,
+    "nonzero": 9216,
+    "rms_radius_out_px": 38.990366644845444,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2280.0625,
+    "sum_wht": 2280.0625
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.25,
+    "min_wht": 0.0625,
+    "nonzero": 9216,
+    "rms_radius_out_px": 38.990366644845444,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2280.0625,
+    "sum_wht": 2280.0625
+   },
+   "geometry_effect_on_kernel": false,
+   "kernel": "square",
+   "scale": 2.0,
+   "wcs_derived_ratio": 0.5
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 4.0690758851269493e-07,
+    "nonzero": 9121,
+    "rms_radius_out_px": 39.18920546503485,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2309.821257406947,
+    "sum_wht": 2309.821257406947
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.0,
+    "nonzero": 2304,
+    "rms_radius_out_px": 39.189709533668825,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2304.0,
+    "sum_wht": 2304.0
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.1660734415054321,
+    "min_wht": 0.25814753770828247,
+    "nonzero": 9216,
+    "rms_radius_out_px": 39.03429778204143,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 9303.594756603241,
+    "sum_wht": 9303.594756603241
+   },
+   "geometry_effect_on_kernel": true,
+   "kernel": "lanczos2",
+   "scale": 2.0,
+   "wcs_derived_ratio": 0.5
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0008258819580078,
+    "min_wht": 6.858274446130963e-07,
+    "nonzero": 9215,
+    "rms_radius_out_px": 39.18873995277264,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2313.4251270242194,
+    "sum_wht": 2313.4251270242194
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 4.260773778241855e-08,
+    "nonzero": 6912,
+    "rms_radius_out_px": 39.18954628311093,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2305.8829022358486,
+    "sum_wht": 2305.8829022358486
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2154641151428223,
+    "min_wht": 0.2459001988172531,
+    "nonzero": 9216,
+    "rms_radius_out_px": 39.05572718079835,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 9097.041003242135,
+    "sum_wht": 9097.041003242135
+   },
+   "geometry_effect_on_kernel": true,
+   "kernel": "lanczos3",
+   "scale": 2.0,
+   "wcs_derived_ratio": 0.5
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.1111111119389534,
+    "min_wht": 0.02777777798473835,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.585400305194305,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2288.027794824913,
+    "sum_wht": 2288.027794824913
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.1111111119389534,
+    "min_wht": 0.02777777798473835,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.585400305194305,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2288.027794824913,
+    "sum_wht": 2288.027794824913
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.1111111119389534,
+    "min_wht": 0.02777777798473835,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.585400305194305,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2288.027794824913,
+    "sum_wht": 2288.027794824913
+   },
+   "geometry_effect_on_kernel": false,
+   "kernel": "square",
+   "scale": 3.0,
+   "wcs_derived_ratio": 0.33333333333333337
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 0.6423097743716865,
+    "max_wht": 0.32691702246665955,
+    "min_wht": -0.07282517105340958,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.724155549109405,
+    "signed_fraction": 0.35769022562831354,
+    "sum_abs_wht": 3713.6355003295466,
+    "sum_wht": 2385.304380315356
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.004055696539580822,
+    "min_wht": 0.0,
+    "nonzero": 9216,
+    "rms_radius_out_px": 58.78350108661443,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 37.377299308776855,
+    "sum_wht": 37.377299308776855
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.1660734415054321,
+    "min_wht": 0.25814753770828247,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.585082138607426,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 20919.356684446335,
+    "sum_wht": 20919.356684446335
+   },
+   "geometry_effect_on_kernel": true,
+   "kernel": "lanczos2",
+   "scale": 3.0,
+   "wcs_derived_ratio": 0.33333333333333337
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 0.4226359684278387,
+    "max_wht": 0.39813345670700073,
+    "min_wht": -0.17048388719558716,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.64133696988121,
+    "signed_fraction": 0.5773640315721613,
+    "sum_abs_wht": 5381.566439559683,
+    "sum_wht": 2274.4435438420624
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.018250634893774986,
+    "min_wht": 0.0,
+    "nonzero": 9216,
+    "rms_radius_out_px": 58.78350108661443,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 168.19785118103027,
+    "sum_wht": 168.19785118103027
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2154641151428223,
+    "min_wht": 0.2459001988172531,
+    "nonzero": 20736,
+    "rms_radius_out_px": 58.6198006403999,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 20415.4564858526,
+    "sum_wht": 20415.4564858526
+   },
+   "geometry_effect_on_kernel": true,
+   "kernel": "lanczos3",
+   "scale": 3.0,
+   "wcs_derived_ratio": 0.33333333333333337
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.0625,
+    "min_wht": 0.015625,
+    "nonzero": 36864,
+    "rms_radius_out_px": 78.18087584095285,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2292.015625,
+    "sum_wht": 2292.015625
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.0625,
+    "min_wht": 0.015625,
+    "nonzero": 36864,
+    "rms_radius_out_px": 78.18087584095285,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2292.015625,
+    "sum_wht": 2292.015625
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 0.0625,
+    "min_wht": 0.015625,
+    "nonzero": 36864,
+    "rms_radius_out_px": 78.18087584095285,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2292.015625,
+    "sum_wht": 2292.015625
+   },
+   "geometry_effect_on_kernel": false,
+   "kernel": "square",
+   "scale": 4.0,
+   "wcs_derived_ratio": 0.25
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.0,
+    "nonzero": 11520,
+    "rms_radius_out_px": 78.36986590300265,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2309.882572863833,
+    "sum_wht": 2309.882572863833
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.0,
+    "nonzero": 2304,
+    "rms_radius_out_px": 78.36984964470285,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2304.0,
+    "sum_wht": 2304.0
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2003055810928345,
+    "min_wht": 0.25814753770828247,
+    "nonzero": 36864,
+    "rms_radius_out_px": 78.12829475000494,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 37350.053395062685,
+    "sum_wht": 37350.053395062685
+   },
+   "geometry_effect_on_kernel": true,
+   "kernel": "lanczos2",
+   "scale": 4.0,
+   "wcs_derived_ratio": 0.25
+  },
+  {
+   "baseline_psr_absent": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 4.260773778241855e-08,
+    "nonzero": 16128,
+    "rms_radius_out_px": 78.36954999123263,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2313.5245435093084,
+    "sum_wht": 2313.5245435093084
+   },
+   "control_psr_equals_scale": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.0,
+    "min_wht": 0.0,
+    "nonzero": 2304,
+    "rms_radius_out_px": 78.36984964470285,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 2304.0,
+    "sum_wht": 2304.0
+   },
+   "corrected_wcs_ratio": {
+    "cancellation_ratio": 1.0,
+    "max_wht": 1.2154641151428223,
+    "min_wht": 0.2459001988172531,
+    "nonzero": 36864,
+    "rms_radius_out_px": 78.17426527927937,
+    "signed_fraction": 0.0,
+    "sum_abs_wht": 36459.9052170068,
+    "sum_wht": 36459.9052170068
+   },
+   "geometry_effect_on_kernel": true,
+   "kernel": "lanczos3",
+   "scale": 4.0,
+   "wcs_derived_ratio": 0.25
+  }
+ ],
+ "schema_version": "p2b.ab.1"
+}

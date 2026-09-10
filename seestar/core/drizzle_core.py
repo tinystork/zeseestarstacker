@@ -31,6 +31,7 @@ Only ``numpy``, ``astropy.wcs`` and ``drizzle.resample`` are used (no
 from __future__ import annotations
 
 import itertools
+import math
 
 import numpy as np
 from astropy.wcs import WCS
@@ -40,6 +41,10 @@ __all__ = [
     "build_output_grid",
     "pixmap_from_alignment",
     "DrizzleAccumulator",
+    "DrizzleGeometryError",
+    "PIXEL_SCALE_RATIO_SOURCE",
+    "angular_pixel_scale_deg",
+    "derive_pixel_scale_ratio",
     "drizzle_stream",
     "support_integrity_violations",
     "VALID_DRIZZLE_KERNELS",
@@ -50,6 +55,90 @@ __all__ = [
     "WhtThresholdResult",
     "wht_relative_threshold",
 ]
+
+# Provenance token for the WCS-derived kernel geometry factor (P2-B).
+PIXEL_SCALE_RATIO_SOURCE = "wcs_output_input_ratio"
+
+
+class DrizzleGeometryError(RuntimeError):
+    """Canonical Drizzle geometry could not be resolved safely.
+
+    Raised *before* any deposition so a run fails closed instead of silently
+    reverting to the upstream ``pixel_scale_ratio=1.0`` default.
+    """
+
+
+def angular_pixel_scale_deg(wcs):
+    """Robust mean angular pixel size (deg/pixel) of a celestial WCS, or None.
+
+    Uses ``astropy.wcs.utils.proj_plane_pixel_scales`` (mean of the absolute
+    projected linear scales at the reference point), falling back to
+    ``sqrt(|det(CD)|)``.  Never raises; returns ``None`` when unresolvable.
+    """
+    if wcs is None:
+        return None
+    try:
+        from astropy.wcs.utils import proj_plane_pixel_scales
+
+        scales = np.asarray(proj_plane_pixel_scales(wcs), dtype=np.float64)
+        scales = scales[np.isfinite(scales)]
+        if scales.size == 0:
+            return None
+        val = float(np.mean(np.abs(scales)))
+        return val if math.isfinite(val) and val > 0.0 else None
+    except Exception:  # noqa: BLE001 - fall back to the CD determinant
+        try:
+            cd = np.asarray(wcs.pixel_scale_matrix, dtype=np.float64)
+            val = math.sqrt(abs(float(np.linalg.det(cd))))
+            return val if math.isfinite(val) and val > 0.0 else None
+        except Exception:  # noqa: BLE001 - unresolvable
+            return None
+
+
+def derive_pixel_scale_ratio(reference_wcs, output_wcs):
+    """Frozen kernel-geometry factor ``output / input`` angular pixel size.
+
+    ``pixel_scale_ratio`` sizes the turbo/gaussian/lanczos kernels from their
+    nominal INPUT-pixel size into the OUTPUT coordinate system, so it is the
+    ratio of the canonical OUTPUT angular pixel size to the canonical INPUT
+    (reference) angular pixel size.  It is resolved from real WCS geometry and
+    is **not** the user scale scalar (a regular grid usually approximates
+    ``1 / scale`` but the ratio is authoritative).
+
+    Raises
+    ------
+    DrizzleGeometryError
+        If either canonical WCS cannot yield a finite positive angular pixel
+        scale (fail closed; never a silent ``1.0`` fallback).
+    """
+    in_scale = angular_pixel_scale_deg(reference_wcs)
+    out_scale = angular_pixel_scale_deg(output_wcs)
+    if in_scale is None:
+        raise DrizzleGeometryError(
+            "input (reference) WCS angular pixel scale is unresolvable"
+        )
+    if out_scale is None:
+        raise DrizzleGeometryError(
+            "output WCS angular pixel scale is unresolvable"
+        )
+    ratio = out_scale / in_scale
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        raise DrizzleGeometryError(
+            f"derived pixel_scale_ratio is not finite/positive: {ratio!r}"
+        )
+    return float(ratio)
+
+
+def _validate_pixel_scale_ratio(value):
+    """Return a validated float or ``None`` (upstream-default marker)."""
+    if value is None:
+        return None
+    val = float(value)
+    if not math.isfinite(val) or val <= 0.0:
+        raise ValueError(
+            f"pixel_scale_ratio must be finite and > 0, got {value!r}"
+        )
+    return val
 
 # Small positive weight floor below which a Drizzle output sample is considered
 # *unsupported*.  Continuity-friendly (matches the historical ``drizzle_finalize``
@@ -245,11 +334,17 @@ class DrizzleAccumulator:
         Fill value for uncovered output pixels (default ``"0.0"``).
     """
 
-    def __init__(self, out_shape_hw, kernel="square", pixfrac=1.0, fillval="0.0"):
+    def __init__(self, out_shape_hw, kernel="square", pixfrac=1.0, fillval="0.0",
+                 pixel_scale_ratio=None):
         self.out_shape_hw = tuple(int(v) for v in out_shape_hw)
         self.kernel = kernel
         self.pixfrac = float(pixfrac)
         self.fillval = fillval
+        # P2-B: frozen kernel-geometry factor (output/input angular pixel size).
+        # ``None`` means "do not pass it" (upstream engine default), used only
+        # by legacy/test call sites; production always passes the resolved WCS
+        # ratio.
+        self.pixel_scale_ratio = _validate_pixel_scale_ratio(pixel_scale_ratio)
         self._total_exptime = 0.0
 
         self._out_img = np.zeros(self.out_shape_hw, dtype=np.float32)
@@ -272,6 +367,7 @@ class DrizzleAccumulator:
         pixfrac=1.0,
         fillval="0.0",
         total_exptime=0.0,
+        pixel_scale_ratio=None,
     ):
         """Reconstruct an accumulator from persisted native drizzle buffers.
 
@@ -353,6 +449,7 @@ class DrizzleAccumulator:
         acc.kernel = kernel
         acc.pixfrac = float(pixfrac)
         acc.fillval = fillval
+        acc.pixel_scale_ratio = _validate_pixel_scale_ratio(pixel_scale_ratio)
         acc._total_exptime = total_exptime
         acc._out_img = img
         acc._out_wht = wht
@@ -425,16 +522,22 @@ class DrizzleAccumulator:
         # desynchronised from its (unchanged) buffers.  Snapshot and restore it
         # on any failure so the accumulator stays coherent and reusable.
         saved_texptime = self._drizzle._texptime
+        add_kwargs = dict(
+            data=data,
+            exptime=exptime,
+            pixmap=pixmap,
+            weight_map=weight_map,
+            in_units=in_units,
+            pixfrac=self.pixfrac,
+            wht_scale=expscale,
+        )
+        # P2-B: thread the frozen WCS-derived kernel-geometry factor explicitly
+        # into the installed engine.  ``iscale`` is deliberately never passed
+        # (unchanged contract).
+        if getattr(self, "pixel_scale_ratio", None) is not None:
+            add_kwargs["pixel_scale_ratio"] = self.pixel_scale_ratio
         try:
-            self._drizzle.add_image(
-                data=data,
-                exptime=exptime,
-                pixmap=pixmap,
-                weight_map=weight_map,
-                in_units=in_units,
-                pixfrac=self.pixfrac,
-                wht_scale=expscale,
-            )
+            self._drizzle.add_image(**add_kwargs)
         except Exception:
             self._drizzle._texptime = saved_texptime
             raise
