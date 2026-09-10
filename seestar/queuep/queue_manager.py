@@ -834,7 +834,14 @@ def _support_lifecycle_failopen(obj, stage, **fields) -> None:
 
 
 def _drizzle_crop_sup_views(obj, crop):
-    """Return cropped SUP_W1/SUP_W2 views matching the final SCI crop (or None)."""
+    """Return cropped SUP_W1/SUP_W2 zero-copy views matching the final crop.
+
+    ZSSS-DRIZZLE-CLOSURE-P1 rework-2 (R1): uses the accumulator's private
+    already-resident native ``_out_wht`` buffer directly (read-only view), never
+    the copying ``.wht`` property, so no duplicate O(HW) support maps are made.
+    Slices after the crop are views.  Returns ``(None, None)`` (support
+    diagnostics degrade fail-open) when the private view is unavailable.
+    """
     try:
         acc_w1 = getattr(obj, "drizzle_sup_w1", None)
         acc_w2 = getattr(obj, "drizzle_sup_w2", None)
@@ -844,8 +851,12 @@ def _drizzle_crop_sup_views(obj, crop):
             and acc_w2 is not None
         ):
             return None, None
-        w1 = np.asarray(acc_w1.wht)
-        w2 = np.asarray(acc_w2.wht)
+        w1 = getattr(acc_w1, "_out_wht", None)
+        w2 = getattr(acc_w2, "_out_wht", None)
+        if w1 is None or w2 is None:
+            return None, None
+        w1 = np.asarray(w1)
+        w2 = np.asarray(w2)
         if crop:
             y0 = crop.get("y0")
             y1 = crop.get("y1")
@@ -907,11 +918,14 @@ def _compute_drizzle_science_diagnostics(obj, sci_hwc, wht_hwc, crop=None,
         logger.debug("drizzle diagnostics summary failed (non-fatal): %s", exc)
 
 
-def _persist_drizzle_science_diagnostics(obj, final=False) -> None:
+def _persist_drizzle_science_diagnostics(obj, final=False, outcome=None,
+                                         success=None, reason=None) -> None:
     """Atomically persist the artifact (terminal events included when final).
 
     ZSSS-DRIZZLE-CLOSURE-P1: fail-open.  ``final=True`` records the
-    ``artifact_final`` stage so the last written artifact is self-describing.
+    ``artifact_final`` stage (with the explicit outcome/success/reason) so the
+    last written artifact is self-describing and terminal failures are not
+    confused with nonterminal snapshots.
     """
     diag = _drizzle_science_diag(obj)
     if diag is None:
@@ -925,12 +939,20 @@ def _persist_drizzle_science_diagnostics(obj, final=False) -> None:
             coverage_render_status=getattr(obj, "coverage_render_status", None),
             processing_error=getattr(obj, "processing_error", None),
             stopped=bool(getattr(obj, "user_requested_stop", False)),
-            fits_saved=bool(getattr(obj, "final_stacked_path", None)),
+            fits_saved=bool(out_path),
         )
+        if outcome is not None:
+            diag.set_finalization_state(
+                outcome=str(outcome),
+                success=(None if success is None else bool(success)),
+                reason=(None if reason is None else str(reason)),
+            )
     except Exception:  # noqa: BLE001 - fail-open
         pass
     if final:
-        _support_lifecycle_failopen(obj, "artifact_final")
+        _support_lifecycle_failopen(
+            obj, "artifact_final", outcome=outcome, success=success, reason=reason
+        )
     try:
         diag.write()
     except Exception as exc:  # noqa: BLE001 - fail-open
@@ -19872,7 +19894,10 @@ class SeestarQueuedStacker:
                     _support_lifecycle_failopen(
                         self, "drizzle_finalization_returned", success=False
                     )
-                    _persist_drizzle_science_diagnostics(self)
+                    _persist_drizzle_science_diagnostics(
+                        self, final=True, outcome="failed", success=False,
+                        reason="invalid_accumulators",
+                    )
                     raise ValueError("Accumulateurs Drizzle invalides ou manquants.")
 
                 logger.info("DRIZZLE FINALIZE: single accumulator (policy-independent)")
@@ -19926,7 +19951,10 @@ class SeestarQueuedStacker:
                     _support_lifecycle_failopen(
                         self, "drizzle_finalization_returned", success=False
                     )
-                    _persist_drizzle_science_diagnostics(self)
+                    _persist_drizzle_science_diagnostics(
+                        self, final=True, outcome="failed", success=False,
+                        reason="no_support",
+                    )
                     self.final_stacked_path = None
                     return
 
@@ -19945,7 +19973,10 @@ class SeestarQueuedStacker:
                     _support_lifecycle_failopen(
                         self, "drizzle_finalization_returned", success=False
                     )
-                    _persist_drizzle_science_diagnostics(self)
+                    _persist_drizzle_science_diagnostics(
+                        self, final=True, outcome="failed", success=False,
+                        reason="support_integrity_violation",
+                    )
                     detail = ", ".join(
                         "ch%d: %d samples (max|sci|=%.6g)" % (c, n, m)
                         for c, n, m in support_violations
@@ -20925,10 +20956,17 @@ class SeestarQueuedStacker:
         _save_final_preview_png(self, data_after_postproc, preview_path)
 
         # ZSSS-DRIZZLE-CLOSURE-P1: final durable rewrite of the artifact AFTER
-        # every terminal observation on the success path (cleanup, finalization
+        # every terminal observation on this path (cleanup, finalization
         # returned, FITS save result), so the persisted JSON — not just RAM —
-        # carries the terminal lifecycle evidence.  Fail-open.
-        _persist_drizzle_science_diagnostics(self, final=True)
+        # carries the terminal lifecycle evidence with an explicit outcome.
+        # Fail-open.
+        _fits_ok = bool(getattr(self, "final_stacked_path", None))
+        _persist_drizzle_science_diagnostics(
+            self, final=True,
+            outcome=("success" if _fits_ok else "fits_failed"),
+            success=_fits_ok,
+            reason=(None if _fits_ok else "final_fits_not_saved"),
+        )
 
         self.update_progress(
             f"DEBUG QM [_save_final_stack V_SaveFinal_CorrectedDataFlow_1]: Fin methode (mode: {current_operation_mode_log_desc})."

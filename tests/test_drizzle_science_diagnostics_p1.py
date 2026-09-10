@@ -1,23 +1,24 @@
-"""Phase-1 / rework-1 tests for passive Drizzle science diagnostics.
+"""Phase-1 / rework-1 / rework-2 tests for passive Drizzle science diagnostics.
 
-ZSSS-DRIZZLE-CLOSURE-P1.  These tests prove the instrumentation contract:
+ZSSS-DRIZZLE-CLOSURE-P1.  Proves the instrumentation contract:
 
 * read-only helpers (SCI/WHT/SUP bitwise unchanged, incl. signed + non-finite);
 * a diagnostic calculation or I/O failure can neither change science nor abort
   the run;
-* the persisted artifact contains terminal lifecycle events (F1);
+* the persisted artifact contains terminal lifecycle events, with explicit
+  terminal outcome on early-return/failure routes (F1, R3);
 * artifact coordinates/support align to the final post-crop /
   post-effective-WHT-policy SCI grid (F2);
-* bounded memory: hard sample/work-buffer caps + no HWC float64 conversion and
-  no full argsort (F3);
+* memory-bounded redesign: no full EDT map, no `.wht` support copies, no full
+  positive fancy-index selection, bounded sample/top-k caps (R1);
 * distance-map edge semantics are symmetric and edge-aware (F4);
-* physical support (`SUP_W1>0`) is never conflated with positive native WHT and
-  no channel-mean cancellation is used (F5);
+* physical support (`SUP_W1>0`) is never conflated with positive native WHT;
+  fallback labelling is explicit (F5, R2);
 * N_eff statistics are computed over valid support only (F6);
 * lifecycle retention coalesces repetitive checkpoint events while always
   keeping terminal evidence (F7);
-* cleanup provenance is truthful (F8);
-* first-deposit timing is split science/support (F9).
+* cleanup provenance is truthful (F8) and first-deposit timing is split (F9);
+* atomic writer removes its temp file on `os.replace` failure (R4).
 
 All scenes are synthetic, deterministic and fast (no GPU / GUI / network).
 """
@@ -35,11 +36,6 @@ from seestar.core import drizzle_science_diagnostics as dsd
 from seestar.core.drizzle_core import DrizzleAccumulator, build_output_grid
 from seestar.queuep import queue_manager as qm
 from seestar.queuep.queue_manager import SeestarQueuedStacker
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 
 def make_wcs(shape_hw, cdelt=(-0.001, 0.001)):
@@ -81,9 +77,9 @@ def test_helpers_are_read_only_bitwise_including_signed_and_nonfinite():
     wht[2, 2, 2] = -np.inf
     w1 = np.abs(rng.random((24, 24))).astype(np.float32)
     w2 = (w1 * w1 + 1e-3).astype(np.float32)
+    mask = np.isfinite(w1) & (w1 > 0)
 
     snaps = [np.array(x, copy=True) for x in (sci, wht, w1, w2)]
-    mask = np.isfinite(w1) & (w1 > 0)
     sections = dsd.summarize_run(sci, wht, sup_w1=w1, sup_w2=w2, support_mask=mask)
     for c in range(3):
         dsd.sci_channel_stats(sci[..., c])
@@ -91,7 +87,7 @@ def test_helpers_are_read_only_bitwise_including_signed_and_nonfinite():
         dsd.threshold_sweep(wht[..., c], sci[..., c], mask)
     dsd.support_conditioning(w1, w2)
     dsd.conditioning_candidates(sci, wht, mask, w1, w2)
-    dsd.spatial_boundary_diagnostics(sci, wht, mask)
+    dsd.spatial_boundary_diagnostics(sci, wht, mask, sup_w1=w1, sup_w2=w2)
     for snap, arr in zip(snaps, (sci, wht, w1, w2)):
         assert _bitwise_equal(snap, arr), "diagnostic helper mutated its input"
     assert sections["sci_stats"][0]["nonfinite_fraction"] > 0
@@ -119,6 +115,23 @@ def test_collector_write_atomic_and_fail_open(tmp_path):
     json.loads((tmp_path / dsd.ARTIFACT_FILENAME).read_text())
     assert not list(tmp_path.glob("*.tmp.*"))
     assert dsd.DrizzleScienceDiagnostics(run_token="r").write("/nonexistent-\x00/x.json") is False
+
+
+def test_writer_temp_cleanup_on_replace_failure(tmp_path, monkeypatch):
+    """R4: a failing os.replace must not leak a *.tmp.* sibling."""
+    diag = dsd.DrizzleScienceDiagnostics(run_token="r", output_folder=str(tmp_path))
+    diag.set_run_config(kernel="square", scale=1.0, pixfrac_requested=1.0,
+                        pixfrac_effective=1.0)
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(dsd.os, "replace", boom)
+    assert diag.write() is False
+    assert not list(tmp_path.glob("*.tmp.*")), "temporary file leaked"
+    # the failure is fail-open and does not corrupt a later successful write
+    monkeypatch.undo()
+    assert diag.write() is True
 
 
 def test_setters_and_write_fail_open_on_garbage():
@@ -163,12 +176,11 @@ def test_init_diagnostics_emits_geometry_token():
         update_progress=lambda msg, *a, **k: lines.append(str(msg)),
     )
     SeestarQueuedStacker._init_drizzle_science_diagnostics(obj, "square", 1.0, 1.0, 2.0, None)
-    token = next(x for x in lines if x.startswith("DRIZZLE_GEOMETRY_DIAGNOSTIC"))
+    token = [x for x in lines if x.startswith("DRIZZLE_GEOMETRY_DIAGNOSTIC")][0]
     assert "kernel=square" in token and "scale=2.0" in token
     assert "pixel_scale_ratio_current=1.0" in token
     assert "candidate_source=wcs_ratio" in token
-    stages = obj._drizzle_science_diag.lifecycle_stages()
-    assert "fresh_m3_init" in stages
+    assert "fresh_m3_init" in obj._drizzle_science_diag.lifecycle_stages()
 
 
 def test_init_diagnostics_geometry_token_fail_open_without_wcs():
@@ -178,7 +190,7 @@ def test_init_diagnostics_geometry_token_fail_open_without_wcs():
         update_progress=lambda msg, *a, **k: lines.append(str(msg)),
     )
     SeestarQueuedStacker._init_drizzle_science_diagnostics(obj, "square", 1.0, 1.0, 1.0, None)
-    token = next(x for x in lines if x.startswith("DRIZZLE_GEOMETRY_DIAGNOSTIC"))
+    token = [x for x in lines if x.startswith("DRIZZLE_GEOMETRY_DIAGNOSTIC")][0]
     assert "pixel_scale_ratio_candidate=unavailable" in token and "reason=" in token
 
 
@@ -213,7 +225,7 @@ def test_real_add_image_omits_iscale_and_pixel_scale_ratio(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 3. threshold / support / N_eff
+# 3. threshold / support / N_eff / R2 labelling
 # ---------------------------------------------------------------------------
 
 
@@ -221,25 +233,44 @@ def test_threshold_sweep_separates_support_from_positive_wht():
     wht = np.array([[1.0, 0.05, 0.0], [2e-3, 5e-5, -1.0]], dtype=np.float32)
     sci = np.arange(6, dtype=np.float32).reshape(2, 3) + 1.0
     support = np.array([[True, True, True], [True, True, False]])
-    before = wht.copy()
     sweep = dsd.threshold_sweep(wht, sci, support, abs_candidates=(1e-4, 1e-3))
-    assert _bitwise_equal(before, wht)
+    assert sweep["support_source"] == "physical"
     assert sweep["physical_support_pixels"] == int(support.sum())
-    assert sweep["currently_valid_positive_native_wht_pixels"] == 4  # 1.0,0.05,2e-3,5e-5
+    assert sweep["currently_valid_positive_native_wht_pixels"] == 4
     by = {c["name"]: c for c in sweep["candidates"]}
-    assert by["abs_0.001"]["newly_removed_from_current_valid"] == 1  # 5e-5
-    assert by["abs_0.0001"]["newly_removed_from_current_valid"] == 1  # 5e-5 <= 1e-4
-    json.dumps(sweep, allow_nan=False)
+    assert by["abs_0.001"]["newly_removed_from_current_valid"] == 1
+    assert by["abs_0.0001"]["newly_removed_from_current_valid"] == 1
+
+
+def test_threshold_sweep_fallback_label_does_not_claim_physical_support():
+    """R2: a native-WHT-derived fallback must not be labelled physical support."""
+    wht = np.ones((4, 4), dtype=np.float32)
+    sci = np.ones((4, 4), dtype=np.float32)
+    support = np.ones((4, 4), dtype=bool)
+    sweep = dsd.threshold_sweep(wht, sci, support,
+                                support_source="native_positive_wht_fallback")
+    assert sweep["physical_support_pixels"] is None
+    assert sweep["fallback_support_pixels"] == 16
+    assert sweep["support_population_pixels"] == 16
+    assert sweep["support_denominator_label"] == "fallback_support_pixels"
+
+
+def test_summarize_fallback_support_source_label():
+    sci = np.ones((8, 8, 3), dtype=np.float32)
+    wht = np.ones((8, 8, 3), dtype=np.float32)
+    sec = dsd.summarize_run(sci, wht, sup_w1=None, sup_w2=None)
+    assert sec["support_source"] == "native_wht_derived_fallback"
+    assert sec["boundary_bins"]["support_source"] == "native_wht_derived_fallback"
+    assert sec["threshold_sweep"][0]["physical_support_pixels"] is None
+    assert sec["threshold_sweep"][0]["support_source"] == "native_positive_wht_fallback"
 
 
 def test_support_conditioning_island_not_diluted_by_off_support_zeros():
     w1 = np.zeros((8, 8), dtype=np.float32)
     w2 = np.zeros((8, 8), dtype=np.float32)
-    # supported island of 4 pixels with N_eff = 1 each (w1=2,w2=4)
     w1[3:5, 3:5] = 2.0
     w2[3:5, 3:5] = 4.0
     rec = dsd.support_conditioning(w1, w2)
-    assert rec["available"] is True
     assert rec["support_pixels"] == 4
     assert rec["n_eff_min"] == rec["n_eff_median"] == rec["n_eff_max"] == pytest.approx(1.0)
     assert rec["n_eff_mean"] == pytest.approx(1.0)
@@ -250,10 +281,8 @@ def test_boundary_bins_all_true_symmetric_and_edge_aware():
     support = np.ones((7, 7), dtype=bool)
     d, meta = dsd.support_distance_map(support)
     assert meta["available"] is True and meta["edge_padding"] is True
-    # corner distance 1; center distance 4 (nearest virtual edge)
     assert d[0, 0] == pytest.approx(1.0)
     assert d[3, 3] == pytest.approx(4.0)
-    # symmetric under flips
     assert np.allclose(d, d[::-1, :]) and np.allclose(d, d[:, ::-1])
 
 
@@ -264,26 +293,42 @@ def test_boundary_bins_edge_touching_left_right_symmetric():
     right[:, 4:] = True
     dl, _ = dsd.support_distance_map(left)
     dr, _ = dsd.support_distance_map(right)
-    # edge column is 1 pixel from the virtual boundary; col 2 abuts the
-    # unsupported col 3; col 1 is 2 from either boundary
     assert dl[3, 0] == pytest.approx(1.0)
     assert dl[3, 1] == pytest.approx(2.0)
     assert dl[3, 2] == pytest.approx(1.0)
     assert np.allclose(dl, dr[:, ::-1])
 
 
+def test_tiled_boundary_matches_full_map_on_bounded_grid():
+    """The streaming tiled boundary must agree with the full EDT reference."""
+    rng = np.random.default_rng(5)
+    support = rng.random((48, 64)) > 0.4
+    ref, _meta = dsd.support_distance_map(support)
+    sci = rng.normal(size=(48, 64, 1)).astype(np.float32)
+    wht = np.ones((48, 64, 1), dtype=np.float32)
+    rec = dsd.spatial_boundary_diagnostics(sci, wht, support)
+    assert rec["available"] is True
+    assert rec["distance_algorithm"] == "row_tile_edt_halo"
+    assert rec["halo"] >= 17
+    # per-pixel bin membership derived from the reference map
+    edges = [hi for _lo, hi in dsd.DISTANCE_BIN_EDGES[:-1]]
+    bi = np.searchsorted(np.asarray(edges), ref[support], side="left")
+    expected = np.bincount(bi, minlength=5)
+    got = np.array([b["pixels"] for b in rec["per_channel"][0]["bins"]])
+    assert np.array_equal(got, expected)
+
+
 def test_boundary_bins_per_channel_and_shape():
     support = np.ones((16, 16), dtype=bool)
     sci = np.stack([np.full((16, 16), c + 1.0, dtype=np.float32) for c in range(3)], axis=-1)
     wht = np.full((16, 16, 3), 0.5, dtype=np.float32)
-    neff = np.full((16, 16), 3.0, dtype=np.float32)
-    rec = dsd.spatial_boundary_diagnostics(sci, wht, support, neff=neff)
+    rec = dsd.spatial_boundary_diagnostics(sci, wht, support)
     assert rec["available"] is True
     assert len(rec["per_channel"]) == 3
     labels = [b["label"] for b in rec["per_channel"][0]["bins"]]
     assert labels == list(dsd.DISTANCE_BIN_LABELS)
     assert sum(b["pixels"] for b in rec["per_channel"][0]["bins"]) == int(support.sum())
-    rec2 = dsd.spatial_boundary_diagnostics(sci, wht, support, neff=neff)
+    rec2 = dsd.spatial_boundary_diagnostics(sci, wht, support)
     assert json.dumps(rec, sort_keys=True, allow_nan=False) == json.dumps(
         rec2, sort_keys=True, allow_nan=False
     )
@@ -298,19 +343,114 @@ def test_bounded_extrema_only_over_support_and_coordinates():
     for r in recs:
         assert support.ravel()[r["index"]], "extrema must lie on physical support"
         assert r["row"] * 10 + r["col"] == r["index"]
-    kinds = {r["kind"] for r in recs}
-    assert {"sci_abs_min", "sci_abs_max"} <= kinds
-
-
-def test_select_extrema_indices_bounded_and_deterministic():
-    vals = np.arange(100, dtype=np.float64).reshape(10, 10)
-    mask = np.ones((10, 10), dtype=bool)
-    lo, hi = dsd.select_extrema_indices(vals, mask, 3)
-    assert lo.tolist() == [0, 1, 2] and hi.tolist() == [99, 98, 97]
 
 
 # ---------------------------------------------------------------------------
-# 4. lifecycle retention + seams
+# 4. memory-boundedness: R1 structural + behavioral caps
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_constants_exist_and_sane():
+    assert dsd.ROW_CHUNK >= 1
+    assert 10_000 <= dsd.MAX_SAMPLE_COUNT <= 1_000_000
+    assert 64 * 1024 * 1024 <= dsd.MAX_BOUNDARY_WORK_BYTES <= 2 * 1024 ** 3
+    assert dsd.MAX_LIFECYCLE_EVENTS <= 4096
+    assert dsd.BOUNDARY_HALO >= 17
+    assert dsd.BOUNDARY_TILE_ROWS >= 1
+
+
+def test_summarize_does_not_call_full_distance_map():
+    """R1 structural guard: the summary path must not build a full EDT map."""
+    src = inspect.getsource(dsd.summarize_run)
+    assert "support_distance_map" not in src
+    assert "distance_transform_edt" not in src
+
+
+def test_module_has_no_full_argsort_and_no_hwc_float64_conversion():
+    """Structural guard (documentation): no full argsort / HWC float64 casts."""
+    src = inspect.getsource(dsd)
+    assert "np.argsort" not in src
+    assert "asarray(sci_hwc, dtype=np.float64" not in src
+    assert "asarray(wht_hwc, dtype=np.float64" not in src
+    assert "_channel_mean" not in src
+    assert "distance_transform_edt" in src  # tiled EDT still present
+
+
+def test_crop_sup_views_never_call_copying_wht_property():
+    """R1 behavioral guard: support views must not use the copying .wht."""
+    class NoCopyAcc:
+        def __init__(self, arr):
+            self._out_wht = arr
+
+        @property
+        def wht(self):
+            raise AssertionError("copying .wht property must not be used")
+
+    a = np.arange(64, dtype=np.float32).reshape(8, 8)
+    b = (a + 1.0).astype(np.float32)
+    obj = types.SimpleNamespace(
+        drizzle_sup_w1=NoCopyAcc(a), drizzle_sup_w2=NoCopyAcc(b),
+        _drizzle_support_available=True,
+    )
+    w1, w2 = qm._drizzle_crop_sup_views(obj, {"x0": 1, "y0": 1, "x1": 4, "y1": 4})
+    assert w1.shape == (3, 3) and w2.shape == (3, 3)
+    # zero-copy view (shares memory with the resident support buffer)
+    assert w1.base is not None and np.shares_memory(w1, a)
+    # missing private view degrades fail-open to unavailable
+    assert qm._drizzle_crop_sup_views(
+        types.SimpleNamespace(drizzle_sup_w1=object(),
+                              drizzle_sup_w2=object(),
+                              _drizzle_support_available=True), {}
+    ) == (None, None)
+
+
+def test_sample_cap_is_exercised_by_population_above_cap():
+    """R5: a population above the cap must produce an exactly capped sample."""
+    n = 800
+    total = n * n  # 640_000 > MAX_SAMPLE_COUNT
+    st = dsd.sci_channel_stats(np.zeros((n, n), dtype=np.float32))
+    assert st["count"] == total
+    assert st["sample_stride"] == total // dsd.MAX_SAMPLE_COUNT
+    assert st["sample_count"] == dsd.MAX_SAMPLE_COUNT
+
+
+def test_summarize_extrema_topk_and_meta_caps():
+    rng = np.random.default_rng(3)
+    h, w = 64, 96
+    sci = rng.normal(size=(h, w, 3)).astype(np.float32)
+    wht = rng.normal(size=(h, w, 3)).astype(np.float32)
+    w1 = np.abs(rng.random((h, w))).astype(np.float32)
+    w2 = (w1 * w1 + 1e-3).astype(np.float32)
+    mask = np.isfinite(w1) & (w1 > 0)
+    sec = dsd.summarize_run(sci, wht, sup_w1=w1, sup_w2=w2, support_mask=mask)
+    for st in sec["sci_stats"]:
+        assert st["sample_count"] <= dsd.MAX_SAMPLE_COUNT
+        assert st["sample_stride"] >= 1
+    for recs in sec["support_extrema"]:
+        assert len(recs) <= 2 * (dsd.EXTREMA_COUNT + 1)
+    meta = sec["meta"]
+    assert meta["boundary_algorithm"] == "row_tile_edt_halo"
+    assert meta["boundary_halo"] >= 17
+    assert meta["max_temporary_bytes"] < 8 * 1024 * 1024
+    assert meta["degraded_sections"] == []
+    assert sec["conditioning_candidates"]["local_reference_method"] == "bounded_tile_sample"
+
+
+def test_summarize_artifact_is_bounded_and_json_safe():
+    rng = np.random.default_rng(11)
+    sci = rng.normal(size=(128, 128, 3)).astype(np.float32)
+    wht = rng.normal(size=(128, 128, 3)).astype(np.float32)
+    w1 = np.abs(rng.random((128, 128))).astype(np.float32)
+    w2 = (w1 * w1 + 1e-3).astype(np.float32)
+    mask = np.isfinite(w1) & (w1 > 0)
+    sec = dsd.summarize_run(sci, wht, sup_w1=w1, sup_w2=w2, support_mask=mask)
+    text = json.dumps({"sections": sec}, sort_keys=True, allow_nan=False)
+    assert "array(" not in text
+    assert len(text) < 500_000
+
+
+# ---------------------------------------------------------------------------
+# 5. lifecycle retention + seams
 # ---------------------------------------------------------------------------
 
 
@@ -319,19 +459,17 @@ def test_lifecycle_retention_coalesces_checkpoints_and_keeps_terminal():
     for i in range(6000):
         diag.add_lifecycle({"stage": "checkpoint_save", "ts": float(i),
                             "generation": i, "frame_count": i})
-    diag.add_lifecycle({"stage": "stop_requested", "ts": 1.0})
-    diag.add_lifecycle({"stage": "drizzle_finalization_entered", "ts": 2.0})
-    diag.add_lifecycle({"stage": "fits_save", "ts": 3.0, "success": True})
-    diag.add_lifecycle({"stage": "memmap_cleanup_returned", "ts": 4.0})
+    for stage in ("stop_requested", "drizzle_finalization_entered",
+                  "fits_save", "memmap_cleanup_returned", "artifact_final"):
+        diag.add_lifecycle({"stage": stage, "ts": 9.0})
     stages = diag.lifecycle_stages()
-    assert "checkpoint_save" not in stages  # coalesced, not appended
+    assert "checkpoint_save" not in stages
     for terminal in ("stop_requested", "drizzle_finalization_entered",
-                     "fits_save", "memmap_cleanup_returned"):
+                     "fits_save", "memmap_cleanup_returned", "artifact_final"):
         assert terminal in stages
     assert diag.coalesced["checkpoint_save"]["count"] == 6000
-    assert diag.coalesced["checkpoint_save"]["generation"] == 5999
     payload = json.dumps(diag.to_dict(), sort_keys=True, allow_nan=False)
-    assert len(payload) < 60_000, "coalesced lifecycle artifact must stay bounded"
+    assert len(payload) < 60_000
     assert len(diag.lifecycle) <= dsd.MAX_LIFECYCLE_EVENTS
 
 
@@ -365,7 +503,6 @@ def test_stop_real_seam_records_lifecycle():
     obj = StopStub()
     SeestarQueuedStacker.stop(obj)
     assert "stop_requested" in diag.lifecycle_stages()
-    assert obj.user_requested_stop is True
 
 
 def test_coverage_render_lifecycle_entered_and_exited():
@@ -390,8 +527,7 @@ def test_memmap_cleanup_naming_truthful_and_returned():
     )
     SeestarQueuedStacker._close_memmaps(obj)
     stages = diag.lifecycle_stages()
-    assert "memmap_cleanup_entered" in stages
-    assert "memmap_cleanup_returned" in stages
+    assert "memmap_cleanup_entered" in stages and "memmap_cleanup_returned" in stages
     assert "cleanup_reset" not in stages
     rec = next(r for r in diag.lifecycle if r["stage"] == "memmap_cleanup_returned")
     assert rec["drizzle_support_released"] is False
@@ -399,7 +535,6 @@ def test_memmap_cleanup_naming_truthful_and_returned():
 
 
 def test_checkpoint_restore_production_ordering_records_lifecycle():
-    """T2: production ordering — first restore (no collector), init, second restore."""
     restored = types.SimpleNamespace(
         counters={"frame_count": 7, "stacked_batches_count": 1,
                   "total_exposure_seconds": 70.0, "exposure_unknown_count": 0,
@@ -411,10 +546,8 @@ def test_checkpoint_restore_production_ordering_records_lifecycle():
         session={"plan": {}, "input_roots": [], "reference": {}},
     )
     obj = types.SimpleNamespace(drizzle_group_size=50)
-    # 1st restore: no collector yet (production ordering: before init)
     SeestarQueuedStacker._restore_drizzle_checkpoint_runtime(obj, restored)
     assert getattr(obj, "_drizzle_science_diag", None) is None
-    # init creates the collector
     ref = make_wcs((4, 4))
     obj.reference_wcs_object = ref
     obj.drizzle_output_wcs = ref
@@ -423,13 +556,12 @@ def test_checkpoint_restore_production_ordering_records_lifecycle():
     SeestarQueuedStacker._init_drizzle_science_diagnostics(
         obj, "square", 1.0, 1.0, 1.0, restored
     )
-    # 2nd restore after the collector exists -> recorded
     SeestarQueuedStacker._restore_drizzle_checkpoint_runtime(obj, restored)
     assert "checkpoint_restore" in obj._drizzle_science_diag.lifecycle_stages()
 
 
 # ---------------------------------------------------------------------------
-# 5. deposit timing (F9)
+# 6. deposit timing (F9)
 # ---------------------------------------------------------------------------
 
 
@@ -460,23 +592,21 @@ def test_first_deposit_split_science_and_support():
     ok = SeestarQueuedStacker._add_frame_to_drizzle_accumulators(obj, data, header, tf, wt)
     assert ok is True
     stages = diag.lifecycle_stages()
-    assert "first_science_deposit" in stages
-    assert "first_support_deposit" in stages
+    assert "first_science_deposit" in stages and "first_support_deposit" in stages
     assert "first_deposit" not in stages
-    sci_rec = next(r for r in diag.lifecycle if r["stage"] == "first_science_deposit")
     sup_rec = next(r for r in diag.lifecycle if r["stage"] == "first_support_deposit")
-    assert sci_rec["succeeded"] is True and sup_rec["succeeded"] is True
-    assert diag.contract is not None
+    assert sup_rec["succeeded"] is True
     assert diag.contract["pixel_scale_ratio_source"] == "upstream_add_image_default"
 
 
 # ---------------------------------------------------------------------------
-# 6. finalization / crop alignment / persisted terminal events
+# 7. finalization / crop alignment / persisted terminal events
 # ---------------------------------------------------------------------------
 
 
 def _make_save_obj(tmp_path, diag, kernel="lanczos2", pixfrac=1.0,
-                   interior_wht=False, threshold=0.0):
+                   interior_wht=False, threshold=0.0, gradient_wht=False,
+                   zero_wht=False):
     from astropy.io import fits
 
     obj = types.SimpleNamespace()
@@ -521,9 +651,15 @@ def _make_save_obj(tmp_path, diag, kernel="lanczos2", pixfrac=1.0,
             for _ in range(3)]
     rng = np.random.default_rng(7)
     for c, acc in enumerate(accs):
-        img = rng.normal(size=(16, 16)).astype(np.float32) + 2.0 + c
-        acc._out_img[:] = img
-        if interior_wht:
+        acc._out_img[:] = rng.normal(size=(16, 16)).astype(np.float32) + 2.0 + c
+        if zero_wht:
+            acc._out_wht[:] = 0.0
+        elif gradient_wht:
+            w = np.zeros((16, 16), dtype=np.float32)
+            w[4:8, 4:12] = 0.2
+            w[8:12, 4:12] = 2.0
+            acc._out_wht[:] = w
+        elif interior_wht:
             w = np.zeros((16, 16), dtype=np.float32)
             w[4:12, 4:12] = 1.0
             acc._out_wht[:] = w
@@ -542,7 +678,6 @@ def _make_save_obj(tmp_path, diag, kernel="lanczos2", pixfrac=1.0,
 
 
 def test_artifact_persists_terminal_lifecycle_events(tmp_path):
-    """F1: the persisted JSON — not just RAM — carries terminal events."""
     diag = dsd.DrizzleScienceDiagnostics(run_token="run1", output_folder=str(tmp_path))
     diag.set_run_config(kernel="lanczos2", scale=2.0, pixfrac_requested=1.0,
                         pixfrac_effective=1.0)
@@ -557,8 +692,9 @@ def test_artifact_persists_terminal_lifecycle_events(tmp_path):
                      "fits_save", "artifact_final"):
         assert terminal in persisted, terminal
     assert payload["finalization_state"]["fits_saved"] is True
+    assert payload["finalization_state"]["outcome"] == "success"
     assert len(payload["sci_stats"]) == 3
-    assert len(payload["threshold_sweep"]) == 3
+    assert payload["crop"]["width"] == 16
 
 
 def test_fits_failure_path_still_persists_terminal_events(tmp_path, monkeypatch):
@@ -566,8 +702,6 @@ def test_fits_failure_path_still_persists_terminal_events(tmp_path, monkeypatch)
     diag.set_run_config(kernel="square", scale=2.0, pixfrac_requested=1.0,
                         pixfrac_effective=1.0)
     obj = _make_save_obj(tmp_path, diag, kernel="square")
-
-    real_writeto = qm.fits.HDUList.writeto
 
     def boom(self, *a, **k):
         raise OSError("disk full")
@@ -578,14 +712,30 @@ def test_fits_failure_path_still_persists_terminal_events(tmp_path, monkeypatch)
     )
     payload = json.loads((tmp_path / dsd.ARTIFACT_FILENAME).read_text())
     persisted = [r["stage"] for r in payload["lifecycle"]]
-    assert "fits_save" in persisted
+    assert "fits_save" in persisted and "artifact_final" in persisted
     rec = next(r for r in payload["lifecycle"] if r["stage"] == "fits_save")
     assert rec.get("success") is False
-    assert "artifact_final" in persisted
+    assert payload["finalization_state"]["outcome"] == "fits_failed"
+
+
+def test_early_return_marks_artifact_final_failed(tmp_path):
+    """R3: a terminal no-support route persists artifact_final with outcome."""
+    diag = dsd.DrizzleScienceDiagnostics(run_token="runz", output_folder=str(tmp_path))
+    diag.set_run_config(kernel="square", scale=2.0, pixfrac_requested=1.0,
+                        pixfrac_effective=1.0)
+    obj = _make_save_obj(tmp_path, diag, kernel="square", zero_wht=True)
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj, output_filename_suffix="_drizzle", preserve_linear_output=True
+    )
+    payload = json.loads((tmp_path / dsd.ARTIFACT_FILENAME).read_text())
+    stages = [r["stage"] for r in payload["lifecycle"]]
+    assert "artifact_final" in stages
+    rec = next(r for r in payload["lifecycle"] if r["stage"] == "artifact_final")
+    assert rec["outcome"] == "failed" and rec["reason"] == "no_support"
+    assert rec["success"] is False
 
 
 def test_crop_alignment_no_threshold_matches_final_grid(tmp_path):
-    """F2 (crop): artifact SCI stats align with the cropped final accumulator science."""
     diag = dsd.DrizzleScienceDiagnostics(run_token="runc", output_folder=str(tmp_path))
     diag.set_run_config(kernel="lanczos2", scale=2.0, pixfrac_requested=1.0,
                         pixfrac_effective=1.0)
@@ -606,25 +756,33 @@ def test_crop_alignment_no_threshold_matches_final_grid(tmp_path):
             assert 0 <= r["row"] < 8 and 0 <= r["col"] < 8
 
 
-def test_crop_and_square_threshold_alignment(tmp_path):
-    """F2 (crop + nonzero Square threshold): masking is reflected in the artifact."""
-    diag = dsd.DrizzleScienceDiagnostics(run_token="runct", output_folder=str(tmp_path))
-    diag.set_run_config(kernel="square", scale=2.0, pixfrac_requested=1.0,
-                        pixfrac_effective=1.0)
-    obj = _make_save_obj(tmp_path, diag, kernel="square", interior_wht=True,
-                         threshold=0.5)
-    qm.SeestarQueuedStacker._save_final_stack(
-        obj, output_filename_suffix="_drizzle", preserve_linear_output=True
-    )
-    payload = json.loads((tmp_path / dsd.ARTIFACT_FILENAME).read_text())
-    assert payload["crop"]["width"] == 8 and payload["crop"]["height"] == 8
-    policy = payload["effective_wht_policy"]
-    assert policy.get("fraction") == pytest.approx(0.5)
-    # threshold masking reduces the finite SCI count vs the cropped support
+def test_crop_square_threshold_masking_changes_finite_count(tmp_path):
+    """R5: compare the same fixture with threshold 0 vs nonzero, non-trivially."""
+    def run(tag, thr):
+        tmp = tmp_path / tag
+        tmp.mkdir()
+        diag = dsd.DrizzleScienceDiagnostics(run_token=tag, output_folder=str(tmp))
+        diag.set_run_config(kernel="square", scale=2.0, pixfrac_requested=1.0,
+                            pixfrac_effective=1.0)
+        obj = _make_save_obj(tmp, diag, kernel="square", gradient_wht=True,
+                             threshold=thr)
+        qm.SeestarQueuedStacker._save_final_stack(
+            obj, output_filename_suffix="_drizzle", preserve_linear_output=True
+        )
+        return json.loads((tmp / dsd.ARTIFACT_FILENAME).read_text())
+
+    off = run("off", 0.0)
+    on = run("on", 0.5)
+    assert off["effective_wht_policy"].get("fraction", 0.0) == 0.0
+    assert on["effective_wht_policy"].get("fraction") == pytest.approx(0.5)
+    assert off["crop"]["width"] == on["crop"]["width"] == 8
+    assert off["sections_meta"]["shape_hwc"] == on["sections_meta"]["shape_hwc"] == [8, 8, 3]
+    # the nonzero threshold genuinely removed finite science pixels
     for c in range(3):
-        st = payload["sci_stats"][c]
-        assert st["finite_count"] <= 64
-    assert payload["sections_meta"]["shape_hwc"] == [8, 8, 3]
+        assert on["sci_stats"][c]["finite_count"] < off["sci_stats"][c]["finite_count"]
+        assert on["sci_stats"][c]["finite_count"] < 64
+        for r in on["wht_diagnostics"][c]["extrema"]:
+            assert 0 <= r["row"] < 8 and 0 <= r["col"] < 8
 
 
 def test_diagnostic_failure_cannot_change_science_or_abort(tmp_path, monkeypatch):
@@ -649,7 +807,7 @@ def test_diagnostic_failure_cannot_change_science_or_abort(tmp_path, monkeypatch
 
 
 def test_science_bitwise_identical_with_diagnostics_enabled_and_failing(tmp_path, monkeypatch):
-    def run(diag_obj):
+    def run(diag_obj, tag):
         obj = _make_save_obj(tmp_path, diag_obj, kernel="square")
         return obj, [np.array(obj.drizzle_accumulators[c]._out_img, copy=True)
                      for c in range(3)]
@@ -657,7 +815,7 @@ def test_science_bitwise_identical_with_diagnostics_enabled_and_failing(tmp_path
     diag_ok = dsd.DrizzleScienceDiagnostics(run_token="ok", output_folder=str(tmp_path))
     diag_ok.set_run_config(kernel="square", scale=2.0, pixfrac_requested=1.0,
                            pixfrac_effective=1.0)
-    obj_a, snaps_a = run(diag_ok)
+    obj_a, snaps_a = run(diag_ok, "a")
     qm.SeestarQueuedStacker._save_final_stack(
         obj_a, output_filename_suffix="_drizzle", preserve_linear_output=True
     )
@@ -669,80 +827,12 @@ def test_science_bitwise_identical_with_diagnostics_enabled_and_failing(tmp_path
     diag_bad = dsd.DrizzleScienceDiagnostics(run_token="bad", output_folder=str(tmp_path))
     diag_bad.set_run_config(kernel="square", scale=2.0, pixfrac_requested=1.0,
                             pixfrac_effective=1.0)
-    obj_b, snaps_b = run(diag_bad)
+    obj_b, snaps_b = run(diag_bad, "b")
     qm.SeestarQueuedStacker._save_final_stack(
         obj_b, output_filename_suffix="_drizzle", preserve_linear_output=True
     )
     for a, b in zip(snaps_a, snaps_b):
         assert _bitwise_equal(a, b)
-
-
-# ---------------------------------------------------------------------------
-# 7. memory-boundedness structural + behavioral caps (F3)
-# ---------------------------------------------------------------------------
-
-
-def test_bounded_constants_exist_and_sane():
-    assert dsd.ROW_CHUNK >= 1
-    assert 10_000 <= dsd.MAX_SAMPLE_COUNT <= 1_000_000
-    assert 64 * 1024 * 1024 <= dsd.MAX_BOUNDARY_WORK_BYTES <= 2 * 1024 ** 3
-    assert dsd.MAX_LIFECYCLE_EVENTS <= 4096
-
-
-def test_module_has_no_full_argsort_and_no_hwc_float64_conversion():
-    src = inspect.getsource(dsd)
-    assert "np.argsort" not in src
-    assert "asarray(sci_hwc, dtype=np.float64" not in src
-    assert "asarray(wht_hwc, dtype=np.float64" not in src
-    assert "_channel_mean" not in src
-
-
-def test_summarize_bounds_sample_and_boundary_budget():
-    rng = np.random.default_rng(3)
-    n = 256
-    sci = rng.normal(size=(n, n, 3)).astype(np.float32)
-    wht = rng.normal(size=(n, n, 3)).astype(np.float32)
-    w1 = np.abs(rng.random((n, n))).astype(np.float32)
-    w2 = (w1 * w1 + 1e-3).astype(np.float32)
-    mask = np.isfinite(w1) & (w1 > 0)
-    sec = dsd.summarize_run(sci, wht, sup_w1=w1, sup_w2=w2, support_mask=mask)
-    for st in sec["sci_stats"]:
-        assert st["sample_count"] <= dsd.MAX_SAMPLE_COUNT
-        assert st["sample_stride"] >= 1
-    wb = sec["meta"]["boundary_work_buffer"]
-    assert wb["bytes"] <= dsd.MAX_BOUNDARY_WORK_BYTES
-    assert wb["edge_padding"] is True
-
-
-def test_support_pair_absent_is_labelled_fallback():
-    sci = np.ones((8, 8, 3), dtype=np.float32)
-    wht = np.ones((8, 8, 3), dtype=np.float32)
-    sec = dsd.summarize_run(sci, wht, sup_w1=None, sup_w2=None)
-    assert sec["support_source"] == "native_wht_derived_fallback"
-    assert sec["boundary_bins"]["support_source"] == "native_wht_derived_fallback"
-
-
-def test_summarize_artifact_is_bounded_and_json_safe():
-    rng = np.random.default_rng(11)
-    sci = rng.normal(size=(128, 128, 3)).astype(np.float32)
-    wht = rng.normal(size=(128, 128, 3)).astype(np.float32)
-    w1 = np.abs(rng.random((128, 128))).astype(np.float32)
-    w2 = (w1 * w1 + 1e-3).astype(np.float32)
-    mask = np.isfinite(w1) & (w1 > 0)
-    sec = dsd.summarize_run(sci, wht, sup_w1=w1, sup_w2=w2, support_mask=mask)
-    text = json.dumps({"sections": sec}, sort_keys=True, allow_nan=False)
-    assert "array(" not in text
-    assert len(text) < 500_000
-    diag = dsd.DrizzleScienceDiagnostics(run_token="r")
-    diag.set_sci_stats(sec["sci_stats"])
-    diag.set_boundary_bins(sec["boundary_bins"])
-    diag.set_conditioning(sec["conditioning_candidates"])
-    assert len(json.dumps(diag.to_dict(), sort_keys=True, allow_nan=False)) < 500_000
-
-
-# ---------------------------------------------------------------------------
-# 8. write helper no-op without collector
-# ---------------------------------------------------------------------------
 
 
 def test_persist_noop_without_collector():

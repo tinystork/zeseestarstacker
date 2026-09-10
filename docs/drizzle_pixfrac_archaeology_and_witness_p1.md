@@ -75,18 +75,35 @@ Rework-1 additions:
   statistics address the final SCI FITS grid (`crop` + `sections_meta`);
 * per-channel output (no channel-mean cancellation); physical support is
   `SUP_W1 > 0` when the pair exists, otherwise an explicitly-labelled
-  native-WHT-derived fallback;
+  native-WHT-derived fallback (`support_source`, and the per-channel
+  `threshold_sweep.support_source`/`support_denominator_label`);
 * the summary is **memory-bounded** (row-chunked float32 streaming, bounded
-  percentile samples and extrema candidates, one justified O(HW) EDT boundary
-  buffer). Measured `summarize_run` delta: ~33 MiB @1024², ~77 MiB @2048²,
-  ~172 MiB @3072², ~305 MiB @4096² (r0 was ~446/837/1504/2419 MiB);
-* the boundary distance map treats the array exterior as a physical support
-  boundary (false-padded EDT), so fully-covered/edge-touching support yields a
-  symmetric, meaningful field;
+  percentile samples and extrema candidates, zero-copy SUP views);
 * lifecycle retention coalesces repetitive `checkpoint_save` events (count +
   first/last generation) while always retaining terminal evidence; the
   successful artifact is rewritten **after** cleanup, finalization-returned and
-  FITS save so terminal events are persisted, not just held in memory.
+  FITS save so terminal events are persisted, not just held in memory; every
+  terminal failure route (invalid accumulators / no support / support-integrity
+  / FITS failure) persists `artifact_final` with an explicit
+  `outcome`/`success`/`reason`.
+
+Rework-2 additions (real x3/x4 boundedness):
+
+* the boundary analysis streams **row tiles with a bounded halo (>= 17 px)** and
+  a transient tile EDT — no full-frame distance map and no float64 upcast of a
+  resident float32 map.  The four global array edges are treated as support
+  boundaries (false padding); interior continuations are padded True so no
+  artificial window boundary appears.  Per-extreme boundary distances are
+  queried locally (bounded window); unresolved distances are reported as
+  `distance=null` with `distance_resolved=false` (a truthful `>16`);
+* local positive-WHT references use bounded tile samples; the SUP views are
+  taken zero-copy from the already-resident private native `_out_wht` buffers
+  (never the copying `.wht` property), sliced after the crop and never mutated;
+* measured incremental peak (isolated process, in-place resident inputs,
+  `VmHWM` after minus before): **x3 3240x5760 ~92 MiB (target <=256)**, **x4
+  4320x7680 ~147 MiB (target <=384)** — versus rework-1 ~606 / ~1077 MiB.
+  Runtime ~29 s (x3) / ~75 s (x4) synchronous at the finalization seam, fully
+  fail-open.
 
 ## 5. Physical witness instructions (run by Tristan after local acceptance)
 

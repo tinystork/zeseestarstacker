@@ -882,16 +882,27 @@ def support_conditioning(w1, w2, chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COU
 def threshold_sweep(wht, sci, support_mask=None, positive_reference=None,
                     chunk_rows=ROW_CHUNK,
                     abs_candidates=DEFAULT_ABS_THRESHOLDS,
-                    rel_candidates=DEFAULT_REL_THRESHOLDS):
+                    rel_candidates=DEFAULT_REL_THRESHOLDS,
+                    support_source="physical"):
     """Report what an (unapplied) threshold *would* do, with explicit denominators.
 
-    Populated regardless of feasibility; never applied to science.  Requires an
-    explicit ``support_mask`` (physical support) so native positive WHT is never
-    reported as physical support.
+    Populated regardless of feasibility; never applied to science.  The support
+    denominator is labelled truthfully: ``support_source == "physical"`` reports
+    ``physical_support_pixels``; a native-WHT-derived fallback sets
+    ``physical_support_pixels=None`` and reports ``fallback_support_pixels`` /
+    ``support_population_pixels`` instead, so positive native signed WHT is never
+    silently presented as physical support.
     """
+    is_physical = str(support_source) == "physical"
     out = {
         "current_epsilon": _f(WEIGHT_EPSILON),
+        "support_source": str(support_source),
+        "support_denominator_label": (
+            "physical_support_pixels" if is_physical else "fallback_support_pixels"
+        ),
         "physical_support_pixels": None,
+        "fallback_support_pixels": None,
+        "support_population_pixels": None,
         "currently_valid_positive_native_wht_pixels": None,
         "positive_reference": _f(positive_reference),
         "positive_reference_source": None,
@@ -903,25 +914,14 @@ def threshold_sweep(wht, sci, support_mask=None, positive_reference=None,
         if w.shape != s.shape:
             return out
         if support_mask is None:
-            out["physical_support_pixels"] = 0
-            out["note"] = "physical support unavailable"
+            out["note"] = "support population unavailable"
             return out
         m = np.asarray(support_mask, dtype=bool)
         h, wid = w.shape
-        total = int(h * wid)
         ref = positive_reference
         ref_source = "provided"
         if ref is None:
-            # bounded positive sample for the reference
-            stride = _sample_stride(total, MAX_SAMPLE_COUNT)
-            ps = []
-            for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
-                sel = _stride_select(w[r0:r1].reshape(-1), r0 * wid, stride)
-                if sel.size:
-                    p = sel[sel > 0.0]
-                    if p.size:
-                        ps.append(p.astype(np.float64, copy=True))
-            sample = np.concatenate(ps) if ps else np.empty(0)
+            sample, _stride = _chunked_positive_sample(w, chunk_rows)
             if sample.size:
                 ref = float(np.percentile(sample, 99.0))
                 ref_source = "positive_wht_p99_sampled"
@@ -954,8 +954,12 @@ def threshold_sweep(wht, sci, support_mask=None, positive_reference=None,
                 if kv.size:
                     rem_min[name] = min(rem_min[name], float(np.min(kv)))
                     rem_max[name] = max(rem_max[name], float(np.max(kv)))
-        out["physical_support_pixels"] = int(n_support)
         out["currently_valid_positive_native_wht_pixels"] = int(n_current)
+        if is_physical:
+            out["physical_support_pixels"] = int(n_support)
+        else:
+            out["fallback_support_pixels"] = int(n_support)
+            out["support_population_pixels"] = int(n_support)
         for name, thr in candidates:
             out["candidates"].append({
                 "name": name,
@@ -993,19 +997,101 @@ def _support_bin_index(dist_value):
     return len(DISTANCE_BIN_EDGES) - 1
 
 
-def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None, distance=None,
-                                 chunk_rows=ROW_CHUNK, n_extrema=EXTREMA_COUNT):
-    """Per-distance-bin summaries over the actual physical support (per channel).
+# Halo (rows) required for exact bin discrimination through <= 16 pixels.
+BOUNDARY_HALO = 17
+# Row-tile height for the streaming boundary EDT work buffer.
+BOUNDARY_TILE_ROWS = ROW_CHUNK
 
-    The distance map is transient (never persisted).  ``sci``/``wht`` may be
-    ``(H, W)`` or ``(H, W, C)``; one bin list is produced per channel.  N_eff is
-    channel-invariant (channel 0 view).  Extreme pixels are the deterministic
-    bounded SCI extrema per channel.
+
+def _tile_distances(support_mask, r0, r1, halo=BOUNDARY_HALO):
+    """Bounded row-tile distance-to-boundary (float64, transient).
+
+    Only the distance values for rows ``[r0, r1)`` are returned (exact through
+    ``halo - 1 >= 16`` output pixels).  The four global array edges are treated
+    as support boundaries (false padding); interior continuations are padded
+    True so no artificial window boundary is introduced.  At most one such tile
+    work buffer is resident at a time; the caller must consume and release it.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    m = np.asarray(support_mask, dtype=bool)
+    h, w = m.shape
+    tr0 = max(0, r0 - halo)
+    tr1 = min(h, r1 + halo)
+    sub = m[tr0:tr1]
+    padded = np.empty((sub.shape[0] + 2, w + 2), dtype=bool)
+    padded[1:-1, 1:-1] = sub
+    # top/bottom: global exterior when the window reaches the array edge, else
+    # an interior continuation (True) so no false boundary appears.
+    if tr0 == 0:
+        padded[0, :] = False
+    else:
+        padded[0, :] = True
+    if tr1 == h:
+        padded[-1, :] = False
+    else:
+        padded[-1, :] = True
+    # left/right array edges are always global exterior
+    padded[:, 0] = False
+    padded[:, -1] = False
+    dist = distance_transform_edt(padded)
+    inner = dist[1:-1, 1:-1]
+    return inner[r0 - tr0 : r1 - tr0]
+
+
+def _local_support_distance(support_mask, row, col, max_radius=BOUNDARY_HALO):
+    """Exact local distance-to-boundary for one pixel, or ``None`` if > radius.
+
+    Uses a bounded ``(2*max_radius+1)`` window with the same edge semantics as
+    the tiled map (global edges are background; interior continuations are
+    padded True).  ``None`` means the true distance exceeds ``max_radius`` (a
+    truthful "unresolved />16" representation).
+    """
+    try:
+        from scipy.ndimage import distance_transform_edt
+
+        m = np.asarray(support_mask, dtype=bool)
+        h, w = m.shape
+        r = int(row); c = int(col)
+        if not (0 <= r < h and 0 <= c < w):
+            return None
+        R = int(max_radius)
+        r0 = max(0, r - R); r1 = min(h, r + R + 1)
+        c0 = max(0, c - R); c1 = min(w, c + R + 1)
+        sub = m[r0:r1, c0:c1]
+        padded = np.empty((sub.shape[0] + 2, sub.shape[1] + 2), dtype=bool)
+        padded[1:-1, 1:-1] = sub
+        padded[0, :] = False if r0 == 0 else True
+        padded[-1, :] = False if r1 == h else True
+        padded[:, 0] = False if c0 == 0 else True
+        padded[:, -1] = False if c1 == w else True
+        dist = distance_transform_edt(padded)
+        val = float(dist[1 + (r - r0), 1 + (c - c0)])
+        if not math.isfinite(val) or val > R:
+            return None
+        return val
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_local_support_distance failed (non-fatal): %s", exc)
+        return None
+
+
+def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None,
+                                 sup_w1=None, sup_w2=None,
+                                 chunk_rows=BOUNDARY_TILE_ROWS,
+                                 n_extrema=EXTREMA_COUNT, halo=BOUNDARY_HALO):
+    """Per-distance-bin summaries over the physical support (per channel).
+
+    Streams **row tiles** with a bounded halo and computes a transient tile EDT
+    (never a full-frame distance map, never a full float64 upcast of a resident
+    float32 map).  ``sci``/``wht`` may be ``(H, W)`` or ``(H, W, C)``; one bin
+    list per channel.  N_eff is computed per tile from the support pair when
+    supplied (or from a caller-provided ``neff`` array), never materialised.
     """
     out = {
         "available": False, "reason": None,
         "small_positive_wht_cut": _f(SMALL_POSITIVE_WHT),
         "support_source": None, "per_channel": [],
+        "distance_algorithm": "row_tile_edt_halo",
     }
     try:
         s = np.asarray(sci, dtype=np.float32)
@@ -1017,109 +1103,126 @@ def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None, distance=Non
         if s.shape[:2] != m.shape or w.shape[:2] != m.shape:
             out["reason"] = "shape_mismatch"
             return out
-        if distance is None:
-            distance, meta = support_distance_map(m)
-            out["distance_map"] = meta
-        if distance is None:
-            out["reason"] = "distance_map_unavailable"
-            return out
-        d = np.asarray(distance, dtype=np.float64)
-        if d.shape != m.shape:
-            out["reason"] = "distance_shape_mismatch"
-            return out
         h, wid, nch = s.shape
-        total_support = int(np.count_nonzero(m))
-        out["total_support_pixels"] = total_support
+        tile_rows = max(1, int(chunk_rows))
+        halo = max(17, int(halo))
+        out["halo"] = int(halo)
+        out["tile_rows"] = int(tile_rows)
+        out["max_temporary_bytes"] = int(
+            (tile_rows + 2 * halo + 4) * (wid + 2) * 8
+        )
+        total_support = 0
         nbins = len(DISTANCE_BIN_EDGES)
-        edge_arr = np.asarray([hi for _lo, hi in DISTANCE_BIN_EDGES[:-1]], dtype=np.float64)
+        edge_arr = np.asarray([hi for _lo, hi in DISTANCE_BIN_EDGES[:-1]],
+                              dtype=np.float64)
+
+        ext_arrs = []
+        acc = []
+        for c in range(nch):
+            lo_i, hi_i = bounded_extrema_indices(
+                s[..., c], m, int(n_extrema), chunk_rows=tile_rows
+            )
+            ext_arrs.append(np.sort(np.asarray(list(lo_i) + list(hi_i), dtype=np.int64)))
+            acc.append({
+                "counts": np.zeros(nbins, dtype=np.int64),
+                "sci_mn": np.full(nbins, math.inf),
+                "sci_mx": np.full(nbins, -math.inf),
+                "small": np.zeros(nbins, dtype=np.int64),
+                "extreme": np.zeros(nbins, dtype=np.int64),
+                "ns": np.zeros(nbins),
+                "nc": np.zeros(nbins, dtype=np.int64),
+                "nmn": np.full(nbins, math.inf),
+                "nmx": np.full(nbins, -math.inf),
+            })
+
+        sup1 = None if sup_w1 is None else np.asarray(sup_w1, dtype=np.float32)
+        sup2 = None if sup_w2 is None else np.asarray(sup_w2, dtype=np.float32)
         neff_arr = None if neff is None else np.asarray(neff, dtype=np.float32)
 
-        per_channel = []
-        for c in range(nch):
-            sc = s[..., c]
-            wc = w[..., c]
-            lo_i, hi_i = bounded_extrema_indices(
-                sc, m, int(n_extrema), chunk_rows=chunk_rows
-            )
-            ext_arr = np.sort(np.asarray(list(lo_i) + list(hi_i), dtype=np.int64))
-            counts = np.zeros(nbins, dtype=np.int64)
-            sci_mn = np.full(nbins, math.inf)
-            sci_mx = np.full(nbins, -math.inf)
-            small = np.zeros(nbins, dtype=np.int64)
-            extreme_in = np.zeros(nbins, dtype=np.int64)
-            neff_sum = np.zeros(nbins)
-            neff_cnt = np.zeros(nbins, dtype=np.int64)
-            neff_mn = np.full(nbins, math.inf)
-            neff_mx = np.full(nbins, -math.inf)
-            for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
-                mc = m[r0:r1]
-                if not np.any(mc):
-                    continue
-                dc = d[r0:r1]
-                scv = sc[r0:r1]
-                wcv = wc[r0:r1]
-                row_idx, col_idx = np.nonzero(mc)
-                if row_idx.size == 0:
-                    continue
-                dvals = dc[row_idx, col_idx]
-                bi = np.searchsorted(edge_arr, dvals, side="left")
-                sv = scv[row_idx, col_idx]
-                wv = wcv[row_idx, col_idx]
+        for r0 in range(0, h, tile_rows):
+            r1 = min(h, r0 + tile_rows)
+            mc = m[r0:r1]
+            if not np.any(mc):
+                continue
+            total_support += int(np.count_nonzero(mc))
+            dist_rows = _tile_distances(m, r0, r1, halo)
+            row_idx, col_idx = np.nonzero(mc)
+            gi = (r0 + row_idx).astype(np.int64) * wid + col_idx.astype(np.int64)
+            dvals = dist_rows[row_idx, col_idx]
+            bi = np.searchsorted(edge_arr, dvals, side="left")
+            if sup1 is not None and sup2 is not None:
+                a1 = sup1[r0:r1][row_idx, col_idx]
+                a2 = sup2[r0:r1][row_idx, col_idx]
+                ok = np.isfinite(a1) & np.isfinite(a2) & (a1 > 0.0) & (a2 > 0.0)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    rr = a1 / np.sqrt(a2)
+                    ne = np.where(ok, rr * rr, np.nan)
+            elif neff_arr is not None:
+                ne = neff_arr[r0:r1][row_idx, col_idx]
+            else:
+                ne = None
+            for c in range(nch):
+                a = acc[c]
+                sv = s[r0:r1, :, c][row_idx, col_idx]
+                wv = w[r0:r1, :, c][row_idx, col_idx]
                 small_v = np.isfinite(wv) & (wv > 0.0) & (wv <= SMALL_POSITIVE_WHT)
-                if ext_arr.size:
-                    pos = np.searchsorted(ext_arr, (r0 + row_idx).astype(np.int64) * wid
-                                          + col_idx.astype(np.int64))
-                    pos = np.clip(pos, 0, ext_arr.size - 1)
-                    gi = (r0 + row_idx).astype(np.int64) * wid + col_idx.astype(np.int64)
-                    ext_member = ext_arr[pos] == gi
+                ea = ext_arrs[c]
+                if ea.size:
+                    pos = np.searchsorted(ea, gi)
+                    pos = np.clip(pos, 0, ea.size - 1)
+                    ext_member = ea[pos] == gi
                 else:
-                    ext_member = np.zeros(row_idx.size, dtype=bool)
-                neff_v = None
-                if neff_arr is not None:
-                    neff_v = neff_arr[r0:r1][row_idx, col_idx]
+                    ext_member = np.zeros(gi.size, dtype=bool)
                 for k in range(nbins):
                     sel = bi == k
                     nsel = int(np.count_nonzero(sel))
                     if nsel == 0:
                         continue
-                    counts[k] += nsel
+                    a["counts"][k] += nsel
                     vv = sv[sel]
                     fin = np.isfinite(vv)
                     if np.any(fin):
-                        sci_mn[k] = min(sci_mn[k], float(np.min(vv[fin])))
-                        sci_mx[k] = max(sci_mx[k], float(np.max(vv[fin])))
-                    small[k] += int(np.count_nonzero(small_v[sel]))
-                    extreme_in[k] += int(np.count_nonzero(ext_member[sel]))
-                    if neff_v is not None:
-                        nv = neff_v[sel]
+                        a["sci_mn"][k] = min(a["sci_mn"][k], float(np.min(vv[fin])))
+                        a["sci_mx"][k] = max(a["sci_mx"][k], float(np.max(vv[fin])))
+                    a["small"][k] += int(np.count_nonzero(small_v[sel]))
+                    a["extreme"][k] += int(np.count_nonzero(ext_member[sel]))
+                    if ne is not None:
+                        nv = ne[sel]
                         nv = nv[np.isfinite(nv)]
                         if nv.size:
-                            neff_sum[k] += float(np.sum(nv))
-                            neff_cnt[k] += int(nv.size)
-                            neff_mn[k] = min(neff_mn[k], float(np.min(nv)))
-                            neff_mx[k] = max(neff_mx[k], float(np.max(nv)))
+                            a["ns"][k] += float(np.sum(nv))
+                            a["nc"][k] += int(nv.size)
+                            a["nmn"][k] = min(a["nmn"][k], float(np.min(nv)))
+                            a["nmx"][k] = max(a["nmx"][k], float(np.max(nv)))
+            del dist_rows
+
+        out["total_support_pixels"] = int(total_support)
+        per_channel = []
+        for c in range(nch):
+            a = acc[c]
             bins = []
             for k, label in enumerate(DISTANCE_BIN_LABELS):
+                n = int(a["counts"][k])
                 bins.append({
                     "label": label,
-                    "pixels": int(counts[k]),
+                    "pixels": n,
                     "fraction_of_support": (
-                        _f(counts[k] / total_support) if total_support else None
+                        _f(n / total_support) if total_support else None
                     ),
-                    "sci_min": _f(sci_mn[k]) if math.isfinite(sci_mn[k]) else None,
-                    "sci_max": _f(sci_mx[k]) if math.isfinite(sci_mx[k]) else None,
+                    "sci_min": _f(a["sci_mn"][k]) if math.isfinite(a["sci_mn"][k]) else None,
+                    "sci_max": _f(a["sci_mx"][k]) if math.isfinite(a["sci_mx"][k]) else None,
                     "small_positive_wht_fraction": (
-                        _f(small[k] / counts[k]) if counts[k] else None
+                        _f(a["small"][k] / n) if n else None
                     ),
-                    "extreme_pixels": int(extreme_in[k]),
+                    "extreme_pixels": int(a["extreme"][k]),
                     "extreme_fraction": (
-                        _f(extreme_in[k] / counts[k]) if counts[k] else None
+                        _f(a["extreme"][k] / n) if n else None
                     ),
-                    "n_eff_min": _f(neff_mn[k]) if math.isfinite(neff_mn[k]) else None,
+                    "n_eff_min": _f(a["nmn"][k]) if math.isfinite(a["nmn"][k]) else None,
                     "n_eff_mean": (
-                        _f(neff_sum[k] / neff_cnt[k]) if neff_cnt[k] else None
+                        _f(a["ns"][k] / a["nc"][k]) if a["nc"][k] else None
                     ),
-                    "n_eff_max": _f(neff_mx[k]) if math.isfinite(neff_mx[k]) else None,
+                    "n_eff_max": _f(a["nmx"][k]) if math.isfinite(a["nmx"][k]) else None,
                 })
             per_channel.append({"channel": c, "bins": bins})
         out["per_channel"] = per_channel
@@ -1135,12 +1238,39 @@ def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None, distance=Non
 # ---------------------------------------------------------------------------
 
 
-def _local_positive_reference(wht_2d, tile=LOCAL_REFERENCE_TILE):
-    """Bounded per-tile positive-WHT reference (non-overlapping, one scalar/tile)."""
+def _chunked_positive_sample(arr_2d, chunk_rows=ROW_CHUNK, cap=MAX_SAMPLE_COUNT):
+    """Deterministic bounded sample of strictly-positive finite values (streamed).
+
+    Never materialises a full-channel positive subset; the returned sample is
+    capped at ``cap``.  Returns ``(sample, stride)``.
+    """
+    a = np.asarray(arr_2d, dtype=np.float32)
+    h, wid = a.shape
+    stride = _sample_stride(int(h) * int(wid), cap)
+    out = []
+    for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+        sel = _stride_select(a[r0:r1].reshape(-1), r0 * wid, stride)
+        if sel.size:
+            p = sel[sel > 0.0]
+            if p.size:
+                out.append(p.astype(np.float64, copy=True))
+    s = np.concatenate(out) if out else np.empty(0)
+    if s.size > cap:
+        s = s[:: max(1, s.size // cap)][:cap]
+    return s, stride
+
+
+def _local_positive_reference(wht_2d, tile=LOCAL_REFERENCE_TILE,
+                              chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Bounded per-tile positive-WHT reference (one scalar per tile).
+
+    The global fallback is a deterministic bounded sample; each tile's positive
+    subset is bounded by ``tile**2`` — no full-channel positive index copy.
+    """
     w = np.asarray(wht_2d, dtype=np.float32)
     h, wid = w.shape
-    positive = w[np.isfinite(w) & (w > 0.0)]
-    global_ref = float(np.percentile(positive, 90.0)) if positive.size else 0.0
+    gsample, _gstride = _chunked_positive_sample(w, chunk_rows, sample_cap)
+    global_ref = float(np.percentile(gsample, 90.0)) if gsample.size else 0.0
     th = int(math.ceil(h / tile))
     tw = int(math.ceil(wid / tile))
     ref = np.full((th, tw), global_ref, dtype=np.float64)
@@ -1164,11 +1294,15 @@ def conditioning_candidates(sci, wht, support_mask, w1=None, w2=None,
 
     For each channel's selected SCI extrema reports native signed WHT,
     WHT / bounded local positive-WHT reference, WHT / SUP_W1-derived reference,
-    N_eff and distance to the physical support boundary.  No rule is chosen.
+    N_eff and distance to the physical support boundary.  Local references use
+    bounded tile samples; the boundary distance is queried locally (bounded
+    window) per extreme.  No rule is chosen or applied.
     """
     out = {
         "tile": int(tile), "local_reference_statistic": "positive_p90",
-        "per_channel": [], "reason": None,
+        "local_reference_method": "bounded_tile_sample",
+        "local_reference_sample_cap": int(MAX_SAMPLE_COUNT),
+        "distance_method": "local_window_edt", "per_channel": [], "reason": None,
     }
     try:
         s = np.asarray(sci, dtype=np.float32)
@@ -1182,31 +1316,33 @@ def conditioning_candidates(sci, wht, support_mask, w1=None, w2=None,
             return out
         w1_ref = None
         if w1 is not None:
-            a = np.asarray(w1, dtype=np.float32)
-            pos = a[np.isfinite(a) & (a > 0.0)]
-            if pos.size:
-                w1_ref = float(np.median(pos))
+            samp, _st = _chunked_positive_sample(np.asarray(w1, dtype=np.float32),
+                                                 chunk_rows)
+            if samp.size:
+                w1_ref = float(np.median(samp))
         out["sup_w1_reference"] = _f(w1_ref)
         for c in range(s.shape[-1]):
             sc = s[..., c]
             wc = w[..., c]
-            local_ref, global_ref, _tile, thw = _local_positive_reference(wc, tile)
+            local_ref, global_ref, _tile, thw = _local_positive_reference(
+                wc, tile, chunk_rows
+            )
             recs = bounded_extrema_records(
-                sc, wc, m, w1, w2, neff, distance, n=n_extrema,
+                sc, wc, m, w1, w2, None, None, n=n_extrema,
                 chunk_rows=chunk_rows,
             )
             rows = []
             for r in recs:
-                fi = r["index"]
                 row = r["row"]
                 col = r["col"]
                 ti = int(row) // int(tile)
                 tj = int(col) // int(tile)
                 local = float(local_ref[ti, tj]) if local_ref.size else global_ref
                 wv = r.get("wht")
+                dist = _local_support_distance(m, row, col)
                 rows.append({
-                    "kind": r["kind"], "index": fi, "row": row, "col": col,
-                    "sci": r.get("sci"), "wht": wv,
+                    "kind": r["kind"], "index": r["index"], "row": row,
+                    "col": col, "sci": r.get("sci"), "wht": wv,
                     "wht_over_local_ref": (
                         _f(wv / local) if wv is not None and local not in (0.0,) else None
                     ),
@@ -1214,12 +1350,15 @@ def conditioning_candidates(sci, wht, support_mask, w1=None, w2=None,
                         _f(wv / global_ref) if wv is not None and global_ref else None
                     ),
                     "wht_over_sup_w1_ref": (
-                        _f(wv / w1_ref) if wv is not None and w1_ref not in (None, 0.0) else None
+                        _f(wv / w1_ref)
+                        if wv is not None and w1_ref not in (None, 0.0) else None
                     ),
                     "n_eff": r.get("n_eff"),
                     "sup_w1": r.get("sup_w1"),
                     "sup_w2": r.get("sup_w2"),
-                    "distance": r.get("distance"),
+                    "distance": _f(dist),
+                    "distance_resolved": dist is not None,
+                    "distance_bound": float(BOUNDARY_HALO),
                 })
             out["per_channel"].append({
                 "channel": c, "global_positive_reference": _f(global_ref),
@@ -1505,7 +1644,13 @@ class DrizzleScienceDiagnostics:
             return None
 
     def write(self, path=None):
-        """Atomically write the artifact (temp + ``os.replace``).  Fail-open."""
+        """Atomically write the artifact (temp + ``os.replace``).  Fail-open.
+
+        The temporary file is always removed (best-effort ``finally``) when the
+        write/replace path fails, so a failed write cannot leak a stale
+        ``*.tmp.*`` sibling.
+        """
+        tmp = None
         try:
             target = path or self.artifact_path
             if target is None and self.output_folder:
@@ -1523,12 +1668,20 @@ class DrizzleScienceDiagnostics:
                 fh.write(payload)
                 fh.write("\n")
             os.replace(tmp, target)
+            tmp = None
             self.artifact_path = target
             self.write_count += 1
             return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("drizzle diagnostics write failed (non-fatal): %s", exc)
             return False
+        finally:
+            if tmp is not None:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:  # noqa: BLE001 - fail-open cleanup
+                    logger.debug("diagnostics temp cleanup failed (non-fatal)")
 
 
 # ---------------------------------------------------------------------------
@@ -1584,9 +1737,9 @@ def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
             support_source = "native_wht_derived_fallback"
         sections["support_source"] = support_source
 
-        # single justified O(HW) boundary work buffer
-        distance, dmeta = support_distance_map(mask2d)
-        sections["meta"]["boundary_work_buffer"] = dmeta
+        # Bounded streaming boundary analysis: NO full-frame distance map and no
+        # full float64 upcast.  One row-tile EDT work buffer at a time.
+        degraded = []
 
         for c in range(nch):
             sc = s[..., c]
@@ -1598,7 +1751,9 @@ def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
                 wht_channel_diagnostics(wc, sc, n_extrema, chunk_rows, sample_cap)
             )
             sections["threshold_sweep"].append(
-                threshold_sweep(wc, sc, mask2d, chunk_rows=chunk_rows)
+                threshold_sweep(wc, sc, mask2d, chunk_rows=chunk_rows,
+                                support_source=("physical" if support_source == "sup_w1_positive"
+                                                else "native_positive_wht_fallback"))
             )
 
         if sup_w1 is not None and sup_w2 is not None:
@@ -1607,26 +1762,36 @@ def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
             sections["support"] = {"available": False,
                                    "reason": "support_accumulator_absent"}
 
-        # per-channel extrema on the physical support (channel 0 gets the
-        # support-level co-diagnostics; all channels get their own records)
         extrema_by_channel = []
         for c in range(nch):
             recs = bounded_extrema_records(
-                s[..., c], w[..., c], mask2d, sup_w1, sup_w2, None, distance,
+                s[..., c], w[..., c], mask2d, sup_w1, sup_w2, None, None,
                 n=n_extrema, chunk_rows=chunk_rows,
             )
             extrema_by_channel.append(recs)
         sections["support_extrema"] = extrema_by_channel
 
         sections["boundary_bins"] = spatial_boundary_diagnostics(
-            s, w, mask2d, distance=distance, chunk_rows=chunk_rows,
-            n_extrema=n_extrema,
+            s, w, mask2d, sup_w1=sup_w1, sup_w2=sup_w2,
+            chunk_rows=chunk_rows, n_extrema=n_extrema,
         )
         sections["boundary_bins"]["support_source"] = support_source
+        sections["meta"]["boundary_algorithm"] = sections["boundary_bins"].get(
+            "distance_algorithm"
+        )
+        sections["meta"]["boundary_halo"] = sections["boundary_bins"].get("halo")
+        sections["meta"]["max_temporary_bytes"] = sections["boundary_bins"].get(
+            "max_temporary_bytes"
+        )
+        if not sections["boundary_bins"].get("available"):
+            degraded.append("boundary_bins")
         sections["conditioning_candidates"] = conditioning_candidates(
-            s, w, mask2d, w1=sup_w1, w2=sup_w2, distance=distance,
+            s, w, mask2d, w1=sup_w1, w2=sup_w2,
             n_extrema=n_extrema, chunk_rows=chunk_rows,
         )
+        if sections["conditioning_candidates"].get("reason"):
+            degraded.append("conditioning_candidates")
+        sections["meta"]["degraded_sections"] = degraded
     except Exception as exc:  # noqa: BLE001
         logger.debug("summarize_run failed (non-fatal): %s", exc)
     return sections
