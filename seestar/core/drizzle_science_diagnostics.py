@@ -161,18 +161,35 @@ def robust_pixel_scale_deg(wcs):
             return None, "wcs_unavailable"
 
 
-def geometry_diagnostic(reference_wcs, output_wcs, kernel=None, scale=None):
-    """Resolved-geometry record (fail-open).  Candidate = output/input scale."""
+def geometry_diagnostic(reference_wcs, output_wcs, kernel=None, scale=None,
+                        pixel_scale_ratio_effective=None, pixel_scale_ratio_source=None):
+    """Resolved-geometry record (fail-open).  Candidate = output/input scale.
+
+    ``pixel_scale_ratio_current`` is the *effective* kernel-geometry factor the
+    run actually uses: the frozen WCS-derived value when one was supplied
+    (P2-B), otherwise the truthful legacy upstream default of 1.0.  It is never
+    fabricated when unavailable.
+    """
     in_scale, in_method = robust_pixel_scale_deg(reference_wcs)
     out_scale, out_method = robust_pixel_scale_deg(output_wcs)
+    if pixel_scale_ratio_effective is None:
+        current = 1.0
+        current_source = "upstream_add_image_default"
+    else:
+        current = _f(pixel_scale_ratio_effective)
+        current_source = (
+            str(pixel_scale_ratio_source)
+            if pixel_scale_ratio_source is not None
+            else "explicit"
+        )
     rec = {
         "available": False,
         "reason": None,
         "method": None,
         "input_pixel_scale_deg": _f(in_scale),
         "output_pixel_scale_deg": _f(out_scale),
-        "pixel_scale_ratio_current": 1.0,
-        "pixel_scale_ratio_current_source": "upstream_add_image_default",
+        "pixel_scale_ratio_current": current,
+        "pixel_scale_ratio_current_source": current_source,
         "pixel_scale_ratio_candidate": None,
         "candidate_source": "wcs_ratio",
         "kernel": None if kernel is None else str(kernel),
@@ -1501,7 +1518,9 @@ class DrizzleScienceDiagnostics:
         self.pixfrac_requested = None
         self.pixfrac_effective = None
         self.iscale_current = 1.0
+        self.pixel_scale_ratio_requested = None
         self.pixel_scale_ratio_current = 1.0
+        self.pixel_scale_ratio_source = "upstream_add_image_default"
         self.pixel_scale_ratio_candidate = None
         self.geometry = None
         self.contract = None
@@ -1545,6 +1564,25 @@ class DrizzleScienceDiagnostics:
 
     def set_contract(self, record):
         self._safe(lambda: setattr(self, "contract", dict(record)))
+
+    def set_pixel_scale_ratio(self, effective=None, source=None, requested=None):
+        """Record the resolved kernel pixel-scale factor truthfully.
+
+        ``effective`` is the frozen value actually used by the run (P2-B).
+        When it is ``None`` the legacy upstream default is reported (1.0 /
+        ``upstream_add_image_default``); nothing is fabricated.
+        """
+        def _do():
+            self.pixel_scale_ratio_requested = _f(requested)
+            if effective is None:
+                self.pixel_scale_ratio_current = 1.0
+                self.pixel_scale_ratio_source = "upstream_add_image_default"
+            else:
+                self.pixel_scale_ratio_current = _f(effective)
+                self.pixel_scale_ratio_source = (
+                    str(source) if source is not None else "explicit"
+                )
+        self._safe(_do)
 
     def set_sci_stats(self, value):
         self._safe(lambda: setattr(self, "sci_stats", list(value)))
@@ -1750,13 +1788,14 @@ class DrizzleScienceDiagnostics:
                 "pixfrac_requested": _f(self.pixfrac_requested),
                 "pixfrac_effective": _f(self.pixfrac_effective),
                 "iscale_current": _f(self.iscale_current),
+                "pixel_scale_ratio_requested": _f(self.pixel_scale_ratio_requested),
                 "pixel_scale_ratio_current": _f(self.pixel_scale_ratio_current),
                 "pixel_scale_ratio_candidate": _f(
                     self.pixel_scale_ratio_candidate
                     if self.pixel_scale_ratio_candidate is not None
                     else geometry.get("pixel_scale_ratio_candidate")
                 ),
-                "pixel_scale_ratio_source": "upstream_add_image_default",
+                "pixel_scale_ratio_source": str(self.pixel_scale_ratio_source),
                 "geometry": geometry,
                 "add_image_contract": self.contract or {},
                 "crop": self.crop or {},

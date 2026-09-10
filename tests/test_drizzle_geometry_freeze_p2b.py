@@ -112,15 +112,37 @@ def test_config_built_after_freeze_equals_config_built_by_builder_alone():
 
 
 # 5: missing (legacy) geometry state is rejected deterministically
+import copy as _copy
+
+
 def test_legacy_config_without_geometry_is_not_equivalent():
-    legacy = rc.RunConfig.from_sections(
-        product_version="8.4.0",
-        scientific={"drizzle_scale_effective": 3.0, "drizzle_kernel_effective": "lanczos2",
-                    "drizzle_pixfrac_effective": 1.0, "drizzle_wht_threshold_effective": 0.0,
-                    "drizzle_fillval": "0.0", "drizzle_double_norm_fix": True},
-    )
+    """Only the four geometry fields differ — the digest must still change."""
     current = dc.build_drizzle_canonical_config(_stacker(), product_version="8.4.0")
-    assert legacy.full_digest() != current.full_digest()
+    legacy = _copy.deepcopy(current)
+    for key in (
+        "pixel_scale_ratio_requested",
+        "pixel_scale_ratio_derived",
+        "pixel_scale_ratio_effective",
+        "pixel_scale_ratio_source",
+    ):
+        legacy.scientific.pop(key, None)
+    # baselines are identical: the ONLY semantic difference is geometry
+    assert set(current.scientific) - set(legacy.scientific) == {
+        "pixel_scale_ratio_requested",
+        "pixel_scale_ratio_derived",
+        "pixel_scale_ratio_effective",
+        "pixel_scale_ratio_source",
+    }
+    assert current.full_digest() != legacy.full_digest()
+    # an explicit geometry VALUE mismatch is rejected too
+    other = _copy.deepcopy(current)
+    other.scientific["pixel_scale_ratio_effective"] = 0.5
+    other.scientific["pixel_scale_ratio_derived"] = 0.5
+    assert other.full_digest() != current.full_digest()
+    # a SOURCE mismatch is rejected as well
+    src = _copy.deepcopy(current)
+    src.scientific["pixel_scale_ratio_source"] = "upstream_add_image_default"
+    assert src.full_digest() != current.full_digest()
 
 
 # 7: the timing refactor does not change the canonical grid

@@ -24988,8 +24988,28 @@ class SeestarQueuedStacker:
                     getattr(self, "drizzle_output_wcs", None),
                     kernel=kernel_eff,
                     scale=scale_eff,
+                    pixel_scale_ratio_effective=getattr(
+                        self, "drizzle_pixel_scale_ratio_effective", None
+                    ),
+                    pixel_scale_ratio_source=getattr(
+                        self, "drizzle_pixel_scale_ratio_source", None
+                    ),
                 )
             )
+            # P2-B: report the frozen effective ratio truthfully (never a
+            # hardcoded 1.0 in a corrected run).
+            try:
+                diag.set_pixel_scale_ratio(
+                    effective=getattr(
+                        self, "drizzle_pixel_scale_ratio_effective", None
+                    ),
+                    source=getattr(self, "drizzle_pixel_scale_ratio_source", None),
+                    requested=getattr(
+                        self, "drizzle_pixel_scale_ratio_requested", None
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - fail-open diagnostics
+                pass
             # Record the resolved geometry ONCE per run with the documented,
             # machine-searchable token.  Unavailable/invalid WCS is reported
             # fail-open with an explicit reason (never a fabricated ratio).
@@ -24999,22 +25019,32 @@ class SeestarQueuedStacker:
                     geo_line = (
                         "DRIZZLE_GEOMETRY_DIAGNOSTIC kernel=%s scale=%s "
                         "input_pixel_scale=%s output_pixel_scale=%s "
-                        "pixel_scale_ratio_current=1.0 "
+                        "pixel_scale_ratio_current=%s "
+                        "pixel_scale_ratio_source=%s "
                         "pixel_scale_ratio_candidate=%s candidate_source=wcs_ratio"
                     ) % (
                         kernel_eff,
                         scale_eff,
                         geo.get("input_pixel_scale_deg"),
                         geo.get("output_pixel_scale_deg"),
+                        geo.get("pixel_scale_ratio_current"),
+                        geo.get("pixel_scale_ratio_current_source"),
                         geo.get("pixel_scale_ratio_candidate"),
                     )
                 else:
                     geo_line = (
                         "DRIZZLE_GEOMETRY_DIAGNOSTIC kernel=%s scale=%s "
-                        "pixel_scale_ratio_current=1.0 "
+                        "pixel_scale_ratio_current=%s "
+                        "pixel_scale_ratio_source=%s "
                         "pixel_scale_ratio_candidate=unavailable "
                         "candidate_source=wcs_ratio reason=%s"
-                    ) % (kernel_eff, scale_eff, geo.get("reason"))
+                    ) % (
+                        kernel_eff,
+                        scale_eff,
+                        geo.get("pixel_scale_ratio_current"),
+                        geo.get("pixel_scale_ratio_current_source"),
+                        geo.get("reason"),
+                    )
                 logger.info("M3: %s", geo_line)
                 _up = getattr(self, "update_progress", None)
                 if callable(_up):

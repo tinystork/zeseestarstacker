@@ -153,17 +153,30 @@ def test_geometry_only_ab_qualification():
     for scale in (1.0, 2.0, 3.0, 4.0):
         r = rows[("square", scale)]
         assert r["baseline_psr_absent"] == r["corrected_wcs_ratio"]
-    # corrected Lanczos does NOT collapse to a point kernel
+    # discriminating metrics for the physical-relevant kernels and scales
     for kernel in ("lanczos2", "lanczos3"):
         for scale in (2.0, 3.0, 4.0):
             r = rows[(kernel, scale)]
-            assert r["corrected_wcs_ratio"]["nonzero"] > 100
-            assert r["corrected_wcs_ratio"]["rms_radius_out_px"] > 1.0
-        # the corrected factor is the WCS ratio, never the disproven psr=scale
-        assert rows[(kernel, 3.0)]["wcs_derived_ratio"] != pytest.approx(3.0, rel=1e-6)
-    # at the physical scale x3 the corrected ratio is 1/3 and the signed
-    # denominator cancellation present at baseline is removed
-    r3 = rows[("lanczos2", 3.0)]
-    assert r3["wcs_derived_ratio"] == pytest.approx(1.0 / 3.0, rel=1e-9)
-    assert r3["baseline_psr_absent"]["min_wht"] < 0.0
-    assert r3["corrected_wcs_ratio"]["min_wht"] > 0.0
+            base, corr, ctrl = (
+                r["baseline_psr_absent"],
+                r["corrected_wcs_ratio"],
+                r["control_psr_equals_scale"],
+            )
+            assert r["wcs_derived_ratio"] == pytest.approx(1.0 / scale, rel=1e-9)
+            # corrected geometry is NOT the disproven psr=scale collapse
+            assert r["wcs_derived_ratio"] != pytest.approx(scale, rel=1e-6)
+            assert ctrl["nonzero"] < corr["nonzero"]
+            assert ctrl["sum_abs_wht"] < 0.5 * corr["sum_abs_wht"]
+            # the corrected kernel is not a point kernel
+            assert corr["nonzero"] > 100
+            assert corr["rms_radius_out_px"] > 1.0
+            # signed-weight discrimination (whole-impulse mass, not per-pixel
+            # noise): baseline retains signed cancellation, the corrected WCS
+            # ratio produces strictly positive weights (signed_fraction == 0)
+            assert base["signed_fraction"] >= corr["signed_fraction"]
+            assert corr["signed_fraction"] == pytest.approx(0.0, abs=1e-12)
+    # the physical configuration (x3) starts from real signed cancellation
+    for kernel in ("lanczos2", "lanczos3"):
+        r3 = rows[(kernel, 3.0)]
+        assert r3["baseline_psr_absent"]["signed_fraction"] > 0.0
+        assert r3["corrected_wcs_ratio"]["signed_fraction"] == pytest.approx(0.0, abs=1e-12)
