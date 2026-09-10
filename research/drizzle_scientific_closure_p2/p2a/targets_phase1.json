@@ -1,0 +1,25 @@
+{
+  "_comment": "ZSSS-DRIZZLE-CLOSURE-P2A bounded deposition-truth targets. Coordinates are the exact numeric fields from the Phase-1 drizzle_science_diagnostics.json artifacts (row/col address the delivered output grid, channel is the debayered RGB channel). Enable a run with ZSSS_DEPOSITION_TRUTH_TARGETS=<this file>; the passive witness then samples these pixels before/after every accepted frame add. Never used by production science.",
+  "targets": [
+    {"run": "L2", "kernel": "lanczos2", "channel": 0, "row": 4266, "col": 42, "category": "catastrophic_lanczos2_abs_min"},
+    {"run": "L2", "kernel": "lanczos2", "channel": 0, "row": 4863, "col": 21, "category": "catastrophic_lanczos2_abs_max"},
+    {"run": "L2", "kernel": "lanczos2", "channel": 0, "row": 4008, "col": 19, "category": "catastrophic_lanczos2_robust_low"},
+    {"run": "L2", "kernel": "lanczos2", "channel": 0, "row": 2712, "col": 1397, "category": "stable_lanczos2_control"},
+    {"run": "L2", "kernel": "lanczos2", "channel": 1, "row": 4266, "col": 42, "category": "catastrophic_lanczos2_abs_min"},
+    {"run": "L2", "kernel": "lanczos2", "channel": 2, "row": 4266, "col": 42, "category": "catastrophic_lanczos2_abs_min"},
+
+    {"run": "L3", "kernel": "lanczos3", "channel": 0, "row": 5529, "col": 38, "category": "catastrophic_lanczos3_abs_min"},
+    {"run": "L3", "kernel": "lanczos3", "channel": 0, "row": 2381, "col": 11, "category": "catastrophic_lanczos3_abs_max"},
+    {"run": "L3", "kernel": "lanczos3", "channel": 0, "row": 3334, "col": 146, "category": "stable_lanczos3_control"},
+    {"run": "L3", "kernel": "lanczos3", "channel": 1, "row": 5529, "col": 38, "category": "catastrophic_lanczos3_abs_min"},
+    {"run": "L3", "kernel": "lanczos3", "channel": 2, "row": 5529, "col": 38, "category": "catastrophic_lanczos3_abs_min"},
+
+    {"run": "stop-r4", "kernel": "lanczos2", "channel": 0, "row": 4380, "col": 50, "category": "catastrophic_lanczos2_stop_abs_min"},
+    {"run": "stop-r4", "kernel": "lanczos2", "channel": 0, "row": 2767, "col": 952, "category": "catastrophic_lanczos2_stop_abs_max"},
+    {"run": "stop-r4", "kernel": "lanczos2", "channel": 0, "row": 2767, "col": 1498, "category": "stable_lanczos2_stop_control"},
+    {"run": "stop-r4", "kernel": "lanczos2", "channel": 1, "row": 4380, "col": 50, "category": "catastrophic_lanczos2_stop_abs_min"},
+
+    {"run": "square", "kernel": "square", "channel": 0, "row": 2713, "col": 1397, "category": "benign_square_control"},
+    {"run": "square", "kernel": "square", "channel": 0, "row": 5279, "col": 1190, "category": "benign_square_abs_min"}
+  ]
+}

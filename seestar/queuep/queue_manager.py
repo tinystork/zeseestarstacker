@@ -957,6 +957,18 @@ def _persist_drizzle_science_diagnostics(obj, final=False, outcome=None,
         diag.write()
     except Exception as exc:  # noqa: BLE001 - fail-open
         logger.debug("drizzle diagnostics write failed (non-fatal): %s", exc)
+    # ZSSS-DRIZZLE-CLOSURE-P2A: persist the (opt-in) deposition-truth witness
+    # alongside the run diagnostics.  Complete no-op when not enabled.
+    try:
+        from ..core import drizzle_deposition_truth as _dt_persist
+
+        if _dt_persist.is_enabled():
+            _dt_persist.persist(
+                getattr(obj, "output_folder", None),
+                accs=getattr(obj, "drizzle_accumulators", None),
+            )
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
 
 
 def _emit_coverage_render_result(obj, status, *, reason=None, **fields) -> None:
@@ -24163,7 +24175,20 @@ class SeestarQueuedStacker:
             if not np.isfinite(exptime) or exptime <= 0:
                 exptime = 1.0
 
+            # ZSSS-DRIZZLE-CLOSURE-P2A: passive, opt-in live deposition-truth
+            # witness.  Reads scalar accumulator state immediately before and
+            # after every real accepted frame add; default-off is a complete
+            # no-op and can never change a science array (fail-open).
+            _dt_here = None
+            try:
+                from ..core import drizzle_deposition_truth as _dt_here
+
+                if not _dt_here.is_enabled():
+                    _dt_here = None
+            except Exception:  # noqa: BLE001 - fail-open
+                _dt_here = None
             for ch in range(3):
+                _dt_before = _dt_here.snapshot(ch, accs[ch]) if _dt_here else None
                 accs[ch].add(
                     data_hwc[..., ch],
                     weight,
@@ -24172,6 +24197,17 @@ class SeestarQueuedStacker:
                     in_units="counts",
                     in_grid_mask=in_grid_mask,
                 )
+                if _dt_here is not None:
+                    try:
+                        _dt_here.record(
+                            ch,
+                            accs[ch].kernel,
+                            os.path.basename(str(getattr(self, "current_file", ""))) or None,
+                            _dt_before,
+                            _dt_here.snapshot(ch, accs[ch]),
+                        )
+                    except Exception:  # noqa: BLE001 - fail-open
+                        pass
 
             # ZSSS-DRIZZLE-CLOSURE-P1: record the ACTUAL add_image contract
             # exactly once per run (from the resolved accumulator state), and
