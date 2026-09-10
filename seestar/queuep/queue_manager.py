@@ -24854,6 +24854,21 @@ class SeestarQueuedStacker:
         Purely observational: it is never passed upstream, never mutates
         science, and any failure is a silent (debug-logged) no-op.
         """
+        # ZSSS-DRIZZLE-CLOSURE-P2A rework-2: bind a FRESH run-scoped passive
+        # deposition-truth witness for every stack run (opt-in; default-off is
+        # a complete no-op).  Bounded/fail-open; never resets mid-run.
+        try:
+            from ..core import drizzle_deposition_truth as _dt_run
+
+            _dt_run.start_run(
+                kernel=kernel_eff,
+                scale=scale_eff,
+                resume=(resume_result is not None),
+                out_dir=getattr(self, "output_folder", None),
+                run_token=None,
+            )
+        except Exception:  # noqa: BLE001 - fail-open
+            pass
         try:
             from ..core.drizzle_science_diagnostics import (
                 DrizzleScienceDiagnostics,
