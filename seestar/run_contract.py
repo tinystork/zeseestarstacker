@@ -444,6 +444,22 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("drizzle_double_norm_fix", Section.SCIENTIFIC, KIND_BOOL,
        qt="drizzle_double_norm_fix", legacy=("drizzle_double_norm_fix",),
        fp=_FP_DRIZZLE),
+    # --- scientific: P2-B geometry (kernel pixel-scale factor) ---
+    # Frozen once per run and part of the canonical scientific contract so a
+    # continuation must use EXACTLY the same geometry.  Nullable kinds keep
+    # ``requested`` truthfully None (never a fabricated user request).
+    _f("pixel_scale_ratio_requested", Section.SCIENTIFIC, KIND_FLOAT_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False,
+       doc="User-requested kernel pixel-scale factor; always None."),
+    _f("pixel_scale_ratio_derived", Section.SCIENTIFIC, KIND_FLOAT_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False,
+       doc="Raw WCS-derived output/input angular pixel-size ratio."),
+    _f("pixel_scale_ratio_effective", Section.SCIENTIFIC, KIND_FLOAT_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False,
+       doc="Frozen kernel pixel-scale factor passed to drizzle add_image."),
+    _f("pixel_scale_ratio_source", Section.SCIENTIFIC, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False,
+       doc="Provenance token for the ratio (wcs_output_input_ratio)."),
 
     # --- scientific: final-output post-processing (not fingerprint) ---
     _f("apply_chroma_correction", Section.SCIENTIFIC, KIND_BOOL,

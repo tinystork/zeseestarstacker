@@ -154,7 +154,10 @@ from seestar import run_contract
 from seestar.core.drizzle_core import (
     DrizzleAccumulator,
     LANCZOS_KERNELS,
+    PIXEL_SCALE_RATIO_SOURCE,
     VALID_DRIZZLE_KERNELS,
+    build_output_grid,
+    derive_pixel_scale_ratio,
 )
 
 __all__ = [
@@ -477,6 +480,56 @@ def serialize_wcs_header(wcs) -> dict:
     return out
 
 
+def _resolve_geometry_facts(qm):
+    """Return ``(derived, effective, source)`` for the kernel-scale factor.
+
+    Prefers the engine's ONE frozen geometry seam
+    (``qm._freeze_drizzle_geometry``) so every consumer of the canonical
+    config sees exactly the same value; otherwise derives it deterministically
+    from the canonical reference WCS and the canonical output grid.  Returns
+    ``(None, None, None)`` when the geometry is not resolvable here; the
+    deposition path still fails closed before ever using the 1.0 default.
+    """
+    freeze = getattr(qm, "_freeze_drizzle_geometry", None)
+    if callable(freeze):
+        try:
+            ratio = freeze()
+        except Exception:  # noqa: BLE001 - treat as unresolved here
+            ratio = None
+        if ratio is not None:
+            return (
+                getattr(qm, "drizzle_pixel_scale_ratio_derived", ratio),
+                ratio,
+                getattr(qm, "drizzle_pixel_scale_ratio_source", PIXEL_SCALE_RATIO_SOURCE),
+            )
+    eff = getattr(qm, "drizzle_pixel_scale_ratio_effective", None)
+    if eff is not None:
+        return (
+            getattr(qm, "drizzle_pixel_scale_ratio_derived", eff),
+            eff,
+            getattr(qm, "drizzle_pixel_scale_ratio_source", PIXEL_SCALE_RATIO_SOURCE),
+        )
+    ref_wcs = getattr(qm, "reference_wcs_object", None)
+    if ref_wcs is None:
+        return (None, None, None)
+    try:
+        out_wcs = getattr(qm, "drizzle_output_wcs", None)
+        if out_wcs is None:
+            scale = float(getattr(qm, "drizzle_scale", 1.0) or 1.0)
+            out_wcs = build_output_grid(ref_wcs, (1, 1), scale)[0]
+        ratio = float(derive_pixel_scale_ratio(ref_wcs, out_wcs))
+    except Exception:  # noqa: BLE001 - unresolved here; deposition fails closed
+        return (None, None, None)
+    try:
+        qm.drizzle_pixel_scale_ratio_requested = None
+        qm.drizzle_pixel_scale_ratio_derived = ratio
+        qm.drizzle_pixel_scale_ratio_effective = ratio
+        qm.drizzle_pixel_scale_ratio_source = PIXEL_SCALE_RATIO_SOURCE
+    except Exception:  # noqa: BLE001
+        pass
+    return (ratio, ratio, PIXEL_SCALE_RATIO_SOURCE)
+
+
 def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contract.RunConfig:
     """Build the canonical schema-v2 :class:`run_contract.RunConfig` for a
     Drizzle run from the runtime-effective engine state.
@@ -487,6 +540,7 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
     no I/O.  The ``product_version`` is supplied by the caller (the engine's
     ``_canonical_product_version``).
     """
+    _psr_derived, _psr_effective, _psr_source = _resolve_geometry_facts(qm)
     scientific = {
         # Shared weighting / hot-pixel / debayer contract (both domains).
         "weighting_method": str(getattr(qm, "weighting_method", "none") or "none"),
@@ -521,6 +575,12 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         "drizzle_double_norm_fix": bool(
             getattr(qm, "drizzle_double_norm_fix", True)
         ),
+        # P2-B geometry: ONE frozen WCS-derived kernel pixel-scale factor.
+        # ``requested`` is truthfully None (never a fabricated user request).
+        "pixel_scale_ratio_requested": None,
+        "pixel_scale_ratio_derived": _psr_derived,
+        "pixel_scale_ratio_effective": _psr_effective,
+        "pixel_scale_ratio_source": _psr_source,
         "background_match_contract": _BACKGROUND_MATCH_CONTRACT,
         "background_match_contract_version": _BACKGROUND_MATCH_CONTRACT_VERSION,
         "output_grid_contract": _OUTPUT_GRID_CONTRACT,
@@ -2396,8 +2456,14 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
     _validate_channel_vs_canonical(config, channels)
     _validate_versions(manifest, require_exact_versions)
 
-    # Reconstruct only after the entire checkpoint validated.
-    accumulators = _reconstruct_accumulators(channels, output_shape_hw)
+    # Reconstruct only after the entire checkpoint validated.  P2-B: the frozen
+    # WCS-derived kernel-geometry factor is restored from the validated
+    # canonical scientific config so a continuation deposits with EXACTLY the
+    # same geometry as the run that wrote the checkpoint.
+    _psr = config.get(run_contract.Section.SCIENTIFIC, "pixel_scale_ratio_effective")
+    accumulators = _reconstruct_accumulators(
+        channels, output_shape_hw, pixel_scale_ratio=_psr
+    )
     support_accumulators = _reconstruct_support(support, output_shape_hw)
 
     # Only the exact shipped immutable policy *type* is carried as re-arm
@@ -3192,7 +3258,7 @@ def _validate_versions(manifest, require_exact_versions):
         )
 
 
-def _reconstruct_accumulators(channels, output_shape_hw):
+def _reconstruct_accumulators(channels, output_shape_hw, pixel_scale_ratio=None):
     """Reconstruct the three accumulators (only after full validation)."""
     accs = []
     for ch in sorted(channels, key=lambda c: c["channel"]):
@@ -3205,6 +3271,7 @@ def _reconstruct_accumulators(channels, output_shape_hw):
                 pixfrac=ch["pixfrac"],
                 fillval=ch["fillval"],
                 total_exptime=ch["total_exptime"],
+                pixel_scale_ratio=pixel_scale_ratio,
             )
         except (TypeError, ValueError) as exc:
             raise DrizzleCheckpointError(

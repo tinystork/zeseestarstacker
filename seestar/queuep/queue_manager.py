@@ -336,7 +336,10 @@ from ..core.drizzle_core import (
     DrizzleAccumulator,
     LANCZOS_KERNELS,
     WEIGHT_EPSILON,
+    DrizzleGeometryError,
+    PIXEL_SCALE_RATIO_SOURCE,
     build_output_grid,
+    derive_pixel_scale_ratio,
     pixmap_from_alignment,
     support_integrity_violations,
     validate_drizzle_kernel,
@@ -5780,6 +5783,19 @@ class SeestarQueuedStacker:
                 self.drizzle_pixfrac_requested = pixfrac_requested
                 self.drizzle_wht_threshold_requested = wht_threshold_requested
                 self.drizzle_wht_threshold_effective = wht_threshold_eff
+
+                # P2-B: consume the ONE frozen geometry fact (frozen earlier, or
+                # adopted from the validated checkpoint); assert consistency
+                # instead of recomputing a different value.  Fail closed before
+                # any deposition.
+                _frozen_psr = self._freeze_drizzle_geometry()
+                if _frozen_psr is None:
+                    raise DrizzleGeometryError(
+                        "M3 geometry: canonical WCS ratio unavailable before "
+                        "deposition; refusing the upstream pixel_scale_ratio=1.0 "
+                        "default"
+                    )
+                _psr = float(_frozen_psr)
                 resume_result = getattr(self, "_drizzle_resume_result", None)
                 if resume_result is not None:
                     if tuple(resume_result.output_shape_hw) != out_shape_hw:
@@ -5799,9 +5815,14 @@ class SeestarQueuedStacker:
                     # science image or reinterpret signed Lanczos weights.
                     self.drizzle_accumulators = resume_result.accumulators
                 else:
+                    # P2-B: the frozen WCS ratio reaches every SCIENCE
+                    # accumulator (never the square-kernel SUP accumulators).
                     self.drizzle_accumulators = [
                         DrizzleAccumulator(
-                            out_shape_hw, kernel=kernel_eff, pixfrac=pixfrac_eff
+                            out_shape_hw,
+                            kernel=kernel_eff,
+                            pixfrac=pixfrac_eff,
+                            pixel_scale_ratio=_psr,
                         )
                         for _ in range(3)
                     ]
@@ -16594,6 +16615,52 @@ class SeestarQueuedStacker:
         self.drizzle_wht_threshold_effective = (
             0.0 if is_lanczos else requested_wht
         )
+        # P2-B: freeze the canonical geometry as early as the reference WCS is
+        # known so every scientific config/checkpoint/run-config snapshot in
+        # this run carries exactly one value (fail closed on drift).
+        try:
+            self._freeze_drizzle_geometry()
+        except DrizzleGeometryError:
+            raise
+        except Exception:  # noqa: BLE001 - fail-open outside the freeze
+            pass
+
+    def _freeze_drizzle_geometry(self):
+        """ONE idempotent canonical Drizzle geometry freeze (P2-B).
+
+        Resolves/reuses the canonical output WCS and the kernel pixel-scale
+        factor ``output/input`` angular pixel size.  After the first freeze the
+        value is returned unchanged, and any later drift (a different geometry
+        resolving for the same run) raises :class:`DrizzleGeometryError` (fail
+        closed).  Returns ``None`` while the reference WCS is not yet known.
+        """
+        ref = getattr(self, "reference_wcs_object", None)
+        frozen = getattr(self, "drizzle_pixel_scale_ratio_effective", None)
+        if ref is None:
+            return frozen
+        out = getattr(self, "drizzle_output_wcs", None)
+        if out is None:
+            scale = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
+            out = build_output_grid(ref, (1, 1), scale)[0]
+        ratio = float(derive_pixel_scale_ratio(ref, out))
+        if frozen is not None:
+            if not math.isclose(float(frozen), ratio, rel_tol=1e-9, abs_tol=0.0):
+                raise DrizzleGeometryError(
+                    "frozen drizzle pixel_scale_ratio drift: "
+                    f"{frozen!r} != derived {ratio!r}"
+                )
+            return float(frozen)
+        self.drizzle_pixel_scale_ratio_requested = None
+        self.drizzle_pixel_scale_ratio_derived = ratio
+        self.drizzle_pixel_scale_ratio_effective = ratio
+        self.drizzle_pixel_scale_ratio_source = PIXEL_SCALE_RATIO_SOURCE
+        logger.info(
+            "M3: pixel_scale_ratio frozen=%.12g source=%s (output/input "
+            "angular pixel size; requested=None)",
+            ratio,
+            PIXEL_SCALE_RATIO_SOURCE,
+        )
+        return ratio
 
     def _restore_drizzle_checkpoint_runtime(self, restored):
         """Restore the exact native Drizzle lifecycle state from disk truth.
@@ -16662,6 +16729,33 @@ class SeestarQueuedStacker:
                 require_exact_versions=True,
                 resolver=resolver,
             )
+            # P2-B: adopt the persisted frozen geometry fact BEFORE building the
+            # current canonical config, so the preflight digest comparison sees
+            # exactly the geometry the run was created with.  A legacy
+            # checkpoint without the fact stays absent here and the
+            # deposition-time freeze then rejects it deterministically.
+            try:
+                _persisted = result.config.get(
+                    "scientific_config", "pixel_scale_ratio_effective"
+                )
+                if (
+                    _persisted is not None
+                    and getattr(self, "drizzle_pixel_scale_ratio_effective", None)
+                    is None
+                ):
+                    self.drizzle_pixel_scale_ratio_requested = None
+                    self.drizzle_pixel_scale_ratio_derived = result.config.get(
+                        "scientific_config", "pixel_scale_ratio_derived"
+                    ) or float(_persisted)
+                    self.drizzle_pixel_scale_ratio_effective = float(_persisted)
+                    self.drizzle_pixel_scale_ratio_source = (
+                        result.config.get(
+                            "scientific_config", "pixel_scale_ratio_source"
+                        )
+                        or PIXEL_SCALE_RATIO_SOURCE
+                    )
+            except Exception:  # noqa: BLE001 - fail-open adoption only
+                pass
             current_cfg = build_drizzle_canonical_config(
                 self, product_version=self._canonical_product_version()
             )
@@ -24227,6 +24321,9 @@ class SeestarQueuedStacker:
                             exptime=exptime,
                             in_units="counts",
                             fillval=accs[0].fillval,
+                            pixel_scale_ratio=getattr(
+                                accs[0], "pixel_scale_ratio", None
+                            ),
                         )
                         _dsd_here.set_contract(_contract)
                         logger.info(

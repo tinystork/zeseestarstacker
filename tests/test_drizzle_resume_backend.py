@@ -64,6 +64,11 @@ def _configure(qm, output, input_root, kernel):
     qm.neighborhood_size = 5
     qm.bayer_pattern = "GRBG"
     qm.drizzle_scale = 1.0
+    # P2-B: a seeded run config must carry the same canonical geometry the
+    # resumed run resolves (kernel pixel-scale factor), because it is part of
+    # the canonical scientific contract compared on resume.
+    qm.reference_wcs_object = _wcs()
+    qm.drizzle_output_wcs = _wcs()
     qm.drizzle_kernel = kernel
     qm.drizzle_pixfrac = 1.0
     qm.drizzle_wht_threshold = 0.0
