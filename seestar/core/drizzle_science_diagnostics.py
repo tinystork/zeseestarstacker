@@ -375,18 +375,23 @@ def select_extrema_indices(values_2d, valid_mask, n):
 # ---------------------------------------------------------------------------
 
 
+# Canonical support-source enum (D3).
+SUPPORT_SOURCE_PHYSICAL = "sup_w1_positive"
+SUPPORT_SOURCE_FALLBACK = "native_positive_wht_fallback"
+
+
 def physical_support_mask(sup_w1, shape_hw):
     """Return ``(mask, source)`` for the physical support.
 
     ``(SUP_W1 > 0) & finite`` is the physical support whenever the pair exists
-    (``source="sup_w1_positive"``).  Absence of the pair is labelled explicitly
-    (never silently called physical support).
+    (``source=SUPPORT_SOURCE_PHYSICAL``).  Absence of the pair is labelled
+    explicitly (never silently called physical support).
     """
     if sup_w1 is not None:
         try:
             a = np.asarray(sup_w1, dtype=np.float32)
             if a.shape == tuple(shape_hw):
-                return (np.isfinite(a) & (a > 0.0)), "sup_w1_positive"
+                return (np.isfinite(a) & (a > 0.0)), SUPPORT_SOURCE_PHYSICAL
         except Exception:  # noqa: BLE001
             pass
     return None, "support_pair_absent"
@@ -659,6 +664,47 @@ def wht_diagnostics_hwc(wht, sci=None, n_extrema=EXTREMA_COUNT,
 # ---------------------------------------------------------------------------
 
 
+def _neff_scalar_at(w1, w2, row, col):
+    """Overflow-resistant N_eff = (SUP_W1/sqrt(SUP_W2))**2 at one coordinate.
+
+    Valid only when both SUP_W1 and SUP_W2 are finite, ``SUP_W1 > 0`` and
+    ``SUP_W2 > 0``; otherwise ``None``.  Reads two scalars only (no full map).
+    """
+    try:
+        a = np.asarray(w1)
+        b = np.asarray(w2)
+        if a.ndim == 2:
+            av = float(a[int(row), int(col)])
+            bv = float(b[int(row), int(col)])
+        else:
+            fi = int(row) * int(a.shape[1]) + int(col)
+            av = float(a.ravel()[fi])
+            bv = float(b.ravel()[fi])
+        if not (math.isfinite(av) and math.isfinite(bv) and av > 0.0 and bv > 0.0):
+            return None
+        r = av / math.sqrt(bv)
+        return _f(r * r)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _finalize_extrema_record(rec, w1, w2, support_mask):
+    """Fill per-point N_eff and boundary distance on demand (bounded, scalar)."""
+    try:
+        if rec.get("n_eff") is None and w1 is not None and w2 is not None:
+            nv = _neff_scalar_at(w1, w2, rec["row"], rec["col"])
+            rec["n_eff"] = nv
+            rec["n_eff_valid"] = nv is not None
+        if rec.get("distance") is None and support_mask is not None:
+            d = _local_support_distance(support_mask, rec["row"], rec["col"])
+            rec["distance"] = _f(d)
+            rec["distance_resolved"] = d is not None
+            rec["distance_bound"] = float(BOUNDARY_HALO)
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+    return rec
+
+
 def _flat_record(sci_2d, wht_2d, width, fi, w1=None, w2=None, neff=None,
                  distance=None, kind=None):
     def _at(arr, i):
@@ -761,7 +807,7 @@ def bounded_extrema_records(sci_2d, wht_2d, support_mask, w1=None, w2=None,
             if r["index"] in seen:
                 continue
             seen.add(r["index"])
-            uniq.append(r)
+            uniq.append(_finalize_extrema_record(r, w1, w2, m))
         return uniq
     except Exception as exc:  # noqa: BLE001
         logger.debug("bounded_extrema_records failed (non-fatal): %s", exc)
@@ -883,7 +929,7 @@ def threshold_sweep(wht, sci, support_mask=None, positive_reference=None,
                     chunk_rows=ROW_CHUNK,
                     abs_candidates=DEFAULT_ABS_THRESHOLDS,
                     rel_candidates=DEFAULT_REL_THRESHOLDS,
-                    support_source="physical"):
+                    support_source=SUPPORT_SOURCE_PHYSICAL):
     """Report what an (unapplied) threshold *would* do, with explicit denominators.
 
     Populated regardless of feasibility; never applied to science.  The support
@@ -893,7 +939,7 @@ def threshold_sweep(wht, sci, support_mask=None, positive_reference=None,
     ``support_population_pixels`` instead, so positive native signed WHT is never
     silently presented as physical support.
     """
-    is_physical = str(support_source) == "physical"
+    is_physical = str(support_source) == SUPPORT_SOURCE_PHYSICAL
     out = {
         "current_epsilon": _f(WEIGHT_EPSILON),
         "support_source": str(support_source),
@@ -1289,7 +1335,8 @@ def _local_positive_reference(wht_2d, tile=LOCAL_REFERENCE_TILE,
 
 def conditioning_candidates(sci, wht, support_mask, w1=None, w2=None,
                             neff=None, distance=None, n_extrema=EXTREMA_COUNT,
-                            tile=LOCAL_REFERENCE_TILE, chunk_rows=ROW_CHUNK):
+                            tile=LOCAL_REFERENCE_TILE, chunk_rows=ROW_CHUNK,
+                            support_source=SUPPORT_SOURCE_PHYSICAL):
     """Per-channel, per-extreme candidate conditioning evidence (bounded).
 
     For each channel's selected SCI extrema reports native signed WHT,
@@ -1302,7 +1349,9 @@ def conditioning_candidates(sci, wht, support_mask, w1=None, w2=None,
         "tile": int(tile), "local_reference_statistic": "positive_p90",
         "local_reference_method": "bounded_tile_sample",
         "local_reference_sample_cap": int(MAX_SAMPLE_COUNT),
-        "distance_method": "local_window_edt", "per_channel": [], "reason": None,
+        "distance_method": "local_window_edt",
+        "support_source": str(support_source),
+        "per_channel": [], "reason": None,
     }
     try:
         s = np.asarray(sci, dtype=np.float32)
@@ -1729,12 +1778,12 @@ def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
                 m = np.asarray(support_mask, dtype=bool)
                 if m.shape == (h, wid):
                     mask2d = m
-                    support_source = "sup_w1_positive"
+                    support_source = SUPPORT_SOURCE_PHYSICAL
             except Exception:  # noqa: BLE001
                 mask2d = None
         if mask2d is None:
             mask2d = native_wht_fallback_mask(w)
-            support_source = "native_wht_derived_fallback"
+            support_source = SUPPORT_SOURCE_FALLBACK
         sections["support_source"] = support_source
 
         # Bounded streaming boundary analysis: NO full-frame distance map and no
@@ -1752,8 +1801,7 @@ def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
             )
             sections["threshold_sweep"].append(
                 threshold_sweep(wc, sc, mask2d, chunk_rows=chunk_rows,
-                                support_source=("physical" if support_source == "sup_w1_positive"
-                                                else "native_positive_wht_fallback"))
+                                support_source=support_source)
             )
 
         if sup_w1 is not None and sup_w2 is not None:
@@ -1788,6 +1836,7 @@ def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
         sections["conditioning_candidates"] = conditioning_candidates(
             s, w, mask2d, w1=sup_w1, w2=sup_w2,
             n_extrema=n_extrema, chunk_rows=chunk_rows,
+            support_source=support_source,
         )
         if sections["conditioning_candidates"].get("reason"):
             degraded.append("conditioning_candidates")
@@ -1802,6 +1851,8 @@ __all__ = [
     "SMALL_POSITIVE_WHT", "DEFAULT_ABS_THRESHOLDS", "DEFAULT_REL_THRESHOLDS",
     "DISTANCE_BIN_LABELS", "DISTANCE_BIN_EDGES", "ROW_CHUNK",
     "MAX_SAMPLE_COUNT", "MAX_BOUNDARY_WORK_BYTES", "MAX_LIFECYCLE_EVENTS",
+    "BOUNDARY_HALO", "BOUNDARY_TILE_ROWS",
+    "SUPPORT_SOURCE_PHYSICAL", "SUPPORT_SOURCE_FALLBACK",
     "TERMINAL_STAGES", "COALESCE_STAGES",
     "DrizzleScienceDiagnostics", "robust_pixel_scale_deg", "geometry_diagnostic",
     "contract_diagnostic", "sci_channel_stats", "sci_stats_hwc",

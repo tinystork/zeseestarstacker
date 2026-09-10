@@ -234,7 +234,7 @@ def test_threshold_sweep_separates_support_from_positive_wht():
     sci = np.arange(6, dtype=np.float32).reshape(2, 3) + 1.0
     support = np.array([[True, True, True], [True, True, False]])
     sweep = dsd.threshold_sweep(wht, sci, support, abs_candidates=(1e-4, 1e-3))
-    assert sweep["support_source"] == "physical"
+    assert sweep["support_source"] == dsd.SUPPORT_SOURCE_PHYSICAL
     assert sweep["physical_support_pixels"] == int(support.sum())
     assert sweep["currently_valid_positive_native_wht_pixels"] == 4
     by = {c["name"]: c for c in sweep["candidates"]}
@@ -259,8 +259,8 @@ def test_summarize_fallback_support_source_label():
     sci = np.ones((8, 8, 3), dtype=np.float32)
     wht = np.ones((8, 8, 3), dtype=np.float32)
     sec = dsd.summarize_run(sci, wht, sup_w1=None, sup_w2=None)
-    assert sec["support_source"] == "native_wht_derived_fallback"
-    assert sec["boundary_bins"]["support_source"] == "native_wht_derived_fallback"
+    assert sec["support_source"] == dsd.SUPPORT_SOURCE_FALLBACK
+    assert sec["boundary_bins"]["support_source"] == dsd.SUPPORT_SOURCE_FALLBACK
     assert sec["threshold_sweep"][0]["physical_support_pixels"] is None
     assert sec["threshold_sweep"][0]["support_source"] == "native_positive_wht_fallback"
 
@@ -343,6 +343,129 @@ def test_bounded_extrema_only_over_support_and_coordinates():
     for r in recs:
         assert support.ravel()[r["index"]], "extrema must lie on physical support"
         assert r["row"] * 10 + r["col"] == r["index"]
+
+
+# ---------------------------------------------------------------------------
+# 3b. D1/D2/D3 — per-extreme N_eff, per-extreme distance, canonical labels
+# ---------------------------------------------------------------------------
+
+
+def _heterogeneous_support_fixture():
+    h = w = 16
+    sci = np.zeros((h, w, 3), dtype=np.float32)
+    wht = np.ones((h, w, 3), dtype=np.float32)
+    w1 = np.zeros((h, w), dtype=np.float32)
+    w2 = np.zeros((h, w), dtype=np.float32)
+    # (row, col, sup_w1, sup_w2) -> N_eff = (w1/sqrt(w2))**2
+    spec = [(2, 2, 2.0, 4.0, 1.0), (2, 13, 6.0, 9.0, 4.0),
+            (13, 2, 3.0, 3.0, 3.0)]
+    for i, (r, c, a, b, _ne) in enumerate(spec):
+        w1[r, c] = a
+        w2[r, c] = b
+        sci[r, c, :] = float(i + 1)
+    return sci, wht, w1, w2, spec
+
+
+def test_d1_per_extreme_n_eff_exact_values_support_extrema():
+    """D1: support extrema must carry exact per-point N_eff (not null)."""
+    sci, wht, w1, w2, spec = _heterogeneous_support_fixture()
+    sec = dsd.summarize_run(sci, wht, sup_w1=w1, sup_w2=w2,
+                            support_mask=(w1 > 0), n_extrema=4)
+    expected = {(r, c): ne for r, c, _a, _b, ne in spec}
+    seen = {}
+    for recs in sec["support_extrema"]:
+        for r in recs:
+            key = (r["row"], r["col"])
+            assert r["n_eff"] is not None and r["n_eff_valid"] is True
+            assert r["n_eff"] == pytest.approx(expected[key], rel=1e-6)
+            seen[key] = r["n_eff"]
+    assert set(seen) == set(expected)
+    # conditioning extrema carry the same exact N_eff
+    for ch in sec["conditioning_candidates"]["per_channel"]:
+        for r in ch["extrema"]:
+            key = (r["row"], r["col"])
+            assert r["n_eff"] == pytest.approx(expected[key], rel=1e-6)
+
+
+def test_d1_n_eff_null_when_invalid_support():
+    """D1: N_eff is null (with validity flag) when the support pair is invalid."""
+    sci = np.zeros((6, 6, 3), dtype=np.float32)
+    sci[2, 2, :] = 1.0
+    wht = np.ones((6, 6, 3), dtype=np.float32)
+    w1 = np.zeros((6, 6), dtype=np.float32)
+    w2 = np.zeros((6, 6), dtype=np.float32)
+    w1[2, 2] = 1.0
+    w2[2, 2] = 0.0  # invalid: SUP_W2 must be > 0
+    recs = dsd.bounded_extrema_records(sci[..., 0], wht[..., 0], w1 > 0,
+                                       w1, w2, None, None, n=2)
+    assert any(r["n_eff"] is None and r["n_eff_valid"] is False for r in recs)
+
+
+def test_d2_local_support_distance_reference_and_gt16():
+    """D2: bounded local distance matches the reference and reports >16 truthfully."""
+    support = np.zeros((60, 60), dtype=bool)
+    support[5:55, 5:55] = True
+    ref, _meta = dsd.support_distance_map(support)
+    assert dsd._local_support_distance(support, 5, 5) == pytest.approx(ref[5, 5])
+    assert ref[5, 5] == pytest.approx(1.0)
+    for r, c in [(12, 12), (20, 20), (5, 30)]:
+        if ref[r, c] <= 16:
+            assert dsd._local_support_distance(support, r, c) == pytest.approx(ref[r, c])
+    # global edge is a boundary
+    edge = np.ones((10, 10), dtype=bool)
+    assert dsd._local_support_distance(edge, 0, 0) == pytest.approx(1.0)
+    assert dsd._local_support_distance(edge, 0, 5) == pytest.approx(1.0)
+    # all-true large grid: centre distance > 16 -> truthful None
+    big = np.ones((60, 60), dtype=bool)
+    ref_big, _m = dsd.support_distance_map(big)
+    assert ref_big[30, 30] > 16
+    assert dsd._local_support_distance(big, 30, 30) is None
+
+
+def test_d2_support_extrema_carry_distance():
+    """D2: support extrema carry the boundary distance (bounded, no full map)."""
+    support = np.zeros((40, 40), dtype=bool)
+    support[4:36, 4:36] = True
+    sci = np.zeros((40, 40), dtype=np.float32)
+    sci[20, 20] = 9.0  # interior maximum
+    sci[4, 4] = -3.0   # boundary minimum
+    wht = np.ones((40, 40), dtype=np.float32)
+    ref, _m = dsd.support_distance_map(support)
+    recs = dsd.bounded_extrema_records(sci, wht, support, n=2)
+    by = {(r["row"], r["col"]): r for r in recs}
+    assert by[(4, 4)]["distance"] == pytest.approx(1.0)
+    assert by[(4, 4)]["distance_resolved"] is True
+    assert by[(20, 20)]["distance"] == pytest.approx(ref[20, 20])
+    assert by[(20, 20)]["distance_resolved"] is True
+
+
+def test_d2_gt16_extrema_distance_is_null_not_fabricated():
+    support = np.ones((60, 60), dtype=bool)
+    sci = np.zeros((60, 60), dtype=np.float32)
+    sci[30, 30] = 5.0
+    wht = np.ones((60, 60), dtype=np.float32)
+    recs = dsd.bounded_extrema_records(sci, wht, support, n=2)
+    centre = [r for r in recs if (r["row"], r["col"]) == (30, 30)]
+    assert centre
+    assert centre[0]["distance"] is None
+    assert centre[0]["distance_resolved"] is False
+    assert centre[0]["distance_bound"] == pytest.approx(17.0)
+
+
+def test_d3_fallback_label_canonical_everywhere():
+    """D3: without a SUP pair every support_source field uses the canonical string."""
+    sci = np.ones((8, 8, 3), dtype=np.float32)
+    wht = np.ones((8, 8, 3), dtype=np.float32)
+    sec = dsd.summarize_run(sci, wht)
+    canon = dsd.SUPPORT_SOURCE_FALLBACK
+    assert canon == "native_positive_wht_fallback"
+    assert sec["support_source"] == canon
+    assert sec["boundary_bins"]["support_source"] == canon
+    assert sec["conditioning_candidates"]["support_source"] == canon
+    for sw in sec["threshold_sweep"]:
+        assert sw["support_source"] == canon
+        assert sw["physical_support_pixels"] is None
+        assert sw["fallback_support_pixels"] is not None
 
 
 # ---------------------------------------------------------------------------
