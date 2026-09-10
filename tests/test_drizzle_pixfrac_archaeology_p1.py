@@ -100,5 +100,5 @@ def test_resume_locator_still_accepts_effective_pixfrac_up_to_two():
 def test_contract_diagnostic_never_reports_a_candidate_as_effective():
     contract = dsd.contract_diagnostic("lanczos3", 1.0, exptime=1.0)
     assert contract["pixel_scale_ratio_effective"] == 1.0
-    assert contract["pixel_scale_ratio_source"] == "upstream_default"
+    assert contract["pixel_scale_ratio_source"] == "upstream_add_image_default"
     assert contract["iscale_effective"] == 1.0

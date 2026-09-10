@@ -60,11 +60,33 @@ production.
 Each Standard-M3 run now writes one passive, atomic artifact
 `drizzle_science_diagnostics.json` into the run output folder (see
 `seestar/core/drizzle_science_diagnostics.py`). It carries the resolved
-geometry (WCS-derived candidate), the effective `add_image` contract, per-channel
+geometry (WCS-derived candidate), the effective `add_image` contract, the final
+bbox crop bounds and the effective WHT-threshold policy, per-channel
 pre-stretch SCI stats, native signed-WHT diagnostics, a diagnostic-only
-threshold sweep, support conditioning (N_eff), spatial boundary bins,
-conditioning candidates, and the SUPPORT_LIFECYCLE ring. It is fail-open and
-never touches science.
+threshold sweep (physical-support vs positive-native-WHT denominators kept
+explicit), support conditioning (N_eff over valid support only), per-channel
+spatial boundary bins, conditioning candidates, and the bounded
+SUPPORT_LIFECYCLE ring. It is fail-open and never touches science.
+
+Rework-1 additions:
+
+* the SCI/WHT/support/threshold sections are computed **after** the final bbox
+  crop and the effective WHT policy, so artifact row/col/index and support
+  statistics address the final SCI FITS grid (`crop` + `sections_meta`);
+* per-channel output (no channel-mean cancellation); physical support is
+  `SUP_W1 > 0` when the pair exists, otherwise an explicitly-labelled
+  native-WHT-derived fallback;
+* the summary is **memory-bounded** (row-chunked float32 streaming, bounded
+  percentile samples and extrema candidates, one justified O(HW) EDT boundary
+  buffer). Measured `summarize_run` delta: ~33 MiB @1024², ~77 MiB @2048²,
+  ~172 MiB @3072², ~305 MiB @4096² (r0 was ~446/837/1504/2419 MiB);
+* the boundary distance map treats the array exterior as a physical support
+  boundary (false-padded EDT), so fully-covered/edge-touching support yields a
+  symmetric, meaningful field;
+* lifecycle retention coalesces repetitive `checkpoint_save` events (count +
+  first/last generation) while always retaining terminal evidence; the
+  successful artifact is rewritten **after** cleanup, finalization-returned and
+  FITS save so terminal events are persisted, not just held in memory.
 
 ## 5. Physical witness instructions (run by Tristan after local acceptance)
 

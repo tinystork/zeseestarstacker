@@ -1,41 +1,43 @@
-"""Passive, fail-open Drizzle science diagnostics (ZSSS-DRIZZLE-CLOSURE-P1).
+"""Passive, fail-open, memory-bounded Drizzle science diagnostics (ZSSS-DRIZZLE-CLOSURE-P1).
 
 This module is **instrumentation only**.  It observes the *current* production
-Drizzle (Standard M3) science without ever mutating it, influencing it, or
+Standard-M3 Drizzle science without ever mutating it, influencing it, or
 changing control flow.  Its sole output is one bounded, versioned JSON artifact
 per run written atomically/best-effort into the run output area.
 
 Hard contract (Phase 1 scientific freeze)
 -----------------------------------------
 * **Passive** — every helper reads its inputs; none of them mutate the arrays
-  they are given (all reductions allocate their own temporaries).  The
-  collector never returns anything consumed by the stacking path.
-* **Fail-open** — every public entry point catches ``Exception`` internally.
-  A calculation failure or an I/O failure only warns (debug log) and returns a
+  they are given (all reductions allocate their own temporaries).
+* **Fail-open** — every public entry point catches ``Exception`` internally.  A
+  calculation failure or an I/O failure only warns (debug log) and returns a
   falsy/neutral value; it can never abort a run or change a scientific array.
-* **Bounded** — no full-frame array is ever serialized.  Only scalars, short
-  bounded lists (percentiles, per-channel/per-bin summaries) and the bounded
-  lifecycle ring are persisted.  Distance maps are computed transiently and
-  dropped; they are never persisted.
+* **Memory-bounded** — the summary never converts a whole HWC SCI/WHT cube to
+  float64.  It streams **row chunks of float32 views**, keeps only bounded
+  sample/candidate buffers, and holds **at most one** justified O(HW) boundary
+  work buffer (the EDT distance map) with an explicit byte budget.  Percentiles
+  use a deterministic, documented bounded sample; extrema use bounded per-chunk
+  candidate merges (no full-array argsort).  See the constants below.
 * **No science rule** — the module *reports* threshold/N_eff/boundary/
-  conditioning candidate data for human/architect comparison.  It never
-  applies a floor, mask, clip or rejection, and never declares negative
-  science invalid.
+  conditioning candidate data for human/architect comparison.  It never applies
+  a floor, mask, clip or rejection, and never declares negative science invalid.
 
 Documented methods
 ------------------
-* Angular pixel scale: the mean of ``abs(proj_plane_pixel_scales(wcs))`` in
-  degrees/pixel at the WCS reference point (a robust scalar for a not-too-
-  skewed grid), falling back to ``sqrt(|det(CD)|)``.  The geometry candidate
-  is ``output_scale / input_scale`` and is **diagnostic-only** — it is never
-  passed to ``Drizzle.add_image`` in Phase 1.
-* Robust extrema: deterministic order-statistic selection over the *valid*
-  physical-support population (stable argsort, flat-index tie-break).  Sample
-  positions/sizes are fixed constants so JSON output is reproducible.
-* Distance bins: the Euclidean distance transform (EDT) of the physical
-  support mask gives each support pixel its distance to the nearest unsupported
-  pixel; bins are the documented half-open intervals ``[0,1]``, ``(1,4]``,
-  ``(4,8]``, ``(8,16]``, ``(16,inf)``.
+* Angular pixel scale: mean of ``abs(proj_plane_pixel_scales(wcs))`` in
+  degrees/pixel (fallback ``sqrt(|det(CD)|)``).  The geometry candidate is
+  ``output_scale / input_scale`` and is diagnostic-only.
+* Percentiles: deterministic uniform-stride sample over the finite population
+  (stride ``max(1, total // MAX_SAMPLE_COUNT)``), capped at
+  :data:`MAX_SAMPLE_COUNT` values; method/stride/count are recorded in the
+  artifact.  Min/max and all counts/fractions are exact (chunked reductions).
+* Extrema: exact absolute min/max plus the ``k`` smallest/largest SCI values over
+  the physical support, selected with bounded per-chunk ``argpartition``
+  candidate merges (tie-break by flat index).  Coordinates address the final
+  (post-crop) SCI grid.
+* Distance bins: EDT of the physical support mask with the array exterior
+  treated as a support boundary (false-padded then cropped); bins are the
+  half-open intervals ``[0,1]``, ``(1,4]``, ``(4,8]``, ``(8,16]``, ``(16,inf)``.
 """
 
 from __future__ import annotations
@@ -50,16 +52,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 ARTIFACT_FILENAME = "drizzle_science_diagnostics.json"
 
-# Neutral support floor used by the current production contract.  Repeated here
-# as a *diagnostic constant* so the module can label the current epsilon without
-# importing the science module (keeps the dependency direction one-way).
+# Neutral support floor used by the current production contract (diagnostic
+# constant; the science module stays the single source of truth).
 WEIGHT_EPSILON = 1e-9
 
-# Diagnostic "small positive WHT" cut for the fraction reported in the WHT and
-# boundary sections.  Purely descriptive; never applied as a mask.
+# Diagnostic "small positive WHT" cut (descriptive only; never applied).
 SMALL_POSITIVE_WHT = 1e-4
 
 # Deterministic threshold-sweep candidates (diagnostic only).
@@ -68,6 +68,19 @@ DEFAULT_REL_THRESHOLDS = (1e-3, 1e-2, 0.05, 0.1)
 
 # Bounded extrema sample size (per channel / per selection side).
 EXTREMA_COUNT = 8
+
+# Streaming chunk height (rows) for every full-array reduction.
+ROW_CHUNK = 64
+
+# Hard cap on the deterministic percentile sample (values per channel).
+MAX_SAMPLE_COUNT = 200_000
+
+# Hard cap on the single justified O(HW) boundary work buffer (EDT distance
+# map, float64).  Larger grids skip the boundary section fail-open.
+MAX_BOUNDARY_WORK_BYTES = 512 * 1024 * 1024
+
+# Local positive-WHT reference tile edge (output pixels) — bounded tile map.
+LOCAL_REFERENCE_TILE = 64
 
 # Documented boundary distance bins (distance in output pixels).
 DISTANCE_BIN_LABELS = ("0-1", "2-4", "5-8", "9-16", ">16")
@@ -78,10 +91,6 @@ DISTANCE_BIN_EDGES = (
     (8.0, 16.0),
     (16.0, math.inf),
 )
-
-# Local positive-WHT reference: tile edge (output pixels) for the bounded
-# per-tile robust reference used by the conditioning-candidate section.
-LOCAL_REFERENCE_TILE = 64
 
 # Native WHT magnitude bins reported in the WHT diagnostics section.
 WHT_MAGNITUDE_BINS = (
@@ -123,15 +132,10 @@ def _i(value):
 def robust_pixel_scale_deg(wcs):
     """Return ``(scale_deg_per_pixel, method)`` or ``(None, reason)``.
 
-    Method (documented, deterministic):
-
-    1. ``astropy.wcs.utils.proj_plane_pixel_scales`` — the projected linear
-       pixel scale (degrees/pixel) along each WCS axis at the reference point;
-       the reported scalar is the mean of the absolute values.
-    2. Fallback: ``sqrt(|det(CD)|)`` of the pixel scale matrix (for a
-       skewed/anisotropic grid this is the geometric mean of the axis scales).
-
-    Never raises; an unusable/absent WCS yields ``None`` with a short reason.
+    Method (documented, deterministic): mean of the absolute projected linear
+    pixel scales at the WCS reference point
+    (``astropy.wcs.utils.proj_plane_pixel_scales``), fallback
+    ``sqrt(|det(CD)|)``.  Never raises.
     """
     if wcs is None:
         return None, "wcs_absent"
@@ -149,8 +153,7 @@ def robust_pixel_scale_deg(wcs):
     except Exception:  # noqa: BLE001
         try:
             cd = np.asarray(wcs.pixel_scale_matrix, dtype=np.float64)
-            det = float(np.linalg.det(cd))
-            val = math.sqrt(abs(det))
+            val = math.sqrt(abs(float(np.linalg.det(cd))))
             if not math.isfinite(val) or val <= 0.0:
                 return None, "wcs_det_nonpositive"
             return val, "sqrt_abs_det_cd"
@@ -159,14 +162,7 @@ def robust_pixel_scale_deg(wcs):
 
 
 def geometry_diagnostic(reference_wcs, output_wcs, kernel=None, scale=None):
-    """Build the resolved-geometry diagnostic record (fail-open).
-
-    Returns a JSON-safe dict.  ``pixel_scale_ratio_candidate`` is
-    ``output_pixel_scale / input_pixel_scale`` (diagnostic only; never passed
-    upstream in Phase 1).  When either WCS is unavailable/invalid the record
-    carries ``available=False`` and an explicit ``reason`` instead of a
-    fabricated ratio.
-    """
+    """Resolved-geometry record (fail-open).  Candidate = output/input scale."""
     in_scale, in_method = robust_pixel_scale_deg(reference_wcs)
     out_scale, out_method = robust_pixel_scale_deg(output_wcs)
     rec = {
@@ -176,7 +172,7 @@ def geometry_diagnostic(reference_wcs, output_wcs, kernel=None, scale=None):
         "input_pixel_scale_deg": _f(in_scale),
         "output_pixel_scale_deg": _f(out_scale),
         "pixel_scale_ratio_current": 1.0,
-        "pixel_scale_ratio_current_source": "upstream_default",
+        "pixel_scale_ratio_current_source": "upstream_add_image_default",
         "pixel_scale_ratio_candidate": None,
         "candidate_source": "wcs_ratio",
         "kernel": None if kernel is None else str(kernel),
@@ -199,13 +195,14 @@ def geometry_diagnostic(reference_wcs, output_wcs, kernel=None, scale=None):
 
 def contract_diagnostic(kernel, pixfrac, exptime=1.0, in_units="counts",
                         fillval="0.0", iscale=None, pixel_scale_ratio=None):
-    """Describe the *effective* ``Drizzle.add_image`` call semantics.
+    """Effective ``Drizzle.add_image`` call semantics with precise provenance.
 
-    Explicit-vs-default provenance is recorded per argument so the current
-    omissions are unambiguous: ``iscale`` and ``pixel_scale_ratio`` are
-    ``upstream_default`` (the wrapper does not pass them), ``fillval`` is the
-    accumulator's construction default.  This mirrors the wrapper's literal
-    call and is cross-checked by a spy test against the real engine call.
+    Provenance semantics (exact distinction):
+
+    * ``kernel`` / ``fillval`` are resolved at **Drizzle construction** (the
+      accumulator's constructor / wrapper default) -> ``drizzle_construction_*``;
+    * ``iscale`` / ``pixel_scale_ratio`` are **upstream ``add_image`` defaults**
+      (the wrapper does not pass them) -> ``upstream_add_image_default``.
     """
     try:
         in_units = str(in_units)
@@ -214,16 +211,20 @@ def contract_diagnostic(kernel, pixfrac, exptime=1.0, in_units="counts",
     expscale = exptime if in_units == "counts" else 1.0
     return {
         "kernel_effective": None if kernel is None else str(kernel),
-        "kernel_source": "explicit",
+        "kernel_source": "drizzle_construction_explicit",
         "pixfrac_effective": _f(pixfrac),
-        "pixfrac_source": "explicit",
+        "pixfrac_source": "drizzle_construction_explicit",
         "iscale_effective": 1.0 if iscale is None else _f(iscale),
-        "iscale_source": "upstream_default" if iscale is None else "explicit",
+        "iscale_source": (
+            "upstream_add_image_default" if iscale is None else "explicit"
+        ),
         "pixel_scale_ratio_effective": (
             1.0 if pixel_scale_ratio is None else _f(pixel_scale_ratio)
         ),
         "pixel_scale_ratio_source": (
-            "upstream_default" if pixel_scale_ratio is None else "explicit"
+            "upstream_add_image_default"
+            if pixel_scale_ratio is None
+            else "explicit"
         ),
         "in_units_effective": in_units,
         "in_units_source": "explicit",
@@ -232,181 +233,122 @@ def contract_diagnostic(kernel, pixfrac, exptime=1.0, in_units="counts",
         "wht_scale_effective": _f(expscale),
         "wht_scale_source": "explicit",
         "fillval_effective": None if fillval is None else str(fillval),
-        "fillval_source": "accumulator_default",
+        "fillval_source": "drizzle_construction_default",
         "weight_map_present": True,
         "weight_map_source": "explicit",
     }
 
 
 # ---------------------------------------------------------------------------
-# statistics helpers
+# streaming helpers (bounded memory)
 # ---------------------------------------------------------------------------
 
 
-def sci_channel_stats(arr):
-    """Pre-stretch SCI statistics for one channel (read-only, fail-open).
+def _iter_row_chunks(height, width, chunk_rows=ROW_CHUNK):
+    """Yield ``(row0, row1)`` half-open row ranges."""
+    step = max(1, int(chunk_rows))
+    for r0 in range(0, int(height), step):
+        yield r0, min(int(height), r0 + step)
 
-    Reports ``min``, ``P0.001``, ``P0.01``, ``median``, ``P99.99``,
-    ``P99.999``, ``max``, the fraction ``< 0``, the finite fraction and the
-    non-finite fraction.  Negative values are *reported*, never declared
-    invalid.  Never raises.
-    """
-    out = {
-        "count": 0,
-        "finite_count": 0,
-        "min": None,
-        "p0_001": None,
-        "p0_01": None,
-        "median": None,
-        "p99_99": None,
-        "p99_999": None,
-        "max": None,
-        "fraction_lt_zero": None,
-        "finite_fraction": None,
-        "nonfinite_fraction": None,
-    }
+
+def _sample_stride(total, cap=MAX_SAMPLE_COUNT):
+    return max(1, int(total) // max(1, int(cap)))
+
+
+def _stride_select(flat_chunk, base_index, stride):
+    """Deterministic uniform-stride sample of a chunk (bounded, finite only)."""
+    off = (-int(base_index)) % int(stride)
+    sel = flat_chunk[off::stride]
+    if sel.size:
+        sel = sel[np.isfinite(sel)]
+    return sel
+
+
+def _pct(sample, p):
+    if sample is None or sample.size == 0:
+        return None
     try:
-        a = np.asarray(arr)
-        flat = a.ravel()
-        total = int(flat.size)
-        out["count"] = total
-        if total == 0:
-            return out
-        finite_mask = np.isfinite(flat)
-        n_finite = int(np.count_nonzero(finite_mask))
-        out["finite_count"] = n_finite
-        out["finite_fraction"] = _f(n_finite / total)
-        out["nonfinite_fraction"] = _f((total - n_finite) / total)
-        if n_finite == 0:
-            return out
-        finite = flat[finite_mask].astype(np.float64, copy=False)
-        out["min"] = _f(np.min(finite))
-        out["max"] = _f(np.max(finite))
-        out["median"] = _f(np.median(finite))
-        out["p0_001"] = _f(np.percentile(finite, 0.001))
-        out["p0_01"] = _f(np.percentile(finite, 0.01))
-        out["p99_99"] = _f(np.percentile(finite, 99.99))
-        out["p99_999"] = _f(np.percentile(finite, 99.999))
-        n_neg = int(np.count_nonzero(finite < 0.0))
-        out["fraction_lt_zero"] = _f(n_neg / n_finite)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("sci_channel_stats failed (non-fatal): %s", exc)
-    return out
-
-
-def sci_stats_hwc(arr):
-    """Per-channel :func:`sci_channel_stats` for ``(H, W)`` or ``(H, W, C)``."""
-    try:
-        a = np.asarray(arr)
-        if a.ndim == 2:
-            return [sci_channel_stats(a)]
-        if a.ndim == 3:
-            return [sci_channel_stats(a[..., c]) for c in range(a.shape[-1])]
-        return []
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("sci_stats_hwc failed (non-fatal): %s", exc)
-        return []
-
-
-def _percentile(finite_sorted_or_flat, p):
-    try:
-        return _f(np.percentile(finite_sorted_or_flat, p))
+        return _f(np.percentile(sample, p))
     except Exception:  # noqa: BLE001
         return None
 
 
-def wht_channel_diagnostics(wht, sci=None, n_extrema=EXTREMA_COUNT):
-    """Native *signed* WHT diagnostics for one channel (read-only, fail-open).
+def _merge_low(cur_v, cur_i, new_v, new_i, k):
+    """Return the ``k`` smallest ``(value, index)`` from bounded candidates."""
+    if new_v.size == 0:
+        return cur_v, cur_i
+    v = np.concatenate([cur_v, new_v]) if cur_v.size else new_v
+    i = np.concatenate([cur_i, new_i]) if cur_i.size else new_i
+    if v.size <= k:
+        order = sorted(range(v.size), key=lambda x: (v[x], int(i[x])))
+        order = np.asarray(order, dtype=np.int64)
+        return v[order], i[order]
+    part = np.argpartition(v, k - 1)[:k]
+    cand = sorted(part.tolist(), key=lambda x: (v[x], int(i[x])))
+    cand = np.asarray(cand, dtype=np.int64)
+    return v[cand], i[cand]
 
-    Reports min/max, robust percentiles of strictly positive WHT, the
-    documented magnitude-bin fractions, and the native WHT at the SCI min/max
-    plus the deterministic robust SCI extrema when ``sci`` is provided.  No
-    clipping/abs()/masking is applied.
+
+def _merge_high(cur_v, cur_i, new_v, new_i, k):
+    """Return the ``k`` largest ``(value, index)`` from bounded candidates."""
+    if new_v.size == 0:
+        return cur_v, cur_i
+    v = np.concatenate([cur_v, new_v]) if cur_v.size else new_v
+    i = np.concatenate([cur_i, new_i]) if cur_i.size else new_i
+    if v.size <= k:
+        order = sorted(range(v.size), key=lambda x: (-v[x], int(i[x])))
+        order = np.asarray(order, dtype=np.int64)
+        return v[order], i[order]
+    part = np.argpartition(-v, k - 1)[:k]
+    cand = sorted(part.tolist(), key=lambda x: (-v[x], int(i[x])))
+    cand = np.asarray(cand, dtype=np.int64)
+    return v[cand], i[cand]
+
+
+def bounded_extrema_indices(values_2d, valid_mask, n, chunk_rows=ROW_CHUNK):
+    """Bounded low/high flat-index selection via per-chunk argpartition.
+
+    Streams row chunks (no full-array float64 copy, no full argsort) and merges
+    a bounded candidate buffer; ties break by flat index.  Returns ``(lo, hi)``
+    int64 arrays.  Fail-open: empty arrays on error.
     """
-    out = {
-        "min": None,
-        "max": None,
-        "positive_percentiles": {},
-        "bin_fractions": {},
-        "n_positive": None,
-        "sci_min_wht": None,
-        "sci_max_wht": None,
-        "extrema": [],
-    }
     try:
-        w = np.asarray(wht, dtype=np.float64)
-        flat = w.ravel()
-        finite = flat[np.isfinite(flat)]
-        if finite.size == 0:
-            return out
-        out["min"] = _f(np.min(finite))
-        out["max"] = _f(np.max(finite))
-        total = int(flat.size)
-        positive = flat[np.isfinite(flat) & (flat > 0.0)]
-        out["n_positive"] = int(positive.size)
-        if positive.size:
-            out["positive_percentiles"] = {
-                "p1": _percentile(positive, 1.0),
-                "p50": _percentile(positive, 50.0),
-                "p99": _percentile(positive, 99.0),
-                "p99_9": _percentile(positive, 99.9),
-                "max": _f(np.max(positive)),
-            }
-        for label, pred in WHT_MAGNITUDE_BINS:
-            try:
-                n = int(np.count_nonzero(pred(flat)))
-                out["bin_fractions"][label] = _f(n / total) if total else None
-            except Exception:  # noqa: BLE001
-                out["bin_fractions"][label] = None
-        if sci is not None:
-            s = np.asarray(sci, dtype=np.float64)
-            if s.shape == w.shape:
-                sflat = s.ravel()
-                finite_s = np.isfinite(sflat)
-                if np.any(finite_s):
-                    i_min = int(np.argmin(np.where(finite_s, sflat, np.inf)))
-                    i_max = int(np.argmax(np.where(finite_s, sflat, -np.inf)))
-                    out["sci_min_wht"] = _f(flat[i_min])
-                    out["sci_max_wht"] = _f(flat[i_max])
-                out["extrema"] = sci_extrema_records(s, w, n=n_extrema)
+        v = np.asarray(values_2d, dtype=np.float32)
+        m = np.asarray(valid_mask, dtype=bool)
+        if v.shape != m.shape:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        h, wid = v.shape
+        k = max(1, int(n))
+        lo_v = np.empty(0); lo_i = np.empty(0, dtype=np.int64)
+        hi_v = np.empty(0); hi_i = np.empty(0, dtype=np.int64)
+        for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+            vc = v[r0:r1]
+            mc = m[r0:r1]
+            valid = mc & np.isfinite(vc)
+            if not np.any(valid):
+                continue
+            rr, cc = np.nonzero(valid)
+            gi = (r0 + rr).astype(np.int64) * wid + cc.astype(np.int64)
+            vv = vc[valid].astype(np.float64)
+            if vv.size > k:
+                lp = np.argpartition(vv, k - 1)[:k]
+                hp = np.argpartition(-vv, k - 1)[:k]
+            else:
+                lp = np.arange(vv.size)
+                hp = np.arange(vv.size)
+            lo_v, lo_i = _merge_low(lo_v, lo_i, vv[lp], gi[lp], k)
+            hi_v, hi_i = _merge_high(hi_v, hi_i, vv[hp], gi[hp], k)
+        return lo_i.astype(np.int64), hi_i.astype(np.int64)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("wht_channel_diagnostics failed (non-fatal): %s", exc)
-    return out
-
-
-def wht_diagnostics_hwc(wht, sci=None, n_extrema=EXTREMA_COUNT):
-    """Per-channel :func:`wht_channel_diagnostics` for ``(H, W)``/``(H, W, C)``."""
-    try:
-        w = np.asarray(wht)
-        s = None if sci is None else np.asarray(sci)
-        if w.ndim == 2:
-            return [wht_channel_diagnostics(w, s, n_extrema)]
-        if w.ndim == 3:
-            res = []
-            for c in range(w.shape[-1]):
-                sc = None if s is None else s[..., c]
-                res.append(wht_channel_diagnostics(w[..., c], sc, n_extrema))
-            return res
-        return []
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("wht_diagnostics_hwc failed (non-fatal): %s", exc)
-        return []
-
-
-def _valid_support_mask(sci, wht, wht_threshold):
-    """Documented physical-support mask: finite SCI, finite WHT, WHT > threshold."""
-    s = np.asarray(sci, dtype=np.float64)
-    w = np.asarray(wht, dtype=np.float64)
-    return np.isfinite(s) & np.isfinite(w) & (w > float(wht_threshold))
+        logger.debug("bounded_extrema_indices failed (non-fatal): %s", exc)
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
 
 def select_extrema_indices(values_2d, valid_mask, n):
-    """Deterministic bounded high/low index selection over a valid population.
+    """Deterministic bounded high/low flat-index selection (returns ``(lo, hi)``).
 
-    Returns ``(low_indices, high_indices)`` as *flat* indices into
-    ``values_2d``.  Selection is by stable argsort of the valid values (ties
-    broken by original flat order); at most ``n`` indices per side.  Never
-    raises (returns two empty arrays on failure).
+    Uses ``argpartition`` candidate selection (never a full argsort); ties are
+    broken by original flat order.  Bounded by ``n`` per side.  Never raises.
     """
     try:
         v = np.asarray(values_2d, dtype=np.float64).ravel()
@@ -417,81 +359,402 @@ def select_extrema_indices(values_2d, valid_mask, n):
         k = max(0, min(int(n), idx.size))
         if k == 0:
             return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-        order = np.argsort(v[idx], kind="stable")
-        lo = idx[order[:k]]
-        hi = idx[order[-k:][::-1]]
-        return lo.astype(np.int64), hi.astype(np.int64)
+        vals = v[idx]
+        lo_part = np.argpartition(vals, k - 1)[:k]
+        hi_part = np.argpartition(-vals, k - 1)[:k]
+        lo = sorted(lo_part.tolist(), key=lambda x: (vals[x], int(idx[x])))
+        hi = sorted(hi_part.tolist(), key=lambda x: (-vals[x], int(idx[x])))
+        return idx[np.asarray(lo, dtype=np.int64)], idx[np.asarray(hi, dtype=np.int64)]
     except Exception as exc:  # noqa: BLE001
         logger.debug("select_extrema_indices failed (non-fatal): %s", exc)
         return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
 
-def _flat_index_records(values_2d, flat_indices, width, extra_arrays=None):
-    """Build bounded JSON-safe records for flat indices (row/col + values)."""
-    recs = []
+# ---------------------------------------------------------------------------
+# physical support
+# ---------------------------------------------------------------------------
+
+
+def physical_support_mask(sup_w1, shape_hw):
+    """Return ``(mask, source)`` for the physical support.
+
+    ``(SUP_W1 > 0) & finite`` is the physical support whenever the pair exists
+    (``source="sup_w1_positive"``).  Absence of the pair is labelled explicitly
+    (never silently called physical support).
+    """
+    if sup_w1 is not None:
+        try:
+            a = np.asarray(sup_w1, dtype=np.float32)
+            if a.shape == tuple(shape_hw):
+                return (np.isfinite(a) & (a > 0.0)), "sup_w1_positive"
+        except Exception:  # noqa: BLE001
+            pass
+    return None, "support_pair_absent"
+
+
+def native_wht_fallback_mask(wht_hwc):
+    """Explicitly-labelled fallback support: any-channel finite native WHT > eps."""
+    a = np.asarray(wht_hwc, dtype=np.float32)
+    if a.ndim == 2:
+        a = a[..., None]
+    mask = np.zeros(a.shape[:2], dtype=bool)
+    for c in range(a.shape[-1]):
+        w = a[..., c]
+        mask |= np.isfinite(w) & (w > WEIGHT_EPSILON)
+    return mask
+
+
+def support_distance_map(support_mask, max_bytes=MAX_BOUNDARY_WORK_BYTES):
+    """Transient EDT distance-to-boundary with array edges as physical boundaries.
+
+    Returns ``(distance_float64, meta)``.  The mask is false-padded by one pixel
+    before the transform and cropped afterwards, so the output exterior and
+    fully-covered grids yield a symmetric, meaningful field.  ``meta`` records
+    the dtype/bytes budget and the reason when skipped (never raises).
+    """
+    meta = {
+        "available": False,
+        "reason": None,
+        "dtype": "float32",
+        "bytes": 0,
+        "transient_float64_bytes": 0,
+        "edge_padding": True,
+        "max_bytes": int(max_bytes),
+    }
     try:
-        v = np.asarray(values_2d, dtype=np.float64).ravel()
-        extras = {}
-        if extra_arrays:
-            for name, arr in extra_arrays.items():
-                try:
-                    extras[name] = np.asarray(arr, dtype=np.float64).ravel()
-                except Exception:  # noqa: BLE001
-                    extras[name] = None
-        for fi in np.asarray(flat_indices).tolist():
-            rec = {
-                "index": int(fi),
-                "row": int(fi) // int(width) if width else None,
-                "col": int(fi) % int(width) if width else None,
-                "sci": _f(v[fi]) if fi < v.size else None,
-            }
-            for name, arr in extras.items():
-                rec[name] = _f(arr[fi]) if arr is not None and fi < arr.size else None
-            recs.append(rec)
+        from scipy.ndimage import distance_transform_edt
+
+        m = np.asarray(support_mask, dtype=bool)
+        if m.ndim != 2:
+            meta["reason"] = "mask_not_2d"
+            return None, meta
+        if not np.any(m):
+            meta["reason"] = "empty_support"
+            return None, meta
+        h, w = m.shape
+        transient = int(h + 2) * int(w + 2) * 8
+        meta["transient_float64_bytes"] = transient
+        if transient > int(max_bytes):
+            meta["bytes"] = transient
+            meta["reason"] = "boundary_work_buffer_over_budget"
+            return None, meta
+        padded = np.zeros((h + 2, w + 2), dtype=bool)
+        padded[1:-1, 1:-1] = m
+        dist = distance_transform_edt(padded)
+        # Immediately materialise the resident buffer as float32 (half the
+        # bytes) and release the float64 transform + padded mask so at most one
+        # O(HW) boundary work buffer is ever resident.
+        out = np.ascontiguousarray(dist[1:-1, 1:-1], dtype=np.float32)
+        meta["bytes"] = int(out.nbytes)
+        del dist, padded
+        meta["available"] = True
+        return out, meta
     except Exception as exc:  # noqa: BLE001
-        logger.debug("_flat_index_records failed (non-fatal): %s", exc)
-    return recs
+        logger.debug("support distance map unavailable (non-fatal): %s", exc)
+        meta["reason"] = "exception"
+        return None, meta
 
 
-def sci_extrema_records(sci, wht, n=EXTREMA_COUNT, w1=None, w2=None,
-                        neff=None, distance=None):
-    """SCI min/max + robust SCI extrema with optional per-pixel co-diagnostics."""
+# ---------------------------------------------------------------------------
+# chunked per-channel statistics
+# ---------------------------------------------------------------------------
+
+
+def _chunked_sci_stats(sci_2d, chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Exact min/max/counts/fractions + bounded-sample percentiles (float32 stream)."""
+    out = {
+        "count": 0, "finite_count": 0, "min": None, "p0_001": None,
+        "p0_01": None, "median": None, "p99_99": None, "p99_999": None,
+        "max": None, "fraction_lt_zero": None, "finite_fraction": None,
+        "nonfinite_fraction": None, "sample_method": "deterministic_uniform_stride",
+        "sample_stride": None, "sample_count": 0, "sample_cap": int(sample_cap),
+    }
     try:
-        s = np.asarray(sci, dtype=np.float64)
-        w = np.asarray(wht, dtype=np.float64)
+        a = np.asarray(sci_2d, dtype=np.float32)
+        h, w = a.shape
+        total = int(h * w)
+        out["count"] = total
+        if total == 0:
+            return out
+        stride = _sample_stride(total, sample_cap)
+        out["sample_stride"] = int(stride)
+        n_fin = 0
+        n_neg = 0
+        mn = math.inf
+        mx = -math.inf
+        samples = []
+        for r0, r1 in _iter_row_chunks(h, w, chunk_rows):
+            ch = a[r0:r1]
+            fin = np.isfinite(ch)
+            nf = int(np.count_nonzero(fin))
+            n_fin += nf
+            if nf == 0:
+                continue
+            vals = ch[fin]
+            if vals.size:
+                mn = min(mn, float(np.min(vals)))
+                mx = max(mx, float(np.max(vals)))
+                n_neg += int(np.count_nonzero(vals < 0.0))
+            sel = _stride_select(ch.reshape(-1), r0 * w, stride)
+            if sel.size:
+                samples.append(sel.astype(np.float64, copy=True))
+        out["finite_count"] = n_fin
+        out["finite_fraction"] = _f(n_fin / total)
+        out["nonfinite_fraction"] = _f((total - n_fin) / total)
+        if n_fin:
+            out["min"] = _f(mn)
+            out["max"] = _f(mx)
+            out["fraction_lt_zero"] = _f(n_neg / n_fin)
+        sample = np.concatenate(samples) if samples else np.empty(0)
+        if sample.size > sample_cap:
+            sample = sample[:: max(1, sample.size // sample_cap)][:sample_cap]
+        out["sample_count"] = int(sample.size)
+        if sample.size:
+            out["median"] = _pct(sample, 50.0)
+            out["p0_001"] = _pct(sample, 0.001)
+            out["p0_01"] = _pct(sample, 0.01)
+            out["p99_99"] = _pct(sample, 99.99)
+            out["p99_999"] = _pct(sample, 99.999)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_chunked_sci_stats failed (non-fatal): %s", exc)
+    return out
+
+
+def sci_channel_stats(arr, chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Pre-stretch SCI statistics for one channel (chunked, read-only, fail-open)."""
+    return _chunked_sci_stats(arr, chunk_rows, sample_cap)
+
+
+def sci_stats_hwc(arr, chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Per-channel :func:`sci_channel_stats` (never converts the cube wholesale)."""
+    try:
+        a = np.asarray(arr)
+        if a.ndim == 2:
+            return [sci_channel_stats(a, chunk_rows, sample_cap)]
+        if a.ndim == 3:
+            return [
+                sci_channel_stats(a[..., c], chunk_rows, sample_cap)
+                for c in range(a.shape[-1])
+            ]
+        return []
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("sci_stats_hwc failed (non-fatal): %s", exc)
+        return []
+
+
+def _chunked_wht_stats(wht_2d, chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Native signed-WHT stats (exact counts/min/max + sampled positive pcts)."""
+    out = {
+        "min": None, "max": None, "n_positive": None, "positive_percentiles": {},
+        "bin_fractions": {},
+        "sample_method": "deterministic_uniform_stride",
+        "sample_count": 0, "sample_cap": int(sample_cap),
+    }
+    try:
+        w = np.asarray(wht_2d, dtype=np.float32)
+        h, wid = w.shape
+        total = int(h * wid)
+        if total == 0:
+            return out
+        stride = _sample_stride(total, sample_cap)
+        mn = math.inf
+        mx = -math.inf
+        n_pos = 0
+        bin_counts = {label: 0 for label, _ in WHT_MAGNITUDE_BINS}
+        pos_samples = []
+        for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+            ch = w[r0:r1]
+            fin = np.isfinite(ch)
+            if not np.any(fin):
+                continue
+            vals = ch[fin]
+            mn = min(mn, float(np.min(vals)))
+            mx = max(mx, float(np.max(vals)))
+            n_pos += int(np.count_nonzero(vals > 0.0))
+            for label, pred in WHT_MAGNITUDE_BINS:
+                bin_counts[label] += int(np.count_nonzero(pred(vals)))
+            flat = ch.reshape(-1)
+            sel = _stride_select(flat, r0 * wid, stride)
+            if sel.size:
+                p = sel[sel > 0.0]
+                if p.size:
+                    pos_samples.append(p.astype(np.float64, copy=True))
+        if math.isfinite(mn):
+            out["min"] = _f(mn)
+            out["max"] = _f(mx)
+        out["n_positive"] = int(n_pos)
+        for label in bin_counts:
+            out["bin_fractions"][label] = _f(bin_counts[label] / total) if total else None
+        pos_sample = np.concatenate(pos_samples) if pos_samples else np.empty(0)
+        if pos_sample.size > sample_cap:
+            pos_sample = pos_sample[:: max(1, pos_sample.size // sample_cap)][:sample_cap]
+        out["sample_count"] = int(pos_sample.size)
+        if pos_sample.size:
+            out["positive_percentiles"] = {
+                "p1": _pct(pos_sample, 1.0),
+                "p50": _pct(pos_sample, 50.0),
+                "p99": _pct(pos_sample, 99.0),
+                "p99_9": _pct(pos_sample, 99.9),
+                "max": _f(float(np.max(pos_sample))),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_chunked_wht_stats failed (non-fatal): %s", exc)
+    return out
+
+
+def wht_channel_diagnostics(wht, sci=None, n_extrema=EXTREMA_COUNT,
+                            chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Native signed-WHT diagnostics for one channel (chunked, read-only)."""
+    out = _chunked_wht_stats(wht, chunk_rows, sample_cap)
+    out.setdefault("sci_min_wht", None)
+    out.setdefault("sci_max_wht", None)
+    out.setdefault("extrema", [])
+    try:
+        if sci is not None:
+            s = np.asarray(sci)
+            if s.shape == np.asarray(wht).shape:
+                # bounded extrema over native-WHT-derived validity (diagnostics only)
+                mask = np.isfinite(np.asarray(wht, dtype=np.float32))
+                recs = bounded_extrema_records(
+                    s, wht, mask, None, None, None, None, n=n_extrema,
+                    chunk_rows=chunk_rows,
+                )
+                out["extrema"] = recs
+                for r in recs:
+                    if r.get("kind") == "sci_abs_min":
+                        out["sci_min_wht"] = r.get("wht")
+                    if r.get("kind") == "sci_abs_max":
+                        out["sci_max_wht"] = r.get("wht")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("wht_channel_diagnostics extrema failed (non-fatal): %s", exc)
+    return out
+
+
+def wht_diagnostics_hwc(wht, sci=None, n_extrema=EXTREMA_COUNT,
+                        chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """Per-channel :func:`wht_channel_diagnostics` (never converts the cube)."""
+    try:
+        w = np.asarray(wht)
+        s = None if sci is None else np.asarray(sci)
+        if w.ndim == 2:
+            return [wht_channel_diagnostics(w, s, n_extrema, chunk_rows, sample_cap)]
+        if w.ndim == 3:
+            res = []
+            for c in range(w.shape[-1]):
+                sc = None if s is None else s[..., c]
+                res.append(
+                    wht_channel_diagnostics(
+                        w[..., c], sc, n_extrema, chunk_rows, sample_cap
+                    )
+                )
+            return res
+        return []
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("wht_diagnostics_hwc failed (non-fatal): %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# bounded extrema
+# ---------------------------------------------------------------------------
+
+
+def _flat_record(sci_2d, wht_2d, width, fi, w1=None, w2=None, neff=None,
+                 distance=None, kind=None):
+    def _at(arr, i):
+        if arr is None:
+            return None
+        try:
+            a = np.asarray(arr)
+            if a.ndim == 2:
+                return _f(a.ravel()[i])
+            return _f(a[i])
+        except Exception:  # noqa: BLE001
+            return None
+
+    return {
+        "kind": kind,
+        "index": int(fi),
+        "row": int(fi) // int(width) if width else None,
+        "col": int(fi) % int(width) if width else None,
+        "sci": _f(np.asarray(sci_2d, dtype=np.float32).ravel()[fi]),
+        "wht": _f(np.asarray(wht_2d, dtype=np.float32).ravel()[fi]),
+        "sup_w1": _at(w1, fi),
+        "sup_w2": _at(w2, fi),
+        "n_eff": _at(neff, fi),
+        "distance": _at(distance, fi),
+    }
+
+
+def bounded_extrema_records(sci_2d, wht_2d, support_mask, w1=None, w2=None,
+                            neff=None, distance=None, n=EXTREMA_COUNT,
+                            chunk_rows=ROW_CHUNK):
+    """Exact abs min/max + bounded k lowest/highest SCI over physical support.
+
+    Single chunked pass; per-chunk ``argpartition`` candidates merged with a
+    bounded running buffer (no full argsort).  Coordinates are flat row-major
+    on the (post-crop) supplied grid.  Fail-open: returns ``[]`` on error.
+    """
+    try:
+        s = np.asarray(sci_2d, dtype=np.float32)
+        w = np.asarray(wht_2d, dtype=np.float32)
+        m = np.asarray(support_mask, dtype=bool)
+        if s.shape != w.shape or s.shape != m.shape:
+            return []
         h, wid = s.shape
-        mask = _valid_support_mask(s, w, WEIGHT_EPSILON)
-        extras = {"wht": w}
-        if w1 is not None:
-            extras["sup_w1"] = w1
-        if w2 is not None:
-            extras["sup_w2"] = w2
-        if neff is not None:
-            extras["n_eff"] = neff
-        if distance is not None:
-            extras["distance"] = distance
-        lo, hi = select_extrema_indices(s, mask, n)
-        flat = s.ravel()
-        finite = np.isfinite(flat) & mask.ravel()
+        k = max(1, int(n))
+        lo_v = np.empty(0, dtype=np.float64)
+        lo_i = np.empty(0, dtype=np.int64)
+        hi_v = np.empty(0, dtype=np.float64)
+        hi_i = np.empty(0, dtype=np.int64)
+        abs_min_i = None
+        abs_max_i = None
+        abs_min_v = math.inf
+        abs_max_v = -math.inf
+        for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+            sc = s[r0:r1]
+            mc = m[r0:r1]
+            valid = mc & np.isfinite(sc)
+            if not np.any(valid):
+                continue
+            rr, cc = np.nonzero(valid)
+            gi = (r0 + rr).astype(np.int64) * wid + cc.astype(np.int64)
+            v = sc[valid].astype(np.float64)
+            # absolute min/max (first occurrence by flat order)
+            amin = int(np.argmin(v))
+            amax = int(np.argmax(v))
+            if v[amin] < abs_min_v:
+                abs_min_v = float(v[amin])
+                abs_min_i = int(gi[amin])
+            if v[amax] > abs_max_v:
+                abs_max_v = float(v[amax])
+                abs_max_i = int(gi[amax])
+            # bounded low/high candidates
+            if v.size > k:
+                lo_part = np.argpartition(v, k - 1)[:k]
+                hi_part = np.argpartition(-v, k - 1)[:k]
+            else:
+                lo_part = np.arange(v.size)
+                hi_part = np.arange(v.size)
+            lo_v, lo_i = _merge_low(
+                lo_v, lo_i, v[lo_part], gi[lo_part], k
+            )
+            hi_v, hi_i = _merge_high(
+                hi_v, hi_i, v[hi_part], gi[hi_part], k
+            )
         recs = []
-        if np.any(finite):
-            idx = np.flatnonzero(finite)
-            vals = flat[idx]
-            i_min = idx[int(np.argmin(vals))]
-            i_max = idx[int(np.argmax(vals))]
-            recs = _flat_index_records(s, [i_min, i_max], wid, extras)
-            # rename the two head records for clarity
-            if recs:
-                recs[0]["kind"] = "sci_abs_min"
-                recs[1]["kind"] = "sci_abs_max"
-        low_recs = _flat_index_records(s, lo, wid, extras)
-        high_recs = _flat_index_records(s, hi, wid, extras)
-        for r in low_recs:
-            r["kind"] = "sci_robust_low"
-        for r in high_recs:
-            r["kind"] = "sci_robust_high"
-        recs = recs + low_recs + high_recs
-        # de-duplicate indices while preserving order
+        if abs_min_i is not None:
+            recs.append(_flat_record(s, w, wid, abs_min_i, w1, w2, neff,
+                                     distance, "sci_abs_min"))
+        if abs_max_i is not None:
+            recs.append(_flat_record(s, w, wid, abs_max_i, w1, w2, neff,
+                                     distance, "sci_abs_max"))
+        for fv, fi in zip(lo_v, lo_i):
+            recs.append(_flat_record(s, w, wid, int(fi), w1, w2, neff,
+                                     distance, "sci_robust_low"))
+        for fv, fi in zip(hi_v, hi_i):
+            recs.append(_flat_record(s, w, wid, int(fi), w1, w2, neff,
+                                     distance, "sci_robust_high"))
         seen = set()
         uniq = []
         for r in recs:
@@ -501,46 +764,167 @@ def sci_extrema_records(sci, wht, n=EXTREMA_COUNT, w1=None, w2=None,
             uniq.append(r)
         return uniq
     except Exception as exc:  # noqa: BLE001
+        logger.debug("bounded_extrema_records failed (non-fatal): %s", exc)
+        return []
+
+
+def sci_extrema_records(sci, wht, n=EXTREMA_COUNT, w1=None, w2=None,
+                        neff=None, distance=None, chunk_rows=ROW_CHUNK):
+    """SCI extrema over native-WHT validity (compat helper; bounded)."""
+    try:
+        s = np.asarray(sci, dtype=np.float32)
+        w = np.asarray(wht, dtype=np.float32)
+        mask = np.isfinite(s) & np.isfinite(w) & (w > WEIGHT_EPSILON)
+        return bounded_extrema_records(s, w, mask, w1, w2, neff, distance, n,
+                                       chunk_rows)
+    except Exception as exc:  # noqa: BLE001
         logger.debug("sci_extrema_records failed (non-fatal): %s", exc)
         return []
 
 
 # ---------------------------------------------------------------------------
-# threshold sweep (diagnostic only)
+# support conditioning (N_eff over support only)
 # ---------------------------------------------------------------------------
 
 
-def threshold_sweep(wht, sci, positive_reference=None,
+def support_conditioning(w1, w2, chunk_rows=ROW_CHUNK, sample_cap=MAX_SAMPLE_COUNT):
+    """N_eff summaries computed **only** over valid physical support.
+
+    Valid support = ``SUP_W1 > 0`` AND ``SUP_W2 > 0`` (finite).  Off-support and
+    invalid fractions are reported separately; min/median/mean/max/percentiles
+    are never diluted by forced-zero off-support pixels.
+    """
+    out = {
+        "available": False, "reason": None, "support_pixels": None, "total_pixels": None,
+        "n_eff_min": None, "n_eff_median": None, "n_eff_mean": None, "n_eff_max": None,
+        "n_eff_p01": None, "n_eff_p99": None,
+        "off_support_fraction": None, "invalid_support_fraction": None,
+        "sample_method": "deterministic_uniform_stride", "sample_count": 0,
+        "sample_cap": int(sample_cap),
+    }
+    try:
+        if w1 is None or w2 is None:
+            out["reason"] = "support_accumulator_absent"
+            return out
+        a = np.asarray(w1, dtype=np.float32)
+        b = np.asarray(w2, dtype=np.float32)
+        if a.shape != b.shape:
+            out["reason"] = "support_shape_mismatch"
+            return out
+        h, wid = a.shape
+        total = int(h * wid)
+        out["total_pixels"] = total
+        stride = _sample_stride(total, sample_cap)
+        n_sup = 0
+        n_off = 0
+        n_invalid = 0
+        mn = math.inf
+        mx = -math.inf
+        ssum = 0.0
+        samples = []
+        for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+            ac = a[r0:r1]
+            bc = b[r0:r1]
+            pos = np.isfinite(ac) & np.isfinite(bc) & (ac > 0.0)
+            valid = pos & (bc > 0.0)
+            n_sup += int(np.count_nonzero(valid))
+            n_off += int(np.count_nonzero(~pos))
+            n_invalid += int(np.count_nonzero(pos & ~valid))
+            if np.any(valid):
+                av = ac[valid].astype(np.float64)
+                bv = bc[valid].astype(np.float64)
+                r = av / np.sqrt(bv)
+                ne = r * r
+                mn = min(mn, float(np.min(ne)))
+                mx = max(mx, float(np.max(ne)))
+                ssum += float(np.sum(ne))
+                # stride sample of support N_eff
+                flat = ac.reshape(-1)
+                base = r0 * wid
+                off = (-base) % stride
+                sel = flat[off::stride]
+                if sel.size:
+                    rb = bc.reshape(-1)[off::stride]
+                    ok = np.isfinite(sel) & np.isfinite(rb) & (sel > 0.0) & (rb > 0.0)
+                    if np.any(ok):
+                        rr = sel[ok].astype(np.float64) / np.sqrt(
+                            rb[ok].astype(np.float64)
+                        )
+                        samples.append(rr * rr)
+        out["support_pixels"] = int(n_sup)
+        if total:
+            out["off_support_fraction"] = _f(n_off / total)
+            out["invalid_support_fraction"] = _f(n_invalid / total)
+        if n_sup:
+            out["available"] = True
+            out["n_eff_min"] = _f(mn)
+            out["n_eff_max"] = _f(mx)
+            out["n_eff_mean"] = _f(ssum / n_sup)
+        sample = np.concatenate(samples) if samples else np.empty(0)
+        if sample.size > sample_cap:
+            sample = sample[:: max(1, sample.size // sample_cap)][:sample_cap]
+        out["sample_count"] = int(sample.size)
+        if sample.size:
+            out["n_eff_median"] = _pct(sample, 50.0)
+            out["n_eff_p01"] = _pct(sample, 1.0)
+            out["n_eff_p99"] = _pct(sample, 99.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("support_conditioning failed (non-fatal): %s", exc)
+        out["reason"] = "exception"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# threshold sweep (diagnostic only; separations explicit)
+# ---------------------------------------------------------------------------
+
+
+def threshold_sweep(wht, sci, support_mask=None, positive_reference=None,
+                    chunk_rows=ROW_CHUNK,
                     abs_candidates=DEFAULT_ABS_THRESHOLDS,
                     rel_candidates=DEFAULT_REL_THRESHOLDS):
-    """Report what an (unapplied) WHT threshold *would* remove / keep.
+    """Report what an (unapplied) threshold *would* do, with explicit denominators.
 
-    Current epsilon plus absolute candidates plus relative candidates derived
-    from a robust positive-WHT reference.  For each threshold it reports the
-    number and fraction of total physical-support pixels that would be removed
-    and the SCI extrema that would remain.  Nothing is ever applied.
+    Populated regardless of feasibility; never applied to science.  Requires an
+    explicit ``support_mask`` (physical support) so native positive WHT is never
+    reported as physical support.
     """
-    out = {"current_epsilon": _f(WEIGHT_EPSILON), "candidates": [],
-           "positive_reference": _f(positive_reference),
-           "positive_reference_source": None}
+    out = {
+        "current_epsilon": _f(WEIGHT_EPSILON),
+        "physical_support_pixels": None,
+        "currently_valid_positive_native_wht_pixels": None,
+        "positive_reference": _f(positive_reference),
+        "positive_reference_source": None,
+        "candidates": [],
+    }
     try:
-        w = np.asarray(wht, dtype=np.float64)
-        s = np.asarray(sci, dtype=np.float64)
+        w = np.asarray(wht, dtype=np.float32)
+        s = np.asarray(sci, dtype=np.float32)
         if w.shape != s.shape:
             return out
-        total = int(w.size)
-        support = _valid_support_mask(s, w, WEIGHT_EPSILON)
-        n_support = int(np.count_nonzero(support))
-        out["total_pixels"] = total
-        out["support_pixels"] = n_support
-
+        if support_mask is None:
+            out["physical_support_pixels"] = 0
+            out["note"] = "physical support unavailable"
+            return out
+        m = np.asarray(support_mask, dtype=bool)
+        h, wid = w.shape
+        total = int(h * wid)
         ref = positive_reference
         ref_source = "provided"
         if ref is None:
-            positive = w[np.isfinite(w) & (w > 0.0)]
-            if positive.size:
-                ref = float(np.percentile(positive, 99.0))
-                ref_source = "positive_wht_p99"
+            # bounded positive sample for the reference
+            stride = _sample_stride(total, MAX_SAMPLE_COUNT)
+            ps = []
+            for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+                sel = _stride_select(w[r0:r1].reshape(-1), r0 * wid, stride)
+                if sel.size:
+                    p = sel[sel > 0.0]
+                    if p.size:
+                        ps.append(p.astype(np.float64, copy=True))
+            sample = np.concatenate(ps) if ps else np.empty(0)
+            if sample.size:
+                ref = float(np.percentile(sample, 99.0))
+                ref_source = "positive_wht_p99_sampled"
         out["positive_reference"] = _f(ref)
         out["positive_reference_source"] = ref_source
 
@@ -551,309 +935,298 @@ def threshold_sweep(wht, sci, positive_reference=None,
             for r in rel_candidates:
                 candidates.append((f"rel_{r:g}", float(r) * float(ref)))
 
+        n_support = 0
+        n_current = 0
+        removed = {name: 0 for name, _ in candidates}
+        rem_min = {name: math.inf for name, _ in candidates}
+        rem_max = {name: -math.inf for name, _ in candidates}
+        for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+            mc = m[r0:r1]
+            wc = w[r0:r1]
+            sc = s[r0:r1]
+            n_support += int(np.count_nonzero(mc))
+            cur = mc & np.isfinite(wc) & (wc > WEIGHT_EPSILON)
+            n_current += int(np.count_nonzero(cur))
+            for name, thr in candidates:
+                keep = cur & (wc > thr)
+                removed[name] += int(np.count_nonzero(cur)) - int(np.count_nonzero(keep))
+                kv = sc[keep]
+                if kv.size:
+                    rem_min[name] = min(rem_min[name], float(np.min(kv)))
+                    rem_max[name] = max(rem_max[name], float(np.max(kv)))
+        out["physical_support_pixels"] = int(n_support)
+        out["currently_valid_positive_native_wht_pixels"] = int(n_current)
         for name, thr in candidates:
-            remove = support & ~(w > thr) & np.isfinite(w)
-            n_remove = int(np.count_nonzero(remove))
-            keep = support & (w > thr)
-            sci_keep = s[keep]
-            sci_keep = sci_keep[np.isfinite(sci_keep)]
-            rec = {
+            out["candidates"].append({
                 "name": name,
                 "threshold": _f(thr),
-                "removed_pixels": n_remove,
-                "removed_fraction_of_support": (
-                    _f(n_remove / n_support) if n_support else None
+                "newly_removed_from_current_valid": int(removed[name]),
+                "removed_fraction_of_physical_support": (
+                    _f(removed[name] / n_support) if n_support else None
                 ),
-                "removed_fraction_of_total": (
-                    _f(n_remove / total) if total else None
-                ),
-                "remaining_pixels": int(np.count_nonzero(keep)),
-                "remaining_sci_min": _f(np.min(sci_keep)) if sci_keep.size else None,
-                "remaining_sci_max": _f(np.max(sci_keep)) if sci_keep.size else None,
-            }
-            out["candidates"].append(rec)
+                "remaining_pixels": int(n_current - removed[name]),
+                "remaining_sci_min": _f(rem_min[name])
+                if math.isfinite(rem_min[name]) else None,
+                "remaining_sci_max": _f(rem_max[name])
+                if math.isfinite(rem_max[name]) else None,
+            })
     except Exception as exc:  # noqa: BLE001
         logger.debug("threshold_sweep failed (non-fatal): %s", exc)
     return out
 
 
 # ---------------------------------------------------------------------------
-# support conditioning / N_eff
+# boundary bins (per channel)
 # ---------------------------------------------------------------------------
 
 
-def _neff_from_sup(w1, w2):
-    """N_eff = SUP_W1**2 / SUP_W2 (overflow-resistant); 0 where W2 <= 0."""
-    try:
-        a = np.asarray(w1, dtype=np.float64)
-        b = np.asarray(w2, dtype=np.float64)
-        valid = b > 0.0
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            w1_sq = a * a
-            out = w1_sq / b
-            ratio = a / np.sqrt(b)
-            safe = ratio * ratio
-        overflowed = ~np.isfinite(w1_sq)
-        out = np.where(overflowed & valid, safe, out)
-        out = np.where(valid & np.isfinite(out) & (out >= 0.0), out, 0.0)
-        return out
-    except Exception:  # noqa: BLE001
-        return None
+def _support_bin_index(dist_value):
+    for i, (lo, hi) in enumerate(DISTANCE_BIN_EDGES):
+        if math.isinf(hi):
+            if dist_value > lo:
+                return i
+        elif lo <= 0.0:
+            if lo <= dist_value <= hi:
+                return i
+        elif lo < dist_value <= hi:
+            return i
+    return len(DISTANCE_BIN_EDGES) - 1
 
 
-def support_conditioning(w1, w2):
-    """Bounded N_eff summaries for a genuinely present SUP_W1/SUP_W2 pair."""
+def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None, distance=None,
+                                 chunk_rows=ROW_CHUNK, n_extrema=EXTREMA_COUNT):
+    """Per-distance-bin summaries over the actual physical support (per channel).
+
+    The distance map is transient (never persisted).  ``sci``/``wht`` may be
+    ``(H, W)`` or ``(H, W, C)``; one bin list is produced per channel.  N_eff is
+    channel-invariant (channel 0 view).  Extreme pixels are the deterministic
+    bounded SCI extrema per channel.
+    """
     out = {
-        "available": False,
-        "reason": None,
-        "n_eff_min": None,
-        "n_eff_median": None,
-        "n_eff_mean": None,
-        "n_eff_max": None,
-        "positive_fraction": None,
-        "sup_w1_max": None,
-        "sup_w2_max": None,
+        "available": False, "reason": None,
+        "small_positive_wht_cut": _f(SMALL_POSITIVE_WHT),
+        "support_source": None, "per_channel": [],
     }
     try:
-        if w1 is None or w2 is None:
-            out["reason"] = "support_accumulator_absent"
+        s = np.asarray(sci, dtype=np.float32)
+        w = np.asarray(wht, dtype=np.float32)
+        m = np.asarray(support_mask, dtype=bool)
+        if s.ndim == 2:
+            s = s[..., None]
+            w = w[..., None]
+        if s.shape[:2] != m.shape or w.shape[:2] != m.shape:
+            out["reason"] = "shape_mismatch"
             return out
-        a = np.asarray(w1, dtype=np.float64)
-        b = np.asarray(w2, dtype=np.float64)
-        if a.shape != b.shape:
-            out["reason"] = "support_shape_mismatch"
+        if distance is None:
+            distance, meta = support_distance_map(m)
+            out["distance_map"] = meta
+        if distance is None:
+            out["reason"] = "distance_map_unavailable"
             return out
-        neff = _neff_from_sup(a, b)
-        if neff is None:
-            out["reason"] = "n_eff_unavailable"
+        d = np.asarray(distance, dtype=np.float64)
+        if d.shape != m.shape:
+            out["reason"] = "distance_shape_mismatch"
             return out
-        finite = neff[np.isfinite(neff)]
-        out["available"] = True
-        if finite.size:
-            out["n_eff_min"] = _f(np.min(finite))
-            out["n_eff_median"] = _f(np.median(finite))
-            out["n_eff_mean"] = _f(np.mean(finite))
-            out["n_eff_max"] = _f(np.max(finite))
-            out["positive_fraction"] = _f(
-                np.count_nonzero(finite > 0.0) / finite.size
+        h, wid, nch = s.shape
+        total_support = int(np.count_nonzero(m))
+        out["total_support_pixels"] = total_support
+        nbins = len(DISTANCE_BIN_EDGES)
+        edge_arr = np.asarray([hi for _lo, hi in DISTANCE_BIN_EDGES[:-1]], dtype=np.float64)
+        neff_arr = None if neff is None else np.asarray(neff, dtype=np.float32)
+
+        per_channel = []
+        for c in range(nch):
+            sc = s[..., c]
+            wc = w[..., c]
+            lo_i, hi_i = bounded_extrema_indices(
+                sc, m, int(n_extrema), chunk_rows=chunk_rows
             )
-        fa = a[np.isfinite(a)]
-        fb = b[np.isfinite(b)]
-        out["sup_w1_max"] = _f(np.max(fa)) if fa.size else None
-        out["sup_w2_max"] = _f(np.max(fb)) if fb.size else None
+            ext_arr = np.sort(np.asarray(list(lo_i) + list(hi_i), dtype=np.int64))
+            counts = np.zeros(nbins, dtype=np.int64)
+            sci_mn = np.full(nbins, math.inf)
+            sci_mx = np.full(nbins, -math.inf)
+            small = np.zeros(nbins, dtype=np.int64)
+            extreme_in = np.zeros(nbins, dtype=np.int64)
+            neff_sum = np.zeros(nbins)
+            neff_cnt = np.zeros(nbins, dtype=np.int64)
+            neff_mn = np.full(nbins, math.inf)
+            neff_mx = np.full(nbins, -math.inf)
+            for r0, r1 in _iter_row_chunks(h, wid, chunk_rows):
+                mc = m[r0:r1]
+                if not np.any(mc):
+                    continue
+                dc = d[r0:r1]
+                scv = sc[r0:r1]
+                wcv = wc[r0:r1]
+                row_idx, col_idx = np.nonzero(mc)
+                if row_idx.size == 0:
+                    continue
+                dvals = dc[row_idx, col_idx]
+                bi = np.searchsorted(edge_arr, dvals, side="left")
+                sv = scv[row_idx, col_idx]
+                wv = wcv[row_idx, col_idx]
+                small_v = np.isfinite(wv) & (wv > 0.0) & (wv <= SMALL_POSITIVE_WHT)
+                if ext_arr.size:
+                    pos = np.searchsorted(ext_arr, (r0 + row_idx).astype(np.int64) * wid
+                                          + col_idx.astype(np.int64))
+                    pos = np.clip(pos, 0, ext_arr.size - 1)
+                    gi = (r0 + row_idx).astype(np.int64) * wid + col_idx.astype(np.int64)
+                    ext_member = ext_arr[pos] == gi
+                else:
+                    ext_member = np.zeros(row_idx.size, dtype=bool)
+                neff_v = None
+                if neff_arr is not None:
+                    neff_v = neff_arr[r0:r1][row_idx, col_idx]
+                for k in range(nbins):
+                    sel = bi == k
+                    nsel = int(np.count_nonzero(sel))
+                    if nsel == 0:
+                        continue
+                    counts[k] += nsel
+                    vv = sv[sel]
+                    fin = np.isfinite(vv)
+                    if np.any(fin):
+                        sci_mn[k] = min(sci_mn[k], float(np.min(vv[fin])))
+                        sci_mx[k] = max(sci_mx[k], float(np.max(vv[fin])))
+                    small[k] += int(np.count_nonzero(small_v[sel]))
+                    extreme_in[k] += int(np.count_nonzero(ext_member[sel]))
+                    if neff_v is not None:
+                        nv = neff_v[sel]
+                        nv = nv[np.isfinite(nv)]
+                        if nv.size:
+                            neff_sum[k] += float(np.sum(nv))
+                            neff_cnt[k] += int(nv.size)
+                            neff_mn[k] = min(neff_mn[k], float(np.min(nv)))
+                            neff_mx[k] = max(neff_mx[k], float(np.max(nv)))
+            bins = []
+            for k, label in enumerate(DISTANCE_BIN_LABELS):
+                bins.append({
+                    "label": label,
+                    "pixels": int(counts[k]),
+                    "fraction_of_support": (
+                        _f(counts[k] / total_support) if total_support else None
+                    ),
+                    "sci_min": _f(sci_mn[k]) if math.isfinite(sci_mn[k]) else None,
+                    "sci_max": _f(sci_mx[k]) if math.isfinite(sci_mx[k]) else None,
+                    "small_positive_wht_fraction": (
+                        _f(small[k] / counts[k]) if counts[k] else None
+                    ),
+                    "extreme_pixels": int(extreme_in[k]),
+                    "extreme_fraction": (
+                        _f(extreme_in[k] / counts[k]) if counts[k] else None
+                    ),
+                    "n_eff_min": _f(neff_mn[k]) if math.isfinite(neff_mn[k]) else None,
+                    "n_eff_mean": (
+                        _f(neff_sum[k] / neff_cnt[k]) if neff_cnt[k] else None
+                    ),
+                    "n_eff_max": _f(neff_mx[k]) if math.isfinite(neff_mx[k]) else None,
+                })
+            per_channel.append({"channel": c, "bins": bins})
+        out["per_channel"] = per_channel
+        out["available"] = True
     except Exception as exc:  # noqa: BLE001
-        logger.debug("support_conditioning failed (non-fatal): %s", exc)
+        logger.debug("spatial_boundary_diagnostics failed (non-fatal): %s", exc)
         out["reason"] = "exception"
     return out
 
 
-def _local_positive_reference(wht, tile=LOCAL_REFERENCE_TILE):
-    """Bounded per-tile robust positive-WHT reference (documented).
+# ---------------------------------------------------------------------------
+# local references + conditioning candidates (per channel)
+# ---------------------------------------------------------------------------
 
-    Non-overlapping ``tile`` squares: each tile's reference is its
-    ``P90`` of strictly-positive finite WHT; empty tiles get the global
-    positive ``P90``.  Returns ``(tile_ref_map, global_ref, meta)``; the map is
-    one scalar per tile (bounded by ``ceil(H/tile)*ceil(W/tile)``).
-    """
-    w = np.asarray(wht, dtype=np.float64)
+
+def _local_positive_reference(wht_2d, tile=LOCAL_REFERENCE_TILE):
+    """Bounded per-tile positive-WHT reference (non-overlapping, one scalar/tile)."""
+    w = np.asarray(wht_2d, dtype=np.float32)
     h, wid = w.shape
     positive = w[np.isfinite(w) & (w > 0.0)]
     global_ref = float(np.percentile(positive, 90.0)) if positive.size else 0.0
-    tried = int(np.ceil(h / tile))
-    twid = int(np.ceil(wid / tile))
-    ref = np.full((tried, twid), global_ref, dtype=np.float64)
-    for i in range(tried):
+    th = int(math.ceil(h / tile))
+    tw = int(math.ceil(wid / tile))
+    ref = np.full((th, tw), global_ref, dtype=np.float64)
+    for i in range(th):
         r0 = i * tile
         r1 = min(h, r0 + tile)
-        for j in range(twid):
+        for j in range(tw):
             c0 = j * tile
             c1 = min(wid, c0 + tile)
             block = w[r0:r1, c0:c1]
             bp = block[np.isfinite(block) & (block > 0.0)]
             if bp.size:
                 ref[i, j] = float(np.percentile(bp, 90.0))
-    return ref, global_ref, {"tile": int(tile), "tiles_hw": (tried, twid),
-                             "statistic": "positive_p90"}
+    return ref, global_ref, int(tile), (th, tw)
 
 
-def _tile_index(row, col, tile):
-    return int(row) // int(tile), int(col) // int(tile)
+def conditioning_candidates(sci, wht, support_mask, w1=None, w2=None,
+                            neff=None, distance=None, n_extrema=EXTREMA_COUNT,
+                            tile=LOCAL_REFERENCE_TILE, chunk_rows=ROW_CHUNK):
+    """Per-channel, per-extreme candidate conditioning evidence (bounded).
 
-
-def conditioning_candidates(sci, wht, w1=None, w2=None, n_extrema=EXTREMA_COUNT,
-                            tile=LOCAL_REFERENCE_TILE, distance=None):
-    """Bounded candidate conditioning evidence at the SCI extrema.
-
-    For each selected extreme pixel reports: native signed WHT, WHT divided by
-    a bounded *local* robust positive-WHT reference, WHT divided by a
-    SUP_W1-derived reference, N_eff, and the distance to the physical support
-    boundary.  Purely observational — no rule is chosen or applied.
+    For each channel's selected SCI extrema reports native signed WHT,
+    WHT / bounded local positive-WHT reference, WHT / SUP_W1-derived reference,
+    N_eff and distance to the physical support boundary.  No rule is chosen.
     """
     out = {
-        "tile": int(tile),
-        "local_reference_statistic": "positive_p90",
-        "sup_w1_reference": None,
-        "extrema": [],
-        "reason": None,
+        "tile": int(tile), "local_reference_statistic": "positive_p90",
+        "per_channel": [], "reason": None,
     }
     try:
-        s = np.asarray(sci, dtype=np.float64)
-        w = np.asarray(wht, dtype=np.float64)
-        if s.shape != w.shape:
+        s = np.asarray(sci, dtype=np.float32)
+        w = np.asarray(wht, dtype=np.float32)
+        m = np.asarray(support_mask, dtype=bool)
+        if s.ndim == 2:
+            s = s[..., None]
+            w = w[..., None]
+        if s.shape[:2] != m.shape:
             out["reason"] = "shape_mismatch"
             return out
-        h, wid = s.shape
-        mask = _valid_support_mask(s, w, WEIGHT_EPSILON)
-        local_ref, global_ref, meta = _local_positive_reference(w, tile)
-        out["global_positive_reference"] = _f(global_ref)
-        out["local_reference_tiles_hw"] = meta["tiles_hw"]
-
-        neff = None
         w1_ref = None
-        if w1 is not None and w2 is not None:
-            neff = _neff_from_sup(w1, w2)
-            a = np.asarray(w1, dtype=np.float64)
+        if w1 is not None:
+            a = np.asarray(w1, dtype=np.float32)
             pos = a[np.isfinite(a) & (a > 0.0)]
             if pos.size:
                 w1_ref = float(np.median(pos))
         out["sup_w1_reference"] = _f(w1_ref)
-
-        lo, hi = select_extrema_indices(s, mask, n_extrema)
-        flat_s = s.ravel()
-        flat_w = w.ravel()
-        flat_neff = None if neff is None else neff.ravel()
-        flat_w1 = None if w1 is None else np.asarray(w1, dtype=np.float64).ravel()
-        flat_dist = None if distance is None else np.asarray(distance, dtype=np.float64).ravel()
-        for fi in list(lo) + list(hi):
-            fi = int(fi)
-            row, col = divmod(fi, wid)
-            ti, tj = _tile_index(row, col, tile)
-            local = float(local_ref[ti, tj]) if local_ref.size else global_ref
-            rec = {
-                "index": fi,
-                "row": int(row),
-                "col": int(col),
-                "sci": _f(flat_s[fi]),
-                "wht": _f(flat_w[fi]),
-                "wht_over_local_ref": (
-                    _f(flat_w[fi] / local) if local not in (0.0, None) else None
-                ),
-                "wht_over_global_ref": (
-                    _f(flat_w[fi] / global_ref) if global_ref else None
-                ),
-                "wht_over_sup_w1_ref": (
-                    _f(flat_w[fi] / w1_ref)
-                    if w1_ref not in (None, 0.0)
-                    else None
-                ),
-                "n_eff": _f(flat_neff[fi]) if flat_neff is not None else None,
-                "sup_w1": _f(flat_w1[fi]) if flat_w1 is not None else None,
-                "distance": _f(flat_dist[fi]) if flat_dist is not None else None,
-            }
-            out["extrema"].append(rec)
+        for c in range(s.shape[-1]):
+            sc = s[..., c]
+            wc = w[..., c]
+            local_ref, global_ref, _tile, thw = _local_positive_reference(wc, tile)
+            recs = bounded_extrema_records(
+                sc, wc, m, w1, w2, neff, distance, n=n_extrema,
+                chunk_rows=chunk_rows,
+            )
+            rows = []
+            for r in recs:
+                fi = r["index"]
+                row = r["row"]
+                col = r["col"]
+                ti = int(row) // int(tile)
+                tj = int(col) // int(tile)
+                local = float(local_ref[ti, tj]) if local_ref.size else global_ref
+                wv = r.get("wht")
+                rows.append({
+                    "kind": r["kind"], "index": fi, "row": row, "col": col,
+                    "sci": r.get("sci"), "wht": wv,
+                    "wht_over_local_ref": (
+                        _f(wv / local) if wv is not None and local not in (0.0,) else None
+                    ),
+                    "wht_over_global_ref": (
+                        _f(wv / global_ref) if wv is not None and global_ref else None
+                    ),
+                    "wht_over_sup_w1_ref": (
+                        _f(wv / w1_ref) if wv is not None and w1_ref not in (None, 0.0) else None
+                    ),
+                    "n_eff": r.get("n_eff"),
+                    "sup_w1": r.get("sup_w1"),
+                    "sup_w2": r.get("sup_w2"),
+                    "distance": r.get("distance"),
+                })
+            out["per_channel"].append({
+                "channel": c, "global_positive_reference": _f(global_ref),
+                "local_reference_tiles_hw": list(thw), "extrema": rows,
+            })
     except Exception as exc:  # noqa: BLE001
         logger.debug("conditioning_candidates failed (non-fatal): %s", exc)
-        out["reason"] = "exception"
-    return out
-
-
-# ---------------------------------------------------------------------------
-# spatial boundary diagnostics
-# ---------------------------------------------------------------------------
-
-
-def _support_distance_map(support_mask):
-    """Transient EDT distance-to-boundary of a support mask (or ``None``)."""
-    try:
-        from scipy.ndimage import distance_transform_edt
-
-        m = np.asarray(support_mask, dtype=bool)
-        if not np.any(m):
-            return None
-        return distance_transform_edt(m).astype(np.float64)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("support distance map unavailable (non-fatal): %s", exc)
-        return None
-
-
-def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None,
-                                 distance=None):
-    """Per-distance-bin summaries over the actual physical support map.
-
-    The distance map is computed transiently (never persisted) unless one is
-    supplied.  For each documented bin it reports SCI extrema, the fraction of
-    small-positive WHT, the number/fraction of extreme pixels and N_eff stats.
-    """
-    out = {"available": False, "reason": None, "bins": [],
-           "small_positive_wht_cut": _f(SMALL_POSITIVE_WHT)}
-    try:
-        s = np.asarray(sci, dtype=np.float64)
-        w = np.asarray(wht, dtype=np.float64)
-        m = np.asarray(support_mask, dtype=bool)
-        if s.shape != w.shape or s.shape != m.shape:
-            out["reason"] = "shape_mismatch"
-            return out
-        if distance is None:
-            distance = _support_distance_map(m)
-        if distance is None:
-            out["reason"] = "distance_map_unavailable"
-            return out
-        d = np.asarray(distance, dtype=np.float64)
-        if d.shape != s.shape:
-            out["reason"] = "distance_shape_mismatch"
-            return out
-        total_support = int(np.count_nonzero(m))
-        out["total_support_pixels"] = total_support
-        lo, hi = select_extrema_indices(s, m, EXTREMA_COUNT)
-        extreme_idx = set(int(x) for x in list(lo) + list(hi))
-        small_positive = np.isfinite(w) & (w > 0.0) & (w <= SMALL_POSITIVE_WHT)
-
-        for label, (lo_e, hi_e) in zip(DISTANCE_BIN_LABELS, DISTANCE_BIN_EDGES):
-            if math.isinf(hi_e):
-                bin_mask = m & (d > lo_e)
-            elif lo_e <= 0.0:
-                bin_mask = m & (d >= 0.0) & (d <= hi_e)
-            else:
-                bin_mask = m & (d > lo_e) & (d <= hi_e)
-            n_bin = int(np.count_nonzero(bin_mask))
-            rec = {
-                "label": label,
-                "pixels": n_bin,
-                "fraction_of_support": (
-                    _f(n_bin / total_support) if total_support else None
-                ),
-                "sci_min": None,
-                "sci_max": None,
-                "small_positive_wht_fraction": None,
-                "extreme_pixels": 0,
-                "extreme_fraction": None,
-                "n_eff_min": None,
-                "n_eff_median": None,
-                "n_eff_max": None,
-            }
-            if n_bin:
-                sv = s[bin_mask]
-                sv = sv[np.isfinite(sv)]
-                if sv.size:
-                    rec["sci_min"] = _f(np.min(sv))
-                    rec["sci_max"] = _f(np.max(sv))
-                n_small = int(np.count_nonzero(small_positive & bin_mask))
-                rec["small_positive_wht_fraction"] = _f(n_small / n_bin)
-                flat_idx = np.flatnonzero(bin_mask.ravel())
-                n_ext = int(sum(1 for i in flat_idx.tolist() if i in extreme_idx))
-                rec["extreme_pixels"] = n_ext
-                rec["extreme_fraction"] = _f(n_ext / n_bin)
-                if neff is not None:
-                    nv = np.asarray(neff, dtype=np.float64)[bin_mask]
-                    nv = nv[np.isfinite(nv)]
-                    if nv.size:
-                        rec["n_eff_min"] = _f(np.min(nv))
-                        rec["n_eff_median"] = _f(np.median(nv))
-                        rec["n_eff_max"] = _f(np.max(nv))
-            out["bins"].append(rec)
-        out["available"] = True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("spatial_boundary_diagnostics failed (non-fatal): %s", exc)
         out["reason"] = "exception"
     return out
 
@@ -864,29 +1237,20 @@ def spatial_boundary_diagnostics(sci, wht, support_mask, neff=None,
 
 
 def lifecycle_record(stage, obj, **extra):
-    """Build one bounded SUPPORT_LIFECYCLE record from a queue-manager object.
-
-    Captures the support presence/availability *as observed at the seam*, the
-    stopped/finalization state, and any caller-supplied scalar context.  The
-    classic memmap flags and the Drizzle accumulator flags are reported
-    separately so an early release/reset is distinguishable from stale logging.
-    """
+    """Build one bounded SUPPORT_LIFECYCLE record from a queue-manager object."""
     rec = {
         "stage": str(stage),
         "ts": time.time(),
         "support_available": bool(getattr(obj, "_drizzle_support_available", False)),
-        "support_reason": getattr(
-            obj, "_drizzle_support_unavailable_reason", None
-        ),
-        "classic_sup_w1_present": getattr(obj, "coverage_sup_w1_memmap", None)
-        is not None,
-        "classic_sup_w2_present": getattr(obj, "coverage_sup_w2_memmap", None)
-        is not None,
+        "support_reason": getattr(obj, "_drizzle_support_unavailable_reason", None),
+        "classic_sup_w1_present": getattr(obj, "coverage_sup_w1_memmap", None) is not None,
+        "classic_sup_w2_present": getattr(obj, "coverage_sup_w2_memmap", None) is not None,
         "classic_support_state_available": bool(
             getattr(obj, "_support_state_available", False)
         ),
         "drizzle_sup_w1_present": getattr(obj, "drizzle_sup_w1", None) is not None,
         "drizzle_sup_w2_present": getattr(obj, "drizzle_sup_w2", None) is not None,
+        "drizzle_support_released": False,
         "stopped": bool(
             getattr(obj, "user_requested_stop", False)
             or getattr(obj, "stop_processing", False) is True
@@ -896,128 +1260,42 @@ def lifecycle_record(stage, obj, **extra):
         "frame_count": _i(getattr(obj, "_drizzle_frame_count", None)),
     }
     for key, value in extra.items():
-        if isinstance(value, (bool, int, float, str)) or value is None:
-            rec[key] = _f(value) if isinstance(value, float) else value
+        if isinstance(value, bool) or value is None:
+            rec[key] = value
+        elif isinstance(value, (int,)):
+            rec[key] = value
+        elif isinstance(value, float):
+            rec[key] = _f(value)
         else:
             rec[key] = str(value)
     return rec
 
 
 # ---------------------------------------------------------------------------
-# high-level finalization summary
-# ---------------------------------------------------------------------------
-
-
-def _channel_mean(arr):
-    """Bounded derived 2-D channel-mean view of an HWC/2-D array."""
-    a = np.asarray(arr, dtype=np.float64)
-    if a.ndim == 2:
-        return a
-    if a.ndim == 3:
-        with np.errstate(invalid="ignore"):
-            return np.mean(a, axis=-1)
-    raise ValueError("unsupported ndim for channel mean")
-
-
-def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None, distance=None):
-    """Compute every bounded per-run diagnostic section (read-only, fail-open).
-
-    The HWC science and native WHT are summarised per channel; the derived
-    2-D boundary/conditioning sections use the documented channel-mean view of
-    SCI and WHT and the channel-invariant physical support map (SUP_W1 > 0
-    when support is present, otherwise any-channel valid native WHT).  No input
-    array is mutated; the distance map is computed transiently unless supplied.
-    """
-    sections = {
-        "sci_stats": [],
-        "wht_diagnostics": [],
-        "threshold_sweep": [],
-        "support": {"available": False, "reason": "unavailable"},
-        "support_extrema": [],
-        "boundary_bins": {"available": False, "reason": "unavailable"},
-        "conditioning_candidates": {"extrema": [], "reason": "unavailable"},
-        "derived_view": "channel_mean_2d",
-    }
-    try:
-        s = np.asarray(sci_hwc, dtype=np.float64)
-        w = np.asarray(wht_hwc, dtype=np.float64)
-        if s.ndim == 2:
-            s = s[..., None]
-        if w.ndim == 2:
-            w = w[..., None]
-        if s.shape != w.shape:
-            sections["notes"] = "sci/wht shape mismatch"
-            return sections
-
-        sections["sci_stats"] = [
-            sci_channel_stats(s[..., c]) for c in range(s.shape[-1])
-        ]
-        sections["wht_diagnostics"] = [
-            wht_channel_diagnostics(w[..., c], s[..., c])
-            for c in range(s.shape[-1])
-        ]
-        sections["threshold_sweep"] = [
-            threshold_sweep(w[..., c], s[..., c]) for c in range(s.shape[-1])
-        ]
-
-        neff = None
-        support_mask = None
-        if sup_w1 is not None and sup_w2 is not None:
-            neff = _neff_from_sup(sup_w1, sup_w2)
-            try:
-                a1 = np.asarray(sup_w1, dtype=np.float64)
-                support_mask = np.isfinite(a1) & (a1 > 0.0)
-            except Exception:  # noqa: BLE001
-                support_mask = None
-        if support_mask is None or not np.any(support_mask):
-            wm = np.asarray(w, dtype=np.float64)
-            support_mask = np.any(np.isfinite(wm) & (wm > WEIGHT_EPSILON), axis=-1)
-
-        sci2d = _channel_mean(s)
-        wht2d = _channel_mean(w)
-
-        if neff is not None:
-            sections["support"] = support_conditioning(sup_w1, sup_w2)
-        else:
-            sections["support"] = {
-                "available": False,
-                "reason": "support_accumulator_absent",
-            }
-
-        dist = distance
-        if dist is None:
-            dist = _support_distance_map(support_mask)
-
-        sections["support_extrema"] = sci_extrema_records(
-            sci2d, wht2d, w1=sup_w1, w2=sup_w2, neff=neff, distance=dist
-        )
-        sections["boundary_bins"] = spatial_boundary_diagnostics(
-            sci2d, wht2d, support_mask, neff=neff, distance=dist
-        )
-        cand = conditioning_candidates(
-            sci2d, wht2d, w1=sup_w1, w2=sup_w2, distance=dist
-        )
-        # attach the per-extreme N_eff/WHT/SUP context already captured
-        cand["support_extrema"] = sections["support_extrema"]
-        sections["conditioning_candidates"] = cand
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("summarize_run failed (non-fatal): %s", exc)
-    return sections
-
-
-# ---------------------------------------------------------------------------
 # collector / artifact writer
 # ---------------------------------------------------------------------------
+
+# Stages that must survive retention (always retained).
+TERMINAL_STAGES = frozenset({
+    "accumulators_ready", "fresh_m3_init", "first_science_deposit",
+    "first_support_deposit", "stop_requested", "drizzle_finalization_entered",
+    "drizzle_finalization_pre_save", "drizzle_finalization_returned",
+    "coverage_render_entered", "coverage_render_exited", "fits_save",
+    "memmap_cleanup_entered", "memmap_cleanup_returned",
+    "drizzle_support_unavailable", "artifact_final",
+})
+# Stages coalesced in place (repetitive high-frequency events).
+COALESCE_STAGES = frozenset({"checkpoint_save"})
+MAX_LIFECYCLE_EVENTS = 256
 
 
 class DrizzleScienceDiagnostics:
     """Bounded, passive per-run collector + atomic artifact writer.
 
-    Every setter and the writer are fail-open: an internal error is logged at
-    debug level and leaves the collector usable and the science untouched.
-    Only one artifact is produced (``drizzle_science_diagnostics.json``) and it
-    is written atomically (temp file + ``os.replace``) so a reader never sees a
-    partial file.
+    Every setter and the writer are fail-open.  Lifecycle retention is bounded:
+    terminal/stop/finalization/first-deposit facts are always retained, while
+    repetitive ``checkpoint_save`` events are coalesced (count + first/last
+    generation/frame) so they can never crowd out terminal evidence.
     """
 
     def __init__(self, run_token=None, output_folder=None):
@@ -1039,7 +1317,11 @@ class DrizzleScienceDiagnostics:
         self.support = None
         self.boundary_bins = None
         self.conditioning = None
+        self.crop = None
+        self.wht_policy = None
+        self.sections_meta = None
         self.lifecycle = []
+        self.coalesced = {}
         self.notes = []
         self.stop_state = {}
         self.finalization_state = {}
@@ -1050,7 +1332,7 @@ class DrizzleScienceDiagnostics:
     def _safe(self, fn):
         try:
             fn()
-        except Exception as exc:  # noqa: BLE001 — fail-open is the contract
+        except Exception as exc:  # noqa: BLE001
             logger.debug("drizzle diagnostics setter failed (non-fatal): %s", exc)
 
     def set_run_config(self, kernel=None, scale=None, pixfrac_requested=None,
@@ -1069,14 +1351,14 @@ class DrizzleScienceDiagnostics:
     def set_contract(self, record):
         self._safe(lambda: setattr(self, "contract", dict(record)))
 
-    def set_sci_stats(self, per_channel):
-        self._safe(lambda: setattr(self, "sci_stats", list(per_channel)))
+    def set_sci_stats(self, value):
+        self._safe(lambda: setattr(self, "sci_stats", list(value)))
 
-    def set_wht_diagnostics(self, per_channel):
-        self._safe(lambda: setattr(self, "wht_diagnostics", list(per_channel)))
+    def set_wht_diagnostics(self, value):
+        self._safe(lambda: setattr(self, "wht_diagnostics", list(value)))
 
-    def set_threshold_sweep(self, sweep):
-        self._safe(lambda: setattr(self, "threshold_sweep", list(sweep)))
+    def set_threshold_sweep(self, value):
+        self._safe(lambda: setattr(self, "threshold_sweep", list(value)))
 
     def set_support(self, conditioning, extrema=None):
         def _do():
@@ -1092,47 +1374,75 @@ class DrizzleScienceDiagnostics:
     def set_conditioning(self, record):
         self._safe(lambda: setattr(self, "conditioning", dict(record)))
 
+    def set_crop(self, record):
+        self._safe(lambda: setattr(self, "crop", dict(record)))
+
+    def set_wht_policy(self, record):
+        self._safe(lambda: setattr(self, "wht_policy", dict(record)))
+
+    def set_sections_meta(self, record):
+        self._safe(lambda: setattr(self, "sections_meta", dict(record)))
+
     def add_lifecycle(self, record):
         def _do():
-            if len(self.lifecycle) < 4096:
-                self.lifecycle.append(dict(record))
+            stage = record.get("stage")
+            if stage in COALESCE_STAGES:
+                prev = self.coalesced.get(stage)
+                if prev is None:
+                    rec = dict(record)
+                    rec["count"] = 1
+                    self.coalesced[stage] = rec
+                else:
+                    prev["count"] = int(prev.get("count", 1)) + 1
+                    prev["last_ts"] = record.get("ts")
+                    for k in ("generation", "frame_count"):
+                        if k in record:
+                            prev.setdefault("first_" + k, prev.get(k))
+                            prev[k] = record[k]
+                return
+            self.lifecycle.append(dict(record))
+            if len(self.lifecycle) > MAX_LIFECYCLE_EVENTS:
+                # evict the oldest non-terminal event; never drop terminal ones
+                for idx, rec in enumerate(self.lifecycle):
+                    if rec.get("stage") not in TERMINAL_STAGES:
+                        del self.lifecycle[idx]
+                        break
+                else:
+                    # all terminal: drop the oldest (bounded hard cap)
+                    del self.lifecycle[0]
         self._safe(_do)
 
     def note(self, message):
-        def _do():
-            if len(self.notes) < 64:
-                self.notes.append(str(message))
-        self._safe(_do)
+        self._safe(lambda: (len(self.notes) < 64) and self.notes.append(str(message)))
 
     def set_stop_state(self, **fields):
         def _do():
-            self.stop_state.update({k: _f(v) if isinstance(v, float) else v
-                                    for k, v in fields.items()})
+            self.stop_state.update(
+                {k: (_f(v) if isinstance(v, float) else v) for k, v in fields.items()}
+            )
         self._safe(_do)
 
     def set_finalization_state(self, **fields):
         def _do():
             self.finalization_state.update(
-                {k: _f(v) if isinstance(v, float) else v for k, v in fields.items()}
+                {k: (_f(v) if isinstance(v, float) else v) for k, v in fields.items()}
             )
         self._safe(_do)
 
     # -- serialization -----------------------------------------------------
     def lifecycle_summary(self):
-        """Bounded summary of the lifecycle ring (stage counts + last stage)."""
-        summary = {"count": len(self.lifecycle), "stage_counts": {},
-                   "last_stage": None, "first_support_available": None,
-                   "last_support_available": None}
+        summary = {
+            "count": len(self.lifecycle), "stage_counts": {}, "last_stage": None,
+            "first_support_available": None, "last_support_available": None,
+            "coalesced": {k: dict(v) for k, v in self.coalesced.items()},
+            "max_events": MAX_LIFECYCLE_EVENTS,
+        }
         try:
             for rec in self.lifecycle:
                 stage = rec.get("stage")
-                summary["stage_counts"][stage] = (
-                    summary["stage_counts"].get(stage, 0) + 1
-                )
+                summary["stage_counts"][stage] = summary["stage_counts"].get(stage, 0) + 1
                 if summary["first_support_available"] is None:
-                    summary["first_support_available"] = rec.get(
-                        "support_available"
-                    )
+                    summary["first_support_available"] = rec.get("support_available")
                 summary["last_support_available"] = rec.get("support_available")
             if self.lifecycle:
                 summary["last_stage"] = self.lifecycle[-1].get("stage")
@@ -1140,11 +1450,13 @@ class DrizzleScienceDiagnostics:
             logger.debug("lifecycle_summary failed (non-fatal): %s", exc)
         return summary
 
+    def lifecycle_stages(self):
+        """Ordered list of persisted stage names (excluding coalesced)."""
+        return [r.get("stage") for r in self.lifecycle]
+
     def to_dict(self):
-        """Return the bounded, JSON-safe artifact payload (never raises)."""
         try:
             geometry = self.geometry or {}
-            contract = self.contract or {}
             return {
                 "schema_version": SCHEMA_VERSION,
                 "run_token": self.run_token,
@@ -1161,9 +1473,12 @@ class DrizzleScienceDiagnostics:
                     if self.pixel_scale_ratio_candidate is not None
                     else geometry.get("pixel_scale_ratio_candidate")
                 ),
-                "pixel_scale_ratio_source": "upstream_default",
+                "pixel_scale_ratio_source": "upstream_add_image_default",
                 "geometry": geometry,
-                "add_image_contract": contract,
+                "add_image_contract": self.contract or {},
+                "crop": self.crop or {},
+                "effective_wht_policy": self.wht_policy or {},
+                "sections_meta": self.sections_meta or {},
                 "sci_stats": self.sci_stats,
                 "wht_diagnostics": self.wht_diagnostics,
                 "threshold_sweep": self.threshold_sweep,
@@ -1190,13 +1505,7 @@ class DrizzleScienceDiagnostics:
             return None
 
     def write(self, path=None):
-        """Atomically write the artifact.  Fail-open: returns ``False``.
-
-        A temporary file in the destination directory is written then
-        ``os.replace``d over the target, so a reader never observes a partial
-        artifact.  Any failure (serialization, permissions, missing directory)
-        is swallowed.
-        """
+        """Atomically write the artifact (temp + ``os.replace``).  Fail-open."""
         try:
             target = path or self.artifact_path
             if target is None and self.output_folder:
@@ -1217,34 +1526,125 @@ class DrizzleScienceDiagnostics:
             self.artifact_path = target
             self.write_count += 1
             return True
-        except Exception as exc:  # noqa: BLE001 — fail-open is the contract
+        except Exception as exc:  # noqa: BLE001
             logger.debug("drizzle diagnostics write failed (non-fatal): %s", exc)
             return False
 
 
+# ---------------------------------------------------------------------------
+# high-level finalization summary (bounded)
+# ---------------------------------------------------------------------------
+
+
+def summarize_run(sci_hwc, wht_hwc, sup_w1=None, sup_w2=None,
+                  support_mask=None, crop=None, chunk_rows=ROW_CHUNK,
+                  sample_cap=MAX_SAMPLE_COUNT, n_extrema=EXTREMA_COUNT):
+    """Compute every bounded per-run diagnostic section (read-only, fail-open).
+
+    Streams row chunks of float32 views; never converts a whole HWC cube to
+    float64.  All sections are **per channel**.  ``support_mask`` is the physical
+    support (``SUP_W1 > 0``) when available; otherwise the explicitly-labelled
+    native-WHT-derived fallback is used.  ``crop`` records the bbox origin.
+    """
+    sections = {
+        "sci_stats": [], "wht_diagnostics": [], "threshold_sweep": [],
+        "support": {"available": False, "reason": "unavailable"},
+        "support_extrema": [], "boundary_bins": {"available": False, "reason": "unavailable"},
+        "conditioning_candidates": {"per_channel": [], "reason": "unavailable"},
+        "support_source": None,
+        "meta": {"chunk_rows": int(chunk_rows), "sample_cap": int(sample_cap),
+                 "extrema_count": int(n_extrema)},
+    }
+    try:
+        s = np.asarray(sci_hwc)
+        w = np.asarray(wht_hwc)
+        if s.ndim == 2:
+            s = s[..., None]
+        if w.ndim == 2:
+            w = w[..., None]
+        if s.shape != w.shape:
+            sections["meta"]["error"] = "sci/wht shape mismatch"
+            return sections
+        h, wid, nch = s.shape
+        sections["meta"]["shape_hwc"] = [int(h), int(wid), int(nch)]
+        sections["meta"]["crop"] = dict(crop or {})
+
+        mask2d = None
+        support_source = "support_pair_absent"
+        if support_mask is not None:
+            try:
+                m = np.asarray(support_mask, dtype=bool)
+                if m.shape == (h, wid):
+                    mask2d = m
+                    support_source = "sup_w1_positive"
+            except Exception:  # noqa: BLE001
+                mask2d = None
+        if mask2d is None:
+            mask2d = native_wht_fallback_mask(w)
+            support_source = "native_wht_derived_fallback"
+        sections["support_source"] = support_source
+
+        # single justified O(HW) boundary work buffer
+        distance, dmeta = support_distance_map(mask2d)
+        sections["meta"]["boundary_work_buffer"] = dmeta
+
+        for c in range(nch):
+            sc = s[..., c]
+            wc = w[..., c]
+            sections["sci_stats"].append(
+                sci_channel_stats(sc, chunk_rows, sample_cap)
+            )
+            sections["wht_diagnostics"].append(
+                wht_channel_diagnostics(wc, sc, n_extrema, chunk_rows, sample_cap)
+            )
+            sections["threshold_sweep"].append(
+                threshold_sweep(wc, sc, mask2d, chunk_rows=chunk_rows)
+            )
+
+        if sup_w1 is not None and sup_w2 is not None:
+            sections["support"] = support_conditioning(sup_w1, sup_w2, chunk_rows, sample_cap)
+        else:
+            sections["support"] = {"available": False,
+                                   "reason": "support_accumulator_absent"}
+
+        # per-channel extrema on the physical support (channel 0 gets the
+        # support-level co-diagnostics; all channels get their own records)
+        extrema_by_channel = []
+        for c in range(nch):
+            recs = bounded_extrema_records(
+                s[..., c], w[..., c], mask2d, sup_w1, sup_w2, None, distance,
+                n=n_extrema, chunk_rows=chunk_rows,
+            )
+            extrema_by_channel.append(recs)
+        sections["support_extrema"] = extrema_by_channel
+
+        sections["boundary_bins"] = spatial_boundary_diagnostics(
+            s, w, mask2d, distance=distance, chunk_rows=chunk_rows,
+            n_extrema=n_extrema,
+        )
+        sections["boundary_bins"]["support_source"] = support_source
+        sections["conditioning_candidates"] = conditioning_candidates(
+            s, w, mask2d, w1=sup_w1, w2=sup_w2, distance=distance,
+            n_extrema=n_extrema, chunk_rows=chunk_rows,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("summarize_run failed (non-fatal): %s", exc)
+    return sections
+
+
 __all__ = [
-    "SCHEMA_VERSION",
-    "ARTIFACT_FILENAME",
-    "WEIGHT_EPSILON",
-    "SMALL_POSITIVE_WHT",
-    "DEFAULT_ABS_THRESHOLDS",
-    "DEFAULT_REL_THRESHOLDS",
-    "DISTANCE_BIN_LABELS",
-    "DISTANCE_BIN_EDGES",
-    "DrizzleScienceDiagnostics",
-    "robust_pixel_scale_deg",
-    "geometry_diagnostic",
-    "contract_diagnostic",
-    "sci_channel_stats",
-    "sci_stats_hwc",
-    "wht_channel_diagnostics",
-    "wht_diagnostics_hwc",
-    "select_extrema_indices",
-    "sci_extrema_records",
-    "threshold_sweep",
-    "support_conditioning",
-    "conditioning_candidates",
-    "spatial_boundary_diagnostics",
-    "lifecycle_record",
+    "SCHEMA_VERSION", "ARTIFACT_FILENAME", "WEIGHT_EPSILON",
+    "SMALL_POSITIVE_WHT", "DEFAULT_ABS_THRESHOLDS", "DEFAULT_REL_THRESHOLDS",
+    "DISTANCE_BIN_LABELS", "DISTANCE_BIN_EDGES", "ROW_CHUNK",
+    "MAX_SAMPLE_COUNT", "MAX_BOUNDARY_WORK_BYTES", "MAX_LIFECYCLE_EVENTS",
+    "TERMINAL_STAGES", "COALESCE_STAGES",
+    "DrizzleScienceDiagnostics", "robust_pixel_scale_deg", "geometry_diagnostic",
+    "contract_diagnostic", "sci_channel_stats", "sci_stats_hwc",
+    "wht_channel_diagnostics", "wht_diagnostics_hwc", "select_extrema_indices",
+    "bounded_extrema_indices",
+    "sci_extrema_records", "bounded_extrema_records", "threshold_sweep",
+    "support_conditioning", "conditioning_candidates",
+    "spatial_boundary_diagnostics", "support_distance_map",
+    "physical_support_mask", "native_wht_fallback_mask", "lifecycle_record",
     "summarize_run",
 ]
