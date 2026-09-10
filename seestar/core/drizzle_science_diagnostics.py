@@ -1474,6 +1474,12 @@ TERMINAL_STAGES = frozenset({
 })
 # Stages coalesced in place (repetitive high-frequency events).
 COALESCE_STAGES = frozenset({"checkpoint_save"})
+# Repeated STOP observations are coalesced into ONE retained timeline record
+# (first position) with a bounded aggregate, so arbitrarily many STOP polls can
+# never evict distinct later lifecycle stages.  The saturating counter caps the
+# stored repeat count; the saturation flag is truthful.
+STOP_STAGE = "stop_requested"
+MAX_STOP_REPEAT_COUNT = 1_000_000
 MAX_LIFECYCLE_EVENTS = 256
 
 
@@ -1510,6 +1516,7 @@ class DrizzleScienceDiagnostics:
         self.sections_meta = None
         self.lifecycle = []
         self.coalesced = {}
+        self._stop_record = None
         self.notes = []
         self.stop_state = {}
         self.finalization_state = {}
@@ -1588,17 +1595,73 @@ class DrizzleScienceDiagnostics:
                             prev.setdefault("first_" + k, prev.get(k))
                             prev[k] = record[k]
                 return
+            if stage == STOP_STAGE:
+                self._coalesce_stop(record)
+                return
             self.lifecycle.append(dict(record))
-            if len(self.lifecycle) > MAX_LIFECYCLE_EVENTS:
-                # evict the oldest non-terminal event; never drop terminal ones
-                for idx, rec in enumerate(self.lifecycle):
-                    if rec.get("stage") not in TERMINAL_STAGES:
-                        del self.lifecycle[idx]
-                        break
-                else:
-                    # all terminal: drop the oldest (bounded hard cap)
-                    del self.lifecycle[0]
+            self._enforce_lifecycle_cap()
         self._safe(_do)
+
+    def _coalesce_stop(self, record):
+        """Coalesce repeated STOP observations into ONE bounded timeline record.
+
+        The first observation is retained at its first-observed position as a
+        real timeline event; later observations update bounded aggregate state
+        in place (first/last timestamps, saturating repeat count, last support
+        snapshot) and never append a slot.  Canonical support fields
+        (``drizzle_sup_w1_present`` / ``drizzle_sup_w2_present`` /
+        ``support_available``) keep the FIRST observation; ``*_first`` /
+        ``*_last`` snapshots are added so state variation across repeats is not
+        silently overwritten.
+        """
+        tracked = ("support_available", "drizzle_sup_w1_present",
+                   "drizzle_sup_w2_present")
+        rec = self._stop_record
+        if rec is None:
+            rec = dict(record)
+            rec["first_stop_timestamp"] = _f(record.get("ts"))
+            rec["last_stop_timestamp"] = _f(record.get("ts"))
+            rec["stop_repeat_count"] = 1
+            rec["stop_repeat_count_saturated"] = False
+            for k in tracked:
+                rec.setdefault(k + "_first", rec.get(k))
+                rec.setdefault(k + "_last", rec.get(k))
+            self._stop_record = rec
+            self.lifecycle.append(rec)
+            self._enforce_lifecycle_cap()
+            return
+        n = int(rec.get("stop_repeat_count", 1) or 1)
+        if n >= MAX_STOP_REPEAT_COUNT:
+            rec["stop_repeat_count_saturated"] = True
+        else:
+            rec["stop_repeat_count"] = n + 1
+        rec["last_stop_timestamp"] = _f(record.get("ts"))
+        for k in tracked:
+            if k in record:
+                rec[k + "_last"] = record.get(k)
+        self._enforce_lifecycle_cap()
+
+    def _enforce_lifecycle_cap(self):
+        """Bounded retention that never evicts distinct terminal evidence.
+
+        Preference order: drop the oldest non-terminal record; then the oldest
+        record that is neither the coalesced STOP record nor ``artifact_final``;
+        only as an absolute last resort drop the oldest (hard bound).
+        """
+        if len(self.lifecycle) <= MAX_LIFECYCLE_EVENTS:
+            return
+        for idx, rec in enumerate(self.lifecycle):
+            if rec.get("stage") not in TERMINAL_STAGES:
+                del self.lifecycle[idx]
+                return
+        for idx, rec in enumerate(self.lifecycle):
+            if rec is self._stop_record:
+                continue
+            if rec.get("stage") == "artifact_final":
+                continue
+            del self.lifecycle[idx]
+            return
+        del self.lifecycle[0]
 
     def note(self, message):
         self._safe(lambda: (len(self.notes) < 64) and self.notes.append(str(message)))
@@ -1618,11 +1681,43 @@ class DrizzleScienceDiagnostics:
         self._safe(_do)
 
     # -- serialization -----------------------------------------------------
+    def stop_summary(self):
+        """Bounded aggregate of all STOP observations (JSON-safe, fail-open).
+
+        ``stop_repeat_count`` counts observations INCLUDING the first one
+        (first observation -> 1).  ``stop_repeat_count_saturated`` is true once
+        the saturating counter reaches ``MAX_STOP_REPEAT_COUNT``.
+        """
+        rec = self._stop_record
+        if rec is None:
+            return {
+                "observed": False, "first_stop_timestamp": None,
+                "last_stop_timestamp": None, "stop_repeat_count": 0,
+                "stop_repeat_count_saturated": False,
+                "support_available_first": None, "support_available_last": None,
+            }
+        return {
+            "observed": True,
+            "first_stop_timestamp": rec.get("first_stop_timestamp"),
+            "last_stop_timestamp": rec.get("last_stop_timestamp"),
+            "stop_repeat_count": int(rec.get("stop_repeat_count", 1) or 0),
+            "stop_repeat_count_saturated": bool(
+                rec.get("stop_repeat_count_saturated", False)
+            ),
+            "support_available_first": rec.get("support_available_first"),
+            "support_available_last": rec.get("support_available_last"),
+            "drizzle_sup_w1_present_first": rec.get("drizzle_sup_w1_present_first"),
+            "drizzle_sup_w1_present_last": rec.get("drizzle_sup_w1_present_last"),
+            "drizzle_sup_w2_present_first": rec.get("drizzle_sup_w2_present_first"),
+            "drizzle_sup_w2_present_last": rec.get("drizzle_sup_w2_present_last"),
+        }
+
     def lifecycle_summary(self):
         summary = {
             "count": len(self.lifecycle), "stage_counts": {}, "last_stage": None,
             "first_support_available": None, "last_support_available": None,
             "coalesced": {k: dict(v) for k, v in self.coalesced.items()},
+            "stop_summary": self.stop_summary(),
             "max_events": MAX_LIFECYCLE_EVENTS,
         }
         try:
@@ -1853,6 +1948,7 @@ __all__ = [
     "MAX_SAMPLE_COUNT", "MAX_BOUNDARY_WORK_BYTES", "MAX_LIFECYCLE_EVENTS",
     "BOUNDARY_HALO", "BOUNDARY_TILE_ROWS",
     "SUPPORT_SOURCE_PHYSICAL", "SUPPORT_SOURCE_FALLBACK",
+    "STOP_STAGE", "MAX_STOP_REPEAT_COUNT",
     "TERMINAL_STAGES", "COALESCE_STAGES",
     "DrizzleScienceDiagnostics", "robust_pixel_scale_deg", "geometry_diagnostic",
     "contract_diagnostic", "sci_channel_stats", "sci_stats_hwc",

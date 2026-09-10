@@ -577,6 +577,85 @@ def test_summarize_artifact_is_bounded_and_json_safe():
 # ---------------------------------------------------------------------------
 
 
+def test_stop_repeats_bounded_and_preserve_terminal_stages():
+    """rework-4: thousands of STOP polls must not evict distinct later stages."""
+    diag = dsd.DrizzleScienceDiagnostics(run_token="stops")
+    sup = {"support_available": True, "drizzle_sup_w1_present": True,
+           "drizzle_sup_w2_present": True}
+    diag.add_lifecycle({"stage": "stop_requested", "ts": 1.0, **sup})
+    for i in range(2, 2001):
+        diag.add_lifecycle({"stage": "stop_requested", "ts": float(i), **sup})
+    diag.add_lifecycle({"stage": "coverage_render_entered", "ts": 3000.0, **sup})
+    diag.add_lifecycle({"stage": "coverage_render_exited", "ts": 3001.0, **sup})
+    for i in range(3002, 4002):
+        diag.add_lifecycle({"stage": "stop_requested", "ts": float(i), **sup})
+    for stage in ("drizzle_finalization_entered", "drizzle_finalization_pre_save",
+                  "drizzle_finalization_returned", "memmap_cleanup_entered",
+                  "memmap_cleanup_returned", "fits_save", "artifact_final"):
+        diag.add_lifecycle({"stage": stage, "ts": 5000.0, **sup})
+    for i in range(5001, 6001):
+        diag.add_lifecycle({"stage": "stop_requested", "ts": float(i), **sup})
+
+    lifecycle = diag.lifecycle
+    assert len(lifecycle) <= dsd.MAX_LIFECYCLE_EVENTS
+    stages = diag.lifecycle_stages()
+    assert stages.count("stop_requested") == 1
+    # one retained stop record at the FIRST position; later repeats never move it
+    assert stages[0] == "stop_requested"
+    rec = diag._stop_record
+    assert rec["first_stop_timestamp"] == 1.0
+    assert rec["last_stop_timestamp"] == 6000.0
+    # count includes the first observation: 2000 + 1000 + 1000
+    assert rec["stop_repeat_count"] == 4000
+    assert rec["stop_repeat_count_saturated"] is False
+    # every distinct later canonical stage survives, in causal emission order
+    expected_tail = ["coverage_render_entered", "coverage_render_exited",
+                     "drizzle_finalization_entered", "drizzle_finalization_pre_save",
+                     "drizzle_finalization_returned", "memmap_cleanup_entered",
+                     "memmap_cleanup_returned", "fits_save", "artifact_final"]
+    assert stages[1:] == expected_tail
+    # every relevant lifecycle record preserves the canonical support fields
+    for r in lifecycle:
+        assert "drizzle_sup_w1_present" in r
+        assert "drizzle_sup_w2_present" in r
+        assert "support_available" in r
+    # bounded + JSON-safe
+    payload = json.dumps(diag.to_dict(), sort_keys=True, allow_nan=False)
+    assert len(payload) < 20_000
+    assert len(lifecycle) < 20
+    summary = diag.to_dict()["lifecycle_summary"]["stop_summary"]
+    assert summary["stop_repeat_count"] == 4000
+    assert summary["first_stop_timestamp"] == 1.0
+    assert summary["last_stop_timestamp"] == 6000.0
+
+
+def test_stop_repeat_count_saturates_and_flags():
+    diag = dsd.DrizzleScienceDiagnostics(run_token="sat")
+    diag.add_lifecycle({"stage": "stop_requested", "ts": 1.0})
+    diag._stop_record["stop_repeat_count"] = dsd.MAX_STOP_REPEAT_COUNT
+    diag.add_lifecycle({"stage": "stop_requested", "ts": 2.0})
+    assert diag._stop_record["stop_repeat_count"] == dsd.MAX_STOP_REPEAT_COUNT
+    assert diag._stop_record["stop_repeat_count_saturated"] is True
+
+
+def test_stop_support_first_last_snapshots_not_overwritten():
+    diag = dsd.DrizzleScienceDiagnostics(run_token="snap")
+    diag.add_lifecycle({"stage": "stop_requested", "ts": 1.0,
+                        "support_available": True,
+                        "drizzle_sup_w1_present": True,
+                        "drizzle_sup_w2_present": True})
+    diag.add_lifecycle({"stage": "stop_requested", "ts": 2.0,
+                        "support_available": False,
+                        "drizzle_sup_w1_present": False,
+                        "drizzle_sup_w2_present": False})
+    rec = diag._stop_record
+    assert rec["support_available_first"] is True
+    assert rec["support_available"] is True  # canonical field keeps FIRST
+    assert rec["support_available_last"] is False
+    assert rec["drizzle_sup_w1_present_last"] is False
+    assert rec["drizzle_sup_w1_present_first"] is True
+
+
 def test_lifecycle_retention_coalesces_checkpoints_and_keeps_terminal():
     diag = dsd.DrizzleScienceDiagnostics(run_token="r")
     for i in range(6000):
