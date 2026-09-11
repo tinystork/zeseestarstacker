@@ -86,6 +86,33 @@ def test_backend_lanczos_effective_one():
     assert obj.drizzle_pixfrac_reason == dx.PIXFRAC_REASON_LANCZOS_FIXED
 
 
+@pytest.mark.parametrize(
+    "kernel,requested,expected_reason",
+    [
+        ("square", 2.0, dx.PIXFRAC_REASON_GT_ONE),
+        ("lanczos2", 0.7, dx.PIXFRAC_REASON_LANCZOS_FIXED),
+    ],
+)
+def test_backend_pixfrac_normalization_is_idempotent(
+    kernel, requested, expected_reason
+):
+    obj = _stacker(kernel=kernel, pixfrac=requested)
+    obj._normalize_effective_drizzle_config()
+    first = (
+        obj.drizzle_pixfrac,
+        obj.drizzle_pixfrac_requested,
+        obj.drizzle_pixfrac_reason,
+    )
+
+    obj._normalize_effective_drizzle_config()
+
+    assert (
+        obj.drizzle_pixfrac,
+        obj.drizzle_pixfrac_requested,
+        obj.drizzle_pixfrac_reason,
+    ) == first == (1.0, requested, expected_reason)
+
+
 # --- 3) run contract provenance --------------------------------------------
 def test_run_contract_pixfrac_reason_round_trip():
     obj = _stacker(pixfrac=1.5)

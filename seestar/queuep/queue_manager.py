@@ -5757,7 +5757,16 @@ class SeestarQueuedStacker:
                 kernel_eff, kernel_reason = validate_drizzle_kernel(
                     kernel_requested
                 )
-                _raw_pixfrac_req = getattr(self, "drizzle_pixfrac", 1.0)
+                _raw_pixfrac_req = getattr(
+                    self,
+                    "_drizzle_pixfrac_request_raw",
+                    getattr(
+                        self,
+                        "drizzle_pixfrac_requested",
+                        getattr(self, "drizzle_pixfrac", 1.0),
+                    ),
+                )
+                self._drizzle_pixfrac_request_raw = _raw_pixfrac_req
                 # keep the legacy validator output for the existing log/warn
                 # seam, but the ONE authoritative result is `resolve_*` below.
                 pixfrac_requested, pixfrac_reason = validate_drizzle_pixfrac(
@@ -16621,7 +16630,14 @@ class SeestarQueuedStacker:
         kernel_eff, _kernel_reason = validate_drizzle_kernel(
             getattr(self, "drizzle_kernel", "square")
         )
-        _raw_pixfrac_req = getattr(self, "drizzle_pixfrac", 1.0)
+        _raw_pixfrac_req = getattr(self, "_drizzle_pixfrac_request_raw", None)
+        if _raw_pixfrac_req is None:
+            _raw_pixfrac_req = getattr(
+                self,
+                "drizzle_pixfrac_requested",
+                getattr(self, "drizzle_pixfrac", 1.0),
+            )
+            self._drizzle_pixfrac_request_raw = _raw_pixfrac_req
         _pf_eff, _pf_raw, _pf_reason = resolve_drizzle_pixfrac(
             kernel_eff, _raw_pixfrac_req
         )
@@ -16748,6 +16764,7 @@ class SeestarQueuedStacker:
             self.drizzle_pixfrac = float(sci["drizzle_pixfrac_effective"])
         if sci.get("drizzle_pixfrac_requested") is not None:
             self.drizzle_pixfrac_requested = float(sci["drizzle_pixfrac_requested"])
+            self._drizzle_pixfrac_request_raw = self.drizzle_pixfrac_requested
         if "drizzle_pixfrac_reason" in sci:
             self.drizzle_pixfrac_reason = sci["drizzle_pixfrac_reason"]
 
@@ -23324,6 +23341,10 @@ class SeestarQueuedStacker:
         if self.drizzle_active_session and not self.is_mosaic_run:
             self.drizzle_kernel = str(drizzle_kernel)
             self.drizzle_pixfrac = float(drizzle_pixfrac)
+            # Fresh run boundary: capture the request once.  Normalization and
+            # initialize retries consume this stable carrier rather than the
+            # effective value written back to ``self.drizzle_pixfrac``.
+            self._drizzle_pixfrac_request_raw = float(drizzle_pixfrac)
             logger.debug(
                 f"   -> Drizzle ACTIF (Standard). Mode: '{self.drizzle_mode}', Scale: {self.drizzle_scale:.1f}, Kernel: {self.drizzle_kernel}, Pixfrac: {self.drizzle_pixfrac:.2f}, WHT Thresh: {self.drizzle_wht_threshold:.3f}"
             )
