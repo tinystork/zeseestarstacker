@@ -1868,14 +1868,20 @@ class SettingsManager:
             try:
                 self.drizzle_pixfrac = float(self.drizzle_pixfrac)
                 if not (
-                    0.01 <= self.drizzle_pixfrac <= 2.0
-                ):  # MODIFIÉ : Limite supérieure à 2.0
+                    0.01 <= self.drizzle_pixfrac <= 1.0
+                ):  # P2-D1 canonical envelope (0.01, 1]
                     original = self.drizzle_pixfrac
-                    self.drizzle_pixfrac = np.clip(
-                        self.drizzle_pixfrac, 0.01, 2.0
-                    )  # MODIFIÉ : Clip à 2.0
+                    self.drizzle_pixfrac = float(
+                        np.clip(self.drizzle_pixfrac, 0.01, 1.0)
+                    )
+                    self.drizzle_pixfrac_requested_raw = float(original)
+                    self.drizzle_pixfrac_reason = (
+                        "pixfrac_gt_one_coerced_to_one"
+                        if original > 1.0
+                        else "pixfrac_below_minimum_clamped"
+                    )
                     messages.append(
-                        f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 2.0], ajusté à {self.drizzle_pixfrac:.2f}"
+                        f"Pixfrac Drizzle ({original:.2f}) hors limites [0.01, 1.0], ajusté à {self.drizzle_pixfrac:.2f}"
                     )
             except (ValueError, TypeError):
                 original = self.drizzle_pixfrac

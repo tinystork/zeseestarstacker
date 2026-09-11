@@ -572,12 +572,6 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         "drizzle_pixfrac_effective": float(
             getattr(qm, "drizzle_pixfrac", 1.0) or 1.0
         ),
-        "drizzle_pixfrac_requested": float(
-            getattr(qm, "drizzle_pixfrac_requested", None)
-            if getattr(qm, "drizzle_pixfrac_requested", None) is not None
-            else (getattr(qm, "drizzle_pixfrac", 1.0) or 1.0)
-        ),
-        "drizzle_pixfrac_reason": getattr(qm, "drizzle_pixfrac_reason", None),
         "drizzle_wht_threshold_effective": float(
             getattr(
                 qm,
@@ -604,6 +598,21 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         "registration_contract": _REGISTRATION_CONTRACT,
         "registration_contract_version": _REGISTRATION_CONTRACT_VERSION,
     }
+    # P2-D1: pixfrac provenance keys are CONDITIONAL so legacy configs that
+    # predate them keep an identical full digest: omit the reason when absent
+    # (never a synthetic null key) and the requested key when it equals the
+    # effective value.
+    _pf_req_v = getattr(qm, "drizzle_pixfrac_requested", None)
+    _pf_eff_v = scientific.get("drizzle_pixfrac_effective")
+    if (
+        _pf_req_v is not None
+        and _pf_eff_v is not None
+        and float(_pf_req_v) != float(_pf_eff_v)
+    ):
+        scientific["drizzle_pixfrac_requested"] = float(_pf_req_v)
+    _pf_rsn_v = getattr(qm, "drizzle_pixfrac_reason", None)
+    if _pf_rsn_v:
+        scientific["drizzle_pixfrac_reason"] = str(_pf_rsn_v)
     execution = {
         "drizzle_mode": str(getattr(qm, "drizzle_mode", "Final") or "Final"),
         "drizzle_group_size": int(getattr(qm, "drizzle_group_size", 50) or 50),

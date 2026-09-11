@@ -216,6 +216,10 @@ class QtSettingsState:
     drizzle_mode: str = "Final"
     drizzle_kernel: str = "square"
     drizzle_pixfrac: float = 1.0
+    # P2-D1 provenance carriers (not user-facing controls): the raw legacy
+    # numeric request and the stable coerce reason.
+    drizzle_pixfrac_requested_raw: float = 1.0
+    drizzle_pixfrac_reason: str = ""
     drizzle_group_size: int = 50
     # Drizzle GPU toggle (Tk ``use_gpu_var``, Stacking tab).  GUI parity only
     # today: ``build_backend_kwargs`` does not consume it (backend E2E later).
@@ -368,6 +372,17 @@ class QtSettingsState:
         # settings file written by an older build must not re-introduce it.
         if state.batch_size < 0:
             state.batch_size = 0
+        # P2-D1 canonical pixfrac envelope: a persisted legacy request > 1
+        # migrates to the active value 1.0 while the raw request and a stable
+        # reason are preserved; values <= 1 are unchanged.
+        if state.drizzle_pixfrac > 1.0:
+            state.drizzle_pixfrac_requested_raw = float(state.drizzle_pixfrac)
+            state.drizzle_pixfrac_reason = "pixfrac_gt_one_coerced_to_one"
+            state.drizzle_pixfrac = 1.0
+        elif state.drizzle_pixfrac < 0.01:
+            state.drizzle_pixfrac_requested_raw = float(state.drizzle_pixfrac)
+            state.drizzle_pixfrac_reason = "pixfrac_below_minimum_clamped"
+            state.drizzle_pixfrac = 0.01
         return state
 
     def to_dict(self) -> Dict[str, Any]:

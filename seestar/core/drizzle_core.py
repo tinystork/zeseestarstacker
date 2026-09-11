@@ -53,6 +53,8 @@ __all__ = [
     "PIXFRAC_REASON_CHECKPOINT_GT_ONE",
     "PIXFRAC_REASON_NOT_REPRESENTABLE",
     "classify_drizzle_pixfrac",
+    "resolve_drizzle_pixfrac",
+    "pixfrac_ui_policy",
     "drizzle_stream",
     "support_integrity_violations",
     "VALID_DRIZZLE_KERNELS",
@@ -229,6 +231,34 @@ def pixfrac_ui_policy(kernel):
     if k == "point":
         return False, PIXFRAC_MAX, PIXFRAC_REASON_POINT_IGNORED, False
     return True, None, None, True
+
+
+def resolve_drizzle_pixfrac(kernel, requested):
+    """ONE authoritative backend result: ``(effective, requested_raw, reason)``.
+
+    Precedence (P2-D1): requested already equals the canonical effective (1.0)
+    -> no reason; Lanczos2/3 differing -> effective 1.0, raw retained,
+    ``pixfrac_not_applicable_lanczos_fixed_one``; Point differing -> numeric
+    argument/effective retained when <= 1 (legacy compatibility; upstream
+    ignores it) or 1.0 when > 1, raw retained,
+    ``pixfrac_ignored_by_upstream_point``; Square/Turbo/Gaussian -> canonical
+    classifier result.
+    """
+    k = str(kernel or "").lower()
+    eff, raw, reason = classify_drizzle_pixfrac(requested)
+    if raw is None:  # non-numeric / non-finite: deterministic bounded policy
+        return eff, raw, reason
+    if k in LANCZOS_KERNELS:
+        return PIXFRAC_MAX, raw, (
+            None if float(raw) == float(PIXFRAC_MAX)
+            else PIXFRAC_REASON_LANCZOS_FIXED
+        )
+    if k == "point":
+        return eff, raw, (
+            None if float(raw) == float(PIXFRAC_MAX)
+            else PIXFRAC_REASON_POINT_IGNORED
+        )
+    return eff, raw, reason
 
 
 def classify_drizzle_pixfrac(pixfrac):

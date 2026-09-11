@@ -82,7 +82,8 @@ def test_backend_lanczos_effective_one():
     obj._normalize_effective_drizzle_config()
     assert obj.drizzle_pixfrac == 1.0
     assert obj.drizzle_pixfrac_requested == 0.7
-    assert obj.drizzle_pixfrac_reason is None
+    # P2-D1: a semantically-fixed Lanczos control carries an explicit reason.
+    assert obj.drizzle_pixfrac_reason == dx.PIXFRAC_REASON_LANCZOS_FIXED
 
 
 # --- 3) run contract provenance --------------------------------------------

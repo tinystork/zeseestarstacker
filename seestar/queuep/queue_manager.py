@@ -342,6 +342,7 @@ from ..core.drizzle_core import (
     build_output_grid,
     classify_drizzle_pixfrac,
     derive_pixel_scale_ratio,
+    resolve_drizzle_pixfrac,
     pixmap_from_alignment,
     support_integrity_violations,
     validate_drizzle_kernel,
@@ -5757,12 +5758,15 @@ class SeestarQueuedStacker:
                     kernel_requested
                 )
                 _raw_pixfrac_req = getattr(self, "drizzle_pixfrac", 1.0)
+                # keep the legacy validator output for the existing log/warn
+                # seam, but the ONE authoritative result is `resolve_*` below.
                 pixfrac_requested, pixfrac_reason = validate_drizzle_pixfrac(
                     _raw_pixfrac_req
                 )
-                _pf_eff, _pf_raw, _pf_reason = classify_drizzle_pixfrac(
-                    _raw_pixfrac_req
+                _pf_eff, _pf_raw, _pf_reason = resolve_drizzle_pixfrac(
+                    kernel_eff, _raw_pixfrac_req
                 )
+                pixfrac_eff = float(_pf_eff)
                 if kernel_reason:
                     logger.warning("M3: %s", kernel_reason)
                 if pixfrac_reason:
@@ -5785,11 +5789,9 @@ class SeestarQueuedStacker:
                 wht_threshold_eff = 0.0 if is_lanczos else wht_threshold_requested
 
                 self.drizzle_kernel = kernel_eff
-                self.drizzle_pixfrac = pixfrac_eff
+                self.drizzle_pixfrac = float(_pf_eff)
                 self.drizzle_pixfrac_requested = (
-                    float(_pf_raw)
-                    if _pf_reason == PIXFRAC_REASON_GT_ONE and _pf_raw is not None
-                    else pixfrac_requested
+                    float(_pf_raw) if _pf_raw is not None else float(_pf_eff)
                 )
                 self.drizzle_pixfrac_reason = _pf_reason
                 self.drizzle_wht_threshold_requested = wht_threshold_requested
@@ -5814,6 +5816,7 @@ class SeestarQueuedStacker:
                             "restored Drizzle output shape differs from the "
                             "checkpoint grid"
                         )
+                    self._adopt_persisted_pixfrac_facts(resume_result)
                     current_cfg = build_drizzle_canonical_config(
                         self, product_version=self._canonical_product_version()
                     )
@@ -16619,19 +16622,16 @@ class SeestarQueuedStacker:
             getattr(self, "drizzle_kernel", "square")
         )
         _raw_pixfrac_req = getattr(self, "drizzle_pixfrac", 1.0)
-        pixfrac_requested, _pixfrac_reason = validate_drizzle_pixfrac(
-            _raw_pixfrac_req
+        _pf_eff, _pf_raw, _pf_reason = resolve_drizzle_pixfrac(
+            kernel_eff, _raw_pixfrac_req
         )
-        _pf_eff, _pf_raw, _pf_reason = classify_drizzle_pixfrac(_raw_pixfrac_req)
         is_lanczos = kernel_eff in LANCZOS_KERNELS
         self.drizzle_kernel = kernel_eff
         self.drizzle_pixfrac_requested = (
-            float(_pf_raw)
-            if _pf_reason == PIXFRAC_REASON_GT_ONE and _pf_raw is not None
-            else pixfrac_requested
+            float(_pf_raw) if _pf_raw is not None else float(_pf_eff)
         )
         self.drizzle_pixfrac_reason = _pf_reason
-        self.drizzle_pixfrac = 1.0 if is_lanczos else pixfrac_requested
+        self.drizzle_pixfrac = float(_pf_eff)
         requested_wht = float(
             getattr(self, "drizzle_wht_threshold", 0.0) or 0.0
         )
@@ -16732,6 +16732,25 @@ class SeestarQueuedStacker:
             self, "checkpoint_restore", frame_count=self._drizzle_frame_count
         )
 
+    def _adopt_persisted_pixfrac_facts(self, result):
+        """P2-D1: copy the validated persisted pixfrac triplet into runtime.
+
+        Uses KEY MEMBERSHIP so a legacy checkpoint without the reason key stays
+        absent; never relaxes the strict scientific/deposition checks.
+        """
+        try:
+            sci = getattr(getattr(result, "config", None), "scientific", None)
+            if not isinstance(sci, dict):
+                return
+        except Exception:  # noqa: BLE001 - fail-open provenance adoption
+            return
+        if sci.get("drizzle_pixfrac_effective") is not None:
+            self.drizzle_pixfrac = float(sci["drizzle_pixfrac_effective"])
+        if sci.get("drizzle_pixfrac_requested") is not None:
+            self.drizzle_pixfrac_requested = float(sci["drizzle_pixfrac_requested"])
+        if "drizzle_pixfrac_reason" in sci:
+            self.drizzle_pixfrac_reason = sci["drizzle_pixfrac_reason"]
+
     def _validate_drizzle_resume_headless(self):
         """Validate a native Drizzle checkpoint without mutating disk/runtime.
 
@@ -16753,6 +16772,11 @@ class SeestarQueuedStacker:
                 require_exact_versions=True,
                 resolver=resolver,
             )
+            # P2-D1: re-adopt the validated persisted pixfrac triplet BEFORE the
+            # full-digest comparison so a checkpoint created under this contract
+            # resumes with exactly the same provenance (key membership; an
+            # absent optional reason stays absent).
+            self._adopt_persisted_pixfrac_facts(result)
             # P2-B: adopt the persisted frozen geometry fact BEFORE building the
             # current canonical config, so the preflight digest comparison sees
             # exactly the geometry the run was created with.  A legacy
