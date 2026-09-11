@@ -375,6 +375,31 @@ class MosaicSettingsWindow(tk.Toplevel):
     def _update_options_state(self):
         print(f"DEBUG (MosaicSettingsWindow _update_options_state V4): Exécution...")
         is_mosaic_enabled = self.local_mosaic_active_var.get()
+        # P2-D2: kernel-aware pixfrac UX (canonical policy; UI-only).
+        try:
+            from ..core.drizzle_core import pixfrac_ui_policy
+
+            _editable, _val, _reason, _applicable = pixfrac_ui_policy(
+                self.local_drizzle_kernel_var.get()
+            )
+            if (not is_mosaic_enabled) or (not _editable):
+                self.pixfrac_spinbox.config(state=tk.DISABLED)
+                if _val is not None and is_mosaic_enabled:
+                    self.local_drizzle_pixfrac_var.set(float(_val))
+            else:
+                self.pixfrac_spinbox.config(state=tk.NORMAL)
+            if hasattr(self, "pixfrac_label"):
+                if is_mosaic_enabled and not _editable:
+                    _suffix = (
+                        " (N/A: ignoré en amont)"
+                        if not _applicable
+                        else " (fixe à 1.0)"
+                    )
+                else:
+                    _suffix = ""
+                self.pixfrac_label.config(text="Pixfrac:" + _suffix)
+        except Exception:  # noqa: BLE001 - UI fail-open
+            pass
         current_align_mode = self.local_mosaic_align_mode_var.get()
 
 

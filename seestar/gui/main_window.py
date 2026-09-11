@@ -677,6 +677,35 @@ class SeestarStackerGUI:
                     # Appliquer l'état global (activé/désactivé par la checkbox principale)
                     widget.config(state=state)
 
+            # P2-D2: kernel-aware pixfrac UX (canonical policy; UI-only).
+            try:
+                from ..core.drizzle_core import pixfrac_ui_policy
+
+                _editable, _val, _reason, _applicable = pixfrac_ui_policy(
+                    self.drizzle_kernel_var.get()
+                )
+                _pf = getattr(self, "drizzle_pixfrac_spinbox", None)
+                _lbl = getattr(self, "drizzle_pixfrac_label", None)
+                if _pf is not None and hasattr(_pf, "winfo_exists") and _pf.winfo_exists():
+                    if (not global_drizzle_enabled) or (not _editable):
+                        _pf.config(state=tk.DISABLED)
+                        if _val is not None and global_drizzle_enabled:
+                            try:
+                                self.drizzle_pixfrac_var.set(float(_val))
+                            except Exception:
+                                pass
+                    else:
+                        _pf.config(state=tk.NORMAL)
+                if _lbl is not None and hasattr(_lbl, "config"):
+                    _suffix = ""
+                    if global_drizzle_enabled and not _applicable:
+                        _suffix = " (N/A: ignoré en amont)"
+                    elif global_drizzle_enabled and not _editable:
+                        _suffix = " (fixe à 1.0)"
+                    _lbl.config(text="Pixfrac:" + _suffix)
+            except Exception:  # noqa: BLE001 - UI fail-open
+                pass
+
             # M3-D: la taille de groupe n'est pertinente qu'en politique Large
             # dataset (Incremental). Standard garde une science identique sans
             # preview automatique par groupe -> widget désactivé.
