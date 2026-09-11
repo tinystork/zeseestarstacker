@@ -2533,6 +2533,16 @@ class SettingsManager:
             "drizzle_mode": str(self.drizzle_mode),
             "drizzle_kernel": str(self.drizzle_kernel),
             "drizzle_pixfrac": float(self.drizzle_pixfrac),
+            # P2-D1: bounded optional provenance carriers (omitted when absent).
+            **({
+                **({
+                    "drizzle_pixfrac_requested_raw": float(self.drizzle_pixfrac_requested_raw),
+                } if getattr(self, "drizzle_pixfrac_requested_raw", None) is not None else {}),
+                **({
+                    "drizzle_pixfrac_reason": str(self.drizzle_pixfrac_reason),
+                } if getattr(self, "drizzle_pixfrac_reason", None) else {}),
+            } if (getattr(self, "drizzle_pixfrac_requested_raw", None) is not None
+                  or getattr(self, "drizzle_pixfrac_reason", None)) else {}),
             "drizzle_group_size": int(getattr(self, "drizzle_group_size", 50)),
             "drizzle_double_norm_fix": bool(
                 getattr(self, "drizzle_double_norm_fix", True)
