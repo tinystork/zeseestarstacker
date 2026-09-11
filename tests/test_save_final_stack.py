@@ -883,10 +883,15 @@ def test_save_final_stack_preserve_linear_argument_overrides_false_attribute(
         preserve_linear_output=True,  # explicit argument must win
     )
     saved = fits.getdata(obj.final_stacked_path)
+    header = fits.getheader(obj.final_stacked_path)
     assert saved.dtype.kind == "f" and saved.dtype.itemsize == 4
-    # Negative linear values preserved (no clip >= 0) and no percentile
-    # normalization collapsed the 100 ADU range to [0,1].
-    assert np.array_equal(saved.astype(np.float32), data)
+    # R3: the float32 export carries a reversible constant additive
+    # viewer-compatibility offset (default ON).  The linear scientific values
+    # survive exactly once the documented offset is undone (no clip >= 0, no
+    # percentile normalization).
+    offset = float(header.get("ZSOFFSET", 0.0))
+    assert bool(header.get("ZSCOMPAT", False)) is True
+    assert np.array_equal((saved.astype(np.float32) - np.float32(offset)), data)
 
 
 def test_save_final_stack_preserve_linear_attribute_honored_without_argument(
@@ -909,8 +914,11 @@ def test_save_final_stack_preserve_linear_attribute_honored_without_argument(
         preserve_linear_output=False,  # explicit False must NOT force non-preserve
     )
     saved = fits.getdata(obj.final_stacked_path)
+    header = fits.getheader(obj.final_stacked_path)
     assert saved.dtype.kind == "f"
-    assert np.array_equal(saved.astype(np.float32), data)
+    offset = float(header.get("ZSOFFSET", 0.0))
+    assert bool(header.get("ZSCOMPAT", False)) is True
+    assert np.array_equal((saved.astype(np.float32) - np.float32(offset)), data)
 
 
 # ---------------------------------------------------------------------------

@@ -212,6 +212,46 @@ def _finite_positive_sample(np: Any, arr):
     return _cap_sample(np, vals)
 
 
+def _anchor_basis(np: Any, arr):
+    """Select the deterministic percentile basis for the anchor mapping (D4).
+
+    Mirrors ``seestar/core/image_processing.py::stretch_display_data`` basis
+    selection so the Qt black anchor cannot land inside the faint positive
+    signal of a signed frame:
+
+    * ``n_neg`` — finite values ``< 0`` (negative background floor / ringing);
+    * ``n_zero`` — finite values ``== 0`` (no-data support / clipped floor);
+    * ``n_total`` — total finite count;
+    * ``positive`` — the existing strictly-positive sample (``> 0.0``; the Qt
+      threshold is intentionally preserved, NOT changed to the D4 ``0.001``);
+
+    ``use_inclusive`` (mirroring D4) is true when there is meaningful signed
+    content, a significant exact-zero population (``>= 2%``) or too few
+    positive pixels to be robust (``< 20``).  In that case the FULL finite
+    signed sample (negatives and zeros included) is the percentile basis, so
+    the low anchor sits at/under the background floor.  Otherwise the legacy
+    positive-only sample is kept, which makes clean non-negative inputs
+    byte-identical to the pre-change behaviour.
+
+    Returns ``None`` when no usable sample exists (no finite element, or a
+    non-inclusive input with no positive element) — preserving the previous
+    degenerate-input handling.
+    """
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return None
+    n_total = int(finite.size)
+    n_neg = int(np.sum(finite < 0))
+    n_zero = int(np.sum(finite == 0))
+    positive = finite[finite > 0.0]
+    use_inclusive = (
+        (n_neg > 0) or (n_zero / n_total >= 0.02) or (positive.size < 20)
+    )
+    if use_inclusive:
+        return _cap_sample(np, finite)
+    return _finite_positive_sample(np, arr)
+
+
 def _luminance(np: Any, arr):
     """Rec.601 luminance of a mapped float buffer (2D or ``(H, W, 3+)``)."""
     if arr.ndim == 3 and arr.shape[2] >= 3:
@@ -477,10 +517,15 @@ def extract_raw_linear(data: Any) -> Optional[Any]:
 def compute_anchors(raw_linear, sep: float = ANCHOR_SEP) -> Tuple[float, float]:
     """Compute fixed normalization anchors ``(lo, hi)`` from a raw-linear array.
 
-    §5.2 Option A: anchors come from a deterministic finite-positive sample
-    (``percentile(sample, ANCHOR_LO_PCT)`` / ``percentile(sample, ANCHOR_HI_PCT)``), falling back
-    to the finite min/max *only* when that sample is degenerate (empty,
-    non-finite, or ``hi <= lo + sep``).  Always returns ``(lo, hi)`` with
+    §5.2 Option A: anchors come from a deterministic percentile sample of the
+    *anchor basis* (``percentile(sample, ANCHOR_LO_PCT)`` /
+    ``percentile(sample, ANCHOR_HI_PCT)``), falling back to the finite min/max
+    *only* when that sample is degenerate (empty, non-finite, or
+    ``hi <= lo + sep``).  The basis is signed-aware (see
+    :func:`_anchor_basis`, mirroring D4): signed content / a significant zero
+    population uses the full finite signed sample so the low anchor sits
+    at/under the negative background floor; clean non-negative inputs keep the
+    legacy positive-only basis (byte-stable).  Always returns ``(lo, hi)`` with
     ``hi > lo`` so the mapping is non-degenerate.
     """
     np = _load_numpy()
@@ -490,7 +535,7 @@ def compute_anchors(raw_linear, sep: float = ANCHOR_SEP) -> Tuple[float, float]:
     if arr.size == 0:
         return (0.0, 1.0)
 
-    sample = _finite_positive_sample(np, arr)
+    sample = _anchor_basis(np, arr)
     if sample is not None and sample.size > 0:
         lo = float(np.percentile(sample, ANCHOR_LO_PCT))
         hi = float(np.percentile(sample, ANCHOR_HI_PCT))
@@ -578,7 +623,8 @@ def adapt_anchors_for_drift(
     single outlier pixel) and never overshoots the data.  Returns a fresh
     ``(lo, hi)`` pair with ``hi > lo``; the input array is never mutated.
 
-    A degenerate new frame (no finite-positive sample) carries no drift
+    A degenerate new frame (no usable percentile sample — no finite element,
+    or a non-inclusive input with no positive pixel) carries no drift
     information and leaves the anchors unchanged.
     """
     np = _load_numpy()
@@ -594,7 +640,10 @@ def adapt_anchors_for_drift(
         # No usable frozen anchors: fall back to a fresh anchor computation.
         return compute_anchors(arr, sep=sep)
 
-    sample = _finite_positive_sample(np, arr)
+    # Signed-aware basis (mirrors D4): signed content / a significant zero
+    # population uses the full finite signed sample so the robust low tail
+    # (p0.5) tracks the negative background floor, not the faint positives.
+    sample = _anchor_basis(np, arr)
     if sample is None or sample.size == 0:
         return (lo, hi)
     cur_lo = float(np.percentile(sample, ANCHOR_LO_PCT))
@@ -799,6 +848,12 @@ def compute_histogram_float(mapped) -> Optional[Dict[str, Any]]:
         "bin_range": bin_range,
         "overflow": overflow,
         "overflow_total": overflow_total,
+        # R2: retained bounded deterministic per-channel analysis SAMPLE (the
+        # exact in-domain arrays the counts/stats above were derived from,
+        # each <= MAX_SAMPLE_PIXELS).  Additive key; existing keys are
+        # untouched.  Enables a zoomed view to re-bin a narrow visible
+        # sub-range from the same bounded sample without a full recompute.
+        "samples": in_domain_by_channel,
     }
 
 

@@ -695,6 +695,21 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- R3 : Lecture du setting FITS viewer compatibility ---
+            self.fits_viewer_compatibility = getattr(
+                gui_instance,
+                "fits_viewer_compatibility_var",
+                tk.BooleanVar(
+                    value=default_values_from_code.get(
+                        "fits_viewer_compatibility", True
+                    )
+                ),
+            ).get()
+            logger.debug(
+                f"DEBUG SM (update_from_ui): self.fits_viewer_compatibility lu (attribut UI ou défaut): {self.fits_viewer_compatibility}"
+            )
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Lecture du setting preserve_linear_output ---
             self.preserve_linear_output = getattr(
                 gui_instance,
@@ -1144,6 +1159,15 @@ class SettingsManager:
             )
             # --- FIN NOUVEAU ---
 
+            # --- R3 : Application du setting fits_viewer_compatibility à l'UI ---
+            getattr(
+                gui_instance, "fits_viewer_compatibility_var", tk.BooleanVar()
+            ).set(bool(getattr(self, "fits_viewer_compatibility", True)))
+            logger.debug(
+                f"DEBUG (Settings apply_to_ui): fits_viewer_compatibility appliqué à l'UI (valeur: {getattr(self, 'fits_viewer_compatibility', True)})"
+            )
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Application du setting preserve_linear_output ---
             getattr(gui_instance, "preserve_linear_output_var", tk.BooleanVar()).set(
                 self.preserve_linear_output
@@ -1368,6 +1392,14 @@ class SettingsManager:
         ] = False  # Défaut à False (donc uint16 après mise à l'échelle par défaut)
         logger.debug(
             f"DEBUG (SettingsManager get_default_values): Ajout de 'save_final_as_float32'={defaults_dict['save_final_as_float32']}"
+        )
+        # --- FIN NOUVEAU ---
+
+        # --- R3: FITS viewer compatibility (constant additive export offset) ---
+        # DEFAULT ENABLED: advanced users can disable it in Expert mode.
+        defaults_dict["fits_viewer_compatibility"] = True
+        logger.debug(
+            f"DEBUG (SettingsManager get_default_values): Ajout de 'fits_viewer_compatibility'={defaults_dict['fits_viewer_compatibility']}"
         )
         # --- FIN NOUVEAU ---
 
@@ -2232,6 +2264,23 @@ class SettingsManager:
                 self.save_final_as_float32 = current_save_float32_val
             # --- FIN NOUVEAU ---
 
+            # --- R3 : Validation du setting fits_viewer_compatibility ---
+            current_compat_val = getattr(
+                self,
+                "fits_viewer_compatibility",
+                defaults_fallback["fits_viewer_compatibility"],
+            )
+            if not isinstance(current_compat_val, bool):
+                messages.append(
+                    f"Option 'FITS viewer compatibility' ('{current_compat_val}') invalide, réinitialisée à {defaults_fallback['fits_viewer_compatibility']}."
+                )
+                self.fits_viewer_compatibility = defaults_fallback[
+                    "fits_viewer_compatibility"
+                ]
+            else:
+                self.fits_viewer_compatibility = current_compat_val
+            # --- FIN NOUVEAU ---
+
             # --- NOUVEAU : Validation du setting preserve_linear_output ---
             logger.debug("    -> Validating Preserve Linear Output...")
             current_preserve_val = getattr(
@@ -2603,6 +2652,11 @@ class SettingsManager:
             # --- NOUVEAU : Sauvegarde du setting save_final_as_float32 ---
             "save_final_as_float32": bool(
                 getattr(self, "save_final_as_float32", False)
+            ),
+            # --- FIN NOUVEAU ---
+            # --- R3 : Sauvegarde du setting fits_viewer_compatibility ---
+            "fits_viewer_compatibility": bool(
+                getattr(self, "fits_viewer_compatibility", True)
             ),
             # --- FIN NOUVEAU ---
             # --- NOUVEAU : Sauvegarde du paramètre use_gpu ---

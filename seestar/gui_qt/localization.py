@@ -300,6 +300,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Preserve linear output",
         "fr": "Préserver la sortie linéaire",
     },
+    "field_fits_viewer_compatibility": {
+        "en": "FITS viewer compatibility",
+        "fr": "Compatibilité visionneuse FITS",
+    },
+    "fits_viewer_compatibility_help": {
+        "en": "Adds a reversible constant offset when required so signed float32 FITS files display correctly in viewers that do not handle negative floating values properly.",
+        "fr": "Ajoute un d\u00e9calage constant r\u00e9versible lorsque n\u00e9cessaire afin que les fichiers FITS float32 sign\u00e9s s'affichent correctement dans les visionneuses qui ne g\u00e8rent pas correctement les valeurs flottantes n\u00e9gatives.",
+    },
     "field_match_bg": {
         "en": "Match background for final",
         "fr": "Correspondance fond final",

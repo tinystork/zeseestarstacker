@@ -254,14 +254,23 @@ class HistogramWidget(ttk.Frame):
             if finite_data_for_range.size > 0:
                 calculated_min = np.min(finite_data_for_range)
                 calculated_max = np.max(finite_data_for_range)
+                # KEEP the "tiny negative noise" heuristic so genuinely
+                # non-negative inputs stay byte-stable, but DO NOT clamp
+                # meaningful negatives to 0: signed float32 data (e.g. drizzle
+                # output, range -4.733 ... +82.809) must keep its true finite
+                # minimum in the histogram domain.
                 if calculated_min < 0 and np.all(finite_data_for_range[finite_data_for_range < 0] > -1e-5):
                     calculated_min = 0.0
-                calculated_min = max(0.0, calculated_min) 
             else: 
                 calculated_min, calculated_max = 0.0, 1.0 
             
             if calculated_max <= calculated_min + 1e-7:
-                if calculated_max < 1.5 and calculated_min > -0.5:
+                if calculated_min < -1e-5:
+                     # Degenerate (near-constant) input whose meaningful floor is
+                     # negative: keep the negative floor instead of snapping to 0.
+                     current_plot_min = calculated_min - 0.5
+                     current_plot_max = current_plot_min + 1.0
+                elif calculated_max < 1.5 and calculated_min > -0.5:
                      current_plot_min, current_plot_max = 0.0, 1.0001 
                 else: 
                      current_plot_min = max(0, calculated_min - 0.5) if calculated_min > 0 else 0.0
@@ -272,11 +281,17 @@ class HistogramWidget(ttk.Frame):
             
             if not self.freeze_x_range or self._current_hist_data_details is None:
                 self.data_min_for_current_plot = current_plot_min
-                self.data_max_for_current_plot = (
-                    current_plot_max * 1.001
-                    if (current_plot_max - current_plot_min) > 1e-9
-                    else current_plot_max + 1e-5
-                )
+                if (current_plot_max - current_plot_min) > 1e-9:
+                    if current_plot_max > 0:
+                        self.data_max_for_current_plot = current_plot_max * 1.001
+                    else:
+                        # Purely negative domain: the *1.001 headroom would
+                        # shrink (clip) the upper edge, so expand outward.
+                        self.data_max_for_current_plot = (
+                            current_plot_max + abs(current_plot_max) * 0.001
+                        )
+                else:
+                    self.data_max_for_current_plot = current_plot_max + 1e-5
             
             print(f"DEBUG HistoWidget._calculate_hist_data (V_HistoCalc_AddInputShape_1): Plage données pour histo (self.data_min/max_for_current_plot): [{self.data_min_for_current_plot:.4g}, {self.data_max_for_current_plot:.4g}]")
             
@@ -510,7 +525,11 @@ class HistogramWidget(ttk.Frame):
             print(f"ERREUR HistoWidget.plot_histogram: {e}"); traceback.print_exc(limit=2)
             try: 
                 self._configure_plot_style()
-                self.ax.set_xlim(0,1); self.ax.set_ylim(1,10); self._apply_x_scale(); self.ax.set_yscale('log')
+                _err_xmin = float(self.data_min_for_current_plot)
+                _err_xmax = float(self.data_max_for_current_plot)
+                if not (np.isfinite(_err_xmin) and np.isfinite(_err_xmax)) or _err_xmax <= _err_xmin:
+                    _err_xmin, _err_xmax = 0.0, 1.0
+                self.ax.set_xlim(_err_xmin, _err_xmax); self.ax.set_ylim(1,10); self._apply_x_scale(); self.ax.set_yscale('log')
                 if self.freeze_x_range:
                     self._stored_xlim = self.ax.get_xlim()
                 self.ax.text(0.5, 0.5, "Erreur Histogramme", color="red", ha='center', va='center', transform=self.ax.transAxes)
@@ -670,7 +689,7 @@ class HistogramWidget(ttk.Frame):
             if (self.data_max_for_current_plot - self.data_min_for_current_plot) > 1e-6:
                  self.ax.set_xlim(self.data_min_for_current_plot, self.data_max_for_current_plot)
             else:
-                 self.ax.set_xlim(0,1)
+                 self.ax.set_xlim(self.data_min_for_current_plot, self.data_min_for_current_plot + 1.0)
             if self.freeze_x_range:
                 self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw_idle(); return
@@ -690,7 +709,11 @@ class HistogramWidget(ttk.Frame):
             x_max = np.percentile(data_flat, percentile_max)
             if not np.isfinite(x_max):
                 return
-            self.ax.set_xlim(0.0, max(0.02, float(x_max)))
+            # Respect a negative domain floor instead of hardcoding 0.
+            x_floor = float(self.data_min_for_current_plot)
+            if x_floor >= 0.0:
+                x_floor = 0.0
+            self.ax.set_xlim(x_floor, max(x_floor + 0.02, float(x_max)))
             if self.freeze_x_range:
                 self._stored_xlim = self.ax.get_xlim()
             self.canvas.draw()
@@ -699,7 +722,15 @@ class HistogramWidget(ttk.Frame):
 
     def reset_histogram_view(self):
         try:
-            self.ax.set_xlim(0.0, 1.0)
+            # Respect a negative domain floor; keep the historical [0, 1]
+            # reset for non-negative (0-1 / positive-ADU) data.
+            if float(self.data_min_for_current_plot) < 0.0:
+                self.ax.set_xlim(
+                    float(self.data_min_for_current_plot),
+                    float(self.data_max_for_current_plot),
+                )
+            else:
+                self.ax.set_xlim(0.0, 1.0)
             self._apply_x_scale()
             if self.freeze_x_range:
                 self._stored_xlim = self.ax.get_xlim()

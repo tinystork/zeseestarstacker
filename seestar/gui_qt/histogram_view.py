@@ -118,6 +118,113 @@ _AXIS_MARGIN_BOTTOM = 14.0
 # range never collapses to a sliver).
 _MIN_ZOOM_WIDTH = 0.02
 
+# R2 (ZSSS zoom re-binning): the global float model grid holds ``bins`` (512)
+# bars.  When a zoomed view window covers fewer than this many GLOBAL bins
+# (i.e. the visible window is narrower than 1/4 of the plotted bar domain) the
+# global grid under-resolves the window and the bars look like a sparse comb of
+# widely spaced spikes (the human witness: zooming ~0.68 -> 0.83 showed a
+# comb).  Below the threshold the retained bounded sample is re-binned over the
+# VISIBLE window instead (see :func:`adaptive_rebin_bars`).  128 = 512/4 is
+# chosen so the un-zoomed default/full views keep their exact previous bars and
+# only a genuinely narrow zoom (< 25% of the plotted domain, < 128 global bins)
+# re-bins; it engages for the witnessed 0.68->0.83 zoom (76 global bins).
+R2_REBIN_MIN_VISIBLE_BINS = 128
+
+
+def _load_numpy():
+    """Lazily import numpy (module object, or ``None`` when unavailable)."""
+    try:
+        import importlib
+
+        return importlib.import_module("numpy")
+    except Exception:
+        return None
+
+
+def format_axis_level(level: float) -> str:
+    """Format an X-axis viewport level for the axis labels.
+
+    Fixed two-decimal formatting that renders negative levels correctly
+    (e.g. ``-4.73``) so the signed scientific domain labels truthfully.
+    """
+    return f"{float(level):.2f}"
+
+
+def adaptive_rebin_bars(
+    model: Optional[Dict[str, Any]],
+    view_min: float,
+    view_max: float,
+    bins: int = 512,
+    min_visible_bins: int = R2_REBIN_MIN_VISIBLE_BINS,
+):
+    """Re-bin the retained bounded sample over a NARROW visible window.
+
+    Domain-agnostic: works for the non-negative display model AND the signed
+    scientific model, because it re-bins the model's retained sample
+    (``model["samples"][ch]``, the R1 pattern) with
+    ``np.histogram(..., range=(vlo, vhi))`` over the *visible* sub-range and
+    returns ``log1p`` counts so the heights are comparable with the global
+    ``log_counts``.  Negative windows and negative levels are handled
+    verbatim.
+
+    Returns ``(heights, lo, hi, draw_overflow)`` — the same 4-tuple contract as
+    :meth:`HistogramView._bars_for_current_mode` — or ``None`` when re-binning
+    must NOT engage (so the caller keeps the global bars unchanged):
+
+    * the model has no retained ``samples`` (synthetic/legacy models);
+    * the visible window does not overlap the plotted bar domain, or is
+      degenerate;
+    * the window is NOT narrow (>= ``min_visible_bins`` global bins visible).
+
+    Strictly bounded and deterministic: at most one ``np.histogram`` per
+    channel over the already-capped sample (``<= MAX_SAMPLE_PIXELS``) with
+    ``bins`` <= 512 — a few milliseconds — so the GUI thread may call it
+    synchronously (the view caches the result per model + window).  It never
+    recomputes from the full frame.
+    """
+    if not model:
+        return None
+    samples = model.get("samples")
+    if not samples:
+        return None
+    try:
+        domain = model.get("bin_range") or model.get("range")
+        lo_d = float(domain[0])
+        hi_d = float(domain[1])
+    except (TypeError, IndexError, ValueError):
+        return None
+    span = hi_d - lo_d
+    if not math.isfinite(span) or span <= 0.0:
+        return None
+    try:
+        vlo = max(float(view_min), lo_d)
+        vhi = min(float(view_max), hi_d)
+    except (TypeError, ValueError):
+        return None
+    if not (vhi > vlo):
+        return None
+    # numpy is imported lazily (like ``preview_analysis``) so importing this Qt
+    # module never pulls numpy eagerly (import-hygiene contract).
+    np = _load_numpy()
+    if np is None:
+        return None
+    global_bins = int(model.get("bins") or bins)
+    visible_bins = (vhi - vlo) / span * global_bins
+    if visible_bins >= float(min_visible_bins):
+        return None
+    heights: Dict[str, Any] = {}
+    for name, sample in samples.items():
+        s = np.asarray(sample)
+        if s.size == 0:
+            heights[name] = np.zeros(int(bins), dtype=np.float64)
+            continue
+        s = s[np.isfinite(s)]
+        hist, _ = np.histogram(s, bins=int(bins), range=(vlo, vhi))
+        heights[name] = np.log1p(hist.astype(np.float64))
+    if not heights:
+        return None
+    return heights, vlo, vhi, False
+
 
 def _validated_model_range(model_range) -> tuple:
     """Return a validated analysis range ``(lo, hi)`` from model metadata.
@@ -330,6 +437,11 @@ class HistogramView(QWidget):
         self._view_mode: str = "default"
         self.auto_zoom_enabled: bool = False
         self._drag_line: Optional[str] = None
+        # R2: memoized narrow-zoom re-bin result, keyed by
+        # ``(id(model), view_mode, view_min, view_max)``.  A repaint that does
+        # not change the model/window (e.g. a BP/WP drag) never recomputes it.
+        self._rebin_cache_key: Optional[tuple] = None
+        self._rebin_cache: Any = None
         # Live-drag coalescing (single-shot, ~25 ms).  A pending intermediate
         # emission is dropped/replaced; the release emit is never dropped.
         self._live_drag_timer = QTimer(self)
@@ -381,6 +493,9 @@ class HistogramView(QWidget):
             return
         self._model = model
         self._histogram = None
+        # R2: a new model invalidates the narrow-zoom re-bin cache.
+        self._rebin_cache_key = None
+        self._rebin_cache = None
         if model is None:
             self._percentile_99_5 = 1.0
             self._x_range = None
@@ -443,6 +558,8 @@ class HistogramView(QWidget):
         self._marker_upper = 1.0
         self._bin_range = (0.0, 1.0)
         self._overflow_total = 0
+        self._rebin_cache_key = None
+        self._rebin_cache = None
         if had_model:
             # FRP-H1 / PHI-R3.3 (F3): a model→legacy transition drops the
             # float view policy (frozen window AND explicit mode) — the legacy
@@ -484,6 +601,8 @@ class HistogramView(QWidget):
         self._marker_upper = 1.0
         self._bin_range = (0.0, 1.0)
         self._overflow_total = 0
+        self._rebin_cache_key = None
+        self._rebin_cache = None
         if had_model:
             # FRP-H1 / PHI-R3.3 (F3): see :meth:`set_data`.
             self._frozen_range = None
@@ -944,6 +1063,15 @@ class HistogramView(QWidget):
                     heights = self._model["log_counts"]
                 lo, hi = self._full_bin_domain()
                 return heights, lo, hi, False
+            # R2: a NARROW zoomed window (manual/auto) re-bins the retained
+            # bounded sample over the visible sub-range, so the bars resolve
+            # the window instead of magnifying the coarse global grid.  The
+            # un-zoomed default view and non-narrow zooms keep the global bars
+            # exactly (adaptive_rebin_bars returns None there).
+            if self._view_mode in ("manual", "auto"):
+                rebinned = self._adaptive_bars()
+                if rebinned is not None:
+                    return rebinned
             return (
                 self._model["log_counts"],
                 self._bin_range[0],
@@ -952,6 +1080,30 @@ class HistogramView(QWidget):
             )
         # Legacy 256-bin linear counts over the display-level [0, 1].
         return self._histogram, 0.0, 1.0, False
+
+    def _adaptive_bars(self):
+        """Memoized narrow-zoom re-bin for the current model/window (R2).
+
+        Bounded/deterministic: delegates to the pure
+        :func:`adaptive_rebin_bars` (one <=512-bin ``np.histogram`` per channel
+        over the already-capped sample).  Cached by ``(model identity, view
+        mode, view window)`` so a repaint triggered by a BP/WP drag (window
+        unchanged) never recomputes it.
+        """
+        key = (
+            id(self._model),
+            self._view_mode,
+            round(float(self._view_min), 9),
+            round(float(self._view_max), 9),
+        )
+        if self._rebin_cache_key == key:
+            return self._rebin_cache
+        result = adaptive_rebin_bars(
+            self._model, self._view_min, self._view_max
+        )
+        self._rebin_cache_key = key
+        self._rebin_cache = result
+        return result
 
     def _full_bin_domain(self) -> tuple:
         """X domain the full-domain bars live in (FRP-H1).
@@ -1077,12 +1229,12 @@ class HistogramView(QWidget):
         painter.drawText(
             QRectF(rect.left(), y, 48.0, label_h),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            f"{self._view_min:.2f}",
+            format_axis_level(self._view_min),
         )
         painter.drawText(
             QRectF(rect.right() - 48.0, y, 48.0, label_h),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            f"{self._view_max:.2f}",
+            format_axis_level(self._view_max),
         )
 
     def _draw_line(self, painter: QPainter, rect: QRectF, level: float, color: QColor) -> None:

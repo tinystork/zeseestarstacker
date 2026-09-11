@@ -715,6 +715,35 @@ _FINALIZATION_MODES = frozenset(
 )
 
 
+def compute_viewer_compatibility_offset(scientific_output, enabled=True) -> float:
+    """Return the constant additive FITS-viewer compatibility offset (R3).
+
+    A pure, deterministic helper for the final float32 FITS export seam.  Some
+    common FITS viewers (incl. the witnessed ASIFitsView path) mishandle signed
+    floating-point pixel data; a *constant additive translation* that makes the
+    stored array non-negative (min == 0) fixes them WITHOUT any clip / abs /
+    affine / uint16 / per-channel / stretch / gamma transform.
+
+    The offset is a SINGLE global scalar over the whole product:
+    ``offset = max(0.0, -finite_min)`` where ``finite_min`` is the minimum over
+    the finite values of ``scientific_output`` (one scalar across all channels).
+
+    Returns ``0.0`` when ``enabled`` is false, when the array is empty, when no
+    finite value exists, or when ``finite_min >= 0`` (non-negative product: the
+    export is numerically unchanged).  Never mutates the input.
+    """
+    if not enabled:
+        return 0.0
+    arr = np.asarray(scientific_output)
+    if arr.size == 0:
+        return 0.0
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return 0.0
+    finite_min = float(np.min(finite))
+    return max(0.0, -finite_min)
+
+
 def _resolve_signed_lanczos_float32_reason(obj, finalization_mode=None) -> Optional[str]:
     """D4 deterministic run-start float32-canonicalization reason (duck-safe).
 
@@ -4922,6 +4951,9 @@ class SeestarQueuedStacker:
         # NOUVEAU : Initialisation de l'attribut pour la sauvegarde en float32
 
         self.save_final_as_float32 = False  # Par défaut, sauvegarde en uint16 (via conversion dans _save_final_stack)
+        # R3: FITS-viewer compatibility (constant additive export offset).
+        # DEFAULT ENABLED; consumed only at the float32 final-FITS write seam.
+        self.fits_viewer_compatibility = True
         logger.debug(
             f"  -> Attribut self.save_final_as_float32 initialisé à: {self.save_final_as_float32}"
         )
@@ -20939,6 +20971,54 @@ class SeestarQueuedStacker:
                 del final_header["BSCALE"]
             if "BZERO" in final_header:
                 del final_header["BZERO"]
+            # --- R3: FITS-viewer compatibility (pure additive translation) ---
+            # Some viewers (incl. the witnessed ASIFitsView path) mishandle
+            # signed float pixel data.  A single constant additive offset makes
+            # the *stored* array non-negative (min == 0) so the file opens
+            # correctly, while the science stays recoverable exactly
+            # (scientific = stored - ZSOFFSET).  This is a translation only:
+            # no clip / abs / affine / uint16 / per-channel / stretch / gamma.
+            # It is applied to the SAVE array only, never to the in-memory
+            # scientific carrier.  Default ENABLED; a non-negative product
+            # yields offset 0.0 and is numerically unchanged.
+            _compat_enabled = bool(
+                getattr(self, "fits_viewer_compatibility", True)
+            )
+            _compat_offset = compute_viewer_compatibility_offset(
+                data_for_primary_hdu_save, enabled=_compat_enabled
+            )
+            if _compat_offset > 0.0:
+                data_for_primary_hdu_save = (
+                    data_for_primary_hdu_save + _compat_offset
+                )
+            final_header["ZSCOMPAT"] = (
+                bool(_compat_enabled),
+                "FITS viewer compatibility offset enabled",
+            )
+            final_header["ZSOFFSET"] = (
+                float(_compat_offset),
+                "Constant additive viewer-compat offset (scientific = stored - ZSOFFSET)",
+            )
+            try:
+                final_header.add_history(
+                    "Constant additive viewer-compatibility offset applied "
+                    "(ZSOFFSET; scientific = stored - ZSOFFSET)"
+                )
+            except Exception:
+                try:
+                    final_header["HISTORY"] = (
+                        "Constant additive viewer-compatibility offset applied "
+                        "(ZSOFFSET; scientific = stored - ZSOFFSET)"
+                    )
+                except Exception:
+                    pass
+            self.update_progress(
+                f"     DEBUG QM: -> FITS float32 compat: ZSCOMPAT={_compat_enabled}, "
+                f"ZSOFFSET={_compat_offset:.6g}"
+            )
+            logger.debug(
+                f"     DEBUG QM: -> FITS float32 compat: ZSCOMPAT={_compat_enabled}, ZSOFFSET={_compat_offset:.6g}"
+            )
         else:  # Sauvegarde en int16 décalé (représentation FITS "unsigned")
             self.update_progress(
                 "   DEBUG QM: Preparation sauvegarde FITS en int16 (depuis données ADU -> 0-65535)..."
@@ -22858,9 +22938,10 @@ class SeestarQueuedStacker:
         move_stacked=True,
         partial_save_interval=1,
         temp_folder=None,
-        *,
+        *, 
         apply_coverage_render=False,
         save_as_float32=False,
+        fits_viewer_compatibility=True,
         preserve_linear_output=False,
         reproject_between_batches=None,
         reproject_coadd_final=None,
@@ -23232,6 +23313,12 @@ class SeestarQueuedStacker:
         self.save_final_as_float32 = bool(save_as_float32)
         logger.debug(
             f"    [OutputFormat] self.save_final_as_float32 (attribut d'instance) mis à : {self.save_final_as_float32} (depuis argument {save_as_float32})"
+        )
+        # R3: FITS-viewer compatibility flag (DEFAULT True).  Threaded from the
+        # GUI settings; consumed ONLY at the float32 final-FITS export seam.
+        self.fits_viewer_compatibility = bool(fits_viewer_compatibility)
+        logger.debug(
+            f"    [OutputFormat] self.fits_viewer_compatibility (attribut d'instance) mis à : {self.fits_viewer_compatibility} (depuis argument {fits_viewer_compatibility})"
         )
         self.preserve_linear_output = bool(preserve_linear_output)
         logger.debug(

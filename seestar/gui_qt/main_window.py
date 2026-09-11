@@ -167,6 +167,10 @@ from .histogram_view import (
 )
 from .histogram_window import DetachedHistogramWindow
 from .histogram_worker import HistogramCoordinator
+from .scientific_histogram import (
+    format_scientific_histogram_status,
+    scientific_histogram_from_fits,
+)
 from .preview_image_view import PreviewImageView
 from .preview_view import (
     ZOOM_FACTORS,
@@ -562,6 +566,7 @@ SETTINGS_SECTIONS = [
         "Output / Reprojection",
         [
             _field("save_final_as_float32", "Save final as float32", "bool"),
+            _field("fits_viewer_compatibility", "FITS viewer compatibility", "bool"),
             _field("preserve_linear_output", "Preserve linear output", "bool"),
         ],
     ),
@@ -649,8 +654,16 @@ LOCALIZED_SETTINGS_FIELD_KEYS = {
     "low_wht_percentile": "field_low_wht_percentile",
     "low_wht_soften_px": "field_low_wht_soften_px",
     "save_final_as_float32": "field_save_as_float32",
+    "fits_viewer_compatibility": "field_fits_viewer_compatibility",
     "preserve_linear_output": "field_preserve_linear_output",
     "match_background_for_final": "field_match_bg",
+}
+
+# R3: Settings-field attr -> localized tooltip key (help text).  Applied as a
+# widget tooltip by :meth:`MainWindow._build_generic_section`; absent attrs get
+# no tooltip.
+SETTINGS_FIELD_TOOLTIP_KEYS = {
+    "fits_viewer_compatibility": "fits_viewer_compatibility_help",
 }
 
 # Mosaic sub-field key -> translation key (M9).  Explicit (rather than a plain
@@ -1131,6 +1144,17 @@ class MainWindow(QMainWindow):
         self._histogram_coordinator = HistogramCoordinator(
             compute_fn=histogram_compute_fn, parent=self
         )
+        # R1: separate bounded coordinator reading the durable final scientific
+        # FITS off the GUI thread and computing the signed SCIENTIFIC histogram
+        # (domain tag "scientific").  Deliberately distinct from the live
+        # display-domain coordinator above; it never replaces the live model.
+        self._scientific_histogram_coordinator = HistogramCoordinator(
+            compute_fn=scientific_histogram_from_fits, parent=self
+        )
+        # Latest accepted final scientific model + its source path (display-only,
+        # read-only carrier).  Cleared at each new run start / shutdown.
+        self._scientific_histogram_model: Optional[Dict[str, Any]] = None
+        self._scientific_histogram_source: Optional[str] = None
         # True once teardown has begun (set at the top of ``shutdown``) so an
         # in-flight histogram result can never touch the UI during/after close.
         self._shutting_down: bool = False
@@ -1808,6 +1832,15 @@ class MainWindow(QMainWindow):
         right_histo_layout.addWidget(histo_toolbar)
         layout.addWidget(self.right_histogram_group)
 
+        # R1: FINAL SCIENTIFIC histogram status — an explicitly distinct space
+        # from the live display/analysis histogram above.  Empty until a run
+        # finishes and the durable final scientific carrier is sampled
+        # off-thread.  It never replaces the live model/view.
+        self.scientific_histogram_status = QLabel("")
+        self.scientific_histogram_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scientific_histogram_status.setWordWrap(True)
+        layout.addWidget(self.scientific_histogram_status)
+
         # Action buttons (Start/Stop/Analyse/Solver/path actions functional).
         # M25.5-E: a compact single-band QHBoxLayout mirrors the Tk right-panel
         # ``control_frame`` side-by-side packing instead of the former dense
@@ -1915,6 +1948,9 @@ class MainWindow(QMainWindow):
             attr, label, kind = field[0], field[1], field[2]
             params = field[3:]
             widget = self._make_settings_widget(attr, kind, *params)
+            tip_key = SETTINGS_FIELD_TOOLTIP_KEYS.get(attr)
+            if tip_key is not None:
+                widget.setToolTip(self._tr(tip_key))
             key = LOCALIZED_SETTINGS_FIELD_KEYS.get(attr)
             if key is not None:
                 self._add_form_row(form, key, widget)
@@ -2179,6 +2215,9 @@ class MainWindow(QMainWindow):
         # result; the queued connection guarantees ``_on_histogram_result`` runs
         # on the GUI thread (the only place widgets may be updated).
         self._histogram_coordinator.result_ready.connect(self._on_histogram_result)
+        self._scientific_histogram_coordinator.result_ready.connect(
+            self._on_scientific_histogram_result
+        )
         # Initial-preview auto-load delivery: the daemon worker thread emits
         # this signal; the explicit queued connection guarantees the slot runs
         # on the GUI thread even though the emitter is not a QThread.
@@ -3369,6 +3408,9 @@ class MainWindow(QMainWindow):
         # A new run is a fresh display-anchor context: drop any anchors / float
         # analysis buffers from a previous run (never reused across runs).
         self._reset_preview_analysis()
+        # R1: a new run also invalidates any previous FINAL SCIENTIFIC histogram
+        # (the carrier it described belongs to the previous run).
+        self._clear_final_scientific_histogram()
         # STABLE-B: a new run is also a fresh view-state context.  Reset the
         # accumulated rotation, continuous zoom and pan offsets exactly once so
         # the next run's first preview starts at the defaults (0°, 100%,
@@ -5159,6 +5201,62 @@ class MainWindow(QMainWindow):
         if self._detached_histogram_window is not None:
             self._detached_histogram_window.stats_label.setText(text)
 
+    # ------------------------------------- final scientific histogram (R1)
+    def _render_scientific_histogram_status(self) -> None:
+        """Render the FINAL SCIENTIFIC histogram status label (display-only).
+
+        This is a distinct surface from the live display histogram status: it is
+        clearly labelled as the scientific (signed) space and is empty until a
+        final scientific carrier has been sampled.
+        """
+        label = getattr(self, "scientific_histogram_status", None)
+        if label is None:
+            return
+        label.setText(format_scientific_histogram_status(self._scientific_histogram_model))
+
+    def _clear_final_scientific_histogram(self) -> None:
+        """Drop the final scientific model/status (new run / shutdown)."""
+        self._scientific_histogram_coordinator.invalidate()
+        self._scientific_histogram_model = None
+        self._scientific_histogram_source = None
+        self._render_scientific_histogram_status()
+
+    def _schedule_final_scientific_histogram(self, payload) -> None:
+        """Schedule the bounded off-thread read of the final scientific FITS.
+
+        Best-effort: no-op unless the payload carries an existing final stack.
+        The FITS read AND the signed histogram/stats computation both run on the
+        dedicated histogram worker thread (never the GUI thread); only the final
+        immutable model is marshalled back to the GUI thread.
+        """
+        final_path = getattr(payload, "final_stack_file", "") or ""
+        if not final_path or not getattr(payload, "final_stack_exists", False):
+            return
+        self._scientific_histogram_source = final_path
+        self._scientific_histogram_coordinator.schedule(
+            final_path, source_token=("scientific", final_path)
+        )
+
+    def _on_scientific_histogram_result(
+        self, generation: int, result, source_token
+    ) -> None:
+        """GUI-thread slot: apply/discard a final scientific histogram result.
+
+        The coordinator already performs the latest-wins generation check; this
+        slot additionally drops a result whose source path is no longer current
+        (e.g. a new run started while the worker was reading), so a stale
+        scientific model can never be displayed.
+        """
+        if self._shutting_down or self._shutdown_called:
+            return
+        if not isinstance(source_token, tuple) or len(source_token) != 2:
+            return
+        _kind, path = source_token
+        if path != self._scientific_histogram_source:
+            return
+        self._scientific_histogram_model = result
+        self._render_scientific_histogram_status()
+
     # ------------------------------------------------------ run-log helpers
     def _run_log_emit(self, event: str, **fields) -> None:
         """Emit one durable lifecycle event to the shared run log (if any)."""
@@ -5219,6 +5317,7 @@ class MainWindow(QMainWindow):
         """
         self._run_log_emit("QT_COMPLETION_HANDLER_ENTERED", outcome="finished")
         terminal_status = derive_terminal_status(self._last_summary_payload)
+        final_payload = self._last_summary_payload
         self._running = False
         self._update_run_state()
         self.progress.setValue(100)
@@ -5237,6 +5336,11 @@ class MainWindow(QMainWindow):
             )
         self._mark_time_terminal("0:00")
         self._show_pending_summary()
+        # R1: after a successful finalization, provide the bounded read-only FITS
+        # -> scientific-histogram path (off the GUI thread).  Best-effort and
+        # non-blocking; the live display histogram above is untouched.
+        if terminal_status == "success":
+            self._schedule_final_scientific_histogram(final_payload)
         self._run_log_emit("CONTROLS_RESTORED")
         self._run_log_emit("GUI_IDLE")
         if terminal_status == "success":
@@ -6117,11 +6221,16 @@ class MainWindow(QMainWindow):
                 pass
         # Stop + join the bounded histogram worker (invalidates in-flight work).
         histogram_stopped = self._histogram_coordinator.shutdown(wait_ms=wait_ms)
+        # R1: stop + join the scientific-histogram worker too (a final FITS read
+        # must never outlive the window).
+        scientific_histogram_stopped = self._scientific_histogram_coordinator.shutdown(
+            wait_ms=wait_ms
+        )
         # F3: stop + join the off-thread GPU probe worker (best-effort; the
         # probe is short and interruption only prevents it from starting).
         probe_stopped = self._stop_gpu_probe(wait_ms=wait_ms)
         shutdown_complete = self.controller.shutdown(wait_ms=wait_ms)
-        if shutdown_complete and histogram_stopped and probe_stopped:
+        if shutdown_complete and histogram_stopped and probe_stopped and scientific_histogram_stopped:
             self._shutdown_called = True
             self._running = False
             self._update_run_state()

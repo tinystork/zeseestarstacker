@@ -300,6 +300,9 @@ class QtSettingsState:
 
     # --- Output format / reprojection ---
     save_final_as_float32: bool = False
+    # R3: FITS viewer compatibility (constant additive export offset at the
+    # float32 final-FITS seam).  DEFAULT ENABLED; expert users can disable it.
+    fits_viewer_compatibility: bool = True
     preserve_linear_output: bool = False
     reproject_between_batches: bool = False
     reproject_coadd_final: bool = False

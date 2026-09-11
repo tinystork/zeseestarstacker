@@ -301,6 +301,9 @@ def build_backend_kwargs(
         "astap_downsample": settings.astap_downsample,
         "astap_sensitivity": settings.astap_sensitivity,
         "save_as_float32": settings.save_final_as_float32,
+        "fits_viewer_compatibility": getattr(
+            settings, "fits_viewer_compatibility", True
+        ),
         "preserve_linear_output": settings.preserve_linear_output,
         "stack_final_combine": settings.stack_final_combine,
         "reproject_between_batches": settings.reproject_between_batches,

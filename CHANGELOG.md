@@ -2,6 +2,16 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.5.0] — Phoenix consedit
+
+- corrected Drizzle pixel-scale geometry
+- Lanczos catastrophic cancellation closure without a conditioning threshold
+- truthful pixfrac kernel-aware UX
+- signed float histogram/display fixes
+- final scientific histogram
+- adaptive histogram zoom
+- default viewer-compatible reversible float32 FITS export
+
 ## [8.4.0] — Phoenix consedit
 
 Candidate / beta release.  These changes have NOT yet been validated on the

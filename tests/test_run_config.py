@@ -113,6 +113,7 @@ DIRECT_MAP = {
     "astap_downsample": "astap_downsample",
     "astap_sensitivity": "astap_sensitivity",
     "save_as_float32": "save_final_as_float32",
+    "fits_viewer_compatibility": "fits_viewer_compatibility",
     "preserve_linear_output": "preserve_linear_output",
     "reproject_between_batches": "reproject_between_batches",
     "reproject_coadd_final": "reproject_coadd_final",
