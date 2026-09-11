@@ -741,11 +741,6 @@ class SettingsManager:
                 f"DEBUG SM (update_from_ui): self.mosaic_mode_active (lu depuis gui_instance ou défaut): {self.mosaic_mode_active}"
             )
 
-            # P2-D1: canonical nested Mosaic pixfrac envelope (0.01..1].
-            if isinstance(getattr(self, "mosaic_settings", None), dict):
-                self.mosaic_settings, _ms_raw, _ms_rsn = migrate_mosaic_pixfrac(
-                    self.mosaic_settings
-                )
             # Gérer l'initialisation de self.mosaic_settings pour être sûr que c'est un dict
             if not isinstance(self.mosaic_settings, dict):
                 self.mosaic_settings = default_values_from_code.get(
@@ -1872,10 +1867,13 @@ class SettingsManager:
                 self.drizzle_kernel = current_driz_kernel.lower()
             try:
                 self.drizzle_pixfrac = float(self.drizzle_pixfrac)
-                if not (0.01 <= self.drizzle_pixfrac <= 1.0):
-                    # P2-D1 canonical envelope (0.01, 1]
+                if not (
+                    0.01 <= self.drizzle_pixfrac <= 1.0
+                ):  # P2-D1 canonical envelope (0.01, 1]
                     original = self.drizzle_pixfrac
-                    self.drizzle_pixfrac = float(np.clip(self.drizzle_pixfrac, 0.01, 1.0))
+                    self.drizzle_pixfrac = float(
+                        np.clip(self.drizzle_pixfrac, 0.01, 1.0)
+                    )
                     self.drizzle_pixfrac_requested_raw = float(original)
                     self.drizzle_pixfrac_reason = (
                         "pixfrac_gt_one_coerced_to_one"
@@ -2424,6 +2422,11 @@ class SettingsManager:
 
             # Validation du facteur d'échelle mosaïque
             # MODIFIÉ : Ce bloc de validation est maintenant inclus ici
+            # P2-D1: canonical nested Mosaic pixfrac envelope (0.01..1].
+            if isinstance(getattr(self, "mosaic_settings", None), dict):
+                self.mosaic_settings, _ms_raw, _ms_rsn = migrate_mosaic_pixfrac(
+                    self.mosaic_settings
+                )
             if not isinstance(self.mosaic_settings, dict):
                 messages.append(
                     "Mosaic settings are invalid (not a dictionary), resetting to defaults."
@@ -2848,8 +2851,6 @@ class SettingsManager:
     # Fin settings.py
 
     # Fin settings.py
-
-
 
 def migrate_mosaic_pixfrac(settings):
     """P2-D1: canonical nested Mosaic pixfrac envelope ``[0.01, 1]``.
