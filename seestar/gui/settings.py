@@ -1319,6 +1319,9 @@ class SettingsManager:
         defaults_dict["drizzle_mode"] = "Final"
         defaults_dict["drizzle_kernel"] = "square"
         defaults_dict["drizzle_pixfrac"] = 1.0
+        # P2-D1: optional migration provenance, populated only when needed.
+        defaults_dict["drizzle_pixfrac_requested_raw"] = None
+        defaults_dict["drizzle_pixfrac_reason"] = ""
         # M3-D: politique de ressources (taille de groupe du preview
         # incrémental), pas une science. Defaut 50.
         defaults_dict["drizzle_group_size"] = 50

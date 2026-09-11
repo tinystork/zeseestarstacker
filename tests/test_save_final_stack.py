@@ -621,7 +621,8 @@ def test_non_m3_no_companion(tmp_path):
 
 def _make_m3_provenance_obj(tmp_path, kernel="square", pixfrac_eff=1.0,
                             scale=2.0, wht_thr_eff=0.0,
-                            pixfrac_req=None, wht_thr_req=None):
+                            pixfrac_req=None, wht_thr_req=None,
+                            pixfrac_reason=None):
     obj = _make_m3_obj(tmp_path, threshold=0.0, shape=(8, 8))
     obj.drizzle_kernel = kernel
     obj.drizzle_pixfrac = pixfrac_eff
@@ -632,6 +633,7 @@ def _make_m3_provenance_obj(tmp_path, kernel="square", pixfrac_eff=1.0,
     obj.drizzle_wht_threshold_requested = (
         wht_thr_req if wht_thr_req is not None else wht_thr_eff
     )
+    obj.drizzle_pixfrac_reason = pixfrac_reason
     return obj
 
 
@@ -686,7 +688,31 @@ def test_m3_square_provenance_no_requested_override_keys(tmp_path):
     assert abs(hdr["DRZWTHT"] - 0.3) < 1e-9
     # requested == effective -> no separate requested keys written
     assert "DRZPFREQ" not in hdr
+    assert "DRZPFRSN" not in hdr
     assert "DRZWTHRQ" not in hdr
+
+
+def test_m3_coerced_pixfrac_provenance_round_trip_to_fits(tmp_path):
+    obj = _make_m3_provenance_obj(
+        tmp_path,
+        kernel="square",
+        pixfrac_eff=1.0,
+        pixfrac_req=2.0,
+        pixfrac_reason="pixfrac_gt_one_coerced_to_one",
+    )
+    qm.SeestarQueuedStacker._save_final_stack(
+        obj, output_filename_suffix="_m3_pixfrac_coerced", preserve_linear_output=True
+    )
+
+    hdr = fits.getheader(obj.final_stacked_path)
+    assert hdr["DRZPIXFR"] == pytest.approx(1.0)
+    assert hdr["DRZPFREQ"] == pytest.approx(2.0)
+    assert hdr["DRZPFRSN"] == "pixfrac_gt_one_coerced_to_one"
+
+    whdr = fits.getheader(obj._companion_wht_path)
+    assert whdr["DRZPIXFR"] == pytest.approx(1.0)
+    assert whdr["DRZPFREQ"] == pytest.approx(2.0)
+    assert whdr["DRZPFRSN"] == "pixfrac_gt_one_coerced_to_one"
 
 
 def test_companion_retains_signed_native_wht(tmp_path):

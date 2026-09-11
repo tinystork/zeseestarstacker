@@ -110,7 +110,22 @@ def _add(accs, frame):
         )
 
 
-def _checkpoint(tmp_path, kernel="square", decomposition=None):
+def _add_support(accs, frame):
+    _data, _weight, pixmap, in_grid = frame
+    support = np.ones(SHAPE, dtype=np.float32)
+    for acc in accs:
+        acc.add(
+            support,
+            support,
+            pixmap,
+            exptime=1.0,
+            in_units="counts",
+            in_grid_mask=in_grid,
+        )
+
+
+def _checkpoint(tmp_path, kernel="square", decomposition=None,
+                requested_pixfrac=1.0, with_support=False):
     output = tmp_path / "out"
     inputs = tmp_path / "inputs"
     output.mkdir()
@@ -126,15 +141,30 @@ def _checkpoint(tmp_path, kernel="square", decomposition=None):
 
     qm = object.__new__(SeestarQueuedStacker)
     _configure(qm, output, inputs, kernel)
+    qm.drizzle_pixfrac = requested_pixfrac
+    qm._normalize_effective_drizzle_config()
     cfg = build_drizzle_canonical_config(
         qm, product_version=qm._canonical_product_version()
     )
     writer = DrizzleCheckpointWriter(
         output, qm._canonical_product_version(), cfg, _wcs(), SHAPE
     )
-    accs = [DrizzleAccumulator(SHAPE, kernel=kernel, pixfrac=1.0) for _ in range(3)]
+    accs = [
+        DrizzleAccumulator(SHAPE, kernel=kernel, pixfrac=qm.drizzle_pixfrac)
+        for _ in range(3)
+    ]
+    support_accs = (
+        [
+            DrizzleAccumulator(SHAPE, kernel="square", pixfrac=1.0)
+            for _ in range(2)
+        ]
+        if with_support else None
+    )
     for i in range(2):
-        _add(accs, _frame(i))
+        frame = _frame(i)
+        _add(accs, frame)
+        if support_accs is not None:
+            _add_support(support_accs, frame)
     writer.commit(
         accs,
         session_binding={
@@ -154,6 +184,7 @@ def _checkpoint(tmp_path, kernel="square", decomposition=None):
             "exposure_max": 1.0,
         },
         completed_sources=idents[:2],
+        support_accumulators=support_accs,
     )
     return qm, output, inputs, paths, idents
 
@@ -275,6 +306,75 @@ def test_stop_resume_backend_is_bit_identical_and_commits_n_plus_1(tmp_path, ker
     assert manifest["frame_count"] == 4
     assert [x["name"] for x in manifest["completed_sources"]] == [
         f"src_{i}.fit" for i in range(4)
+    ]
+
+
+def test_requested_gt_one_checkpoint_resume_preserves_digest_science_and_support(
+    tmp_path,
+):
+    qm, output, _inputs, paths, _idents = _checkpoint(
+        tmp_path, "square", requested_pixfrac=2.0, with_support=True
+    )
+    config_path = output / "run_config.cfg"
+    config_before = config_path.read_bytes()
+    manifest_before = json.loads(
+        (output / ".m3d_checkpoint" / "checkpoint.json").read_text()
+    )
+    sci = manifest_before["scientific_config"]
+    assert sci["drizzle_pixfrac_requested"] == pytest.approx(2.0)
+    assert sci["drizzle_pixfrac_effective"] == pytest.approx(1.0)
+    assert sci["drizzle_pixfrac_reason"] == "pixfrac_gt_one_coerced_to_one"
+
+    ok, resolved_ref = qm._early_resume_preflight()
+    assert ok is True
+    assert resolved_ref == str(paths[0])
+    assert qm.drizzle_pixfrac_requested == pytest.approx(2.0)
+    assert qm.drizzle_pixfrac == pytest.approx(1.0)
+    assert qm.drizzle_pixfrac_reason == "pixfrac_gt_one_coerced_to_one"
+
+    qm.queue = Queue()
+    for path in paths[2:]:
+        qm.queue.put(str(path))
+    assert qm._init_drizzle_checkpoint() is True
+    assert qm.drizzle_sup_w1 is not None and qm.drizzle_sup_w2 is not None
+
+    for i, path in enumerate(paths[2:], start=2):
+        frame = _frame(i)
+        _add(qm.drizzle_accumulators, frame)
+        _add_support((qm.drizzle_sup_w1, qm.drizzle_sup_w2), frame)
+        qm._drizzle_group_tick()
+        qm.stacked_batches_count += 1
+        qm.total_exposure_seconds += 1.0
+        qm._drizzle_checkpoint_after_frame(str(path))
+
+    continuous = [
+        DrizzleAccumulator(SHAPE, kernel="square", pixfrac=1.0)
+        for _ in range(3)
+    ]
+    continuous_support = [
+        DrizzleAccumulator(SHAPE, kernel="square", pixfrac=1.0)
+        for _ in range(2)
+    ]
+    for i in range(4):
+        frame = _frame(i)
+        _add(continuous, frame)
+        _add_support(continuous_support, frame)
+
+    for resumed, expected in zip(qm.drizzle_accumulators, continuous):
+        assert np.array_equal(resumed._out_img, expected._out_img)
+        assert np.array_equal(resumed._out_wht, expected._out_wht)
+    for resumed, expected in zip(
+        (qm.drizzle_sup_w1, qm.drizzle_sup_w2), continuous_support
+    ):
+        assert np.array_equal(resumed._out_wht, expected._out_wht)
+
+    manifest_after = json.loads(
+        (output / ".m3d_checkpoint" / "checkpoint.json").read_text()
+    )
+    assert config_path.read_bytes() == config_before
+    assert manifest_after["run_config_digest"] == manifest_before["run_config_digest"]
+    assert manifest_after["scientific_fingerprint"] == manifest_before[
+        "scientific_fingerprint"
     ]
 
 

@@ -140,7 +140,8 @@ def test_stacking_drizzle_and_scnr_controls_have_tk_defaults(window):
         defaults["drizzle_pixfrac"]
     )  # 1.0
     assert window.drizzle_pixfrac_spin.minimum() == 0.01
-    assert window.drizzle_pixfrac_spin.maximum() == 2.0
+    # P2-D canonical active pixfrac envelope supersedes the legacy 2.0 UI cap.
+    assert window.drizzle_pixfrac_spin.maximum() == 1.0
 
     # No duplication: the four controls are no longer in the Expert surface.
     for attr in ("drizzle_scale", "drizzle_wht_threshold", "drizzle_kernel", "drizzle_pixfrac"):

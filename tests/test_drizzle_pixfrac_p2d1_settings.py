@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
 dx = importlib.import_module("seestar.core.drizzle_core")
 ss = importlib.import_module("seestar.gui_qt.settings_state")
 gsettings = importlib.import_module("seestar.gui.settings")
+smigration = importlib.import_module("seestar.settings_migration")
 
 
 # --- settings migration (behavioral) ---------------------------------------
@@ -57,6 +59,63 @@ def test_nested_mosaic_invalid_and_nonfinite():
         out, r, rsn = gsettings.migrate_mosaic_pixfrac({"pixfrac": bad})
         assert out["pixfrac"] == 0.8
         assert rsn == "pixfrac_invalid_defaulted"
+
+
+@pytest.mark.parametrize(
+    "value,expected,raw,reason",
+    [
+        (2.0, 1.0, 2.0, "pixfrac_gt_one_coerced_to_one"),
+        (0.005, 0.01, 0.005, "pixfrac_below_minimum_clamped"),
+        (0.8, 0.8, None, None),
+    ],
+)
+def test_shared_loader_migrates_current_schema_pixfrac(
+    value, expected, raw, reason
+):
+    data, changed = smigration.migrate_settings_data(
+        {
+            smigration.SETTINGS_SCHEMA_VERSION_KEY:
+                smigration.CURRENT_SETTINGS_SCHEMA_VERSION,
+            "drizzle_pixfrac": value,
+        }
+    )
+    assert data["drizzle_pixfrac"] == pytest.approx(expected)
+    assert changed is (reason is not None)
+    assert data.get("drizzle_pixfrac_requested_raw") == raw
+    assert data.get("drizzle_pixfrac_reason") == reason
+
+
+@pytest.mark.parametrize(
+    "value,expected,raw,reason",
+    [
+        (2.0, 1.0, 2.0, "pixfrac_gt_one_coerced_to_one"),
+        (0.005, 0.01, 0.005, "pixfrac_below_minimum_clamped"),
+        (0.8, 0.8, None, None),
+    ],
+)
+def test_tk_settings_file_round_trip_preserves_pixfrac_migration(
+    tmp_path, value, expected, raw, reason
+):
+    path = tmp_path / "settings.json"
+    seed = gsettings.SettingsManager(str(path))
+    seed.save_settings()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["drizzle_pixfrac"] = value
+    payload.pop("drizzle_pixfrac_requested_raw", None)
+    payload.pop("drizzle_pixfrac_reason", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = gsettings.SettingsManager(str(path))
+    assert loaded.load_settings() is True
+    assert loaded.drizzle_pixfrac == pytest.approx(expected)
+    assert getattr(loaded, "drizzle_pixfrac_requested_raw", None) == raw
+    observed_reason = getattr(loaded, "drizzle_pixfrac_reason", "") or None
+    assert observed_reason == reason
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["drizzle_pixfrac"] == pytest.approx(expected)
+    assert persisted.get("drizzle_pixfrac_requested_raw") == raw
+    assert persisted.get("drizzle_pixfrac_reason") == reason
 
 
 # --- neutrality: explicit 1 vs requested2->effective1 ----------------------
