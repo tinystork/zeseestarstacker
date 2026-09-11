@@ -578,7 +578,7 @@ SETTINGS_SECTIONS = [
 # trips exactly with the Tk defaults.
 MOSAIC_FIELDS = [
     ("kernel", "Kernel", "combo", DRIZZLE_KERNELS),
-    ("pixfrac", "Pixfrac", "float", (0.01, 2.0, 0.05, 2)),
+    ("pixfrac", "Pixfrac", "float", (0.01, 1.0, 0.05, 2)),
     ("use_gpu", "Use GPU", "bool", ()),
     ("fillval", "Fill value", "str", ()),
     ("wht_threshold", "WHT threshold", "float", (0.0, 1.0, 0.01, 3)),
@@ -1403,7 +1403,7 @@ class MainWindow(QMainWindow):
             self.drizzle_kernel_combo.setCurrentText(kernel_text)
 
         self.drizzle_pixfrac_spin = QDoubleSpinBox()
-        self.drizzle_pixfrac_spin.setRange(0.01, 2.0)
+        self.drizzle_pixfrac_spin.setRange(0.01, 1.0)
         self.drizzle_pixfrac_spin.setSingleStep(0.05)
         self.drizzle_pixfrac_spin.setDecimals(2)
         self.drizzle_pixfrac_spin.setValue(float(self.settings_state.drizzle_pixfrac))
@@ -2742,7 +2742,24 @@ class MainWindow(QMainWindow):
             self._tr("drizzle_wht_threshold_signed_tooltip") if signed_wht else ""
         )
         self.drizzle_kernel_combo.setEnabled(drizzle)
-        self.drizzle_pixfrac_spin.setEnabled(drizzle)
+        # P2-D canonical pixfrac UX: Lanczos is fixed at effective 1.0 (the
+        # engine ignores pixfrac there) and Point is disabled/N-A (upstream
+        # ignores the argument).  Square/Turbo/Gaussian stay editable 0.01..1.0.
+        _pf_kernel = self.drizzle_kernel_combo.currentText()
+        if drizzle and _pf_kernel in ("lanczos2", "lanczos3"):
+            self.drizzle_pixfrac_spin.setEnabled(False)
+            self.drizzle_pixfrac_spin.setValue(1.0)
+            self.drizzle_pixfrac_spin.setToolTip(
+                "Fixed at 1.0 (Lanczos ignores pixfrac)"
+            )
+        elif drizzle and _pf_kernel == "point":
+            self.drizzle_pixfrac_spin.setEnabled(False)
+            self.drizzle_pixfrac_spin.setToolTip(
+                "Not applicable (Point ignores pixfrac)"
+            )
+        else:
+            self.drizzle_pixfrac_spin.setEnabled(drizzle)
+            self.drizzle_pixfrac_spin.setToolTip("")
 
         # D4: signed-Lanczos float32 hold.  The signed Lanczos kernels
         # (lanczos2/lanczos3) legitimately produce negative ringing that a

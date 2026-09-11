@@ -338,7 +338,9 @@ from ..core.drizzle_core import (
     WEIGHT_EPSILON,
     DrizzleGeometryError,
     PIXEL_SCALE_RATIO_SOURCE,
+    PIXFRAC_REASON_GT_ONE,
     build_output_grid,
+    classify_drizzle_pixfrac,
     derive_pixel_scale_ratio,
     pixmap_from_alignment,
     support_integrity_violations,
@@ -5754,8 +5756,12 @@ class SeestarQueuedStacker:
                 kernel_eff, kernel_reason = validate_drizzle_kernel(
                     kernel_requested
                 )
+                _raw_pixfrac_req = getattr(self, "drizzle_pixfrac", 1.0)
                 pixfrac_requested, pixfrac_reason = validate_drizzle_pixfrac(
-                    getattr(self, "drizzle_pixfrac", 1.0)
+                    _raw_pixfrac_req
+                )
+                _pf_eff, _pf_raw, _pf_reason = classify_drizzle_pixfrac(
+                    _raw_pixfrac_req
                 )
                 if kernel_reason:
                     logger.warning("M3: %s", kernel_reason)
@@ -5780,7 +5786,12 @@ class SeestarQueuedStacker:
 
                 self.drizzle_kernel = kernel_eff
                 self.drizzle_pixfrac = pixfrac_eff
-                self.drizzle_pixfrac_requested = pixfrac_requested
+                self.drizzle_pixfrac_requested = (
+                    float(_pf_raw)
+                    if _pf_reason == PIXFRAC_REASON_GT_ONE and _pf_raw is not None
+                    else pixfrac_requested
+                )
+                self.drizzle_pixfrac_reason = _pf_reason
                 self.drizzle_wht_threshold_requested = wht_threshold_requested
                 self.drizzle_wht_threshold_effective = wht_threshold_eff
 
@@ -10301,6 +10312,12 @@ class SeestarQueuedStacker:
         final_header["DRZSCALE"] = (self.drizzle_scale, "Drizzle final scale factor")
         final_header["DRZKERNEL"] = (self.drizzle_kernel, "Drizzle kernel used")
         final_header["DRZPIXFR"] = (self.drizzle_pixfrac, "Drizzle pixfrac used")
+        _pf_req_h = getattr(self, "drizzle_pixfrac_requested", None)
+        if _pf_req_h is not None and float(_pf_req_h) != float(self.drizzle_pixfrac):
+            final_header["DRZPFREQ"] = (float(_pf_req_h), "Requested drizzle pixfrac")
+        _pf_rsn_h = getattr(self, "drizzle_pixfrac_reason", None)
+        if _pf_rsn_h:
+            final_header["DRZPFRSN"] = (str(_pf_rsn_h), "Drizzle pixfrac reason")
         final_header["DRZMODE"] = (
             "Final",
             "Drizzle combination mode",
@@ -16601,12 +16618,19 @@ class SeestarQueuedStacker:
         kernel_eff, _kernel_reason = validate_drizzle_kernel(
             getattr(self, "drizzle_kernel", "square")
         )
+        _raw_pixfrac_req = getattr(self, "drizzle_pixfrac", 1.0)
         pixfrac_requested, _pixfrac_reason = validate_drizzle_pixfrac(
-            getattr(self, "drizzle_pixfrac", 1.0)
+            _raw_pixfrac_req
         )
+        _pf_eff, _pf_raw, _pf_reason = classify_drizzle_pixfrac(_raw_pixfrac_req)
         is_lanczos = kernel_eff in LANCZOS_KERNELS
         self.drizzle_kernel = kernel_eff
-        self.drizzle_pixfrac_requested = pixfrac_requested
+        self.drizzle_pixfrac_requested = (
+            float(_pf_raw)
+            if _pf_reason == PIXFRAC_REASON_GT_ONE and _pf_raw is not None
+            else pixfrac_requested
+        )
+        self.drizzle_pixfrac_reason = _pf_reason
         self.drizzle_pixfrac = 1.0 if is_lanczos else pixfrac_requested
         requested_wht = float(
             getattr(self, "drizzle_wht_threshold", 0.0) or 0.0
@@ -20778,6 +20802,18 @@ class SeestarQueuedStacker:
                 pixfrac_eff,
                 "Effective drizzle pixfrac (1.0 for Lanczos)",
             )
+            _pf_req_h = getattr(self, "drizzle_pixfrac_requested", None)
+            if _pf_req_h is not None and float(_pf_req_h) != float(pixfrac_eff):
+                final_header["DRZPFREQ"] = (
+                    float(_pf_req_h),
+                    "Requested drizzle pixfrac",
+                )
+            _pf_rsn_h = getattr(self, "drizzle_pixfrac_reason", None)
+            if _pf_rsn_h:
+                final_header["DRZPFRSN"] = (
+                    str(_pf_rsn_h),
+                    "Drizzle pixfrac reason",
+                )
             final_header["DRZSCALE"] = (scale_eff, "Effective drizzle scale factor")
             final_header["DRZMODE"] = (
                 "M3",

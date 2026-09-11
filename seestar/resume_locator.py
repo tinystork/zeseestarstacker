@@ -320,9 +320,12 @@ def _validate_drizzle_manifest_and_config(
     if (
         not isinstance(pixfrac, (int, float))
         or isinstance(pixfrac, bool)
-        or not (0.01 <= pixfrac <= 2.0)
+        or not (0.01 <= pixfrac <= 1.0)
     ):
-        return "Drizzle effective pixfrac is not representable by this UI"
+        return (
+            "pixfrac_not_representable_by_ui: Drizzle effective pixfrac is "
+            "outside the canonical (0, 1] UI envelope"
+        )
     if (
         not isinstance(threshold, (int, float))
         or isinstance(threshold, bool)

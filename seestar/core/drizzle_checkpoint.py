@@ -409,6 +409,16 @@ def _check_deposition_matches_canonical(kernel, pixfrac, fillval, scientific,
         scientific.get("drizzle_pixfrac_effective"),
         "canonical drizzle_pixfrac_effective",
     )
+    # P2-D: a pre-existing checkpoint whose canonical effective pixfrac exceeds
+    # the canonical envelope (> 1.0) cannot be continued; it is not
+    # scientifically legal to keep depositing into an accumulator created with a
+    # different effective parameter, and the stored state is never rewritten.
+    if canon_pixfrac > 1.0:
+        raise DrizzleCheckpointError(
+            "checkpoint_pixfrac_effective_gt_one_incompatible: canonical "
+            f"drizzle_pixfrac_effective {canon_pixfrac!r} > 1.0 cannot be "
+            "continued (P2-D canonical pixfrac envelope is (0, 1])"
+        )
     if canon_pixfrac != float(pixfrac):
         raise DrizzleCheckpointError(
             f"{where} pixfrac {pixfrac!r} != canonical "
@@ -562,6 +572,12 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         "drizzle_pixfrac_effective": float(
             getattr(qm, "drizzle_pixfrac", 1.0) or 1.0
         ),
+        "drizzle_pixfrac_requested": float(
+            getattr(qm, "drizzle_pixfrac_requested", None)
+            if getattr(qm, "drizzle_pixfrac_requested", None) is not None
+            else (getattr(qm, "drizzle_pixfrac", 1.0) or 1.0)
+        ),
+        "drizzle_pixfrac_reason": getattr(qm, "drizzle_pixfrac_reason", None),
         "drizzle_wht_threshold_effective": float(
             getattr(
                 qm,

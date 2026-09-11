@@ -45,6 +45,14 @@ __all__ = [
     "PIXEL_SCALE_RATIO_SOURCE",
     "angular_pixel_scale_deg",
     "derive_pixel_scale_ratio",
+    "PIXFRAC_MIN",
+    "PIXFRAC_MAX",
+    "PIXFRAC_REASON_GT_ONE",
+    "PIXFRAC_REASON_LANCZOS_FIXED",
+    "PIXFRAC_REASON_POINT_IGNORED",
+    "PIXFRAC_REASON_CHECKPOINT_GT_ONE",
+    "PIXFRAC_REASON_NOT_REPRESENTABLE",
+    "classify_drizzle_pixfrac",
     "drizzle_stream",
     "support_integrity_violations",
     "VALID_DRIZZLE_KERNELS",
@@ -189,6 +197,60 @@ def validate_drizzle_pixfrac(pixfrac):
     if not np.isfinite(p) or p <= 0.0 or p > 1.0:
         return 1.0, f"drizzle pixfrac {pixfrac!r} outside (0, 1] -> 1.0"
     return p, None
+
+
+# P2-D canonical active pixfrac envelope (lower bound preserved from the
+# accepted archaeology authority; the legacy UI/settings upper bound 2.0 is
+# superseded).  Provenance-only reason tokens; human UI text is localized
+# separately.
+PIXFRAC_MIN = 0.01
+PIXFRAC_MAX = 1.0
+PIXFRAC_REASON_GT_ONE = "pixfrac_gt_one_coerced_to_one"
+PIXFRAC_REASON_LANCZOS_FIXED = "pixfrac_not_applicable_lanczos_fixed_one"
+PIXFRAC_REASON_POINT_IGNORED = "pixfrac_ignored_by_upstream_point"
+PIXFRAC_REASON_CHECKPOINT_GT_ONE = (
+    "checkpoint_pixfrac_effective_gt_one_incompatible"
+)
+PIXFRAC_REASON_NOT_REPRESENTABLE = "pixfrac_not_representable_by_ui"
+
+
+def pixfrac_ui_policy(kernel):
+    """P2-D canonical UI policy for the pixfrac control of one kernel.
+
+    Returns ``(editable, value, reason, applicable)``:
+
+    * Square/Turbo/Gaussian -> editable, canonical value unchanged, applicable;
+    * Lanczos2/Lanczos3 -> not editable, fixed 1.0, applicable (fixed);
+    * Point -> not editable, fixed 1.0, NOT applicable (upstream ignores).
+    """
+    k = str(kernel or "").lower()
+    if k in LANCZOS_KERNELS:
+        return False, PIXFRAC_MAX, PIXFRAC_REASON_LANCZOS_FIXED, True
+    if k == "point":
+        return False, PIXFRAC_MAX, PIXFRAC_REASON_POINT_IGNORED, False
+    return True, None, None, True
+
+
+def classify_drizzle_pixfrac(pixfrac):
+    """Return ``(effective, requested_raw, reason)`` for a requested pixfrac.
+
+    ``requested_raw`` is the numeric request made by the user / legacy settings
+    (``None`` when non-numeric) and is never overwritten by coercion, so run
+    provenance stays truthful.  ``effective`` is inside the canonical envelope
+    ``[PIXFRAC_MIN, PIXFRAC_MAX]``.  ``reason`` is a stable machine token
+    (``None`` when nothing was coerced).
+    """
+    try:
+        raw = float(pixfrac)
+    except (TypeError, ValueError):
+        return PIXFRAC_MAX, None, "pixfrac_non_numeric_defaulted_to_one"
+    if not np.isfinite(raw):
+        return PIXFRAC_MAX, None, "pixfrac_non_finite_defaulted_to_one"
+    if raw > PIXFRAC_MAX:
+        return PIXFRAC_MAX, raw, PIXFRAC_REASON_GT_ONE
+    if raw < PIXFRAC_MIN:
+        return PIXFRAC_MIN, raw, "pixfrac_below_minimum_clamped"
+    return float(raw), raw, None
 
 
 def build_output_grid(reference_wcs, reference_shape_hw, scale):

@@ -1443,7 +1443,7 @@ class SeestarStackerGUI:
         self.drizzle_pixfrac_spinbox = ttk.Spinbox(
             pixfrac_frame,
             from_=0.01,
-            to=2.00,
+            to=1.00,
             increment=0.05,
             textvariable=self.drizzle_pixfrac_var,
             width=6,

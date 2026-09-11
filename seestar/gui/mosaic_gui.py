@@ -308,7 +308,7 @@ class MosaicSettingsWindow(tk.Toplevel):
         ttk.Label(pixfrac_frame, 
                   text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), # Clé existante
                   width=15).pack(side=tk.LEFT, padx=(0,5))
-        self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=2.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
+        self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
         self.use_gpu_check = ttk.Checkbutton(
             pixfrac_frame,
             text=self.parent_gui.tr("mosaic_drizzle_use_gpu_label", default="Use GPU"),

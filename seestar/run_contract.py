@@ -428,6 +428,10 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("drizzle_pixfrac_effective", Section.SCIENTIFIC, KIND_FLOAT,
        presence=PRESENCE_CHECKPOINT, fp=_FP_DRIZZLE,
        doc="Runtime-effective pixfrac (1.0 for Lanczos)."),
+    _f("drizzle_pixfrac_reason", Section.SCIENTIFIC, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, backend_mapped=False,
+       doc="P2-D provenance-only pixfrac coerce/ignore reason (stable token, "
+           "not fingerprinted)."),
     _f("drizzle_wht_threshold_requested", Section.SCIENTIFIC, KIND_FLOAT,
        qt="drizzle_wht_threshold", backend="drizzle_wht_threshold",
        legacy=("drizzle_wht_threshold",)),

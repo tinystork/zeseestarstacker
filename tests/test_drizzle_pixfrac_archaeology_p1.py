@@ -92,9 +92,10 @@ def test_offered_kernel_set_is_the_engine_set():
 
 
 def test_resume_locator_still_accepts_effective_pixfrac_up_to_two():
-    """Archaeology: the resume locator bound is <= 2.0 (not a >1 endorsement)."""
+    """P2-D supersedes the legacy 2.0 envelope: the resume locator bound is the
+    canonical (0, 1] envelope (still not a >1 endorsement)."""
     src = inspect.getsource(resume_locator)
-    assert "0.01 <= pixfrac <= 2.0" in src
+    assert "0.01 <= pixfrac <= 1.0" in src
 
 
 def test_contract_diagnostic_never_reports_a_candidate_as_effective():
