@@ -303,11 +303,15 @@ class MosaicSettingsWindow(tk.Toplevel):
                   text=self.parent_gui.tr("mosaic_drizzle_kernel_label", default="Kernel:"), # Clé existante
                   width=15).pack(side=tk.LEFT, padx=(0,5))
         self.kernel_combo = ttk.Combobox(kernel_frame, textvariable=self.local_drizzle_kernel_var, values=VALID_DRIZZLE_KERNELS, state="readonly", width=12); self.kernel_combo.pack(side=tk.LEFT, padx=5)
+        self.kernel_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_options_state())
         
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame, padding=5); pixfrac_frame.pack(fill=tk.X)
-        ttk.Label(pixfrac_frame, 
-                  text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"), # Clé existante
-                  width=15).pack(side=tk.LEFT, padx=(0,5))
+        self.pixfrac_label = ttk.Label(
+            pixfrac_frame,
+            text=self.parent_gui.tr("mosaic_drizzle_pixfrac_label", default="Pixfrac:"),
+            width=15,
+        )
+        self.pixfrac_label.pack(side=tk.LEFT, padx=(0,5))
         self.pixfrac_spinbox = ttk.Spinbox(pixfrac_frame, from_=0.01, to=1.00, increment=0.05, textvariable=self.local_drizzle_pixfrac_var, width=7, justify=tk.RIGHT, format="%.2f"); self.pixfrac_spinbox.pack(side=tk.LEFT, padx=5)
         self.use_gpu_check = ttk.Checkbutton(
             pixfrac_frame,
@@ -375,31 +379,6 @@ class MosaicSettingsWindow(tk.Toplevel):
     def _update_options_state(self):
         print(f"DEBUG (MosaicSettingsWindow _update_options_state V4): Exécution...")
         is_mosaic_enabled = self.local_mosaic_active_var.get()
-        # P2-D2: kernel-aware pixfrac UX (canonical policy; UI-only).
-        try:
-            from ..core.drizzle_core import pixfrac_ui_policy
-
-            _editable, _val, _reason, _applicable = pixfrac_ui_policy(
-                self.local_drizzle_kernel_var.get()
-            )
-            if (not is_mosaic_enabled) or (not _editable):
-                self.pixfrac_spinbox.config(state=tk.DISABLED)
-                if _val is not None and is_mosaic_enabled:
-                    self.local_drizzle_pixfrac_var.set(float(_val))
-            else:
-                self.pixfrac_spinbox.config(state=tk.NORMAL)
-            if hasattr(self, "pixfrac_label"):
-                if is_mosaic_enabled and not _editable:
-                    _suffix = (
-                        " (N/A: ignoré en amont)"
-                        if not _applicable
-                        else " (fixe à 1.0)"
-                    )
-                else:
-                    _suffix = ""
-                self.pixfrac_label.config(text="Pixfrac:" + _suffix)
-        except Exception:  # noqa: BLE001 - UI fail-open
-            pass
         current_align_mode = self.local_mosaic_align_mode_var.get()
 
 
@@ -440,6 +419,35 @@ class MosaicSettingsWindow(tk.Toplevel):
         toggle_frame_children_state(self.alignment_mode_frame, main_frames_state)
         toggle_frame_children_state(self.astrometry_config_frame, main_frames_state)
         toggle_frame_children_state(self.drizzle_options_frame, main_frames_state) # Contient pixfrac_spinbox et wht_spinbox
+
+        # P2-D2: apply kernel policy after the parent-frame pass so that pass
+        # cannot re-enable Lanczos/Point pixfrac controls.
+        try:
+            from ..core.drizzle_core import pixfrac_ui_policy
+
+            _editable, _val, _reason, _applicable = pixfrac_ui_policy(
+                self.local_drizzle_kernel_var.get()
+            )
+            if (not is_mosaic_enabled) or (not _editable):
+                self.pixfrac_spinbox.config(state=tk.DISABLED)
+                if _val is not None and is_mosaic_enabled:
+                    self.local_drizzle_pixfrac_var.set(float(_val))
+            else:
+                self.pixfrac_spinbox.config(state=tk.NORMAL)
+            _base = self.parent_gui.tr(
+                "mosaic_drizzle_pixfrac_label", default="Pixfrac:"
+            )
+            if is_mosaic_enabled and not _editable:
+                _suffix = (
+                    " (N/A: ignoré en amont)"
+                    if not _applicable
+                    else " (fixe à 1.0)"
+                )
+            else:
+                _suffix = ""
+            self.pixfrac_label.config(text=_base + _suffix)
+        except Exception:  # noqa: BLE001 - UI fail-open
+            pass
         
         # Visibilité et état du cadre FastAligner
         show_fa_opts = is_mosaic_enabled and current_align_mode in ["local_fast_fallback", "local_fast_only"]

@@ -702,7 +702,8 @@ class SeestarStackerGUI:
                         _suffix = " (N/A: ignoré en amont)"
                     elif global_drizzle_enabled and not _editable:
                         _suffix = " (fixe à 1.0)"
-                    _lbl.config(text="Pixfrac:" + _suffix)
+                    _base = self.tr("drizzle_pixfrac_label", default="Pixfrac:")
+                    _lbl.config(text=_base + _suffix)
             except Exception:  # noqa: BLE001 - UI fail-open
                 pass
 
@@ -1465,6 +1466,10 @@ class SeestarStackerGUI:
             width=12,
         )
         self.drizzle_kernel_combo.pack(side=tk.LEFT, padx=5)
+        self.drizzle_kernel_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._update_drizzle_options_state(),
+        )
         pixfrac_frame = ttk.Frame(self.drizzle_options_frame)
         pixfrac_frame.pack(fill=tk.X, padx=(20, 5), pady=(0, 5))
         self.drizzle_pixfrac_label = ttk.Label(pixfrac_frame, text="Pixfrac:")
@@ -3431,6 +3436,10 @@ class SeestarStackerGUI:
 
         if self.current_preview_data is None and hasattr(self, "preview_manager"):
             self.preview_manager.clear_preview(self.tr("Select input/output folders."))
+
+        # Re-apply the dynamic kernel suffix after static labels are translated.
+        if hasattr(self, "drizzle_kernel_var"):
+            self._update_drizzle_options_state()
 
     def update_histogram_lines_from_sliders(self, *args):
         if hasattr(self, "histogram_widget") and self.histogram_widget:

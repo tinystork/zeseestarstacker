@@ -2754,6 +2754,7 @@ class MainWindow(QMainWindow):
             )
         elif drizzle and _pf_kernel == "point":
             self.drizzle_pixfrac_spin.setEnabled(False)
+            self.drizzle_pixfrac_spin.setValue(1.0)
             self.drizzle_pixfrac_spin.setToolTip(
                 "Not applicable (Point ignores pixfrac)"
             )

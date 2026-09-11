@@ -304,6 +304,42 @@ def test_signed_wht_kernel_disables_threshold_without_losing_requested_value(win
     assert window.collect_settings_state().drizzle_wht_threshold == pytest.approx(0.7)
 
 
+def test_drizzle_pixfrac_kernel_matrix_and_parent_gate(window):
+    """P2-D2: real offscreen Qt widgets expose truthful kernel semantics."""
+    window.drizzle_check.setChecked(True)
+
+    for kernel in ("square", "turbo", "gaussian"):
+        window.drizzle_kernel_combo.setCurrentText(kernel)
+        window.drizzle_pixfrac_spin.setValue(0.73)
+        assert window.drizzle_pixfrac_spin.isEnabled()
+        assert window.drizzle_pixfrac_spin.value() == pytest.approx(0.73)
+        assert window.drizzle_pixfrac_spin.toolTip() == ""
+
+    for kernel in ("lanczos2", "lanczos3"):
+        window.drizzle_pixfrac_spin.setValue(0.73)
+        window.drizzle_kernel_combo.setCurrentText(kernel)
+        assert not window.drizzle_pixfrac_spin.isEnabled()
+        assert window.drizzle_pixfrac_spin.value() == pytest.approx(1.0)
+        assert "1.0" in window.drizzle_pixfrac_spin.toolTip()
+
+    window.drizzle_pixfrac_spin.setValue(0.73)
+    window.drizzle_kernel_combo.setCurrentText("point")
+    assert not window.drizzle_pixfrac_spin.isEnabled()
+    assert window.drizzle_pixfrac_spin.value() == pytest.approx(1.0)
+    point_tip = window.drizzle_pixfrac_spin.toolTip().lower()
+    assert "not applicable" in point_tip and "ignore" in point_tip
+
+    window.drizzle_kernel_combo.setCurrentText("square")
+    assert window.drizzle_pixfrac_spin.isEnabled()
+    assert window.drizzle_pixfrac_spin.value() <= 1.0
+
+    window.drizzle_check.setChecked(False)
+    for kernel in ("square", "turbo", "gaussian", "lanczos2", "lanczos3", "point"):
+        window.drizzle_kernel_combo.setCurrentText(kernel)
+        window._update_drizzle_gating()
+        assert not window.drizzle_pixfrac_spin.isEnabled()
+
+
 def test_group_size_mode_interaction_only_large_dataset(window):
     """Group size is enabled only for drizzle + Large-dataset (Incremental)."""
     window.drizzle_check.setChecked(True)

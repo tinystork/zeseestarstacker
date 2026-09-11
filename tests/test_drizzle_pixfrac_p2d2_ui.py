@@ -1,7 +1,8 @@
-"""P2-D2 behavioral tests: kernel-aware pixfrac UX (Tk standard, Tk Mosaic, Qt).
+"""P2-D2 behavioral tests for the two Tk kernel-aware pixfrac surfaces.
 
-No display is required: each real state handler is invoked against faithful fake
-variable/widget objects that implement every method the handlers call.
+The real state handlers are invoked against faithful variable/widget doubles.  In
+particular, the Mosaic drizzle frame contains the same pixfrac spinbox object so
+the recursive parent-gating pass is represented and ordering regressions fail.
 """
 
 from __future__ import annotations
@@ -18,180 +19,181 @@ if str(ROOT) not in sys.path:
 
 tk_std = importlib.import_module("seestar.gui.main_window")
 tk_mos = importlib.import_module("seestar.gui.mosaic_gui")
-qt = importlib.import_module("seestar.gui_qt.main_window")
 
 NORMAL, DISABLED = "normal", "disabled"
+EDITABLE = ("square", "turbo", "gaussian")
+FIXED = ("lanczos2", "lanczos3")
+ALL_KERNELS = EDITABLE + FIXED + ("point",)
 
 
 class _Var:
-    def __init__(self, v):
-        self.v = v
+    def __init__(self, value):
+        self.value = value
 
     def get(self):
-        return self.v
+        return self.value
 
-    def set(self, v):
-        self.v = v
+    def set(self, value):
+        self.value = value
 
 
-class _W:
-    """Permissive widget proxy implementing the calls the handlers make."""
-
-    def __init__(self, text="square"):
+class _Widget:
+    def __init__(self, widget_class="TFrame", children=None):
+        self.widget_class = widget_class
+        self.children = list(children or [])
         self.state = None
-        self.value = None
-        self.tip = ""
-        self.text = text
-        self.enabled = None
+        self.text = ""
+        self.bindings = {}
 
-    # tk
-    def winfo_exists(self): return True
-    def winfo_children(self): return []
-    def winfo_class(self): return "TFrame"
-    def config(self, **kw):
-        if "state" in kw: self.state = kw["state"]
-        if "text" in kw: self.text = kw["text"]
+    def winfo_exists(self):
+        return True
+
+    def winfo_children(self):
+        return self.children
+
+    def winfo_class(self):
+        return self.widget_class
+
+    def winfo_name(self):
+        return "fake"
+
+    def winfo_ismapped(self):
+        return False
+
+    def config(self, **kwargs):
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+        if "text" in kwargs:
+            self.text = kwargs["text"]
+
     configure = config
-    def cget(self, k): return getattr(self, k, "")
-    def pack(self, *a, **k): pass
-    def pack_forget(self, *a, **k): pass
-    def grid(self, *a, **k): pass
-    def bind(self, *a, **k): pass
-    def get(self, *a): return self.value if self.value is not None else self.text
-    def set(self, v): self.value = v
-    def insert(self, *a, **k): pass
-    def delete(self, *a, **k): pass
-    # qt
-    def currentText(self): return self.text
-    def setEnabled(self, b): self.enabled = bool(b)
-    def setValue(self, v): self.value = v
-    def setToolTip(self, t): self.tip = t
-    def value(self): return self.value
-    def currentIndex(self): return 0
-    def addItems(self, *a, **k): pass
-    def setCurrentText(self, t): self.text = t
-    def blockSignals(self, *a, **k): pass
-    def isChecked(self): return True
-    def winfo_ismapped(self): return True
-    def __call__(self, *a, **k): return _W()
-    def setChecked(self, b): pass
-    def checkState(self): return 2
+
+    def bind(self, sequence, callback):
+        self.bindings[sequence] = callback
+
+    def pack(self, *args, **kwargs):
+        return None
+
+    def pack_forget(self):
+        return None
 
 
-class _Fake:
+class _DynamicFake:
+    """Supply inert widgets for unrelated controls touched by a real handler."""
+
     def __getattr__(self, name):
-        obj = _W()
-        setattr(self, name, obj)
-        return obj
+        widget = _Widget()
+        setattr(self, name, widget)
+        return widget
 
 
-def _tk_std(kernel, drizzle=True, value=0.8):
-    f = _Fake()
-    f.use_drizzle_var = _Var(drizzle)
-    f.drizzle_mode_var = _Var("Final")
-    f.drizzle_kernel_var = _Var(kernel)
-    f.drizzle_pixfrac_var = _Var(value)
-    f.drizzle_pixfrac_spinbox = _W()
-    f.drizzle_pixfrac_label = _W()
-    return f
+class _Parent:
+    @staticmethod
+    def tr(_key, default=""):
+        return default
 
 
-def _tk_mos(kernel, active=True, value=0.8):
-    f = _Fake()
-    f.local_mosaic_active_var = _Var(active)
-    f.local_mosaic_align_mode_var = _Var("local_fast_fallback")
-    f.local_drizzle_kernel_var = _Var(kernel)
-    f.local_drizzle_pixfrac_var = _Var(value)
-    f.pixfrac_spinbox = _W()
-    return f
+def _standard(kernel, *, enabled=True, value=0.8):
+    fake = _DynamicFake()
+    fake.tr = lambda _key, default="": default
+    fake.use_drizzle_var = _Var(enabled)
+    fake.drizzle_mode_var = _Var("Final")
+    fake.drizzle_kernel_var = _Var(kernel)
+    fake.drizzle_pixfrac_var = _Var(value)
+    fake.drizzle_pixfrac_spinbox = _Widget("TSpinbox")
+    fake.drizzle_pixfrac_label = _Widget("TLabel")
+    return fake
 
 
-EDITABLE = ("square", "turbo", "gaussian")
-FIXED = ("lanczos2", "lanczos3")
+def _mosaic(kernel, *, enabled=True, value=0.8):
+    fake = _DynamicFake()
+    fake.parent_gui = _Parent()
+    fake.local_mosaic_active_var = _Var(enabled)
+    fake.local_mosaic_align_mode_var = _Var("local_fast_fallback")
+    fake.local_drizzle_kernel_var = _Var(kernel)
+    fake.local_drizzle_pixfrac_var = _Var(value)
+    fake.pixfrac_spinbox = _Widget("TSpinbox")
+    fake.pixfrac_label = _Widget("TLabel")
+    fake.alignment_mode_frame = _Widget()
+    fake.astrometry_config_frame = _Widget()
+    fake.drizzle_options_frame = _Widget(children=[fake.pixfrac_spinbox])
+    fake.fastaligner_options_frame = _Widget()
+    return fake
 
 
 @pytest.mark.parametrize("kernel", EDITABLE)
-def test_tk_standard_editable_kernels(kernel):
-    f = _tk_std(kernel, value=0.8)
-    tk_std.SeestarStackerGUI._update_drizzle_options_state(f)
-    assert f.drizzle_pixfrac_spinbox.state == NORMAL
-    assert f.drizzle_pixfrac_var.get() == 0.8
-
-
-def test_tk_standard_parent_gate_authoritative():
-    f = _tk_std("square", drizzle=False)
-    tk_std.SeestarStackerGUI._update_drizzle_options_state(f)
-    assert f.drizzle_pixfrac_spinbox.state == DISABLED
+def test_tk_standard_editable_kernels_preserve_value(kernel):
+    fake = _standard(kernel)
+    tk_std.SeestarStackerGUI._update_drizzle_options_state(fake)
+    assert fake.drizzle_pixfrac_spinbox.state == NORMAL
+    assert fake.drizzle_pixfrac_var.get() == pytest.approx(0.8)
+    assert fake.drizzle_pixfrac_label.text == "Pixfrac:"
 
 
 @pytest.mark.parametrize("kernel", FIXED)
-def test_tk_standard_lanczos_fixed_one(kernel):
-    f = _tk_std(kernel, value=0.8)
-    tk_std.SeestarStackerGUI._update_drizzle_options_state(f)
-    assert f.drizzle_pixfrac_spinbox.state == DISABLED
-    assert f.drizzle_pixfrac_var.get() == 1.0
-    assert "1.0" in f.drizzle_pixfrac_label.text
+def test_tk_standard_lanczos_is_fixed_one(kernel):
+    fake = _standard(kernel)
+    tk_std.SeestarStackerGUI._update_drizzle_options_state(fake)
+    assert fake.drizzle_pixfrac_spinbox.state == DISABLED
+    assert fake.drizzle_pixfrac_var.get() == pytest.approx(1.0)
+    assert "1.0" in fake.drizzle_pixfrac_label.text
 
 
-def test_tk_standard_point_na_and_round_trip():
-    f = _tk_std("point", value=0.8)
-    tk_std.SeestarStackerGUI._update_drizzle_options_state(f)
-    assert f.drizzle_pixfrac_spinbox.state == DISABLED
-    assert f.drizzle_pixfrac_var.get() == 1.0
-    assert "N/A" in f.drizzle_pixfrac_label.text
-    # fixed -> editable round trip restores editability (never > 1)
-    f.drizzle_kernel_var.set("gaussian")
-    tk_std.SeestarStackerGUI._update_drizzle_options_state(f)
-    assert f.drizzle_pixfrac_spinbox.state == NORMAL
-    assert f.drizzle_pixfrac_var.get() <= 1.0
+def test_tk_standard_point_is_na_and_round_trip_is_editable():
+    fake = _standard("point")
+    tk_std.SeestarStackerGUI._update_drizzle_options_state(fake)
+    assert fake.drizzle_pixfrac_spinbox.state == DISABLED
+    assert fake.drizzle_pixfrac_var.get() == pytest.approx(1.0)
+    assert "N/A" in fake.drizzle_pixfrac_label.text
+
+    fake.drizzle_kernel_var.set("gaussian")
+    tk_std.SeestarStackerGUI._update_drizzle_options_state(fake)
+    assert fake.drizzle_pixfrac_spinbox.state == NORMAL
+    assert fake.drizzle_pixfrac_var.get() <= 1.0
+    assert fake.drizzle_pixfrac_label.text == "Pixfrac:"
+
+
+@pytest.mark.parametrize("kernel", ALL_KERNELS)
+def test_tk_standard_parent_gate_is_authoritative(kernel):
+    fake = _standard(kernel, enabled=False)
+    tk_std.SeestarStackerGUI._update_drizzle_options_state(fake)
+    assert fake.drizzle_pixfrac_spinbox.state == DISABLED
 
 
 @pytest.mark.parametrize("kernel", EDITABLE)
-def test_tk_mosaic_editable_kernels(kernel):
-    f = _tk_mos(kernel, value=0.8)
-    tk_mos.MosaicSettingsWindow._update_options_state(f)
-    assert f.pixfrac_spinbox.state == NORMAL
+def test_tk_mosaic_editable_kernels_preserve_value(kernel):
+    fake = _mosaic(kernel)
+    tk_mos.MosaicSettingsWindow._update_options_state(fake)
+    assert fake.pixfrac_spinbox.state == NORMAL
+    assert fake.local_drizzle_pixfrac_var.get() == pytest.approx(0.8)
+    assert fake.pixfrac_label.text == "Pixfrac:"
 
 
-def test_tk_mosaic_gate_and_fixed_kernels():
-    f = _tk_mos("square", active=False)
-    tk_mos.MosaicSettingsWindow._update_options_state(f)
-    assert f.pixfrac_spinbox.state == DISABLED
-    for kernel in FIXED:
-        g = _tk_mos(kernel, value=0.8)
-        tk_mos.MosaicSettingsWindow._update_options_state(g)
-        assert g.pixfrac_spinbox.state == DISABLED
-        assert g.local_drizzle_pixfrac_var.get() == 1.0
+@pytest.mark.parametrize("kernel", FIXED)
+def test_tk_mosaic_lanczos_stays_disabled_after_parent_frame_pass(kernel):
+    fake = _mosaic(kernel)
+    tk_mos.MosaicSettingsWindow._update_options_state(fake)
+    assert fake.pixfrac_spinbox.state == DISABLED
+    assert fake.local_drizzle_pixfrac_var.get() == pytest.approx(1.0)
+    assert "1.0" in fake.pixfrac_label.text
 
 
-import pytest as _pytest
+def test_tk_mosaic_point_is_na_and_round_trip_is_editable():
+    fake = _mosaic("point")
+    tk_mos.MosaicSettingsWindow._update_options_state(fake)
+    assert fake.pixfrac_spinbox.state == DISABLED
+    assert fake.local_drizzle_pixfrac_var.get() == pytest.approx(1.0)
+    assert "N/A" in fake.pixfrac_label.text
+
+    fake.local_drizzle_kernel_var.set("turbo")
+    tk_mos.MosaicSettingsWindow._update_options_state(fake)
+    assert fake.pixfrac_spinbox.state == NORMAL
+    assert fake.local_drizzle_pixfrac_var.get() <= 1.0
+    assert fake.pixfrac_label.text == "Pixfrac:"
 
 
-@_pytest.mark.skip(
-    reason=("Qt fake-widget harness cannot represent the real widget graph "
-            "consumed by _update_drizzle_gating (str-typed widget lists); Qt "
-            "kernel-aware behavior is covered by the shipped P2-D tests. "
-            "Bounded harness limitation, not a product defect.")
-)
-def test_qt_kernel_matrix_transitions():
-    for kernel in EDITABLE:
-        f = _Fake()
-        f.use_drizzle_var = _Var(True)
-        f.drizzle_kernel_combo = _W(text=kernel)
-        f.drizzle_pixfrac_spin = _W()
-        qt.MainWindow._update_drizzle_gating(f)
-        assert f.drizzle_pixfrac_spin.enabled is True
-    for kernel in FIXED:
-        f = _Fake()
-        f.use_drizzle_var = _Var(True)
-        f.drizzle_kernel_combo = _W(text=kernel)
-        f.drizzle_pixfrac_spin = _W()
-        qt.MainWindow._update_drizzle_gating(f)
-        assert f.drizzle_pixfrac_spin.enabled is False
-        assert f.drizzle_pixfrac_spin.value == 1.0
-    f = _Fake()
-    f.use_drizzle_var = _Var(True)
-    f.drizzle_kernel_combo = _W(text="point")
-    f.drizzle_pixfrac_spin = _W()
-    qt.MainWindow._update_drizzle_gating(f)
-    assert f.drizzle_pixfrac_spin.enabled is False
+@pytest.mark.parametrize("kernel", ALL_KERNELS)
+def test_tk_mosaic_parent_gate_is_authoritative(kernel):
+    fake = _mosaic(kernel, enabled=False)
+    tk_mos.MosaicSettingsWindow._update_options_state(fake)
+    assert fake.pixfrac_spinbox.state == DISABLED
