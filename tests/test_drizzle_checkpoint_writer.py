@@ -169,11 +169,27 @@ def _plan(sources):
     return {"sources": sources, "decomposition": [len(sources)]}
 
 
+def _reference_geometry(shape=(8, 8)):
+    """A minimal valid v2 frozen input-reference geometry payload."""
+    from astropy.wcs import WCS
+    from seestar.core.drizzle_checkpoint import serialize_input_reference_geometry
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [shape[1] / 2.0 + 0.5, shape[0] / 2.0 + 0.5]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-0.001, 0.001]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = shape
+    return serialize_input_reference_geometry(wcs, shape, None)
+
+
 def _session_binding(tmp_path, plan):
     return {
         "input_roots": [str(tmp_path)],
         "reference": _reference_identity(tmp_path),
         "plan": plan,
+        "reference_geometry": _reference_geometry(),
     }
 
 
@@ -264,6 +280,7 @@ def test_writer_roundtrip_inspection_bit_exact(tmp_path, kernel):
         "input_roots": [str(tmp_path)],
         "reference": idents[0],
         "plan": plan,
+        "reference_geometry": _reference_geometry(),
     }
     gen = writer.commit(
         accs,

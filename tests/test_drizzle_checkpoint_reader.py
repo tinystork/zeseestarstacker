@@ -169,6 +169,20 @@ def _identity(path):
     }
 
 
+def _reference_geometry(shape=(8, 8)):
+    """A minimal valid v2 frozen input-reference geometry payload."""
+    from seestar.core.drizzle_checkpoint import serialize_input_reference_geometry
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [shape[1] / 2.0 + 0.5, shape[0] / 2.0 + 0.5]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-0.001, 0.001]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = shape
+    return serialize_input_reference_geometry(wcs, shape, None)
+
+
 def _counters(frame_count, exptimes):
     return {
         "frame_count": frame_count,
@@ -211,6 +225,7 @@ def _write_checkpoint(tmp_path, kernel="square", n_sources=4, frame_count=2,
         "input_roots": [str(tmp_path)],
         "reference": ref_ident,
         "plan": {"sources": src_idents, "decomposition": [n_sources]},
+        "reference_geometry": _reference_geometry(out_shape),
     }
     gen = writer.commit(
         accs,
@@ -398,6 +413,7 @@ def test_numeric_fillval_equivalent_to_canonical_string(tmp_path):
         "input_roots": [str(tmp_path)],
         "reference": _identity(ref_path),
         "plan": {"sources": src_idents, "decomposition": [4]},
+        "reference_geometry": _reference_geometry(OUT_SHAPE),
     }
     assert writer.commit(
         accs,

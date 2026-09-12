@@ -514,15 +514,32 @@ class ReferenceResolutionError(RuntimeError):
 
 
 def _is_usable_fits_image(path: str) -> bool:
-    """Cheap header-level validation that ``path`` is a usable FITS image."""
+    """Header-level validation that ``path`` is a usable FITS image.
+
+    Mirrors the product loader's legitimate input form: a valid image may live
+    in the primary HDU *or* in an accepted image extension HDU.  Only headers
+    are inspected (no full image load/normalization), so the check stays cheap
+    and never mutates the source.  Empty, non-image, table-only and corrupt
+    files are refused.
+    """
     try:
         with fits.open(path, memmap=True) as hdul:
-            if len(hdul) == 0:
-                return False
-            naxis = int(hdul[0].header.get("NAXIS", 0) or 0)
-            if naxis not in (2, 3):
-                return False
-        return True
+            for hdu in hdul:
+                header = hdu.header
+                xtension = str(header.get("XTENSION", "") or "").upper()
+                if xtension and xtension not in ("IMAGE", "IUEIMAGE"):
+                    # Skip tables / non-image extensions.
+                    continue
+                naxis = int(header.get("NAXIS", 0) or 0)
+                if naxis not in (2, 3):
+                    continue
+                dims = [
+                    int(header.get(f"NAXIS{i}", 0) or 0)
+                    for i in range(1, naxis + 1)
+                ]
+                if all(d > 0 for d in dims):
+                    return True
+        return False
     except Exception:  # noqa: BLE001 - fail closed on any read error
         return False
 

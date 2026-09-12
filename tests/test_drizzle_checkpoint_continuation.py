@@ -213,6 +213,21 @@ def _plan(sources):
     return {"sources": sources, "decomposition": [len(sources)]}
 
 
+def _reference_geometry(shape=(8, 8)):
+    """A minimal valid v2 frozen input-reference geometry payload."""
+    from astropy.wcs import WCS
+    from seestar.core.drizzle_checkpoint import serialize_input_reference_geometry
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [shape[1] / 2.0 + 0.5, shape[0] / 2.0 + 0.5]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-0.001, 0.001]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = shape
+    return serialize_input_reference_geometry(wcs, shape, None)
+
+
 def _binding(tmp_path, plan):
     ref = Path(tmp_path) / "reference.fit"
     ref.write_bytes(b"reference-bytes")
@@ -220,6 +235,7 @@ def _binding(tmp_path, plan):
         "input_roots": [str(tmp_path)],
         "reference": _identity(ref),
         "plan": plan,
+        "reference_geometry": _reference_geometry(),
     }
 
 

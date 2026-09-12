@@ -43,6 +43,21 @@ from seestar.core.drizzle_checkpoint import (
 from seestar.core.drizzle_core import DrizzleAccumulator, validate_drizzle_kernel
 
 SHAPE = (8, 8)
+
+
+def _reference_geometry(shape=SHAPE):
+    """A minimal valid v2 frozen input-reference geometry payload."""
+    from astropy.wcs import WCS
+    from seestar.core.drizzle_checkpoint import serialize_input_reference_geometry
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [shape[1] / 2.0 + 0.5, shape[0] / 2.0 + 0.5]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-0.001, 0.001]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = shape
+    return serialize_input_reference_geometry(wcs, shape, None)
 _ENGINE_SHAPE = (32, 32)  # proven reference grid for real initialize()
 
 
@@ -292,6 +307,7 @@ def _seed_run_config(tmp_path, kernel, *, scale=3.0):
                 "sources": idents,
                 "decomposition": [4],
             },
+            "reference_geometry": _reference_geometry(),
         },
         counters={
             "frame_count": 2,

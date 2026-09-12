@@ -171,6 +171,7 @@ __all__ = [
     "serialize_wcs_header",
     "serialize_input_reference_geometry",
     "reconstruct_input_reference_wcs",
+    "output_grid_contract_identity",
     "INPUT_REFERENCE_GEOMETRY_CONTRACT",
     "INPUT_REFERENCE_GEOMETRY_VERSION",
     "CHECKPOINT_DIRNAME",
@@ -597,6 +598,14 @@ def reconstruct_input_reference_wcs(reference_geometry):
         except Exception:  # noqa: BLE001
             pass
     return wcs
+
+
+def output_grid_contract_identity():
+    """Return the stable output-grid contract identity (token + version)."""
+    return {
+        "contract": _OUTPUT_GRID_CONTRACT,
+        "contract_version": _OUTPUT_GRID_CONTRACT_VERSION,
+    }
 
 
 def _resolve_geometry_facts(qm):
@@ -1519,6 +1528,11 @@ class DrizzleCheckpointWriter:
             )
         if new_geom is None and loaded_geom is not None:
             session_clean["reference_geometry"] = loaded_geom
+        if session_clean.get("reference_geometry") is None:
+            raise DrizzleCheckpointError(
+                "continuation must not omit the mandatory input-reference "
+                "geometry"
+            )
         loaded_counters = loaded["counters"]
         new_frame = counters_clean["frame_count"]
         loaded_frame = loaded_counters["frame_count"]
@@ -1972,6 +1986,20 @@ class DrizzleCheckpointWriter:
             #    AttributeError/TypeError/ValueError.
             counters_clean = self._validate_counters(counters)
             session_clean = self._validate_session_binding(session_binding)
+            # F1: the v2 output-grid checkpoint mandates the frozen
+            # input-reference geometry.  A fresh (non-continuation) commit
+            # refuses to publish without it; a continuation may carry it
+            # forward from the loaded checkpoint (handled in
+            # ``_check_monotonic_extension``, which also refuses if neither
+            # side supplies it).
+            if (
+                session_clean.get("reference_geometry") is None
+                and self._continuation_state is None
+            ):
+                raise DrizzleCheckpointError(
+                    "input-reference geometry is mandatory for the v2 "
+                    "output-grid checkpoint; refusing to publish without it"
+                )
             ledger_clean = self._validate_ledger(completed_sources)
             snapshots = self._snapshot_channels(accumulators)
             support_snapshot = self._snapshot_support(
@@ -2608,6 +2636,14 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
     wcs = _reconstruct_wcs(manifest, output_shape_hw)
     counters = _validate_counters(manifest)
     session = _validate_session(manifest)
+    # F1: a v2 output-grid checkpoint must carry the versioned frozen
+    # input-reference geometry; refuse a stripped payload before any
+    # reconstruction/mutation.
+    if session.get("reference_geometry") is None:
+        raise DrizzleCheckpointError(
+            "missing mandatory input-reference geometry in the v2 output-grid "
+            "checkpoint"
+        )
     ledger = _validate_ledger(manifest, session, counters)
     resolved_reference, resolved_plan_paths = _resolve_sources(
         session, counters, resolver, output_dir

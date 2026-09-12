@@ -335,6 +335,7 @@ from ..core.background import (
 from ..core.drizzle_core import (
     DrizzleAccumulator,
     LANCZOS_KERNELS,
+    OUTPUT_GRID_CRPIX_CONVENTION,
     WEIGHT_EPSILON,
     DrizzleGeometryError,
     PIXEL_SCALE_RATIO_SOURCE,
@@ -362,6 +363,7 @@ from ..core.drizzle_checkpoint import (
     DrizzleCheckpointWriter,
     SafeStackedSourceResolver,
     build_drizzle_canonical_config,
+    output_grid_contract_identity,
     read_drizzle_checkpoint,
     reconstruct_input_reference_wcs,
     serialize_input_reference_geometry,
@@ -16696,13 +16698,19 @@ class SeestarQueuedStacker:
         self.ref_wcs_header = None
         self.reference_pixel_scale_arcsec = None
         self._drizzle_grid_identity = None
+        self._drizzle_grid_provenance_emitted = False
+        # F2: every newly accepted run -- fresh OR resume -- must drop the
+        # previous run's reference owner/aligner state before any new
+        # reference decision, so a reused stacker can never keep an
+        # object-scoped frozen reference that would conflict with the
+        # checkpoint-resolved RESUME identity.
+        self._clear_frozen_reference()
+        self._resolved_reference_origin = None
         if not getattr(self, "_resume_requested", False):
             self._drizzle_resume_result = None
             self._drizzle_resume_continuation = None
             self._automatic_reference_resolution_count = 0
             self._reference_geometry_stats = None
-            self._clear_frozen_reference()
-            self._resolved_reference_origin = None
             # The frozen kernel-geometry scalar is run-scoped too: a fresh run
             # on a reused stacker must re-derive it for ITS scale, never inherit
             # the previous run's value.  A resume keeps its persisted value
@@ -16741,6 +16749,39 @@ class SeestarQueuedStacker:
             except Exception:  # noqa: BLE001
                 return None
 
+        def _rounded(value):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            # A non-finite frame card (e.g. an unset EQUINOX serialized as NaN)
+            # must collapse to a stable sentinel, otherwise `nan != nan` would
+            # report a spurious drift on every repeated resolution.
+            if not math.isfinite(number):
+                return None
+            return round(number, 12)
+
+        def _frame_facts(wcs_obj):
+            """Frame/projection facts that can alter mapping or frame."""
+            wcsprm = getattr(wcs_obj, "wcs", None)
+            facts = {
+                "ctype": tuple(str(c) for c in getattr(wcsprm, "ctype", ()) or ()),
+                "cunit": tuple(str(c) for c in getattr(wcsprm, "cunit", ()) or ()),
+                "radesys": str(getattr(wcsprm, "radesys", "") or ""),
+                "equinox": _rounded(getattr(wcsprm, "equinox", None)),
+                "lonpole": _rounded(getattr(wcsprm, "lonpole", None)),
+                "latpole": _rounded(getattr(wcsprm, "latpole", None)),
+            }
+            for name, getter in (("pv", "get_pv"), ("ps", "get_ps")):
+                try:
+                    pairs = getattr(wcsprm, getter)() if wcsprm is not None else []
+                    facts[name] = tuple(
+                        (int(k), _rounded(v)) for k, v in (pairs or [])
+                    )
+                except Exception:  # noqa: BLE001 - absent PV/PS
+                    facts[name] = ()
+            return tuple(sorted(facts.items()))
+
         frozen = getattr(self, "_frozen_reference", None)
         return {
             "reference_source": getattr(frozen, "source_path", None),
@@ -16748,52 +16789,137 @@ class SeestarQueuedStacker:
             "reference_crval": tuple(float(v) for v in ref.wcs.crval),
             "reference_crpix": tuple(float(v) for v in ref.wcs.crpix),
             "reference_matrix": _matrix(ref),
-            "reference_ctype": tuple(str(c) for c in ref.wcs.ctype),
+            "reference_frame": _frame_facts(ref),
             "reference_handedness": _handedness(ref),
+            "reference_array_shape": tuple(getattr(ref, "array_shape", ()) or ()),
+            "reference_pixel_shape": tuple(getattr(ref, "pixel_shape", ()) or ()),
             "output_crval": tuple(float(v) for v in out.wcs.crval),
             "output_crpix": tuple(float(v) for v in out.wcs.crpix),
             "output_matrix": _matrix(out),
-            "output_ctype": tuple(str(c) for c in out.wcs.ctype),
+            "output_frame": _frame_facts(out),
             "output_handedness": _handedness(out),
+            "output_array_shape": tuple(getattr(out, "array_shape", ()) or ()),
+            "output_pixel_shape": tuple(getattr(out, "pixel_shape", ()) or ()),
             "scale": float(scale),
             "psr": float(psr),
         }
 
-    def _check_drizzle_grid_identity(self, ref, out, ratio):
-        """Fail closed on any same-run reference/output grid drift.
+    # Shape facts may resolve from absent to concrete exactly once (the early
+    # freeze may run before the concrete grid/reference shapes exist), but are
+    # immutable once concrete -- like every other fact.
+    _GRID_SHAPE_KEYS = (
+        "reference_array_shape",
+        "reference_pixel_shape",
+        "output_array_shape",
+        "output_pixel_shape",
+        "output_shape",
+    )
 
-        The output shape is allowed to move from unresolved to concrete exactly
-        once (the early freeze may run before the concrete grid exists), but
-        once concrete it is immutable for the run, like every other fact.
-        """
+    def _check_drizzle_grid_identity(self, ref, out, ratio):
+        """Fail closed on any same-run reference/output grid drift."""
         scale = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
         snapshot = self._drizzle_grid_identity_snapshot(ref, out, scale, ratio)
         out_shape = getattr(self, "drizzle_output_shape_hw", None)
+        snapshot["output_shape"] = tuple(out_shape) if out_shape else None
         prior = getattr(self, "_drizzle_grid_identity", None)
         if prior is None:
-            stored = dict(snapshot)
-            stored["output_shape"] = tuple(out_shape) if out_shape else None
-            self._drizzle_grid_identity = stored
+            self._drizzle_grid_identity = dict(snapshot)
+            self._emit_drizzle_grid_provenance("resolution", ref, out, ratio)
             return
-        differing = {
-            key: (prior.get(key), value)
-            for key, value in snapshot.items()
-            if prior.get(key) != value
-        }
+        differing = {}
+        for key, value in snapshot.items():
+            prior_value = prior.get(key)
+            if prior_value == value:
+                continue
+            if key in self._GRID_SHAPE_KEYS and not prior_value and value:
+                prior[key] = value
+                continue
+            differing[key] = (prior_value, value)
         if differing:
             raise DrizzleGeometryError(
                 "frozen drizzle grid identity drift: "
                 + repr(sorted(differing.items()))
             )
-        prior_shape = prior.get("output_shape")
-        if out_shape is not None:
-            if prior_shape is None:
-                prior["output_shape"] = tuple(out_shape)
-            elif tuple(prior_shape) != tuple(out_shape):
-                raise DrizzleGeometryError(
-                    "frozen drizzle output shape drift: "
-                    f"{prior_shape!r} != {tuple(out_shape)!r}"
+
+    def _emit_drizzle_grid_provenance(self, kind, ref=None, out=None, ratio=None):
+        """Emit one compact, verified ``DRIZZLE_GRID`` provenance record.
+
+        Emitted once per resolution and once on a validated resume -- never per
+        frame, never per pixel.  ``orientation_preserved`` is *computed* by
+        comparing the output effective matrix against the reference matrix
+        divided by the scale (and the handedness sign), never hard-coded.  Any
+        failure to resolve a field degrades to ``None`` rather than raising, so
+        provenance can never abort a run.
+        """
+        if kind == "resolution" and getattr(
+            self, "_drizzle_grid_provenance_emitted", False
+        ):
+            return
+        try:
+            if ref is None:
+                ref = getattr(self, "reference_wcs_object", None)
+            if out is None:
+                out = getattr(self, "drizzle_output_wcs", None)
+            if ratio is None:
+                ratio = getattr(self, "drizzle_pixel_scale_ratio_effective", None)
+            if ref is None or out is None:
+                return
+            frozen = getattr(self, "_frozen_reference", None)
+            scale = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
+            contract = output_grid_contract_identity()
+
+            def _matrix(wcs_obj):
+                try:
+                    return [
+                        round(float(v), 10)
+                        for v in np.asarray(
+                            wcs_obj.pixel_scale_matrix, dtype=float
+                        ).ravel()
+                    ]
+                except Exception:  # noqa: BLE001
+                    return None
+
+            orientation_preserved = False
+            try:
+                matrix_ref = np.asarray(ref.pixel_scale_matrix, dtype=float)
+                matrix_out = np.asarray(out.pixel_scale_matrix, dtype=float)
+                orientation_preserved = bool(
+                    np.allclose(
+                        matrix_out, matrix_ref / scale, rtol=1e-9, atol=1e-12
+                    )
+                    and int(np.sign(np.linalg.det(matrix_out)))
+                    == int(np.sign(np.linalg.det(matrix_ref)))
                 )
+            except Exception:  # noqa: BLE001
+                orientation_preserved = False
+
+            logger.info(
+                "DRIZZLE_GRID kind=%s source=reference_wcs builder=%s "
+                "reference_origin=%s requested_manual=%r reference_source=%s "
+                "materialized=%s worker_source=%s shape_hw=%s scale=%s psr=%s "
+                "orientation_preserved=%s ref_matrix=%s output_matrix=%s "
+                "contract=%s v%s crpix_convention=%s",
+                kind,
+                "seestar.core.drizzle_core.build_output_grid",
+                getattr(frozen, "origin", None),
+                getattr(self, "_reference_requested_raw", None),
+                getattr(frozen, "source_path", None),
+                getattr(frozen, "materialized_path", None),
+                getattr(frozen, "source_basename", None),
+                tuple(getattr(self, "drizzle_output_shape_hw", ()) or ()),
+                scale,
+                ratio,
+                orientation_preserved,
+                _matrix(ref),
+                _matrix(out),
+                contract.get("contract"),
+                contract.get("contract_version"),
+                OUTPUT_GRID_CRPIX_CONVENTION,
+            )
+            if kind in ("resolution", "resume"):
+                self._drizzle_grid_provenance_emitted = True
+        except Exception:  # noqa: BLE001 - provenance must never abort a run
+            pass
 
     def _freeze_drizzle_geometry(self):
         """ONE idempotent canonical Drizzle geometry freeze (P2-B).
@@ -22425,6 +22551,10 @@ class SeestarQueuedStacker:
         whether that raw string happens to exist as a CWD-relative file, so a
         failing explicit request never mis-reports as ``auto``.
         """
+        # Preserve the raw requested value for durable provenance (F6).
+        self._reference_requested_raw = (
+            None if reference_path_ui is None else str(reference_path_ui)
+        )
         if getattr(self, "_resume_requested", False):
             return "resume"
         if getattr(self, "reference_origin_hint", None) == ORIGIN_ZEANALYSER:
@@ -24152,6 +24282,9 @@ class SeestarQueuedStacker:
                         int(_restored_shape[0]),
                         int(_restored_shape[1]),
                     )
+            # F6: emit one validated-resume provenance record describing the
+            # exact restored output grid + input-reference geometry.
+            self._emit_drizzle_grid_provenance("resume")
 
         init_shape_hwc = ref_shape_hwc
         if (
@@ -24992,16 +25125,31 @@ class SeestarQueuedStacker:
         restore the exact input-reference WCS instead of merely re-solving the
         same file (re-solving alone is not proof of stability).
         """
+        # On a continuation the persisted input-reference geometry is
+        # authoritative (restored exactly on resume) and must never be
+        # downgraded/replaced by a re-serialized value; prefer it over a fresh
+        # serialization so path/identity re-resolution cannot diverge.
         reference_geometry = None
-        try:
-            reference_geometry = serialize_input_reference_geometry(
-                getattr(self, "reference_wcs_object", None),
-                getattr(self, "input_reference_shape_hw", None)
-                or getattr(self, "reference_shape", None),
-                getattr(self, "_resume_reference_identity", None),
+        resume_result = getattr(self, "_drizzle_resume_result", None)
+        if resume_result is not None:
+            reference_geometry = getattr(
+                resume_result, "reference_geometry", None
             )
-        except Exception:  # noqa: BLE001 - geometry payload is additive
-            reference_geometry = None
+        if reference_geometry is None:
+            continuation = getattr(self, "_drizzle_resume_continuation", None)
+            session = getattr(continuation, "session", None)
+            if isinstance(session, dict):
+                reference_geometry = session.get("reference_geometry")
+        if reference_geometry is None:
+            try:
+                reference_geometry = serialize_input_reference_geometry(
+                    getattr(self, "reference_wcs_object", None),
+                    getattr(self, "input_reference_shape_hw", None)
+                    or getattr(self, "reference_shape", None),
+                    getattr(self, "_resume_reference_identity", None),
+                )
+            except Exception:  # noqa: BLE001 - commit fails closed if absent
+                reference_geometry = None
         return {
             "input_roots": list(getattr(self, "_resume_input_roots", None) or []),
             "reference": getattr(self, "_resume_reference_identity", None),

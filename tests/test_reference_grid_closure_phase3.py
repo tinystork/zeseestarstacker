@@ -68,6 +68,44 @@ def test_same_run_retry_is_idempotent():
     assert first == second
 
 
+def _grid_subject(scale=2.0):
+    obj = object.__new__(qm.SeestarQueuedStacker)
+    obj.drizzle_scale = scale
+    obj.reference_wcs_object = _rot_wcs()
+    obj.drizzle_output_wcs = build_output_grid(obj.reference_wcs_object, (32, 32), scale)[0]
+    obj.drizzle_output_shape_hw = (int(32 * scale), int(32 * scale))
+    return obj
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda o: setattr(o.reference_wcs_object.wcs, "radesys", "FK5"),
+        lambda o: setattr(o.reference_wcs_object, "array_shape", (31, 32)),
+        lambda o: setattr(o.drizzle_output_wcs.wcs, "radesys", "FK5"),
+        lambda o: setattr(o.reference_wcs_object.wcs, "lonpole", 10.0),
+        lambda o: setattr(o.drizzle_output_wcs.wcs, "equinox", 2000.0),
+    ],
+)
+def test_frame_and_shape_mutations_are_rejected(mutate):
+    """F3: frame metadata and reference *shape* drift must fail closed, not
+    only CTYPE/matrix/PSR."""
+    obj = _grid_subject()
+    obj._freeze_drizzle_geometry()
+    mutate(obj)
+    with pytest.raises(DrizzleGeometryError):
+        obj._freeze_drizzle_geometry()
+
+
+def test_repeated_equivalent_resolution_is_idempotent():
+    obj = _grid_subject()
+    first = obj._freeze_drizzle_geometry()
+    assert obj._freeze_drizzle_geometry() == first
+    # equivalent re-resolution from the same reference/scale stays stable
+    obj.drizzle_output_wcs = build_output_grid(obj.reference_wcs_object, (32, 32), 2.0)[0]
+    assert obj._freeze_drizzle_geometry() == first
+
+
 def test_reference_geometry_drift_is_rejected():
     obj = object.__new__(qm.SeestarQueuedStacker)
     obj.drizzle_scale = 2.0
@@ -139,6 +177,29 @@ def test_resume_reset_preserves_persisted_checkpoint_result():
     assert obj._drizzle_grid_identity is None
     # the persisted checkpoint result must survive so it can be restored
     assert obj._drizzle_resume_result is persisted
+
+
+def test_resume_reset_clears_prior_reference_owner(tmp_path):
+    """F2: a resume accepted on a reused stacker must clear the previous run's
+    frozen reference owner, then freeze the checkpoint-resolved RESUME identity
+    without a conflict, while preserving the persisted checkpoint result."""
+    st = qm.SeestarQueuedStacker(batch_size=1, autotune=False)
+    st.update_progress = lambda *a, **k: None
+    old = tmp_path / "old.fit"
+    new = tmp_path / "new.fit"
+    old.write_bytes(b"old")
+    new.write_bytes(b"new")
+    st._freeze_reference(str(old), "USER")
+    assert st._frozen_reference.source_basename == "old.fit"
+
+    st._resume_requested = True
+    st._drizzle_resume_result = "sentinel-result"
+    st._reset_run_geometry()
+    assert st._frozen_reference is None
+    assert st._drizzle_resume_result == "sentinel-result"
+    frozen = st._freeze_reference(str(new), "RESUME")
+    assert frozen.origin == "RESUME"
+    assert frozen.source_basename == "new.fit"
 
 
 def test_refused_concurrent_start_mutates_nothing():
@@ -224,6 +285,63 @@ def _run_once(st, root, out, request, scale, selector_calls):
         return started, done, snapshot
     finally:
         _qm.select_geometry_reference = orig
+
+
+def test_drizzle_grid_provenance_record_once(caplog):
+    """F6: one compact, computed DRIZZLE_GRID provenance record per resolution."""
+    import logging
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    qm.logger.addHandler(handler)
+    old_level = qm.logger.level
+    qm.logger.setLevel(logging.INFO)
+    try:
+        obj = _grid_subject()
+        obj._reference_requested_raw = "/in/B.fit"
+        obj._freeze_drizzle_geometry()
+        obj._freeze_drizzle_geometry()  # idempotent: no second record
+    finally:
+        qm.logger.removeHandler(handler)
+        qm.logger.setLevel(old_level)
+
+    grid = [m for m in records if m.startswith("DRIZZLE_GRID")]
+    assert len(grid) == 1
+    line = grid[0]
+    assert "builder=seestar.core.drizzle_core.build_output_grid" in line
+    assert "contract=m3_output_grid_v2 v2" in line
+    assert "crpix_convention=fits_edge_centre_v1" in line
+    assert "orientation_preserved=True" in line
+    assert "requested_manual='/in/B.fit'" in line
+
+
+def test_drizzle_grid_resume_provenance_record(caplog):
+    import logging
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    qm.logger.addHandler(handler)
+    old_level = qm.logger.level
+    qm.logger.setLevel(logging.INFO)
+    try:
+        obj = _grid_subject()
+        obj._drizzle_grid_provenance_emitted = True
+        obj._emit_drizzle_grid_provenance("resume")
+    finally:
+        qm.logger.removeHandler(handler)
+        qm.logger.setLevel(old_level)
+    resume = [m for m in records if m.startswith("DRIZZLE_GRID kind=resume")]
+    assert len(resume) == 1
 
 
 def test_reused_stacker_rebuilds_grid_for_new_reference_and_scale(tmp_path):

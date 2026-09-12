@@ -162,6 +162,21 @@ def _identity(path):
     }
 
 
+def _reference_geometry(shape=(8, 8)):
+    """A minimal valid v2 frozen input-reference geometry payload."""
+    from astropy.wcs import WCS
+    from seestar.core.drizzle_checkpoint import serialize_input_reference_geometry
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [shape[1] / 2.0 + 0.5, shape[0] / 2.0 + 0.5]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-0.001, 0.001]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = shape
+    return serialize_input_reference_geometry(wcs, shape, None)
+
+
 def _counters(frame_count):
     ex = FRAME_EXPTIMES[:frame_count]
     return {
@@ -229,6 +244,7 @@ def _write_checkpoint(tmp_path, kernel="square", n_sources=4, frame_count=2):
         "input_roots": [str(tmp_path)],
         "reference": ref_ident,
         "plan": {"sources": src_idents, "decomposition": [n_sources]},
+        "reference_geometry": _reference_geometry(),
     }
     gen = writer.commit(
         accs,
@@ -282,6 +298,7 @@ def _write_checkpoint_reference_in_plan(tmp_path, kernel="square", n_sources=4,
         "input_roots": [str(tmp_path)],
         "reference": src_idents[0],
         "plan": {"sources": src_idents, "decomposition": [n_sources]},
+        "reference_geometry": _reference_geometry(),
     }
     gen = writer.commit(
         accs,
@@ -499,6 +516,7 @@ def test_ambiguous_duplicate_destination_refused(tmp_path):
         "input_roots": [str(tmp_path)],
         "reference": _identity(ref),
         "plan": {"sources": [id0, id1], "decomposition": [2]},
+        "reference_geometry": _reference_geometry(),
     }
     assert writer.commit(
         accs,

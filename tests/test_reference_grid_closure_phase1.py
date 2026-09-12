@@ -33,6 +33,20 @@ def _write_fits(path, ra=10.0, shape=(32, 40)):
     fits.PrimaryHDU(np.ones(shape, np.float32), header).writeto(str(path))
 
 
+def _write_fits_extension(path, ra=276.0, shape=(32, 40)):
+    """A legitimate product input form: image data in an extension HDU."""
+    w = WCS(naxis=2)
+    w.wcs.crpix = [(shape[1] + 1) / 2.0, (shape[0] + 1) / 2.0]
+    w.wcs.crval = [ra, 20.0]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    w.wcs.cdelt = [-0.001, 0.001]
+    header = w.to_header()
+    header["EXPTIME"] = 20.0
+    fits.HDUList(
+        [fits.PrimaryHDU(), fits.ImageHDU(np.ones(shape, np.float32), header)]
+    ).writeto(str(path))
+
+
 # ---------------------------------------------------------------------------
 # resolver unit coverage
 # ---------------------------------------------------------------------------
@@ -136,14 +150,25 @@ class _NoopExecutor:
         pass
 
 
-def _drive_start(tmp_path, request, additional=None, origin_hint="USER"):
+def _drive_start(tmp_path, request, additional=None, origin_hint="USER",
+                 extension_b=False, invalid_b=False, duplicate_root=False):
     """Run a real (stubbed-executor) Drizzle Standard start; return facts."""
     root = tmp_path / "input"
     out = tmp_path / ("output_" + str(abs(hash((request, str(additional))))))
     root.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
-    for name, ra in (("A.fit", 275.0), ("B.fit", 276.0)):
-        _write_fits(root / name, ra=ra)
+    _write_fits(root / "A.fit", ra=275.0)
+    if invalid_b:
+        (root / "B.fit").write_bytes(b"not a fits file at all")
+    elif extension_b:
+        _write_fits_extension(root / "B.fit", ra=276.0)
+    else:
+        _write_fits(root / "B.fit", ra=276.0)
+    if duplicate_root:
+        dup = tmp_path / "duplicate_input"
+        dup.mkdir(parents=True, exist_ok=True)
+        _write_fits(dup / "B.fit", ra=277.0)
+        additional = list(additional or []) + [str(dup)]
     selector_calls = []
 
     def choose(*args, **kwargs):
@@ -281,6 +306,86 @@ def test_conflicting_manual_freeze_is_refused(tmp_path):
         st._freeze_reference(str(b), "USER")
     with pytest.raises(RuntimeError):
         st._freeze_reference(str(a), "RESUME")
+
+
+def test_duplicate_basename_fails_start_without_auto(tmp_path):
+    st, started, done, snapshot, calls, events = _drive_start(
+        tmp_path / "dup", "B.fit", duplicate_root=True
+    )
+    assert started is False
+    assert calls == []
+    assert done.is_set() is False
+    assert st.startup_refusal is not None
+    assert st.startup_refusal.code == qm.StartupRefusal.CODE_MANUAL_REFERENCE_UNRESOLVED
+    assert "ambiguous" in st.startup_refusal.technical_detail
+
+
+def test_invalid_unusable_explicit_fails_start_without_auto(tmp_path):
+    st, started, done, snapshot, calls, events = _drive_start(
+        tmp_path / "inv", str(tmp_path / "inv" / "input" / "B.fit"), invalid_b=True
+    )
+    assert started is False
+    assert calls == []
+    assert st.startup_refusal is not None
+    assert st.startup_refusal.code == qm.StartupRefusal.CODE_MANUAL_REFERENCE_UNRESOLVED
+
+
+def test_zeanalyser_explicit_path_resolves_with_zeanalyser_origin(tmp_path):
+    st, started, done, snapshot, calls, events = _drive_start(
+        tmp_path / "zea",
+        str(tmp_path / "zea" / "input" / "B.fit"),
+        origin_hint="ZEANALYSER_V1",
+    )
+    assert started and done.is_set(), events[-15:]
+    assert snapshot["source"] == "B.fit"
+    assert snapshot["origin"] == "ZEANALYSER_V1"
+    assert calls == []
+
+
+def test_extension_hdu_reference_resolves_and_starts(tmp_path):
+    base = tmp_path / "ext"
+    root = base / "input"
+    root.mkdir(parents=True)
+    target = root / "ext.fit"
+    _write_fits_extension(target)
+    # resolver accepts the legitimate extension-image input form
+    assert resolve_explicit_reference(str(target), search_roots=[str(root)]) == os.path.realpath(
+        str(target)
+    )
+    st, started, done, snapshot, calls, events = _drive_start(base, str(target))
+    assert started and done.is_set(), events[-15:]
+    assert snapshot["source"] == "ext.fit"
+    assert snapshot["origin"] == "USER"
+    assert calls == []
+
+
+def test_resume_precedence_never_consults_manual_resolver(tmp_path, monkeypatch):
+    """A resume-intent start must never let a conflicting manual request
+    redirect the checkpoint-resolved identity, and must never call the
+    explicit resolver."""
+    base = tmp_path / "res"
+    root = base / "input"
+    out = base / "out"
+    root.mkdir(parents=True)
+    out.mkdir(parents=True)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("explicit resolver must not run on a resume")
+
+    monkeypatch.setattr(qm, "resolve_explicit_reference", _boom)
+    monkeypatch.setattr(qm, "ProcessPoolExecutor", _NoopExecutor)
+    st = qm.SeestarQueuedStacker(batch_size=1, autotune=False)
+    st.update_progress = lambda *a, **k: None
+    started = st.start_processing(
+        str(root), str(out),
+        reference_path_ui=str(root / "conflicting.fit"),
+        resume_intent="resume", resume_source=str(out),
+        use_drizzle=True, drizzle_scale=2, drizzle_kernel="lanczos2",
+    )
+    # Resume intent without recognized state refuses at the resume gate, before
+    # the reference dispatch; the conflicting manual request is never resolved.
+    assert started is False
+    assert st._reference_requested_policy(str(root / "conflicting.fit")) == "resume"
 
 
 def test_requested_policy_reports_explicit_intent_by_presence():

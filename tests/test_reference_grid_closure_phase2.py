@@ -160,6 +160,34 @@ def test_unsupported_distortion_is_refused():
         build_output_grid(_Distorted(), REF_SHAPE, 2)
 
 
+def test_shapeless_reference_with_explicit_shape_accepted():
+    """F5: the caller supplies the authoritative shape; a shapeless reference
+    WCS must not be refused, and the OUTPUT metadata must still match."""
+    ref = make_reference()
+    ref.pixel_shape = None
+    try:
+        ref.array_shape = None
+    except Exception:  # noqa: BLE001
+        pass
+    out, out_shape = build_output_grid(ref, REF_SHAPE, 2)
+    assert out_shape == (REF_SHAPE[0] * 2, REF_SHAPE[1] * 2)
+    assert out.array_shape == out_shape
+    assert out.pixel_shape == (out_shape[1], out_shape[0])
+    assert np.allclose(
+        out.pixel_scale_matrix, ref.pixel_scale_matrix / 2, rtol=1e-12, atol=1e-18
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_shape",
+    [(0, 10), (10, 0), (-1, 5), (2.5, 10), (10, None), (True, 10), (10,), (1, 2, 3)],
+)
+def test_invalid_reference_shape_is_rejected(bad_shape):
+    ref = make_reference()
+    with pytest.raises(ValueError):
+        build_output_grid(ref, bad_shape, 2)
+
+
 def test_invalid_scale_and_non_celestial_refused():
     ref = make_reference()
     with pytest.raises(ValueError):

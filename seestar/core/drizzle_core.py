@@ -311,6 +311,34 @@ def _unsupported_distortion_kind(reference_wcs):
     return None
 
 
+def _validate_shape_hw(shape_hw):
+    """Require ``(H, W)`` to be finite positive integral dimensions."""
+    for axis, value in enumerate(tuple(shape_hw)):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(
+                f"reference_shape_hw[{axis}] must be an integer, got {value!r}"
+            )
+        if int(value) <= 0:
+            raise ValueError(
+                f"reference_shape_hw[{axis}] must be positive, got {value!r}"
+            )
+
+
+def _verify_grid_shape(out_wcs, out_shape_hw):
+    """Fail closed unless the output public shape metadata matches exactly."""
+    out_h, out_w = int(out_shape_hw[0]), int(out_shape_hw[1])
+    array_shape = getattr(out_wcs, "array_shape", None)
+    if array_shape is not None and tuple(array_shape) != (out_h, out_w):
+        raise ValueError(
+            f"output array_shape {tuple(array_shape)!r} != {(out_h, out_w)!r}"
+        )
+    pixel_shape = getattr(out_wcs, "pixel_shape", None)
+    if pixel_shape is not None and tuple(pixel_shape) != (out_w, out_h):
+        raise ValueError(
+            f"output pixel_shape {tuple(pixel_shape)!r} != {(out_w, out_h)!r}"
+        )
+
+
 def _attach_grid_shape(out_wcs, out_shape_hw):
     """Attach the public grid shape metadata to a modified WCS copy.
 
@@ -384,12 +412,14 @@ def build_output_grid(reference_wcs, reference_shape_hw, scale):
         raise ValueError("scale must be >= 1.0")
     if reference_wcs is None or not getattr(reference_wcs, "is_celestial", False):
         raise ValueError("reference WCS must be celestial")
-    if getattr(reference_wcs, "pixel_shape", None) is None:
-        raise ValueError("reference WCS must define pixel_shape")
+    # The caller supplies the authoritative grid shape explicitly, so the
+    # reference WCS itself need not carry pixel_shape; only the OUTPUT grid
+    # metadata is required to match the returned shape (verified below).
     if reference_shape_hw is None or len(tuple(reference_shape_hw)) != 2:
         raise ValueError(
             f"reference_shape_hw must be (H, W), got {reference_shape_hw!r}"
         )
+    _validate_shape_hw(reference_shape_hw)
     distortion = _unsupported_distortion_kind(reference_wcs)
     if distortion is not None:
         raise ValueError(
@@ -406,10 +436,11 @@ def build_output_grid(reference_wcs, reference_shape_hw, scale):
             np.asarray(reference_wcs.wcs.cdelt, dtype=float) / scale
         )
 
-    out_h = max(1, int(round(reference_shape_hw[0] * scale)))
-    out_w = max(1, int(round(reference_shape_hw[1] * scale)))
+    out_h = int(round(int(reference_shape_hw[0]) * scale))
+    out_w = int(round(int(reference_shape_hw[1]) * scale))
     out_shape_hw = (out_h, out_w)
     _attach_grid_shape(out_wcs, out_shape_hw)
+    _verify_grid_shape(out_wcs, out_shape_hw)
     return out_wcs, out_shape_hw
 
 

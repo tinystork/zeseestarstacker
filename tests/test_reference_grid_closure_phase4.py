@@ -233,6 +233,95 @@ def test_missing_reference_geometry_is_rejected(tmp_path):
         read_drizzle_checkpoint(str(tmp_path))
 
 
+def test_removed_reference_geometry_key_is_rejected(tmp_path):
+    """F1: removing the payload (not merely corrupting the token) must refuse."""
+    _write(tmp_path)
+    manifest_path = Path(tmp_path) / CHECKPOINT_DIRNAME / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["session"]["reference_geometry"]
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
+    )
+    with pytest.raises(DrizzleCheckpointError) as exc:
+        read_drizzle_checkpoint(str(tmp_path))
+    assert "input-reference geometry" in str(exc.value)
+
+
+def test_fresh_commit_without_reference_geometry_fails_closed(tmp_path):
+    """F1: production checkpoint creation refuses to publish without it."""
+    ref_wcs = _make_wcs(IN_SHAPE)
+    out_wcs, out_shape_hw = build_output_grid(_make_wcs(OUT_SHAPE), OUT_SHAPE, 1.0)
+    cfg = build_drizzle_canonical_config(_fake_qm(), product_version="8.5.0")
+    writer = DrizzleCheckpointWriter(str(tmp_path), "8.5.0", cfg, out_wcs, out_shape_hw)
+    accs = [DrizzleAccumulator(out_shape_hw, kernel="square", pixfrac=1.0) for _ in range(3)]
+
+    ref_path = Path(tmp_path) / "reference.fit"
+    ref_path.write_bytes(b"reference-bytes")
+    src_paths = []
+    for i in range(4):
+        p = Path(tmp_path) / f"src_{i}.fit"
+        p.write_bytes(b"src-%d" % i)
+        src_paths.append(p)
+    src_idents = [_identity(p) for p in src_paths]
+    binding = {
+        "input_roots": [str(tmp_path)],
+        "reference": _identity(ref_path),
+        "plan": {"sources": src_idents, "decomposition": [4]},
+    }
+    counters = {
+        "frame_count": 1, "stacked_batches_count": 1,
+        "total_exposure_seconds": 1.0, "exposure_unknown_count": 0,
+        "exposure_min": 1.0, "exposure_max": 1.0,
+    }
+    with pytest.raises(DrizzleCheckpointError) as exc:
+        writer.commit(
+            accs, session_binding=binding, counters=counters,
+            completed_sources=src_idents[:1],
+        )
+    assert "input-reference geometry is mandatory" in str(exc.value)
+    # nothing was published
+    assert not (Path(tmp_path) / CHECKPOINT_DIRNAME).exists()
+
+
+def test_continuation_never_downgrades_reference_geometry(tmp_path):
+    """F1: a continuation that omits the payload carries the loaded one forward."""
+    ctx = _write(tmp_path)
+    result = read_drizzle_checkpoint(str(tmp_path))
+    original = result.reference_geometry
+    assert original is not None
+
+    from seestar.core.drizzle_checkpoint import DrizzleCheckpointWriter
+
+    cont = DrizzleCheckpointWriter.from_validated_result(result)
+    # Continuation binding deliberately omits reference_geometry.
+    cont_binding = {
+        "input_roots": result.session["input_roots"],
+        "reference": result.session["reference"],
+        "plan": result.session["plan"],
+    }
+    from seestar.core.drizzle_checkpoint import DrizzleAccumulator as _Acc
+
+    accs = cont.accumulators
+    writer = cont.writer
+    # advance one frame using the same frame generator as the initial commit
+    data, weight, pixmap, mask = _frames(OUT_SHAPE, 4)[2]
+    for acc in accs:
+        acc.add(data, weight, pixmap, exptime=1.0, in_units="counts", in_grid_mask=mask)
+    counters = {
+        "frame_count": 3, "stacked_batches_count": 3,
+        "total_exposure_seconds": 3.0, "exposure_unknown_count": 0,
+        "exposure_min": 1.0, "exposure_max": 1.0,
+    }
+    writer.commit(
+        accs,
+        session_binding=cont_binding,
+        counters=counters,
+        completed_sources=list(result.session["plan"]["sources"][:3]),
+    )
+    again = read_drizzle_checkpoint(str(tmp_path))
+    assert again.reference_geometry == original
+
+
 def test_resume_identity_wins_over_conflicting_manual_request():
     class _Dummy:
         pass

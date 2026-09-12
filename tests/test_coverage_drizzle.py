@@ -210,7 +210,23 @@ def _checkpoint_inputs(output_dir, count):
         "input_roots": [str(output_dir)],
         "reference": sources[0],
         "plan": {"sources": sources, "decomposition": [count]},
+        "reference_geometry": _reference_geometry(),
     }
+
+
+def _reference_geometry(shape=(8, 8)):
+    """A minimal valid v2 frozen input-reference geometry payload."""
+    from astropy.wcs import WCS
+    from seestar.core.drizzle_checkpoint import serialize_input_reference_geometry
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [shape[1] / 2.0 + 0.5, shape[0] / 2.0 + 0.5]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-0.001, 0.001]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = shape
+    return serialize_input_reference_geometry(wcs, shape, None)
 
 
 def _checkpoint_counters(frame_count):
