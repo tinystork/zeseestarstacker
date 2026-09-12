@@ -492,6 +492,157 @@ def select_geometry_reference(
     )
 
 
+class ReferenceResolutionError(RuntimeError):
+    """Fail-closed explicit manual-reference resolution failure.
+
+    Raised when a non-blank manual reference request cannot be resolved to one
+    usable FITS observation inside the *declared* input context.  The caller
+    must refuse the start (never silently fall through to AUTO).
+    """
+
+    CODE_EMPTY = "MANUAL_REFERENCE_EMPTY"
+    CODE_UNRESOLVED = "MANUAL_REFERENCE_UNRESOLVED"
+    CODE_AMBIGUOUS = "MANUAL_REFERENCE_AMBIGUOUS"
+    CODE_DIRECTORY = "MANUAL_REFERENCE_DIRECTORY"
+    CODE_INACCESSIBLE = "MANUAL_REFERENCE_INACCESSIBLE"
+    CODE_INVALID = "MANUAL_REFERENCE_INVALID"
+
+    def __init__(self, code, message, *, requested=None):
+        super().__init__(message)
+        self.code = code
+        self.requested = requested
+
+
+def _is_usable_fits_image(path: str) -> bool:
+    """Cheap header-level validation that ``path`` is a usable FITS image."""
+    try:
+        with fits.open(path, memmap=True) as hdul:
+            if len(hdul) == 0:
+                return False
+            naxis = int(hdul[0].header.get("NAXIS", 0) or 0)
+            if naxis not in (2, 3):
+                return False
+        return True
+    except Exception:  # noqa: BLE001 - fail closed on any read error
+        return False
+
+
+def resolve_explicit_reference(
+    request: Optional[str],
+    search_roots: Optional[Iterable[str]] = None,
+    plan_path: Optional[str] = None,
+) -> str:
+    """Resolve one explicit manual reference request deterministically.
+
+    Intent is the presence of a non-blank request, **not** whether that raw
+    string happens to exist as a process-CWD-relative file.  An absolute path
+    is canonicalized directly.  A relative path / basename is resolved only
+    against the declared legitimate input context (the session input roots and,
+    when present, the stack-plan source directories) — never by arbitrary
+    filesystem search and never by substituting a generated ``stacked/``
+    artifact.
+
+    Exactly one distinct canonical match is required.  Missing, directory,
+    inaccessible, invalid/unusable or duplicate-basename requests raise
+    :class:`ReferenceResolutionError` so the caller can refuse before any
+    worker or checkpoint publication.
+
+    Returns
+    -------
+    str
+        Canonical absolute path (``realpath``) of the single usable FITS file.
+    """
+    raw = "" if request is None else str(request).strip()
+    if not raw:
+        raise ReferenceResolutionError(
+            ReferenceResolutionError.CODE_EMPTY,
+            "explicit reference request is empty",
+            requested=request,
+        )
+
+    candidates: list = []
+    if os.path.isabs(raw):
+        candidates.append(raw)
+    else:
+        roots: list = []
+        for root in search_roots or ():
+            if not root:
+                continue
+            real_root = os.path.realpath(os.path.abspath(str(root)))
+            if os.path.isdir(real_root) and real_root not in roots:
+                roots.append(real_root)
+        if plan_path and os.path.isfile(plan_path):
+            plan_dir = os.path.realpath(os.path.abspath(os.path.dirname(plan_path)))
+            if plan_dir not in roots:
+                roots.append(plan_dir)
+            try:
+                for plan_fp in files_from_stack_plan(plan_path, plan_dir):
+                    plan_src_dir = os.path.dirname(plan_fp)
+                    if plan_src_dir not in roots:
+                        roots.append(plan_src_dir)
+            except Exception:  # noqa: BLE001 - plan context is best effort
+                pass
+        for root in roots:
+            candidates.append(os.path.join(root, raw))
+
+    files: list = []
+    directories: list = []
+    seen: set = set()
+    for candidate in candidates:
+        try:
+            if os.path.isdir(candidate):
+                directories.append(candidate)
+            elif os.path.isfile(candidate):
+                real = os.path.realpath(candidate)
+                if real not in seen:
+                    seen.add(real)
+                    files.append(real)
+        except OSError:
+            continue
+
+    if len(files) > 1:
+        raise ReferenceResolutionError(
+            ReferenceResolutionError.CODE_AMBIGUOUS,
+            f"explicit reference {raw!r} is ambiguous across input roots: "
+            + ", ".join(sorted(files)),
+            requested=request,
+        )
+    if not files:
+        if directories:
+            raise ReferenceResolutionError(
+                ReferenceResolutionError.CODE_DIRECTORY,
+                f"explicit reference {raw!r} is a directory, not a FITS file",
+                requested=request,
+            )
+        raise ReferenceResolutionError(
+            ReferenceResolutionError.CODE_UNRESOLVED,
+            f"explicit reference {raw!r} was not found in the declared input "
+            "context",
+            requested=request,
+        )
+
+    resolved = files[0]
+    if not os.path.isfile(resolved):
+        raise ReferenceResolutionError(
+            ReferenceResolutionError.CODE_UNRESOLVED,
+            f"explicit reference {raw!r} disappeared before resolution",
+            requested=request,
+        )
+    if not os.access(resolved, os.R_OK):
+        raise ReferenceResolutionError(
+            ReferenceResolutionError.CODE_INACCESSIBLE,
+            f"explicit reference {raw!r} is not readable",
+            requested=request,
+        )
+    if not _is_usable_fits_image(resolved):
+        raise ReferenceResolutionError(
+            ReferenceResolutionError.CODE_INVALID,
+            f"explicit reference {raw!r} is not a usable FITS image",
+            requested=request,
+        )
+    return resolved
+
+
 def resolve_reference_precedence(
     resume_path: Optional[str] = None,
     user_path: Optional[str] = None,

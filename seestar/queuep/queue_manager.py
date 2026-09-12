@@ -363,6 +363,8 @@ from ..core.drizzle_checkpoint import (
     SafeStackedSourceResolver,
     build_drizzle_canonical_config,
     read_drizzle_checkpoint,
+    reconstruct_input_reference_wcs,
+    serialize_input_reference_geometry,
 )
 from ..core.coverage_support import accumulate_support_pair
 from ..core.normalization import (
@@ -395,9 +397,11 @@ from ..core.geometry_reference import (
     ORIGIN_RESUME,
     ORIGIN_USER,
     ORIGIN_ZEANALYSER,
+    ReferenceResolutionError,
     ResolvedReference,
     canonical_session_sources,
     legacy_session_sources,
+    resolve_explicit_reference,
     select_legacy_reference,
     select_geometry_reference,
 )
@@ -1339,6 +1343,10 @@ class StartupRefusal:
     CODE_RESUME_STATE_MISSING = "RESUME_STATE_MISSING"
     CODE_RESUME_MODE_UNSUPPORTED = "RESUME_MODE_UNSUPPORTED"
     CODE_RESUME_SOURCE_MISMATCH = "RESUME_SOURCE_MISMATCH"
+    # GAR-06 explicit manual-reference resolution: a non-blank manual request
+    # that cannot be resolved to exactly one usable FITS observation in the
+    # declared input context refuses the start (never silently AUTO).
+    CODE_MANUAL_REFERENCE_UNRESOLVED = "MANUAL_REFERENCE_UNRESOLVED"
 
     def __init__(self, code, technical_detail="", semantic_key=None, semantic_data=None):
         self.code = code
@@ -6869,9 +6877,14 @@ class SeestarQueuedStacker:
     #########################################################################################################################################################
 
     def _create_drizzle_output_wcs(self, ref_wcs, ref_shape_2d, scale_factor):
-        """
-        Crée le WCS et la shape (H,W) pour l'image Drizzle de sortie.
-        Inspiré de full_drizzle.py corrigé pour conserver le même centre ciel.
+        """Build (and cache) the Standard Drizzle output grid.
+
+        Validation, once-per-run caching and bookkeeping live here; the grid
+        geometry itself is built by the canonical pure builder
+        :func:`seestar.core.drizzle_core.build_output_grid`, so the Standard
+        output grid is always an exact scaled copy of the frozen reference
+        grid (same projection/frame/orientation/handedness, effective matrix
+        divided by ``scale``, FITS edge/centre-preserving CRPIX).
 
         Args
         ----
@@ -6897,42 +6910,10 @@ class SeestarQueuedStacker:
         if self.fixed_output_wcs is not None and self.fixed_output_shape is not None:
             return self.fixed_output_wcs, self.fixed_output_shape
 
-        # ------------------ 1. Dimensions de sortie ------------------
-        h_in, w_in = ref_shape_2d
-        out_h = int(round(h_in * scale_factor))
-        out_w = int(round(w_in * scale_factor))
-        out_h = max(1, out_h)
-        out_w = max(1, out_w)
-        out_shape_hw = (out_h, out_w)
-
+        out_wcs, out_shape_hw = build_output_grid(ref_wcs, ref_shape_2d, scale_factor)
         logger.debug(
             f"[DrizzleWCS] Scale={scale_factor}  -->  shape in={ref_shape_2d}  ->  out={out_shape_hw}"
         )
-
-        # ------------------ 2. Construction d'un WCS sans rotation ------------------
-        out_wcs = WCS(naxis=2)
-        out_wcs.wcs.crval = list(ref_wcs.wcs.crval)
-        out_wcs.wcs.crpix = (
-            np.asarray(ref_wcs.wcs.crpix, dtype=float) * scale_factor
-        ).tolist()
-
-        ref_scale_arcsec = self.reference_pixel_scale_arcsec
-        if ref_scale_arcsec is None:
-            try:
-                ref_scale_deg = np.mean(np.abs(proj_plane_pixel_scales(ref_wcs)))
-                ref_scale_arcsec = ref_scale_deg * 3600.0
-            except Exception:
-                ref_scale_arcsec = 1.0
-
-        final_scale_deg = (ref_scale_arcsec / scale_factor) / 3600.0
-        out_wcs.wcs.cd = np.array([[-final_scale_deg, 0.0], [0.0, final_scale_deg]])
-        out_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-        out_wcs.pixel_shape = (out_w, out_h)
-        try:
-            out_wcs._naxis1 = out_w
-            out_wcs._naxis2 = out_h
-        except AttributeError:
-            pass
 
         self.fixed_output_wcs = out_wcs
         self.fixed_output_shape = out_shape_hw
@@ -16697,6 +16678,123 @@ class SeestarQueuedStacker:
         except Exception:  # noqa: BLE001 - fail-open outside the freeze
             pass
 
+    def _reset_run_geometry(self):
+        """Reset every run-scoped grid/reference carrier for an accepted run.
+
+        Called once, only after a new Start has been accepted (a refused
+        concurrent Start returns before this point and mutates nothing).  On a
+        resume the persisted Drizzle checkpoint result is preserved because the
+        persisted grid is authoritative and is restored later in
+        ``start_processing``.  Nothing here touches the scientific accumulators.
+        """
+        self.fixed_output_wcs = None
+        self.fixed_output_shape = None
+        self.drizzle_output_wcs = None
+        self.drizzle_output_shape_hw = None
+        self.reference_wcs_object = None
+        self.reference_header_for_wcs = None
+        self.ref_wcs_header = None
+        self.reference_pixel_scale_arcsec = None
+        self._drizzle_grid_identity = None
+        if not getattr(self, "_resume_requested", False):
+            self._drizzle_resume_result = None
+            self._drizzle_resume_continuation = None
+            self._automatic_reference_resolution_count = 0
+            self._reference_geometry_stats = None
+            self._clear_frozen_reference()
+            self._resolved_reference_origin = None
+            # The frozen kernel-geometry scalar is run-scoped too: a fresh run
+            # on a reused stacker must re-derive it for ITS scale, never inherit
+            # the previous run's value.  A resume keeps its persisted value
+            # (adopted from the checkpoint before this reset).
+            self.drizzle_pixel_scale_ratio_requested = None
+            self.drizzle_pixel_scale_ratio_derived = None
+            self.drizzle_pixel_scale_ratio_effective = None
+            self.drizzle_pixel_scale_ratio_source = None
+
+    def _drizzle_grid_identity_snapshot(self, ref, out, scale, psr):
+        """Full-grid identity facts for the once-per-run immutability guard.
+
+        Materially covers the frozen reference identity, CRVAL, CRPIX,
+        effective pixel-scale matrix, handedness, projection/ctype, output
+        shape, scale and PSR.  This is deliberately *separate* from the scalar
+        PSR guard: a rotated-to-axis-aligned matrix with unchanged angular
+        scale is still detected here.
+        """
+
+        def _matrix(wcs_obj):
+            try:
+                return tuple(
+                    round(float(v), 12)
+                    for v in np.asarray(
+                        wcs_obj.pixel_scale_matrix, dtype=float
+                    ).ravel()
+                )
+            except Exception:  # noqa: BLE001 - unresolved geometry
+                return None
+
+        def _handedness(wcs_obj):
+            try:
+                m = np.asarray(wcs_obj.pixel_scale_matrix, dtype=float)
+                det = m[0, 0] * m[1, 1] - m[0, 1] * m[1, 0]
+                return int(np.sign(det)) if np.isfinite(det) else None
+            except Exception:  # noqa: BLE001
+                return None
+
+        frozen = getattr(self, "_frozen_reference", None)
+        return {
+            "reference_source": getattr(frozen, "source_path", None),
+            "reference_origin": getattr(frozen, "origin", None),
+            "reference_crval": tuple(float(v) for v in ref.wcs.crval),
+            "reference_crpix": tuple(float(v) for v in ref.wcs.crpix),
+            "reference_matrix": _matrix(ref),
+            "reference_ctype": tuple(str(c) for c in ref.wcs.ctype),
+            "reference_handedness": _handedness(ref),
+            "output_crval": tuple(float(v) for v in out.wcs.crval),
+            "output_crpix": tuple(float(v) for v in out.wcs.crpix),
+            "output_matrix": _matrix(out),
+            "output_ctype": tuple(str(c) for c in out.wcs.ctype),
+            "output_handedness": _handedness(out),
+            "scale": float(scale),
+            "psr": float(psr),
+        }
+
+    def _check_drizzle_grid_identity(self, ref, out, ratio):
+        """Fail closed on any same-run reference/output grid drift.
+
+        The output shape is allowed to move from unresolved to concrete exactly
+        once (the early freeze may run before the concrete grid exists), but
+        once concrete it is immutable for the run, like every other fact.
+        """
+        scale = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
+        snapshot = self._drizzle_grid_identity_snapshot(ref, out, scale, ratio)
+        out_shape = getattr(self, "drizzle_output_shape_hw", None)
+        prior = getattr(self, "_drizzle_grid_identity", None)
+        if prior is None:
+            stored = dict(snapshot)
+            stored["output_shape"] = tuple(out_shape) if out_shape else None
+            self._drizzle_grid_identity = stored
+            return
+        differing = {
+            key: (prior.get(key), value)
+            for key, value in snapshot.items()
+            if prior.get(key) != value
+        }
+        if differing:
+            raise DrizzleGeometryError(
+                "frozen drizzle grid identity drift: "
+                + repr(sorted(differing.items()))
+            )
+        prior_shape = prior.get("output_shape")
+        if out_shape is not None:
+            if prior_shape is None:
+                prior["output_shape"] = tuple(out_shape)
+            elif tuple(prior_shape) != tuple(out_shape):
+                raise DrizzleGeometryError(
+                    "frozen drizzle output shape drift: "
+                    f"{prior_shape!r} != {tuple(out_shape)!r}"
+                )
+
     def _freeze_drizzle_geometry(self):
         """ONE idempotent canonical Drizzle geometry freeze (P2-B).
 
@@ -16704,7 +16802,8 @@ class SeestarQueuedStacker:
         factor ``output/input`` angular pixel size.  After the first freeze the
         value is returned unchanged, and any later drift (a different geometry
         resolving for the same run) raises :class:`DrizzleGeometryError` (fail
-        closed).  Returns ``None`` while the reference WCS is not yet known.
+        closed) — including a full-grid identity drift that keeps PSR the same.
+        Returns ``None`` while the reference WCS is not yet known.
         """
         ref = getattr(self, "reference_wcs_object", None)
         frozen = getattr(self, "drizzle_pixel_scale_ratio_effective", None)
@@ -16715,6 +16814,7 @@ class SeestarQueuedStacker:
             scale = float(getattr(self, "drizzle_scale", 1.0) or 1.0)
             out = build_output_grid(ref, (1, 1), scale)[0]
         ratio = float(derive_pixel_scale_ratio(ref, out))
+        self._check_drizzle_grid_identity(ref, out, ratio)
         if frozen is not None:
             if not math.isclose(float(frozen), ratio, rel_tol=1e-9, abs_tol=0.0):
                 raise DrizzleGeometryError(
@@ -21876,10 +21976,33 @@ class SeestarQueuedStacker:
         return True
 
     def _freeze_reference(self, source_path, origin):
-        """Freeze one canonical source identity for the complete run."""
+        """Freeze one canonical source identity for the complete run.
+
+        Idempotent for the same canonical source + origin (the
+        materialized-artifact update path re-enters here with the same
+        identity).  A different source or origin within the same run is
+        refused rather than silently substituted, so the frozen observation
+        identity can never drift.  ``reference_image.fit`` materialization is
+        a separate, additive step (:meth:`_record_materialized_reference`) and
+        never changes the source identity.
+        """
         if not source_path:
             raise RuntimeError("cannot freeze an empty registration reference")
         descriptor = FrozenReference(source_path=source_path, origin=origin)
+        existing = getattr(self, "_frozen_reference", None)
+        if isinstance(existing, FrozenReference):
+            if (
+                existing.source_path == descriptor.source_path
+                and existing.origin == descriptor.origin
+            ):
+                self._resolved_reference_origin = existing.origin
+                self._sync_frozen_reference_to_aligner()
+                return existing
+            raise RuntimeError(
+                "conflicting registration reference freeze in the same run: "
+                f"{existing.source_path!r} [{existing.origin}] != "
+                f"{descriptor.source_path!r} [{origin}]"
+            )
         self._frozen_reference = descriptor
         self._resolved_reference_origin = origin
         if not self._sync_frozen_reference_to_aligner():
@@ -22296,12 +22419,17 @@ class SeestarQueuedStacker:
         return self._canonical_stacking_reducer_key(mode)
 
     def _reference_requested_policy(self, reference_path_ui) -> Optional[str]:
-        """Requested reference policy token (user/zeanalyser/auto/resume)."""
+        """Requested reference policy token (user/zeanalyser/auto/resume).
+
+        Explicit intent is the presence of a non-blank manual request, not
+        whether that raw string happens to exist as a CWD-relative file, so a
+        failing explicit request never mis-reports as ``auto``.
+        """
         if getattr(self, "_resume_requested", False):
             return "resume"
         if getattr(self, "reference_origin_hint", None) == ORIGIN_ZEANALYSER:
             return "zeanalyser"
-        if reference_path_ui and os.path.isfile(str(reference_path_ui)):
+        if reference_path_ui and str(reference_path_ui).strip():
             return "user"
         return "auto"
 
@@ -23468,6 +23596,13 @@ class SeestarQueuedStacker:
         # verified moved-to-stacked counterpart) for reference preparation.
         self._resume_resolved_reference = early_result
 
+        # GAR-06 (lifetime): the run is now ACCEPTED.  A refused concurrent
+        # Start returned above and mutated nothing; from here every run-scoped
+        # grid/reference carrier is reset exactly once so a new run can never
+        # inherit a previous run's frozen output anchor.  A resume keeps its
+        # persisted checkpoint result (restored later in this method).
+        self._reset_run_geometry()
+
         # GAR-05: the run has passed the fail-closed resume/configuration gate
         # and is now accepted.  Emit lifecycle acknowledgement before the
         # potentially expensive header scan and quality shortlist.
@@ -23641,15 +23776,47 @@ class SeestarQueuedStacker:
             # selector, which falls back to legacy auto-selection on any failure.
             self._resolved_reference_origin = None
             if self._resume_requested:
+                # Resume identity wins: the persisted, verified reference is
+                # re-frozen (ORIGIN_RESUME).  A conflicting newly entered
+                # manual reference can never redirect it.
                 self._freeze_reference(reference_path_ui, ORIGIN_RESUME)
-            elif reference_path_ui and os.path.isfile(reference_path_ui):
+            elif reference_path_ui and str(reference_path_ui).strip():
+                # GAR-06: manual intent is the PRESENCE of a non-blank request,
+                # never whether that raw string exists as a CWD-relative file.
+                # Resolve deterministically against the declared input context
+                # and fail closed (never silently fall through to AUTO).
+                try:
+                    resolved_explicit = resolve_explicit_reference(
+                        reference_path_ui,
+                        search_roots=getattr(self, "_resume_input_roots", None)
+                        or [self.current_folder],
+                        plan_path=plan_path,
+                    )
+                except ReferenceResolutionError as ref_err:
+                    self.startup_refusal = StartupRefusal(
+                        StartupRefusal.CODE_MANUAL_REFERENCE_UNRESOLVED,
+                        str(ref_err),
+                        semantic_key=ref_err.code,
+                        semantic_data={"requested": str(reference_path_ui)},
+                    )
+                    self.update_progress(
+                        "❌ Référence manuelle invalide: " + str(ref_err),
+                        "ERROR",
+                    )
+                    logger.debug(
+                        "ERREUR QM (start_processing): résolution référence "
+                        f"manuelle échouée [{ref_err.code}]: {ref_err}"
+                    )
+                    self.processing_error = str(ref_err)
+                    self._cleanup_failed_start()
+                    return False
                 origin_hint = getattr(self, "reference_origin_hint", None)
                 explicit_origin = (
                     ORIGIN_ZEANALYSER
                     if origin_hint == ORIGIN_ZEANALYSER
                     else ORIGIN_USER
                 )
-                self._freeze_reference(reference_path_ui, explicit_origin)
+                self._freeze_reference(resolved_explicit, explicit_origin)
             else:
                 self._resolve_automatic_reference(
                     current_folder=self.current_folder,
@@ -23922,7 +24089,18 @@ class SeestarQueuedStacker:
         else:
             logger.debug(f"     WCS Ref non disponible ou non céleste.")
 
-        if self.reference_wcs_object and self.fixed_output_wcs is None:
+        # RSM2-D2B2B / GAR-06: on resume the persisted output grid and the
+        # persisted frozen input-reference geometry are authoritative.  They
+        # are restored exactly; a fresh grid is never built over accumulated
+        # SCI/WHT state, so the `_reset_run_geometry` decision above can never
+        # separate the deposition grid from the registration reference.
+        drizzle_resume_result = getattr(self, "_drizzle_resume_result", None)
+
+        if (
+            self.reference_wcs_object
+            and self.fixed_output_wcs is None
+            and drizzle_resume_result is None
+        ):
             try:
                 ref_hw = ref_shape_hwc[:2]
                 use_drizzle = getattr(self, "use_drizzle", False) or self.drizzle_active_session
@@ -23948,11 +24126,6 @@ class SeestarQueuedStacker:
                     f"WARN start_processing: erreur creation grille fixe: {e_fix}"
                 )
 
-        # RSM2-D2B2B: the persisted output grid is authoritative on resume.
-        # Reference preparation still supplies the immutable input reference
-        # used by registration, but must never silently recompute/change the
-        # Drizzle deposition grid across Stop -> Resume.
-        drizzle_resume_result = getattr(self, "_drizzle_resume_result", None)
         if drizzle_resume_result is not None:
             self.drizzle_output_wcs = drizzle_resume_result.wcs
             self.drizzle_output_shape_hw = tuple(
@@ -23961,6 +24134,24 @@ class SeestarQueuedStacker:
             self.fixed_output_wcs = drizzle_resume_result.wcs
             self.fixed_output_shape = tuple(drizzle_resume_result.output_shape_hw)
             self.reference_shape = tuple(drizzle_resume_result.output_shape_hw)
+            restored_reference = reconstruct_input_reference_wcs(
+                getattr(drizzle_resume_result, "reference_geometry", None)
+            )
+            if restored_reference is not None:
+                self.reference_wcs_object = restored_reference
+                self.reference_header_for_wcs = restored_reference.to_header(
+                    relax=True
+                )
+                self.ref_wcs_header = self.reference_header_for_wcs
+                _restored_geometry = getattr(
+                    drizzle_resume_result, "reference_geometry", None
+                ) or {}
+                _restored_shape = _restored_geometry.get("shape_hw")
+                if isinstance(_restored_shape, list) and len(_restored_shape) == 2:
+                    self.input_reference_shape_hw = (
+                        int(_restored_shape[0]),
+                        int(_restored_shape[1]),
+                    )
 
         init_shape_hwc = ref_shape_hwc
         if (
@@ -24240,6 +24431,17 @@ class SeestarQueuedStacker:
             self.fixed_output_wcs = self.reference_wcs_object
             self.fixed_output_shape = self.reference_shape
 
+        # GAR-06 (lifetime): Standard (Drizzle, non-mosaic) stays
+        # reference-anchored.  Global/union grid preparation must never split
+        # the fixed alias from the actual deposition grid, so reconcile the
+        # aliases once, here, after every grid-preparation path.
+        if self.drizzle_active_session and not self.is_mosaic_run:
+            if self.drizzle_output_wcs is not None:
+                self.fixed_output_wcs = self.drizzle_output_wcs
+                self.fixed_output_shape = self.drizzle_output_shape_hw
+                if self.drizzle_output_shape_hw is not None:
+                    self.reference_shape = self.drizzle_output_shape_hw
+
         # GAR-05B: never restore the raw UI argument here.  AUTO_GEOMETRY has
         # no reference_path_ui, so that historical assignment erased the
         # successfully resolved source immediately before _worker().
@@ -24284,8 +24486,12 @@ class SeestarQueuedStacker:
             target=self._worker, name="StackerWorker"
         )
         self.processing_thread.daemon = True
-        self.processing_thread.start()
+        # Mark the run active *before* the worker starts: a very fast worker
+        # may set it back to False as it finishes, and the run must never be
+        # left spuriously "active" after it completed (which would refuse the
+        # next accepted Start and split the run-lifetime invariant).
         self.processing_active = True
+        self.processing_thread.start()
 
         self.update_progress("🚀 Thread de traitement démarré.")
         logger.debug(
@@ -24780,11 +24986,27 @@ class SeestarQueuedStacker:
         }
 
     def _drizzle_checkpoint_session_binding(self):
-        """Return the scientific-session binding (input roots/reference/plan)."""
+        """Return the scientific-session binding (input roots/reference/plan).
+
+        Includes the versioned frozen input-reference geometry so a resume can
+        restore the exact input-reference WCS instead of merely re-solving the
+        same file (re-solving alone is not proof of stability).
+        """
+        reference_geometry = None
+        try:
+            reference_geometry = serialize_input_reference_geometry(
+                getattr(self, "reference_wcs_object", None),
+                getattr(self, "input_reference_shape_hw", None)
+                or getattr(self, "reference_shape", None),
+                getattr(self, "_resume_reference_identity", None),
+            )
+        except Exception:  # noqa: BLE001 - geometry payload is additive
+            reference_geometry = None
         return {
             "input_roots": list(getattr(self, "_resume_input_roots", None) or []),
             "reference": getattr(self, "_resume_reference_identity", None),
             "plan": getattr(self, "_drizzle_checkpoint_plan", None),
+            "reference_geometry": reference_geometry,
         }
 
     def _init_drizzle_checkpoint(self):

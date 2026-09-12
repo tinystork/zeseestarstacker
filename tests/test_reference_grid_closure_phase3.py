@@ -1,0 +1,269 @@
+"""GAR-06 Phase 3 acceptance: REFERENCE_GRID_LIFETIME_ACCEPT.
+
+The reference/output grid caches live for exactly one accepted run: a fresh
+accepted run resets them, a refused concurrent Start mutates nothing, same-run
+retries are idempotent, and a full-grid identity guard (separate from the
+scalar PSR guard) fails closed on any same-run geometry drift.
+"""
+
+import math
+import threading
+from types import MethodType
+
+import numpy as np
+import pytest
+from astropy.io import fits
+from astropy.wcs import WCS
+
+import seestar.queuep.queue_manager as qm
+from seestar.core.drizzle_core import (
+    DrizzleGeometryError,
+    build_output_grid,
+)
+
+
+# ---------------------------------------------------------------------------
+# full-grid identity guard (separate from the scalar PSR guard)
+# ---------------------------------------------------------------------------
+
+
+def _rot_wcs(angle=37.0, shape=(32, 32), plate=4.4e-4):
+    w = WCS(naxis=2)
+    w.wcs.crpix = [(shape[1] + 1) / 2.0, (shape[0] + 1) / 2.0]
+    w.wcs.crval = [10.0, 20.0]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    a = math.radians(angle)
+    w.wcs.pc = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    w.wcs.cdelt = [-plate, plate]
+    w.array_shape = shape
+    return w
+
+
+@pytest.mark.parametrize("scale", [1.0, 2.0, 3.0])
+def test_same_psr_orientation_mutation_is_rejected(scale):
+    obj = object.__new__(qm.SeestarQueuedStacker)
+    obj.drizzle_scale = scale
+    obj.reference_wcs_object = _rot_wcs()
+    obj.drizzle_output_wcs = build_output_grid(obj.reference_wcs_object, (32, 32), scale)[0]
+    obj.drizzle_output_shape_hw = (int(32 * scale), int(32 * scale))
+    first = obj._freeze_drizzle_geometry()
+    assert first is not None
+
+    # rotate the output grid to axis-aligned: identical angular pixel scale
+    # (so PSR and the scalar guard are unchanged) but a materially different
+    # effective matrix and orientation.
+    obj.drizzle_output_wcs.wcs.pc = np.eye(2)
+    with pytest.raises(DrizzleGeometryError):
+        obj._freeze_drizzle_geometry()
+
+
+def test_same_run_retry_is_idempotent():
+    obj = object.__new__(qm.SeestarQueuedStacker)
+    obj.drizzle_scale = 2.0
+    obj.reference_wcs_object = _rot_wcs()
+    obj.drizzle_output_wcs = build_output_grid(obj.reference_wcs_object, (32, 32), 2.0)[0]
+    obj.drizzle_output_shape_hw = (64, 64)
+    first = obj._freeze_drizzle_geometry()
+    second = obj._freeze_drizzle_geometry()
+    assert first == second
+
+
+def test_reference_geometry_drift_is_rejected():
+    obj = object.__new__(qm.SeestarQueuedStacker)
+    obj.drizzle_scale = 2.0
+    obj.reference_wcs_object = _rot_wcs()
+    obj.drizzle_output_wcs = build_output_grid(obj.reference_wcs_object, (32, 32), 2.0)[0]
+    obj.drizzle_output_shape_hw = (64, 64)
+    obj._freeze_drizzle_geometry()
+    # same scale / same output grid, but the reference CRVAL moved
+    obj.reference_wcs_object.wcs.crval = [11.0, 21.0]
+    with pytest.raises(DrizzleGeometryError):
+        obj._freeze_drizzle_geometry()
+
+
+# ---------------------------------------------------------------------------
+# per-run reset
+# ---------------------------------------------------------------------------
+
+
+class _Dummy:
+    pass
+
+
+def _reset_subject():
+    obj = _Dummy()
+    obj.fixed_output_wcs = object()
+    obj.fixed_output_shape = (1, 1)
+    obj.drizzle_output_wcs = object()
+    obj.drizzle_output_shape_hw = (1, 1)
+    obj.reference_wcs_object = object()
+    obj.reference_header_for_wcs = object()
+    obj.ref_wcs_header = object()
+    obj.reference_pixel_scale_arcsec = 1.0
+    obj._drizzle_grid_identity = {"x": 1}
+    obj._drizzle_resume_result = object()
+    obj._drizzle_resume_continuation = object()
+    obj._frozen_reference = object()
+    obj._resolved_reference_origin = "AUTO_GEOMETRY"
+    obj._automatic_reference_resolution_count = 1
+    obj._reference_geometry_stats = {"x": 1}
+    obj._resume_requested = False
+    obj.aligner = _Dummy()
+    obj.aligner.reference_image_path = "/x"
+    for name in ("_reset_run_geometry", "_clear_frozen_reference"):
+        setattr(obj, name, MethodType(getattr(qm.SeestarQueuedStacker, name), obj))
+    return obj
+
+
+def test_fresh_run_reset_clears_every_geometry_carrier():
+    obj = _reset_subject()
+    obj._reset_run_geometry()
+    assert obj.fixed_output_wcs is None
+    assert obj.fixed_output_shape is None
+    assert obj.drizzle_output_wcs is None
+    assert obj.drizzle_output_shape_hw is None
+    assert obj.reference_wcs_object is None
+    assert obj._drizzle_grid_identity is None
+    assert obj._frozen_reference is None
+    assert obj._drizzle_resume_result is None
+    assert obj._automatic_reference_resolution_count == 0
+
+
+def test_resume_reset_preserves_persisted_checkpoint_result():
+    obj = _reset_subject()
+    obj._resume_requested = True
+    persisted = obj._drizzle_resume_result
+    obj._reset_run_geometry()
+    assert obj.fixed_output_wcs is None
+    assert obj.drizzle_output_wcs is None
+    assert obj._drizzle_grid_identity is None
+    # the persisted checkpoint result must survive so it can be restored
+    assert obj._drizzle_resume_result is persisted
+
+
+def test_refused_concurrent_start_mutates_nothing():
+    st = qm.SeestarQueuedStacker(batch_size=1, autotune=False)
+    st.processing_active = True
+    st.fixed_output_wcs = "sentinel-fixed"
+    st.drizzle_output_wcs = "sentinel-drizzle"
+    st.drizzle_output_shape_hw = (7, 9)
+    st._frozen_reference = "sentinel-frozen"
+    started = st.start_processing(
+        "/nonexistent-input", "/nonexistent-output",
+        use_drizzle=True, drizzle_scale=2, drizzle_kernel="lanczos2",
+    )
+    assert started is False
+    assert st.fixed_output_wcs == "sentinel-fixed"
+    assert st.drizzle_output_wcs == "sentinel-drizzle"
+    assert st.drizzle_output_shape_hw == (7, 9)
+    assert st._frozen_reference == "sentinel-frozen"
+
+
+# ---------------------------------------------------------------------------
+# reused-stacker integration: fresh run rebuilds the grid
+# ---------------------------------------------------------------------------
+
+
+class _NoopExecutor:
+    def __init__(self, max_workers=1, **kwargs):
+        self._max_workers = max_workers
+
+    def shutdown(self, *args, **kwargs):
+        pass
+
+
+def _write_fits(path, ra, shape=(32, 40)):
+    w = WCS(naxis=2)
+    w.wcs.crpix = [(shape[1] + 1) / 2.0, (shape[0] + 1) / 2.0]
+    w.wcs.crval = [ra, 20.0]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    w.wcs.cdelt = [-0.001, 0.001]
+    header = w.to_header()
+    header["EXPTIME"] = 20.0
+    fits.PrimaryHDU(np.ones(shape, np.float32), header).writeto(str(path))
+
+
+def _run_once(st, root, out, request, scale, selector_calls):
+    def choose(*args, **kwargs):
+        selector_calls.append("AUTO")
+        from seestar.core.geometry_reference import GeometrySelection, ResolvedReference
+
+        return GeometrySelection(ResolvedReference(str(root / "A.fit"), "AUTO_GEOMETRY"))
+
+    import seestar.queuep.queue_manager as _qm
+
+    orig = _qm.select_geometry_reference
+    _qm.select_geometry_reference = choose
+    try:
+        snapshot = {}
+        done = threading.Event()
+
+        def worker():
+            frozen = st._consume_frozen_reference_for_worker()
+            snapshot.update(
+                source=frozen.source_basename,
+                origin=frozen.origin,
+                grid_crval=list(st.drizzle_output_wcs.wcs.crval),
+                shape=tuple(st.drizzle_output_shape_hw),
+                fixed_is_drizzle=st.fixed_output_wcs is st.drizzle_output_wcs,
+                fixed_shape=tuple(st.fixed_output_shape),
+            )
+            st.processing_active = False
+            done.set()
+
+        st._worker = worker
+        started = st.start_processing(
+            str(root), str(out), reference_path_ui=request,
+            use_drizzle=True, drizzle_scale=scale, drizzle_kernel="lanczos2",
+            batch_size=1, correct_hot_pixels=False, perform_cleanup=False,
+            move_stacked=False, reproject_between_batches=False,
+            reproject_coadd_final=False,
+        )
+        if st.processing_thread is not None:
+            st.processing_thread.join(10)
+        return started, done, snapshot
+    finally:
+        _qm.select_geometry_reference = orig
+
+
+def test_reused_stacker_rebuilds_grid_for_new_reference_and_scale(tmp_path):
+    root = tmp_path / "input"
+    out1 = tmp_path / "out1"
+    out2 = tmp_path / "out2"
+    root.mkdir(parents=True)
+    out1.mkdir()
+    out2.mkdir()
+    _write_fits(root / "A.fit", 275.0)
+    _write_fits(root / "B.fit", 276.0)
+
+    import seestar.queuep.queue_manager as _qm
+
+    orig_exec = _qm.ProcessPoolExecutor
+    _qm.ProcessPoolExecutor = _NoopExecutor
+    try:
+        st = _qm.SeestarQueuedStacker(batch_size=1, autotune=False)
+        st.update_progress = lambda *a, **k: None
+        st._solve_astrometry_async = lambda path, header, settings, **kwargs: WCS(header).celestial
+        calls = {}
+
+        started, done, snap = _run_once(st, root, out1, str(root / "B.fit"), 2, [])
+        assert started and done.is_set()
+        assert snap["source"] == "B.fit"
+        assert snap["grid_crval"] == [276.0, 20.0]
+        assert snap["shape"] == (64, 80)
+        assert snap["fixed_is_drizzle"] is True
+
+        started2, done2, snap2 = _run_once(st, root, out2, str(root / "A.fit"), 3, [])
+        refusal = getattr(st, "startup_refusal", None)
+        assert started2 and done2.is_set(), (
+            getattr(refusal, "code", None),
+            getattr(refusal, "technical_detail", None),
+            getattr(st, "processing_error", None),
+            getattr(st, "processing_active", None),
+        )
+        assert snap2["source"] == "A.fit"
+        assert snap2["grid_crval"] == [275.0, 20.0]
+        assert snap2["shape"] == (96, 120)
+        assert snap2["fixed_is_drizzle"] is True
+    finally:
+        _qm.ProcessPoolExecutor = orig_exec

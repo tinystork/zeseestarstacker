@@ -295,12 +295,19 @@ def test_output_grid_wcs():
     assert abs(out_y[0] - (out_wcs.wcs.crpix[1] - 1.0)) < 1e-6
 
     # a round-trip through the two WCS objects maps a reference pixel to
-    # ``scale * p + (scale - 1)`` in the output grid
+    # ``scale * p + (scale - 1) / 2`` in the output grid.  JUSTIFICATION: the
+    # old assertion encoded the superseded raw-CRPIX convention
+    # (``CRPIX_out = scale * CRPIX_ref``, i.e. ``scale * p + (scale - 1)``),
+    # which shifted the geometric footprint centre by ``(scale - 1) / 2``
+    # output pixels.  The accepted FITS edge/centre-preserving contract
+    # (``CRPIX_out = scale * (CRPIX_ref - 0.5) + 0.5``) maps pixel *edges*
+    # ``[-0.5, N-0.5]`` exactly onto ``[-0.5, sN-0.5]``.  This is a
+    # geometry-only subpixel translation; no scientific expected value moves.
     h, w = shape
     sky = ref.all_pix2world(np.array([w / 2.0]), np.array([h / 2.0]), 0)
     out_x, out_y = out_wcs.all_world2pix(sky[0], sky[1], 0)
-    assert abs(out_x[0] - (2.0 * (w / 2.0) + 1.0)) < 1e-6
-    assert abs(out_y[0] - (2.0 * (h / 2.0) + 1.0)) < 1e-6
+    assert abs(out_x[0] - (2.0 * (w / 2.0) + 0.5)) < 1e-6
+    assert abs(out_y[0] - (2.0 * (h / 2.0) + 0.5)) < 1e-6
 
 
 # --------------------------------------------------------------------------

@@ -169,6 +169,10 @@ __all__ = [
     "read_drizzle_checkpoint",
     "build_drizzle_canonical_config",
     "serialize_wcs_header",
+    "serialize_input_reference_geometry",
+    "reconstruct_input_reference_wcs",
+    "INPUT_REFERENCE_GEOMETRY_CONTRACT",
+    "INPUT_REFERENCE_GEOMETRY_VERSION",
     "CHECKPOINT_DIRNAME",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
@@ -207,10 +211,22 @@ STATE_CLEAN = "clean"
 _WHT_POLICY_TOKEN = "relative_coverage_v1"
 _BACKGROUND_MATCH_CONTRACT = "dpic01_bgmatch_v1"
 _BACKGROUND_MATCH_CONTRACT_VERSION = 1
-_OUTPUT_GRID_CONTRACT = "m3_output_grid_v1"
-_OUTPUT_GRID_CONTRACT_VERSION = 1
+# v2 (GAR-06): the Standard output grid is an exact scaled copy of the frozen
+# reference grid (projection/frame/orientation/handedness preserved, effective
+# matrix divided by the scale, FITS edge/centre-preserving CRPIX).  v1 was the
+# historical north-up / raw-CRPIX-scaled grid; it is deliberately NOT migratable
+# in place (accumulated arrays are never silently converted).
+_OUTPUT_GRID_CONTRACT = "m3_output_grid_v2"
+_OUTPUT_GRID_CONTRACT_VERSION = 2
+_LEGACY_OUTPUT_GRID_CONTRACTS = {("m3_output_grid_v1", 1)}
 _REGISTRATION_CONTRACT = "m3_tf_registration_v1"
 _REGISTRATION_CONTRACT_VERSION = 1
+
+# Versioned frozen input-reference geometry payload persisted in the session
+# binding so a resume can restore the exact input-reference WCS (re-solving
+# alone is not proof of stability).
+INPUT_REFERENCE_GEOMETRY_CONTRACT = "m3_input_reference_geometry_v1"
+INPUT_REFERENCE_GEOMETRY_VERSION = 1
 
 # Explicit allowlist for generation-unique array artifacts.  Garbage collection
 # and failure cleanup may only ever touch names matching these patterns.  The
@@ -488,6 +504,99 @@ def serialize_wcs_header(wcs) -> dict:
                 f"non-JSON output WCS card {key!r}: {exc}"
             ) from exc
     return out
+
+
+def serialize_input_reference_geometry(reference_wcs, reference_shape_hw=None,
+                                        reference_identity=None):
+    """Serialize the frozen *input-reference* geometry (or ``None``).
+
+    Versioned so a future contract change is detectable.  The persisted WCS
+    reproduces the exact input reference used for registration, which the
+    output-grid payload alone cannot prove.
+    """
+    if reference_wcs is None:
+        return None
+    shape = None
+    if reference_shape_hw is not None and len(tuple(reference_shape_hw)) == 2:
+        shape = [int(reference_shape_hw[0]), int(reference_shape_hw[1])]
+    identity = None
+    if isinstance(reference_identity, dict):
+        identity = dict(reference_identity)
+    return {
+        "contract": INPUT_REFERENCE_GEOMETRY_CONTRACT,
+        "contract_version": INPUT_REFERENCE_GEOMETRY_VERSION,
+        "shape_hw": shape,
+        "wcs": serialize_wcs_header(reference_wcs),
+        "identity": identity,
+    }
+
+
+def _validate_input_reference_geometry(payload, where="input reference geometry"):
+    """Validate a persisted input-reference geometry payload (or ``None``)."""
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise DrizzleCheckpointError(f"{where} must be a mapping")
+    if payload.get("contract") != INPUT_REFERENCE_GEOMETRY_CONTRACT:
+        raise DrizzleCheckpointError(
+            f"{where} contract mismatch: {payload.get('contract')!r}"
+        )
+    version = _strict_int(payload.get("contract_version"), f"{where} version")
+    if version != INPUT_REFERENCE_GEOMETRY_VERSION:
+        raise DrizzleCheckpointError(
+            f"{where} unsupported contract_version {version}"
+        )
+    shape = None
+    shape_raw = payload.get("shape_hw")
+    if shape_raw is not None:
+        if not isinstance(shape_raw, list) or len(shape_raw) != 2:
+            raise DrizzleCheckpointError(f"{where} shape_hw must be a 2-element list")
+        h = _strict_int(shape_raw[0], f"{where} shape_hw[0]")
+        w = _strict_int(shape_raw[1], f"{where} shape_hw[1]")
+        if h <= 0 or w <= 0:
+            raise DrizzleCheckpointError(f"{where} invalid shape_hw {(h, w)}")
+        shape = [h, w]
+    wcs_dict = payload.get("wcs")
+    if not isinstance(wcs_dict, dict) or not wcs_dict:
+        raise DrizzleCheckpointError(f"{where} wcs is missing or malformed")
+    _wcs_from_cards(wcs_dict, where)
+    identity = None
+    if payload.get("identity") is not None:
+        identity = _validate_identity(payload.get("identity"), f"{where} identity")
+    return {
+        "contract": INPUT_REFERENCE_GEOMETRY_CONTRACT,
+        "contract_version": INPUT_REFERENCE_GEOMETRY_VERSION,
+        "shape_hw": shape,
+        "wcs": dict(wcs_dict),
+        "identity": identity,
+    }
+
+
+def reconstruct_input_reference_wcs(reference_geometry):
+    """Rebuild the frozen input-reference WCS from a validated payload.
+
+    Returns ``None`` when no payload is present (callers then keep whatever
+    reference preparation produced; a legacy checkpoint without the payload is
+    refused earlier by the output-grid contract check).
+    """
+    if not isinstance(reference_geometry, dict):
+        return None
+    wcs_dict = reference_geometry.get("wcs")
+    if not isinstance(wcs_dict, dict) or not wcs_dict:
+        return None
+    wcs = _wcs_from_cards(wcs_dict, "input reference geometry")
+    shape = reference_geometry.get("shape_hw")
+    if isinstance(shape, list) and len(shape) == 2:
+        h, w = int(shape[0]), int(shape[1])
+        try:
+            wcs.array_shape = (h, w)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            wcs.pixel_shape = (w, h)
+        except Exception:  # noqa: BLE001
+            pass
+    return wcs
 
 
 def _resolve_geometry_facts(qm):
@@ -1290,6 +1399,9 @@ class DrizzleCheckpointWriter:
             "input_roots": roots_clean,
             "reference": ref_clean,
             "plan": plan_clean,
+            "reference_geometry": _validate_input_reference_geometry(
+                sb.get("reference_geometry")
+            ),
         }
 
     @classmethod
@@ -1378,11 +1490,35 @@ class DrizzleCheckpointWriter:
         if self._continuation_state is None:
             return
         loaded = self._continuation_state
-        if session_clean != loaded["session"]:
+        loaded_session = loaded["session"]
+        # The core session binding (input roots / reference / plan) must be
+        # byte-identical.  The additive, versioned input-reference geometry is
+        # handled separately below: it must match when both sides carry it, and
+        # when the runtime binding omits it (a resume path that re-solves the
+        # reference) the loaded geometry is carried forward for the same run so
+        # the persisted geometry never drifts.  This preserves the historical
+        # continuation semantics for checkpoints written before the payload
+        # existed.
+        core_new = {
+            k: v for k, v in session_clean.items() if k != "reference_geometry"
+        }
+        core_loaded = {
+            k: v for k, v in loaded_session.items() if k != "reference_geometry"
+        }
+        if core_new != core_loaded:
             raise DrizzleCheckpointError(
                 "continuation session binding diverges from the loaded "
                 "checkpoint (input_roots/reference/plan must be identical)"
             )
+        new_geom = session_clean.get("reference_geometry")
+        loaded_geom = loaded_session.get("reference_geometry")
+        if new_geom is not None and loaded_geom is not None and new_geom != loaded_geom:
+            raise DrizzleCheckpointError(
+                "continuation input-reference geometry diverges from the "
+                "loaded checkpoint"
+            )
+        if new_geom is None and loaded_geom is not None:
+            session_clean["reference_geometry"] = loaded_geom
         loaded_counters = loaded["counters"]
         new_frame = counters_clean["frame_count"]
         loaded_frame = loaded_counters["frame_count"]
@@ -2080,6 +2216,7 @@ class DrizzleCheckpointResult:
     resolved_completed_paths: tuple = ()     # resolved_plan_paths[:next_source_index]
     resolved_remaining_paths: tuple = ()     # resolved_plan_paths[next_source_index:]
     resolution_policy: object = None         # immutable SafeStackedSourceResolver | None
+    reference_geometry: object = None        # versioned frozen input-reference geometry | None
 
     def __post_init__(self):
         """Validate and normalize the source-output provenance (read-only).
@@ -2517,6 +2654,7 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
         resolved_reference=resolved_reference,
         resolved_plan_paths=resolved_plan_paths,
         resolution_policy=resolution_policy,
+        reference_geometry=session.get("reference_geometry"),
     )
 
 
@@ -2605,6 +2743,27 @@ def _validate_config(manifest, cfg_path):
         raise DrizzleCheckpointError(f"cannot read run_config.cfg: {exc}") from exc
     config = report.config
 
+    # GAR-06: the output-grid geometry contract is explicitly versioned.  A
+    # checkpoint written under the legacy north-up / raw-CRPIX grid contract is
+    # refused here (read-only, before any mutation) with a clear restart
+    # requirement; accumulated SCI/WHT arrays are never silently converted.
+    persisted_grid = (
+        config.scientific.get("output_grid_contract"),
+        config.scientific.get("output_grid_contract_version"),
+    )
+    if persisted_grid != (_OUTPUT_GRID_CONTRACT, _OUTPUT_GRID_CONTRACT_VERSION):
+        if persisted_grid in _LEGACY_OUTPUT_GRID_CONTRACTS:
+            raise DrizzleCheckpointError(
+                "legacy Drizzle output-grid checkpoint "
+                f"({persisted_grid[0]} v{persisted_grid[1]}): the north-up / "
+                "raw-CRPIX grid contract cannot be migrated in place; start a "
+                "fresh run (accumulated arrays are never silently converted)."
+            )
+        raise DrizzleCheckpointError(
+            "unsupported Drizzle output-grid contract "
+            f"{persisted_grid[0]!r} v{persisted_grid[1]!r}"
+        )
+
     if config.product_version != manifest.get("product_version"):
         raise DrizzleCheckpointError(
             "run_config.cfg product_version does not match the manifest"
@@ -2644,12 +2803,12 @@ def _validate_config(manifest, cfg_path):
     return config
 
 
-def _reconstruct_wcs(manifest, output_shape_hw):
-    """Reconstruct and validate the output WCS; attach ``array_shape``."""
-    wcs_dict = manifest.get("wcs")
-    if not isinstance(wcs_dict, dict) or not wcs_dict:
-        raise DrizzleCheckpointError("manifest wcs is missing or malformed")
+def _wcs_from_cards(wcs_dict, where="output WCS"):
+    """Rebuild a 2-axis :class:`astropy.wcs.WCS` from strict JSON cards.
 
+    Fail closed on any non-JSON/non-finite card or unreadable frame; the
+    caller attaches the shape metadata it validates separately.
+    """
     header = fits.Header()
     for key, value in wcs_dict.items():
         if not isinstance(key, str) or key in ("", "HISTORY", "COMMENT"):
@@ -2666,17 +2825,23 @@ def _reconstruct_wcs(manifest, output_shape_hw):
             raise DrizzleCheckpointError(
                 f"non-JSON WCS card {key!r} value type {type(value).__name__}"
             )
-
     try:
         wcs = WCS(header)
     except Exception as exc:  # noqa: BLE001 - fail closed, never partial
         raise DrizzleCheckpointError(
-            f"cannot reconstruct output WCS: {exc}"
+            f"cannot reconstruct {where}: {exc}"
         ) from exc
     if wcs.naxis != 2:
-        raise DrizzleCheckpointError(
-            f"output WCS has naxis {wcs.naxis} != 2"
-        )
+        raise DrizzleCheckpointError(f"{where} has naxis {wcs.naxis} != 2")
+    return wcs
+
+
+def _reconstruct_wcs(manifest, output_shape_hw):
+    """Reconstruct and validate the output WCS; attach ``array_shape``."""
+    wcs_dict = manifest.get("wcs")
+    if not isinstance(wcs_dict, dict) or not wcs_dict:
+        raise DrizzleCheckpointError("manifest wcs is missing or malformed")
+    wcs = _wcs_from_cards(wcs_dict, "output WCS")
     wcs.array_shape = tuple(output_shape_hw)
 
     # Exact output-grid contract: the reconstructed WCS must round-trip back
@@ -2814,6 +2979,9 @@ def _validate_session(manifest):
         "input_roots": roots_clean,
         "reference": reference,
         "plan": plan_clean,
+        "reference_geometry": _validate_input_reference_geometry(
+            session.get("reference_geometry")
+        ),
     }
 
 

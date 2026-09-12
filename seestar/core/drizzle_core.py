@@ -283,16 +283,82 @@ def classify_drizzle_pixfrac(pixfrac):
     return float(raw), raw, None
 
 
-def build_output_grid(reference_wcs, reference_shape_hw, scale):
-    """Build the output WCS and grid shape for a drizzle scale factor.
+OUTPUT_GRID_CRPIX_CONVENTION = "fits_edge_centre_v1"
 
-    The output WCS keeps the same projection / CRVAL / CTYPE as the reference;
-    ``CDELT`` is divided by ``scale`` and ``CRPIX`` is multiplied by ``scale``.
+
+def _unsupported_distortion_kind(reference_wcs):
+    """Return a stable token naming unsupported distortion, else ``None``.
+
+    Scaling only the linear terms of a distorted WCS does not preserve its
+    full mapping, so any distortion must be refused explicitly instead of
+    silently claiming preservation.
+    """
+    if getattr(reference_wcs, "sip", None) is not None:
+        return "sip"
+    wcsprm = getattr(reference_wcs, "wcs", None)
+    if wcsprm is not None:
+        for attr in ("cpdis1", "cpdis2"):
+            if getattr(wcsprm, attr, None) is not None:
+                return "lookup_table"
+    for attr in ("det2im1", "det2im2"):
+        if getattr(reference_wcs, attr, None) is not None:
+            return "detector_to_image"
+    try:
+        if bool(reference_wcs.has_distortion):
+            return "distortion"
+    except Exception:  # noqa: BLE001 - older astropy without the property
+        pass
+    return None
+
+
+def _attach_grid_shape(out_wcs, out_shape_hw):
+    """Attach the public grid shape metadata to a modified WCS copy.
+
+    ``array_shape`` is ``(H, W)`` (numpy) while ``pixel_shape`` is ``(W, H)``
+    (FITS NAXIS order); both are set so consumers such as
+    :func:`pixmap_from_alignment` mask against the real output grid.
+    """
+    out_h, out_w = int(out_shape_hw[0]), int(out_shape_hw[1])
+    try:
+        out_wcs.array_shape = (out_h, out_w)
+    except Exception:  # noqa: BLE001 - best effort public metadata
+        pass
+    try:
+        out_wcs.pixel_shape = (out_w, out_h)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out_wcs._naxis1 = out_w
+        out_wcs._naxis2 = out_h
+    except AttributeError:
+        pass
+
+
+def build_output_grid(reference_wcs, reference_shape_hw, scale):
+    """Build the canonical output WCS and grid shape for a drizzle scale.
+
+    The output grid is an exact ``scale``-times scaled copy of the frozen
+    reference grid: same celestial projection, frame, orientation and
+    handedness, with the *effective* pixel-scale matrix divided by ``scale``
+    and the same sky anchor (``CRVAL``).
+
+    Geometry contract (``M`` = effective pixel-scale matrix):
+
+    * ``shape_out = (round(H*scale), round(W*scale))`` (``(H, W)`` order);
+    * ``M_out = M_ref / scale``.  A real ``CD`` matrix is scaled directly;
+      otherwise ``CDELT`` is scaled and the ``PC`` matrix is preserved (never
+      dropped, never reduced to a diagonal);
+    * ``CRPIX_out = scale * (CRPIX_ref - 0.5) + 0.5`` (FITS edge/centre
+      preserving: pixel edges ``[-0.5, N-0.5]`` map exactly onto
+      ``[-0.5, sN-0.5]``, so the geometric footprint centre and any
+      off-centre ``CRPIX`` are preserved);
+    * ``CRVAL``, ``CTYPE``, projection and celestial frame are preserved;
+    * the returned WCS is an independent copy (the reference is untouched).
 
     Parameters
     ----------
     reference_wcs : `astropy.wcs.WCS`
-        Reference WCS.
+        Reference WCS (must be celestial with a defined ``pixel_shape``).
     reference_shape_hw : tuple of int
         Reference grid shape ``(height, width)``.
     scale : float
@@ -301,21 +367,50 @@ def build_output_grid(reference_wcs, reference_shape_hw, scale):
     Returns
     -------
     out_wcs : `astropy.wcs.WCS`
-        Output WCS (``CDELT / scale``, ``CRPIX * scale``).
+        Output WCS with public shape metadata equal to ``out_shape_hw``.
     out_shape_hw : tuple of int
         Output grid shape ``(round(H * scale), round(W * scale))``.
+
+    Raises
+    ------
+    ValueError
+        On a non-celestial / shapeless reference, an unsupported distortion,
+        an invalid shape, or a non-finite / ``< 1`` scale.
     """
     scale = float(scale)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("scale must be finite and > 0")
     if scale < 1.0:
         raise ValueError("scale must be >= 1.0")
+    if reference_wcs is None or not getattr(reference_wcs, "is_celestial", False):
+        raise ValueError("reference WCS must be celestial")
+    if getattr(reference_wcs, "pixel_shape", None) is None:
+        raise ValueError("reference WCS must define pixel_shape")
+    if reference_shape_hw is None or len(tuple(reference_shape_hw)) != 2:
+        raise ValueError(
+            f"reference_shape_hw must be (H, W), got {reference_shape_hw!r}"
+        )
+    distortion = _unsupported_distortion_kind(reference_wcs)
+    if distortion is not None:
+        raise ValueError(
+            "unsupported WCS distortion for output grid: " + distortion
+        )
 
     out_wcs = reference_wcs.deepcopy()
-    out_wcs.wcs.crpix = np.asarray(reference_wcs.wcs.crpix, dtype=float) * scale
-    out_wcs.wcs.cdelt = np.asarray(reference_wcs.wcs.cdelt, dtype=float) / scale
+    crpix_ref = np.asarray(reference_wcs.wcs.crpix, dtype=float)
+    out_wcs.wcs.crpix = scale * (crpix_ref - 0.5) + 0.5
+    if reference_wcs.wcs.has_cd():
+        out_wcs.wcs.cd = np.asarray(reference_wcs.wcs.cd, dtype=float) / scale
+    else:
+        out_wcs.wcs.cdelt = (
+            np.asarray(reference_wcs.wcs.cdelt, dtype=float) / scale
+        )
 
-    out_h = int(round(reference_shape_hw[0] * scale))
-    out_w = int(round(reference_shape_hw[1] * scale))
-    return out_wcs, (out_h, out_w)
+    out_h = max(1, int(round(reference_shape_hw[0] * scale)))
+    out_w = max(1, int(round(reference_shape_hw[1] * scale)))
+    out_shape_hw = (out_h, out_w)
+    _attach_grid_shape(out_wcs, out_shape_hw)
+    return out_wcs, out_shape_hw
 
 
 def pixmap_from_alignment(data_shape_hw, tf, reference_wcs, output_wcs):
