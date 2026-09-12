@@ -1590,6 +1590,56 @@ def _identities_equivalent(a, b):
         return False
 
 
+def _canon_projection_value(value):
+    """Deterministically normalize one PV/PS value (strings preserved)."""
+    if isinstance(value, str):
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ("__non_numeric__", repr(value))
+    if not math.isfinite(number):
+        return ("__non_finite__",)
+    return round(number, 12)
+
+
+def _canonical_projection_params(name, pairs):
+    """Canonicalize Astropy PV/PS entries with their full tuple identity.
+
+    Astropy returns ``(axis, parameter, value)`` triples (some legacy forms may
+    be pairs) with an unspecified order.  The canonical form is a deterministically
+    sorted tuple of the complete identity so a changed projection parameter is
+    detected even when PSR is unchanged.  ``None``/empty maps to ``()``; an
+    unreadable or malformed value maps to a *distinct stable sentinel* so it can
+    never masquerade as "no parameters".
+    """
+    if pairs is None:
+        return ()
+    try:
+        items = list(pairs)
+    except TypeError:
+        return (("__malformed__", name),)
+    canonical = []
+    for entry in items:
+        try:
+            parts = tuple(entry)
+        except TypeError:
+            return (("__malformed__", name),)
+        if len(parts) == 3:
+            axis, index, value = parts
+        elif len(parts) == 2:
+            axis, (index, value) = None, parts
+        else:
+            return (("__malformed__", name),)
+        try:
+            axis_key = None if axis is None else int(axis)
+            index_key = int(index)
+        except (TypeError, ValueError):
+            return (("__malformed__", name),)
+        canonical.append((axis_key, index_key, _canon_projection_value(value)))
+    return tuple(sorted(canonical, key=repr))
+
+
 def _identity_evidence_key(ident):
     """Tuple of the physical-observation evidence of one source identity.
 
@@ -16773,13 +16823,18 @@ class SeestarQueuedStacker:
                 "latpole": _rounded(getattr(wcsprm, "latpole", None)),
             }
             for name, getter in (("pv", "get_pv"), ("ps", "get_ps")):
-                try:
-                    pairs = getattr(wcsprm, getter)() if wcsprm is not None else []
-                    facts[name] = tuple(
-                        (int(k), _rounded(v)) for k, v in (pairs or [])
-                    )
-                except Exception:  # noqa: BLE001 - absent PV/PS
+                getter_fn = (
+                    getattr(wcsprm, getter, None) if wcsprm is not None else None
+                )
+                if getter_fn is None:
                     facts[name] = ()
+                    continue
+                try:
+                    raw_params = getter_fn()
+                except Exception:  # noqa: BLE001 - distinct stable sentinel
+                    facts[name] = (("__read_error__", name),)
+                    continue
+                facts[name] = _canonical_projection_params(name, raw_params)
             return tuple(sorted(facts.items()))
 
         frozen = getattr(self, "_frozen_reference", None)

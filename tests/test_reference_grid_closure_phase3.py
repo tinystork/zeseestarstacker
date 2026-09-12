@@ -68,6 +68,92 @@ def test_same_run_retry_is_idempotent():
     assert first == second
 
 
+def _zpn_wcs(shape=(32, 32)):
+    from astropy.wcs import WCS
+
+    w = WCS(naxis=2)
+    w.wcs.ctype = ["RA---ZPN", "DEC--ZPN"]
+    w.wcs.crpix = [(shape[1] + 1) / 2.0, (shape[0] + 1) / 2.0]
+    w.wcs.crval = [10.0, 20.0]
+    w.wcs.cdelt = [-0.001, 0.001]
+    w.wcs.set_pv([(2, 0, 0.0), (2, 1, 1.0)])
+    w.array_shape = shape
+    w.pixel_shape = (shape[1], shape[0])
+    return w
+
+
+def test_pv_projection_drift_is_rejected_and_idempotent():
+    """F8: a changed projection parameter (PV) must fail closed even though
+    the angular pixel scale (PSR) is unchanged; repeated resolution stays
+    idempotent."""
+    ref = _zpn_wcs()
+    obj = object.__new__(qm.SeestarQueuedStacker)
+    obj.drizzle_scale = 2.0
+    obj.reference_wcs_object = ref
+    obj.drizzle_output_wcs = build_output_grid(ref, (32, 32), 2.0)[0]
+    obj.drizzle_output_shape_hw = (64, 64)
+    first = obj._freeze_drizzle_geometry()
+    assert first is not None
+    assert obj._freeze_drizzle_geometry() == first
+
+    ref.wcs.set_pv([(2, 0, 0.0), (2, 1, 1.1)])
+    with pytest.raises(DrizzleGeometryError):
+        obj._freeze_drizzle_geometry()
+
+
+def test_canonical_projection_params_full_identity():
+    canon = qm._canonical_projection_params
+    assert canon("pv", None) == ()
+    assert canon("pv", []) == ()
+    # Astropy triples are canonicalized with full (axis, index, value) identity,
+    # order-independently.
+    assert canon("pv", [(2, 1, 1.0), (2, 0, 0.0)]) == ((2, 0, 0.0), (2, 1, 1.0))
+    assert canon("pv", [(2, 0, 0.0), (2, 1, 1.0)]) == canon(
+        "pv", [(2, 1, 1.0), (2, 0, 0.0)]
+    )
+    # PS string values are preserved.
+    assert canon("ps", [(1, 0, "A"), (2, 0, "B")]) == ((1, 0, "A"), (2, 0, "B"))
+    # Malformed entries map to a distinct non-empty sentinel, never to "absent".
+    malformed = canon("pv", [object()])
+    assert malformed and malformed != ()
+    assert canon("pv", [(2, 1, 1.0, 9)]) == (("__malformed__", "pv"),)
+    # Non-finite values normalize deterministically.
+    assert canon("pv", [(2, 1, float("nan"))]) == canon(
+        "pv", [(2, 1, float("nan"))
+    ])
+
+
+def test_frame_facts_include_pv_and_ps():
+    class _Prm:
+        ctype = ("RA---ZPN", "DEC--ZPN")
+        cunit = ("deg", "deg")
+        radesys = "ICRS"
+        equinox = 2000.0
+        lonpole = 180.0
+        latpole = 20.0
+        crval = (10.0, 20.0)
+        crpix = (16.5, 16.5)
+
+        def get_pv(self):
+            return [(2, 0, 0.0), (2, 1, 1.0)]
+
+        def get_ps(self):
+            return [(1, 0, "A")]
+
+    class _W:
+        wcs = _Prm()
+        array_shape = (32, 32)
+        pixel_shape = (32, 32)
+
+    obj = object.__new__(qm.SeestarQueuedStacker)
+    obj.drizzle_scale = 1.0
+    obj._frozen_reference = None
+    snap = obj._drizzle_grid_identity_snapshot(_W(), _W(), 1.0, 1.0)
+    ref_frame = dict(snap["reference_frame"])
+    assert ref_frame["pv"] == ((2, 0, 0.0), (2, 1, 1.0))
+    assert ref_frame["ps"] == ((1, 0, "A"),)
+
+
 def _grid_subject(scale=2.0):
     obj = object.__new__(qm.SeestarQueuedStacker)
     obj.drizzle_scale = scale
