@@ -59,10 +59,13 @@ WHT/SUP, weighting, histogram/render) are untouched.
 - `serialize_wcs_header` persists SIP `A/B/AP/BP` cards via
   `to_header(relax=True)`. A forward-only SIP is persisted without the empty
   `AP_ORDER/BP_ORDER` cards so the header round-trips exactly.
-- Astropy 8.0.1 drops the SIP *inverse* on header re-parse, so
-  `_sip_from_cards` reconstructs the full SIP explicitly (forward and inverse)
-  in both output-WCS and input-reference-geometry restore paths. Round-trips
-  are exact and mapping-preserving.
+- Astropy 8.0.1 preserves standard inverse SIP polynomials (order >=2).
+  It omits order-1 AP/BP on header re-parse, although `Sip` accepts them in
+  memory. `_sip_from_cards` explicitly preserves these as well in both
+  output-WCS and input-reference-geometry restore paths.
+- Junior's review caught and fixed mixed SIP+CPDIS acceptance: lookup tables
+  belong to the WCS object, not its linear Wcsprm. Real Astropy table fixtures
+  now verify refusal with and without SIP, on both CPDIS axes.
 - The full-grid identity snapshot includes, for input and output: SIP presence,
   origin, A/B/AP/BP orders and every coefficient, so a same-PSR SIP
   mutation/add/remove fails closed; repeated equivalent resolution stays

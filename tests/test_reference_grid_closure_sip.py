@@ -175,14 +175,11 @@ def test_sip_tiny_deposition(kernel):
 
 
 def test_lookup_and_det2im_distortions_refused():
-    class _Prm:
-        cpdis1 = object()
-
     class _Lookup:
         is_celestial = True
         pixel_shape = (100, 60)
         sip = None
-        wcs = _Prm()
+        cpdis1 = object()
 
     with pytest.raises(ValueError):
         build_output_grid(_Lookup(), REF_SHAPE, 2)
@@ -499,3 +496,19 @@ def test_start_processing_sip_reference_initializes_accumulators(tmp_path):
     assert snapshot["grid_sip"] is True
     assert snapshot["shape"] == (64, 80)
     assert snapshot["crval"] == [276.0, 20.0]
+
+
+@pytest.mark.parametrize("with_sip", [False, True])
+@pytest.mark.parametrize("table_attr", ["cpdis1", "cpdis2"])
+def test_real_astropy_lookup_table_is_refused_even_with_sip(with_sip, table_attr):
+    from astropy.wcs import DistortionLookupTable
+
+    ref = _sip_reference()
+    if not with_sip:
+        ref.sip = None
+        ref.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    setattr(ref, table_attr, DistortionLookupTable(
+        np.ones((2, 2), dtype=np.float32), (1, 1), (1, 1), (1, 1)
+    ))
+    with pytest.raises(ValueError, match="lookup_table"):
+        build_output_grid(ref, REF_SHAPE, 2)

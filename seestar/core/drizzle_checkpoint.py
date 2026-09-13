@@ -2882,9 +2882,9 @@ def _wcs_from_cards(wcs_dict, where="output WCS"):
         ) from exc
     if wcs.naxis != 2:
         raise DrizzleCheckpointError(f"{where} has naxis {wcs.naxis} != 2")
-    # Astropy 8 drops the SIP *inverse* AP/BP polynomials when re-parsing a
-    # header, so reconstruct the full SIP (forward and inverse) explicitly from
-    # the persisted cards.  Forward-only SIP reconstructs identically.
+    # Preserve inverse polynomials explicitly, including order-1 AP/BP
+    # accepted in memory but omitted by Astropy 8 on header re-parse.
+    # Standard inverse polynomials of order >=2 already survive WCS parsing.
     sip = _sip_from_cards(header, where)
     if sip is not None:
         try:

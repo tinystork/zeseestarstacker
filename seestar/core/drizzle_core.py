@@ -295,11 +295,11 @@ def _unsupported_distortion_kind(reference_wcs):
     explicitly refused instead of silently claiming preservation.  Anything
     else that reports ``has_distortion`` without SIP is likewise refused.
     """
-    wcsprm = getattr(reference_wcs, "wcs", None)
-    if wcsprm is not None:
-        for attr in ("cpdis1", "cpdis2"):
-            if getattr(wcsprm, attr, None) is not None:
-                return "lookup_table"
+    # CPDIS tables belong to WCS itself, not to its linear Wcsprm.
+    # Check them before allowing SIP, including mixed SIP+lookup WCSes.
+    for attr in ("cpdis1", "cpdis2"):
+        if getattr(reference_wcs, attr, None) is not None:
+            return "lookup_table"
     for attr in ("det2im1", "det2im2"):
         if getattr(reference_wcs, attr, None) is not None:
             return "detector_to_image"
