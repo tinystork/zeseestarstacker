@@ -2,6 +2,16 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.5.1] — Phoenix consedit
+
+- Drizzle Standard output grid now preserves the frozen reference WCS
+  orientation instead of reconstructing a rotation-free grid.
+- Fixes reference truncation / lost field coverage on mixed ALTAZ/EQ datasets
+  with strongly rotated references.
+- Output grid remains immutable for the whole run.
+- No change to Drizzle SCI, WHT, SUP, pixel_scale_ratio, iscale, normalization,
+  viewer compatibility, or kernel science.
+
 ## [8.5.0] — Phoenix consedit
 
 - corrected Drizzle pixel-scale geometry
