@@ -504,6 +504,19 @@ def serialize_wcs_header(wcs) -> dict:
             raise DrizzleCheckpointError(
                 f"non-JSON output WCS card {key!r}: {exc}"
             ) from exc
+
+    # Canonical SIP persistence: a forward-only SIP (AP_ORDER/BP_ORDER == 0
+    # with no AP_/BP_ coefficients) is stored without the empty order cards so
+    # that the persisted header round-trips exactly through WCS re-parsing
+    # (Astropy omits the zero order cards on reserialization).
+    sip_inverse_coeffs = [
+        key
+        for key in out
+        if key.startswith(("AP_", "BP_")) and key not in ("AP_ORDER", "BP_ORDER")
+    ]
+    if out.get("AP_ORDER") == 0 and not sip_inverse_coeffs:
+        out.pop("AP_ORDER", None)
+        out.pop("BP_ORDER", None)
     return out
 
 
@@ -2869,7 +2882,86 @@ def _wcs_from_cards(wcs_dict, where="output WCS"):
         ) from exc
     if wcs.naxis != 2:
         raise DrizzleCheckpointError(f"{where} has naxis {wcs.naxis} != 2")
+    # Astropy 8 drops the SIP *inverse* AP/BP polynomials when re-parsing a
+    # header, so reconstruct the full SIP (forward and inverse) explicitly from
+    # the persisted cards.  Forward-only SIP reconstructs identically.
+    sip = _sip_from_cards(header, where)
+    if sip is not None:
+        try:
+            wcs.sip = sip
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            raise DrizzleCheckpointError(
+                f"cannot attach SIP distortion to {where}: {exc}"
+            ) from exc
     return wcs
+
+
+def _sip_from_cards(header, where="output WCS"):
+    """Rebuild a full :class:`astropy.wcs.Sip` from persisted order cards.
+
+    Returns ``None`` when the header carries no SIP.  Fails closed on an
+    inconsistent forward/inverse order or non-finite coefficient.
+    """
+    from astropy.wcs import Sip
+
+    def _order(name):
+        try:
+            return int(header.get(name, 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise DrizzleCheckpointError(
+                f"{where} has a malformed {name} card"
+            ) from exc
+
+    a_order = _order("A_ORDER")
+    b_order = _order("B_ORDER")
+    ap_order = _order("AP_ORDER")
+    bp_order = _order("BP_ORDER")
+    if max(a_order, b_order, ap_order, bp_order) <= 0:
+        return None
+    if a_order != b_order:
+        raise DrizzleCheckpointError(f"{where} has mismatched SIP A/B orders")
+    if ap_order != bp_order:
+        raise DrizzleCheckpointError(f"{where} has mismatched SIP AP/BP orders")
+
+    def _matrix(order, prefix):
+        matrix = np.zeros((order + 1, order + 1), dtype=float)
+        for i in range(order + 1):
+            for j in range(order + 1):
+                key = f"{prefix}_{i}_{j}"
+                if key in header:
+                    try:
+                        matrix[i, j] = float(header[key])
+                    except (TypeError, ValueError) as exc:
+                        raise DrizzleCheckpointError(
+                            f"{where} has a malformed {key} coefficient"
+                        ) from exc
+        if not np.all(np.isfinite(matrix)):
+            raise DrizzleCheckpointError(f"{where} has non-finite SIP coefficients")
+        return matrix
+
+    a = _matrix(a_order, "A")
+    b = _matrix(b_order, "B")
+    if ap_order > 0:
+        ap = _matrix(ap_order, "AP")
+        bp = _matrix(bp_order, "BP")
+    else:
+        ap = np.zeros((1, 1), dtype=float)
+        bp = np.zeros((1, 1), dtype=float)
+    try:
+        crpix = np.array(
+            [float(header.get("CRPIX1", 0.0)), float(header.get("CRPIX2", 0.0))],
+            dtype=float,
+        )
+    except (TypeError, ValueError) as exc:
+        raise DrizzleCheckpointError(f"{where} has a malformed CRPIX") from exc
+    if not np.all(np.isfinite(crpix)):
+        raise DrizzleCheckpointError(f"{where} has non-finite CRPIX")
+    try:
+        return Sip(a, b, ap, bp, crpix)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise DrizzleCheckpointError(
+            f"cannot reconstruct SIP distortion for {where}: {exc}"
+        ) from exc
 
 
 def _reconstruct_wcs(manifest, output_shape_hw):

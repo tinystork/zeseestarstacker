@@ -289,12 +289,12 @@ OUTPUT_GRID_CRPIX_CONVENTION = "fits_edge_centre_v1"
 def _unsupported_distortion_kind(reference_wcs):
     """Return a stable token naming unsupported distortion, else ``None``.
 
-    Scaling only the linear terms of a distorted WCS does not preserve its
-    full mapping, so any distortion must be refused explicitly instead of
-    silently claiming preservation.
+    SIP is a supported, exactly-scalable polynomial distortion (see
+    :func:`_scale_sip`).  Lookup-table (``CPDIS``) and detector-to-image
+    distortions are *not* scalable from their linear terms only, so they stay
+    explicitly refused instead of silently claiming preservation.  Anything
+    else that reports ``has_distortion`` without SIP is likewise refused.
     """
-    if getattr(reference_wcs, "sip", None) is not None:
-        return "sip"
     wcsprm = getattr(reference_wcs, "wcs", None)
     if wcsprm is not None:
         for attr in ("cpdis1", "cpdis2"):
@@ -303,12 +303,69 @@ def _unsupported_distortion_kind(reference_wcs):
     for attr in ("det2im1", "det2im2"):
         if getattr(reference_wcs, attr, None) is not None:
             return "detector_to_image"
+    if getattr(reference_wcs, "sip", None) is not None:
+        return None  # SIP is supported and exactly scaled
     try:
         if bool(reference_wcs.has_distortion):
             return "distortion"
     except Exception:  # noqa: BLE001 - older astropy without the property
         pass
     return None
+
+
+def _scale_sip_coefficients(coefficients, scale):
+    """Scale one SIP coefficient matrix for a ``s*(p+0.5)-0.5`` grid.
+
+    With ``u_out = s*u_ref`` the polynomial identity
+    ``f_out(u_out, v_out) = s * f_ref(u_out/s, v_out/s)`` gives
+    ``C_out[i, j] = C_ref[i, j] * s ** (1 - i - j)`` for the forward ``A``/``B``
+    and the inverse ``AP``/``BP`` polynomials alike.
+    """
+    coeffs = np.asarray(coefficients, dtype=float)
+    if coeffs.ndim != 2:
+        raise ValueError("SIP coefficient matrix must be 2-D")
+    if coeffs.size and not np.all(np.isfinite(coeffs)):
+        raise ValueError("SIP coefficients contain non-finite values")
+    out = np.zeros_like(coeffs)
+    for i in range(coeffs.shape[0]):
+        for j in range(coeffs.shape[1]):
+            out[i, j] = coeffs[i, j] * (scale ** (1 - i - j))
+    return out
+
+
+def _scale_sip(reference_sip, scale, sip_crpix_out):
+    """Return an independent, exactly-scaled copy of a SIP distortion.
+
+    The forward ``A``/``B`` and (when really present) inverse ``AP``/``BP``
+    polynomials are scaled with :func:`_scale_sip_coefficients`; the SIP origin
+    is transformed with the same FITS edge/centre formula as the linear CRPIX.
+    A forward-only SIP (``ap_order == 0`` / ``ap is None``) stays forward-only.
+    """
+    from astropy.wcs import Sip
+
+    a = _scale_sip_coefficients(reference_sip.a, scale)
+    b = _scale_sip_coefficients(reference_sip.b, scale)
+    if a.shape != b.shape:
+        raise ValueError("SIP forward A/B orders differ; cannot scale exactly")
+    has_inverse = (
+        getattr(reference_sip, "ap", None) is not None
+        and getattr(reference_sip, "ap_order", 0) > 0
+    )
+    if has_inverse:
+        ap = _scale_sip_coefficients(reference_sip.ap, scale)
+        bp = _scale_sip_coefficients(reference_sip.bp, scale)
+        if ap.shape != bp.shape:
+            raise ValueError("SIP inverse AP/BP orders differ; cannot scale exactly")
+    else:
+        ap = np.zeros((1, 1), dtype=float)
+        bp = np.zeros((1, 1), dtype=float)
+    crpix = np.asarray(sip_crpix_out, dtype=float)
+    if crpix.shape != (2,) or not np.all(np.isfinite(crpix)):
+        raise ValueError("SIP output origin is invalid")
+    try:
+        return Sip(a, b, ap, bp, crpix)
+    except Exception as exc:  # noqa: BLE001 - fail closed on unsupported form
+        raise ValueError(f"cannot scale SIP distortion exactly: {exc}") from exc
 
 
 def _validate_shape_hw(shape_hw):
@@ -435,6 +492,22 @@ def build_output_grid(reference_wcs, reference_shape_hw, scale):
         out_wcs.wcs.cdelt = (
             np.asarray(reference_wcs.wcs.cdelt, dtype=float) / scale
         )
+
+    # Exact SIP scaling (same FITS edge/centre origin transform).  The output
+    # gets an independent, exactly-scaled SIP copy; the reference is untouched.
+    reference_sip = getattr(reference_wcs, "sip", None)
+    if reference_sip is not None:
+        sip_crpix_ref = np.asarray(reference_sip.crpix, dtype=float)
+        # FITS stores a single CRPIX; a SIP origin that differs from the linear
+        # CRPIX cannot be preserved exactly through persistence, so refuse it
+        # clearly rather than silently changing the mapping.
+        if not np.allclose(sip_crpix_ref, crpix_ref, rtol=0.0, atol=1e-6):
+            raise ValueError(
+                "unsupported WCS: SIP origin differs from the linear CRPIX; "
+                "cannot preserve the exact mapping through FITS persistence"
+            )
+        sip_crpix_out = scale * (sip_crpix_ref - 0.5) + 0.5
+        out_wcs.sip = _scale_sip(reference_sip, scale, sip_crpix_out)
 
     out_h = int(round(int(reference_shape_hw[0]) * scale))
     out_w = int(round(int(reference_shape_hw[1]) * scale))

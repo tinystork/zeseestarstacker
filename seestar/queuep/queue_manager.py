@@ -16835,6 +16835,40 @@ class SeestarQueuedStacker:
                     facts[name] = (("__read_error__", name),)
                     continue
                 facts[name] = _canonical_projection_params(name, raw_params)
+
+            # Complete SIP geometry: presence, origin, orders and every A/B/AP/BP
+            # coefficient, so a same-PSR SIP mutation/add/remove is detected.
+            sip = getattr(wcs_obj, "sip", None)
+            if sip is None:
+                facts["sip"] = None
+            else:
+                def _coeff(arr):
+                    if arr is None:
+                        return None
+                    coeffs = np.asarray(arr, dtype=float)
+                    if not np.all(np.isfinite(coeffs)):
+                        return ("__non_finite__",)
+                    return tuple(round(float(v), 17) for v in coeffs.ravel())
+
+                try:
+                    sip_crpix = tuple(
+                        round(float(v), 12)
+                        for v in np.asarray(sip.crpix, dtype=float).ravel()
+                    )
+                except Exception:  # noqa: BLE001
+                    sip_crpix = ("__read_error__",)
+                facts["sip"] = (
+                    "present",
+                    sip_crpix,
+                    int(sip.a_order),
+                    int(sip.b_order),
+                    int(getattr(sip, "ap_order", 0)),
+                    int(getattr(sip, "bp_order", 0)),
+                    _coeff(sip.a),
+                    _coeff(sip.b),
+                    _coeff(getattr(sip, "ap", None)),
+                    _coeff(getattr(sip, "bp", None)),
+                )
             return tuple(sorted(facts.items()))
 
         frozen = getattr(self, "_frozen_reference", None)

@@ -150,14 +150,32 @@ def test_supported_non_tan_projection_preserved():
     )
 
 
-def test_unsupported_distortion_is_refused():
-    class _Distorted:
+def test_lookup_table_distortion_is_refused():
+    """Superseded intentional support: SIP is now supported (see
+    ``tests/test_reference_grid_closure_sip.py``); non-SIP lookup-table /
+    detector-to-image distortions remain explicitly refused."""
+
+    class _Prm:
+        cpdis1 = object()
+
+    class _Lookup:
         is_celestial = True
         pixel_shape = (100, 60)
-        sip = object()
+        sip = None
+        wcs = _Prm()
 
     with pytest.raises(ValueError):
-        build_output_grid(_Distorted(), REF_SHAPE, 2)
+        build_output_grid(_Lookup(), REF_SHAPE, 2)
+
+    class _Det:
+        is_celestial = True
+        pixel_shape = (100, 60)
+        sip = None
+        det2im1 = object()
+        wcs = None
+
+    with pytest.raises(ValueError):
+        build_output_grid(_Det(), REF_SHAPE, 2)
 
 
 def test_shapeless_reference_with_explicit_shape_accepted():
