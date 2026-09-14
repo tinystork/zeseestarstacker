@@ -395,6 +395,14 @@ def test_requested_gt_one_checkpoint_resume_preserves_digest_science_and_support
 
 
 def test_suffix_mismatch_refuses_before_new_generation(tmp_path):
+    """REWORK R1 (authoritative remaining queue): the validated continuation
+    is the only authority for the remaining queue.  A hand-built ambient
+    queue that disagrees with the persisted suffix is therefore REPLACED by
+    the verified resolved suffix (never trusted, never used to fail the run),
+    and the re-armed writer still performs its fresh full disk re-read before
+    anything is written.  Genuine post-validation filesystem divergence is
+    still refused by the per-identity resolution checks (covered by the
+    rejection-contract crash-window tests)."""
     qm, output, _inputs, paths, _idents = _checkpoint(tmp_path)
     ok, _ = qm._early_resume_preflight()
     assert ok is True
@@ -403,7 +411,12 @@ def test_suffix_mismatch_refuses_before_new_generation(tmp_path):
     qm.queue = Queue()
     qm.queue.put(str(paths[3]))
     qm.queue.put(str(paths[2]))
-    assert qm._init_drizzle_checkpoint() is False
+    assert qm._init_drizzle_checkpoint() is True
+    # The authoritative queue was re-established from the validated result.
+    remaining = [
+        item for item in list(qm.queue.queue) if item != queue_manager_module._BATCH_BREAK_TOKEN
+    ]
+    assert [Path(p).name for p in remaining] == ["src_2.fit", "src_3.fit"]
     assert manifest_path.read_bytes() == before
     assert json.loads(before)["generation"] == 1
 

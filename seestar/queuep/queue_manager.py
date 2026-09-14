@@ -16373,9 +16373,19 @@ class SeestarQueuedStacker:
         self.queue = new_queue
         self.use_batch_plan = True
         self.files_in_queue = len(remaining_paths)
+        processed = getattr(self, "processed_files", None)
+        if processed is None:
+            processed = set()
+            try:
+                self.processed_files = processed
+            except Exception:  # noqa: BLE001 - bare fixtures may be read-only
+                pass
         for p in remaining_paths:
-            self.processed_files.add(os.path.abspath(p))
-        self._recalculate_total_batches()
+            processed.add(os.path.abspath(p))
+        try:
+            self._recalculate_total_batches()
+        except Exception:  # noqa: BLE001 - count refresh is best-effort
+            pass
         return previous_count
 
     def _validate_plan_against_manifest(self):
@@ -16427,22 +16437,23 @@ class SeestarQueuedStacker:
 
         expected_remaining = persisted_sources[cursor:]
         if drizzle_resume:
-            if len(current_remaining) != len(expected_remaining):
+            mismatch_detail = None
+            if len(current_remaining) != len(expected_remaining) or any(
+                not self._queue_item_matches_plan_identity(
+                    queue_ident.get("path"), expected_ident
+                )
+                for queue_ident, expected_ident in zip(
+                    current_remaining, expected_remaining
+                )
+            ):
+                mismatch_detail = self._remaining_queue_mismatch_detail(
+                    current_remaining, expected_remaining, cursor
+                )
+            if mismatch_detail is not None:
                 return (
                     False,
-                    "remaining observation set/order differs from the persisted plan",
+                    mismatch_detail,
                 )
-            for queue_ident, expected_ident in zip(
-                current_remaining, expected_remaining
-            ):
-                if not self._queue_item_matches_plan_identity(
-                    queue_ident.get("path"), expected_ident
-                ):
-                    return (
-                        False,
-                        "remaining observation set/order differs from the "
-                        "persisted plan",
-                    )
         elif current_remaining != expected_remaining:
             return (
                 False,
@@ -16518,6 +16529,67 @@ class SeestarQueuedStacker:
             ),
         }
         return os.path.normcase(item_dir) in allowed
+
+    def _remaining_queue_mismatch_detail(self, current_remaining,
+                                         expected_remaining, resume_cursor):
+        """Bounded first-difference diagnostic for a remaining-queue mismatch.
+
+        Reports the resume cursor, the expected vs actual counts, and the
+        FIRST diverging position with the expected vs actual identity
+        (name + path + size/mtime evidence).  Never dumps more than one
+        difference and never weakens validation (the caller still refuses).
+        """
+        detail = (
+            "remaining Drizzle observation set/order differs from the "
+            "validated checkpoint plan "
+            f"[resume cursor {resume_cursor}, expected remaining "
+            f"{len(expected_remaining)}, actual remaining "
+            f"{len(current_remaining)}"
+        )
+        if current_remaining and expected_remaining:
+            first_diff = None
+            for idx, (cur, exp) in enumerate(
+                zip(current_remaining, expected_remaining)
+            ):
+                if (
+                    cur.get("name") != exp.get("name")
+                    or cur.get("size") != exp.get("size")
+                    or cur.get("mtime_ns") != exp.get("mtime_ns")
+                ):
+                    first_diff = (idx, cur, exp)
+                    break
+            if first_diff is None and len(current_remaining) != len(
+                expected_remaining
+            ):
+                first_diff = (
+                    min(len(current_remaining), len(expected_remaining)),
+                    (
+                        current_remaining[len(expected_remaining)]
+                        if len(current_remaining) > len(expected_remaining)
+                        else None
+                    ),
+                    (
+                        expected_remaining[len(current_remaining)]
+                        if len(expected_remaining) > len(current_remaining)
+                        else None
+                    ),
+                )
+            if first_diff is not None:
+                idx, cur, exp = first_diff
+                detail += f", first difference at index {idx}"
+                if cur is not None:
+                    detail += (
+                        f", actual[{idx}]=({cur.get('name')}, "
+                        f"{cur.get('path')}, size={cur.get('size')}, "
+                        f"mtime_ns={cur.get('mtime_ns')})"
+                    )
+                if exp is not None:
+                    detail += (
+                        f", expected[{idx}]=({exp.get('name')}, "
+                        f"{exp.get('path')}, size={exp.get('size')}, "
+                        f"mtime_ns={exp.get('mtime_ns')})"
+                    )
+        return detail + "]"
 
     def _checkpoint_preflight(self):
         """Session/reference/plan preflight before the worker starts.
@@ -24762,7 +24834,15 @@ class SeestarQueuedStacker:
         # size + mtime_ns), never ``stacked_batches_count * batch_size``.  This
         # stays correct for unequal/partial batches and ordering changes.  A
         # same-path/different-identity queue item is a hard refusal.
-        if self._resume_requested and getattr(self, "_resume_active", False):
+        # RJK-R1: the native Drizzle resume authority is the validated
+        # ``_drizzle_resume_result`` itself (a legacy-era ``_resume_active``
+        # flag must never be able to silently skip the authoritative queue
+        # rebuild — that is exactly the class of divergence the real
+        # Windows witness exposed).
+        if self._resume_requested and (
+            getattr(self, "_resume_active", False)
+            or getattr(self, "_drizzle_resume_result", None) is not None
+        ):
             try:
                 drizzle_result = getattr(self, "_drizzle_resume_result", None)
                 if drizzle_result is not None:
@@ -24776,6 +24856,13 @@ class SeestarQueuedStacker:
                     # resolved paths instead of trusting the folder scan.
                     self._install_resume_remaining_queue(drizzle_result)
                     skipped = 0
+                    self.update_progress(
+                        f"Resuming: file d'attente Drizzle reconstruite "
+                        f"depuis le checkpoint validé "
+                        f"({len(drizzle_result.resolved_remaining_paths)} "
+                        f"observations restantes).",
+                        None,
+                    )
                 else:
                     skipped = self._filter_queue_by_resume_ledger()
             except _ResumeCheckpointError as ckpt_err:
@@ -25429,25 +25516,40 @@ class SeestarQueuedStacker:
         effective Drizzle config/output grid are known, and before the worker
         thread starts.  Returns ``False`` to abort the run cleanly on any
         failure (never a partial writer, never a silent disable).
+
+        On a Resume the **validated continuation is the only authority for
+        the remaining queue**: the queue is re-derived here from the
+        validated result's verified resolved paths (never from the ambient
+        scan) so no upstream branch/reset — including a skipped
+        ``_install_resume_remaining_queue`` — can leave the worker with a
+        queue that disagrees with the persisted plan.
         """
         if not getattr(self, "_drizzle_checkpoint_enabled", False):
             return True
         try:
             resume_result = getattr(self, "_drizzle_resume_result", None)
             if resume_result is not None:
+                persisted_plan = resume_result.session["plan"]
+                persisted_sources = persisted_plan["sources"]
+                next_index = int(resume_result.next_source_index)
+                expected_remaining = persisted_sources[next_index:]
+
+                # RJK-R1: re-establish the authoritative remaining queue from
+                # the validated continuation BEFORE comparing, so the
+                # comparison can only fail on a genuine post-validation
+                # filesystem divergence (never on a queue that another
+                # lifecycle branch forgot to rebuild).
+                self._install_resume_remaining_queue(resume_result)
                 (
                     current_remaining,
                     current_decomposition,
                     _has_breaks,
                 ) = self._scan_queue_decomposition()
-                persisted_plan = resume_result.session["plan"]
-                persisted_sources = persisted_plan["sources"]
-                next_index = int(resume_result.next_source_index)
-                expected_remaining = persisted_sources[next_index:]
                 if len(current_remaining) != len(expected_remaining):
                     raise DrizzleCheckpointError(
-                        "remaining Drizzle observation set/order differs from "
-                        "the validated checkpoint plan"
+                        self._remaining_queue_mismatch_detail(
+                            current_remaining, expected_remaining, next_index
+                        )
                     )
                 for queue_ident, expected_ident in zip(
                     current_remaining, expected_remaining
@@ -25456,8 +25558,10 @@ class SeestarQueuedStacker:
                         queue_ident.get("path"), expected_ident
                     ):
                         raise DrizzleCheckpointError(
-                            "remaining Drizzle observation set/order differs "
-                            "from the validated checkpoint plan"
+                            self._remaining_queue_mismatch_detail(
+                                current_remaining, expected_remaining,
+                                next_index,
+                            )
                         )
                 expected_decomposition = self._decomposition_suffix_at_index(
                     persisted_plan["decomposition"], next_index
@@ -25472,7 +25576,10 @@ class SeestarQueuedStacker:
                     if current_decomposition != expected_decomposition:
                         raise DrizzleCheckpointError(
                             "remaining Drizzle batch decomposition differs from "
-                            "the validated checkpoint plan"
+                            "the validated checkpoint plan "
+                            f"(expected {expected_decomposition}, actual "
+                            f"{current_decomposition}, resume cursor "
+                            f"{next_index})"
                         )
                 continuation = DrizzleCheckpointWriter.from_validated_result(
                     resume_result
