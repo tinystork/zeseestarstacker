@@ -992,6 +992,7 @@ class DrizzleCheckpointWriter:
             session=copy.deepcopy(fresh.session),
             counters=copy.deepcopy(fresh.counters),
             completed_sources=copy.deepcopy(fresh.completed_sources),
+            rejected_sources=copy.deepcopy(fresh.rejected_sources),
             generation=int(fresh.generation),
             next_source_index=int(fresh.next_source_index),
         )
@@ -1036,6 +1037,7 @@ class DrizzleCheckpointWriter:
             "session": copy.deepcopy(fresh.session),
             "counters": copy.deepcopy(fresh.counters),
             "completed": copy.deepcopy(fresh.completed_sources),
+            "rejected": copy.deepcopy(fresh.rejected_sources),
             "channel_total_exptime": per_channel_total,
             "support_wht": support_wht,
         }
@@ -1305,13 +1307,29 @@ class DrizzleCheckpointWriter:
         ``exposure_unknown_count <= frame_count`` and
         ``exposure_min <= exposure_max`` when both are present (legitimate
         unknown-exposure runs may omit min/max).
+
+        ``plan_cursor`` (optional) is the number of plan sources whose
+        disposition is final (accepted *or* rejected).  When absent it defaults
+        to ``frame_count`` (the legacy prefix-only contract).
         """
         if not isinstance(counters, dict):
             raise DrizzleCheckpointError("counters must be a mapping")
         frame_count = _strict_int(counters.get("frame_count", 0), "frame_count")
-        if frame_count <= 0:
+        if frame_count < 0:
             raise DrizzleCheckpointError(
-                "refusing to publish an empty checkpoint (frame_count <= 0)"
+                "negative frame_count"
+            )
+        plan_cursor = _strict_int(
+            counters.get("plan_cursor", frame_count), "plan_cursor"
+        )
+        if plan_cursor < frame_count:
+            raise DrizzleCheckpointError(
+                f"plan_cursor {plan_cursor} < frame_count {frame_count}"
+            )
+        if frame_count == 0 and plan_cursor == 0:
+            raise DrizzleCheckpointError(
+                "refusing to publish an empty checkpoint (no accepted frames "
+                "and no disposed sources)"
             )
         stacked = _strict_int(
             counters.get("stacked_batches_count", 0), "stacked_batches_count"
@@ -1349,6 +1367,7 @@ class DrizzleCheckpointWriter:
 
         return {
             "frame_count": frame_count,
+            "plan_cursor": plan_cursor,
             "stacked_batches_count": stacked,
             "total_exposure_seconds": total_exp,
             "exposure_unknown_count": unknown,
@@ -1448,15 +1467,50 @@ class DrizzleCheckpointWriter:
             clean.append(ident)
         return clean
 
+    @classmethod
+    def _validate_rejected_ledger(cls, rejected_sources):
+        """Validate the rejected-source disposition ledger (strict, unique)."""
+        if rejected_sources is None:
+            return []
+        if not isinstance(rejected_sources, (list, tuple)):
+            raise DrizzleCheckpointError("rejected_sources must be a list")
+        clean = []
+        seen = set()
+        for entry in rejected_sources:
+            ident = _validate_identity(entry, "rejected disposition ledger")
+            key = (ident["path"], ident["size"], ident["mtime_ns"])
+            if key in seen:
+                raise DrizzleCheckpointError(
+                    f"duplicate source identity in rejected ledger: "
+                    f"{ident['name']}"
+                )
+            seen.add(key)
+            clean.append(ident)
+        return clean
+
     @staticmethod
-    def _validate_manifest_consistency(counters_clean, session_clean, ledger_clean):
+    def _validate_manifest_consistency(
+        counters_clean, session_clean, ledger_clean, rejected_clean=None
+    ):
         """Enforce the self-consistent manifest ledger/plan/counter invariant.
 
         Under the current Drizzle runtime ``stacked_batches_count`` increments
-        once per accepted pose, so it must equal ``frame_count``; the completed
-        ledger must be exactly the ordered plan prefix of length ``frame_count``.
+        once per accepted pose, so it must equal ``frame_count``.  The
+        disposition partition invariant (rejection-aware):
+
+        * ``plan_cursor`` is the number of plan sources with a final
+          disposition (accepted or rejected);
+        * ``plan[0:plan_cursor]`` is exactly the plan-ordered interleaving of
+          the completed (accepted science) ledger and the rejected ledger;
+        * neither ledger may contain a source that reappears in the remaining
+          plan suffix ``plan[plan_cursor:]`` (no double-processing);
+        * a source can never be both accepted and rejected.
+
+        The legacy prefix-only contract is the exact special case with an
+        empty rejected ledger and ``plan_cursor == frame_count``.
         """
         frame_count = counters_clean["frame_count"]
+        plan_cursor = counters_clean["plan_cursor"]
         stacked = counters_clean["stacked_batches_count"]
         if stacked != frame_count:
             raise DrizzleCheckpointError(
@@ -1473,14 +1527,99 @@ class DrizzleCheckpointWriter:
                 f"frame_count {frame_count} exceeds session plan length "
                 f"{len(plan_sources)}"
             )
-        if ledger_clean != plan_sources[:frame_count]:
+        rejected_clean = rejected_clean or []
+        if plan_cursor > len(plan_sources):
+            raise DrizzleCheckpointError(
+                f"plan_cursor {plan_cursor} exceeds session plan length "
+                f"{len(plan_sources)}"
+            )
+        if plan_cursor != len(ledger_clean) + len(rejected_clean):
+            raise DrizzleCheckpointError(
+                f"plan_cursor {plan_cursor} != completed "
+                f"{len(ledger_clean)} + rejected {len(rejected_clean)}"
+            )
+        rejected_keys = {
+            (e["path"], e["size"], e["mtime_ns"]) for e in rejected_clean
+        }
+        completed_keys = {
+            (e["path"], e["size"], e["mtime_ns"]) for e in ledger_clean
+        }
+        reference = session_clean["reference"]
+        reference_key = (
+            reference["path"], reference["size"], reference["mtime_ns"]
+        )
+        if reference_key in rejected_keys:
+            raise DrizzleCheckpointError(
+                "the session reference observation cannot be rejected: a "
+                "disposed reference would make the alignment reference "
+                "unresolvable on Resume"
+            )
+        if rejected_keys & completed_keys:
+            raise DrizzleCheckpointError(
+                "a source identity is both accepted and rejected"
+            )
+        if not rejected_clean and ledger_clean != plan_sources[:frame_count]:
             raise DrizzleCheckpointError(
                 "completed_sources is not the exact ordered prefix of the "
                 "session plan"
             )
+        for ident in plan_sources[plan_cursor:]:
+            key = (ident["path"], ident["size"], ident["mtime_ns"])
+            if key in rejected_keys:
+                raise DrizzleCheckpointError(
+                    f"rejected source {ident['name']} reappears in the "
+                    "remaining session plan"
+                )
+            if key in completed_keys:
+                raise DrizzleCheckpointError(
+                    f"completed source {ident['name']} reappears in the "
+                    "remaining session plan"
+                )
+        # Plan-ordered interleaving walk over the final-disposition prefix.
+        accepted_ptr = 0
+        rejected_ptr = 0
+        for plan_index, ident in enumerate(plan_sources[:plan_cursor]):
+            key = (ident["path"], ident["size"], ident["mtime_ns"])
+            if (
+                accepted_ptr < len(ledger_clean)
+                and key
+                == (
+                    ledger_clean[accepted_ptr]["path"],
+                    ledger_clean[accepted_ptr]["size"],
+                    ledger_clean[accepted_ptr]["mtime_ns"],
+                )
+            ):
+                accepted_ptr += 1
+            elif (
+                rejected_ptr < len(rejected_clean)
+                and key
+                == (
+                    rejected_clean[rejected_ptr]["path"],
+                    rejected_clean[rejected_ptr]["size"],
+                    rejected_clean[rejected_ptr]["mtime_ns"],
+                )
+            ):
+                rejected_ptr += 1
+            else:
+                raise DrizzleCheckpointError(
+                    f"plan source at index {plan_index} has no matching "
+                    "accepted/rejected disposition "
+                    f"({ident['name']}); completed_sources must be an ordered "
+                    "subsequence of the session plan and rejected_sources must "
+                    "match the disposed plan positions"
+                )
+        if accepted_ptr != len(ledger_clean) or rejected_ptr != len(
+            rejected_clean
+        ):
+            raise DrizzleCheckpointError(
+                "disposition ledgers do not exhaust the plan prefix "
+                f"(completed {accepted_ptr}/{len(ledger_clean)}, rejected "
+                f"{rejected_ptr}/{len(rejected_clean)})"
+            )
 
     def _check_monotonic_extension(self, counters_clean, session_clean,
-                                   ledger_clean, snapshots, support_snapshot):
+                                   ledger_clean, snapshots, support_snapshot,
+                                   rejected_clean=None):
         """Enforce monotonic continuation for a re-armed writer.
 
         No-op for a fresh-run writer (``_continuation_state is None``).  For a
@@ -1504,6 +1643,15 @@ class DrizzleCheckpointWriter:
         * positive support must remain either present or legacy-absent for the
           whole run, and present SUP_W1/SUP_W2 must never decrease;
         * the completed ledger must keep the loaded ledger as its exact prefix.
+
+        Rejection-aware extension (RJK): a continuation whose only delta is
+        newly-finalized *rejected* dispositions (``frame_count`` unchanged) is
+        legal only when **every** scientific byte is proven unchanged — same
+        ledger, same exposure counters, same per-channel totals, byte-identical
+        support — and ``plan_cursor`` strictly advances with the loaded
+        rejected ledger preserved as an exact prefix.  Any accepted frame
+        always increases ``frame_count``, so no accepted science can hide in a
+        cursor-only commit.
 
         This runs *before* any write, inside the commit try-block, so a
         divergent continuation is refused with the previous committed
@@ -1547,22 +1695,102 @@ class DrizzleCheckpointWriter:
                 "geometry"
             )
         loaded_counters = loaded["counters"]
+        loaded_ledger = loaded["completed"]
+        loaded_rejected = list(loaded.get("rejected") or [])
         new_frame = counters_clean["frame_count"]
         loaded_frame = loaded_counters["frame_count"]
-        if new_frame <= loaded_frame:
+        new_cursor = counters_clean["plan_cursor"]
+        loaded_cursor = loaded_counters.get("plan_cursor", loaded_frame)
+        if new_frame < loaded_frame:
             raise DrizzleCheckpointError(
                 f"continuation must extend the loaded checkpoint: frame_count "
-                f"{new_frame} <= loaded frame_count {loaded_frame}"
+                f"{new_frame} < loaded frame_count {loaded_frame}"
             )
+        rejected_clean = rejected_clean or []
+        if new_frame == loaded_frame:
+            # Cursor-only extension: a rejection disposition commit.  Science
+            # must be byte-proven unchanged; only the plan cursor / rejected
+            # ledger may advance.
+            if ledger_clean != loaded_ledger:
+                raise DrizzleCheckpointError(
+                    "cursor-only continuation must preserve the exact loaded "
+                    "completed ledger (no rewrite/reorder/divergence)"
+                )
+            if new_cursor <= loaded_cursor:
+                raise DrizzleCheckpointError(
+                    f"cursor-only continuation must advance plan_cursor "
+                    f"({new_cursor} <= loaded {loaded_cursor})"
+                )
+            if rejected_clean[: len(loaded_rejected)] != loaded_rejected:
+                raise DrizzleCheckpointError(
+                    "continuation rejected_sources must preserve the exact "
+                    "loaded rejected ledger prefix"
+                )
+            if len(rejected_clean) <= len(loaded_rejected):
+                raise DrizzleCheckpointError(
+                    "cursor-only continuation must extend the rejected ledger"
+                )
+            for field in (
+                "total_exposure_seconds",
+                "exposure_unknown_count",
+                "exposure_min",
+                "exposure_max",
+            ):
+                if counters_clean[field] != loaded_counters[field]:
+                    raise DrizzleCheckpointError(
+                        f"cursor-only continuation must not change "
+                        f"{field} ({counters_clean[field]!r} != "
+                        f"{loaded_counters[field]!r})"
+                    )
+            if counters_clean["stacked_batches_count"] != loaded_counters[
+                "stacked_batches_count"
+            ]:
+                raise DrizzleCheckpointError(
+                    "cursor-only continuation must not change "
+                    "stacked_batches_count"
+                )
+            loaded_totals = loaded["channel_total_exptime"]
+            new_totals = [float(s["total_exptime"]) for s in snapshots]
+            if len(new_totals) != len(loaded_totals) or any(
+                new_t != loaded_t for new_t, loaded_t in zip(new_totals, loaded_totals)
+            ):
+                raise DrizzleCheckpointError(
+                    "cursor-only continuation per-channel total_exptime must "
+                    "be byte-unchanged"
+                )
+            loaded_wht = loaded.get("support_wht")
+            if (loaded_wht is None) != (support_snapshot is None):
+                raise DrizzleCheckpointError(
+                    "cursor-only continuation positive-support availability "
+                    "changed"
+                )
+            if loaded_wht is not None:
+                for kind, previous in zip(("w1", "w2"), loaded_wht):
+                    if not np.array_equal(support_snapshot[kind], previous):
+                        raise DrizzleCheckpointError(
+                            f"cursor-only continuation support {kind} must be "
+                            "byte-unchanged"
+                        )
+            return
+        # Accepted-frame extension: strict monotonic growth on every axis.
         self._check_cumulative_counters(loaded_counters, counters_clean)
         self._check_channel_total_monotonic(loaded, snapshots)
         self._check_support_monotonic(loaded, support_snapshot)
 
-        loaded_ledger = loaded["completed"]
         if ledger_clean[: len(loaded_ledger)] != loaded_ledger:
             raise DrizzleCheckpointError(
                 "continuation completed_sources must preserve the exact loaded "
                 "ledger prefix (no rewrite/reorder/divergent prefix)"
+            )
+        if rejected_clean[: len(loaded_rejected)] != loaded_rejected:
+            raise DrizzleCheckpointError(
+                "continuation rejected_sources must preserve the exact loaded "
+                "rejected ledger prefix"
+            )
+        if new_cursor < loaded_cursor:
+            raise DrizzleCheckpointError(
+                f"continuation plan_cursor must not decrease "
+                f"({new_cursor} < {loaded_cursor})"
             )
 
     def _check_cumulative_counters(self, loaded_counters, counters_clean):
@@ -1720,7 +1948,7 @@ class DrizzleCheckpointWriter:
 
     def _build_next_continuation_state(self, generation, counters_clean,
                                        session_clean, ledger_clean, snapshots,
-                                       support_snapshot):
+                                       support_snapshot, rejected_clean=None):
         """Build (deep-copied) the continuation baseline for the next commit.
 
         Pure and fallible: the deep copies and the per-channel total-exposure
@@ -1740,13 +1968,15 @@ class DrizzleCheckpointWriter:
             "session": copy.deepcopy(session_clean),
             "counters": copy.deepcopy(counters_clean),
             "completed": copy.deepcopy(ledger_clean),
+            "rejected": copy.deepcopy(rejected_clean or []),
             "channel_total_exptime": [
                 float(s["total_exptime"]) for s in snapshots
             ],
             "support_wht": support_wht,
         }
 
-    def _preflight_json_payload(self, counters_clean, session_clean, ledger_clean):
+    def _preflight_json_payload(self, counters_clean, session_clean, ledger_clean,
+                                rejected_clean=None):
         """Preflight-serialize the non-artifact manifest payload (fail closed).
 
         Serializes every persisted field except the array descriptors with
@@ -1773,6 +2003,10 @@ class DrizzleCheckpointWriter:
             "session": session_clean,
             "completed_sources": ledger_clean,
         }
+        if rejected_clean:
+            payload["rejected_sources"] = rejected_clean
+        if counters_clean["plan_cursor"] != counters_clean["frame_count"]:
+            payload["plan_cursor"] = counters_clean["plan_cursor"]
         try:
             json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
@@ -1948,7 +2182,8 @@ class DrizzleCheckpointWriter:
 
     # ------------------------------------------------------------------ commit
     def commit(self, accumulators, *, session_binding, counters,
-               completed_sources, support_accumulators=None):
+               completed_sources, support_accumulators=None,
+               rejected_sources=None):
         """Persist one generation and atomically commit the manifest.
 
         Parameters
@@ -1958,12 +2193,20 @@ class DrizzleCheckpointWriter:
         session_binding :
             ``{"input_roots": [...], "reference": {...}, "plan": {...}}``.
         counters :
-            ``{"frame_count": int, "stacked_batches_count": int,
+            ``{"frame_count": int, "plan_cursor": int|absent,
+            "stacked_batches_count": int,
             "total_exposure_seconds": float, "exposure_unknown_count": int,
             "exposure_min": float|None, "exposure_max": float|None}``.
+            ``plan_cursor`` defaults to ``frame_count`` (legacy contract).
         completed_sources :
-            Ordered ledger of accepted source identities (must equal the exact
-            ordered plan prefix of length ``frame_count``).
+            Ordered ledger of accepted source identities (the accepted half of
+            the plan-ordered disposition partition of length ``frame_count``).
+        rejected_sources :
+            Optional ordered ledger of rejected (disposed, non-admitted) source
+            identities.  A rejected source never enters SCI/WHT/SUPPORT and
+            never increments ``frame_count`` / ``stacked_batches_count``; the
+            plan cursor (``counters["plan_cursor"]``) records its final
+            disposition so Resume continues beyond it without replaying it.
         support_accumulators :
             Optional ``(SUP_W1, SUP_W2)`` positive-support accumulators.  When
             present their WHT buffers are committed by the same manifest as
@@ -2014,6 +2257,7 @@ class DrizzleCheckpointWriter:
                     "output-grid checkpoint; refusing to publish without it"
                 )
             ledger_clean = self._validate_ledger(completed_sources)
+            rejected_clean = self._validate_rejected_ledger(rejected_sources)
             snapshots = self._snapshot_channels(accumulators)
             support_snapshot = self._snapshot_support(
                 support_accumulators, counters_clean["frame_count"]
@@ -2022,7 +2266,7 @@ class DrizzleCheckpointWriter:
             # 2. Manifest self-consistency invariants (truthful
             #    ledger/plan/counter).
             self._validate_manifest_consistency(
-                counters_clean, session_clean, ledger_clean
+                counters_clean, session_clean, ledger_clean, rejected_clean
             )
 
             # 2b. Continuation monotonicity: a re-armed writer must extend the
@@ -2031,11 +2275,13 @@ class DrizzleCheckpointWriter:
             #     total exposure).  No-op for a fresh-run writer.
             self._check_monotonic_extension(
                 counters_clean, session_clean, ledger_clean, snapshots,
-                support_snapshot,
+                support_snapshot, rejected_clean,
             )
 
             # 3. Preflight strict-JSON serialization of the non-artifact payload.
-            self._preflight_json_payload(counters_clean, session_clean, ledger_clean)
+            self._preflight_json_payload(
+                counters_clean, session_clean, ledger_clean, rejected_clean
+            )
 
             # 3b. Build the exact next continuation baseline (deep copies)
             #     entirely during preflight, BEFORE any artifact write or
@@ -2047,7 +2293,7 @@ class DrizzleCheckpointWriter:
             if self._continuation_state is not None:
                 next_continuation_state = self._build_next_continuation_state(
                     generation, counters_clean, session_clean, ledger_clean,
-                    snapshots, support_snapshot,
+                    snapshots, support_snapshot, rejected_clean,
                 )
 
             os.makedirs(self._dir, exist_ok=True)
@@ -2151,6 +2397,10 @@ class DrizzleCheckpointWriter:
                 "completed_sources": ledger_clean,
                 "channels": channels,
             }
+            if rejected_clean:
+                manifest["rejected_sources"] = rejected_clean
+            if counters_clean["plan_cursor"] != counters_clean["frame_count"]:
+                manifest["plan_cursor"] = counters_clean["plan_cursor"]
             if support_snapshot is not None:
                 manifest["support"] = {
                     "schema_version": support_snapshot["schema_version"],
@@ -2227,9 +2477,9 @@ class DrizzleCheckpointResult:
     reconstructed via :meth:`DrizzleAccumulator.from_native_state`; ``wcs`` is
     the reconstructed :class:`astropy.wcs.WCS` with ``array_shape`` attached;
     ``next_source_index`` is the 0-based index of the first source not yet
-    accumulated (== ``frame_count``, because ``completed_sources`` is the exact
-    ordered prefix of the session plan).  Suitable for later D2B lifecycle
-    wiring (which is *not* performed here).
+    disposed (== ``plan_cursor`` — on a legacy prefix-only checkpoint this
+    equals ``frame_count``).  Suitable for later D2B lifecycle wiring (which
+    is *not* performed here).
 
     ``source_output_dir`` is the immutable, validated provenance of the exact
     output directory the checkpoint was read from (normalized to an absolute
@@ -2258,6 +2508,9 @@ class DrizzleCheckpointResult:
     resolved_remaining_paths: tuple = ()     # resolved_plan_paths[next_source_index:]
     resolution_policy: object = None         # immutable SafeStackedSourceResolver | None
     reference_geometry: object = None        # versioned frozen input-reference geometry | None
+    rejected_sources: object = None          # finalized rejected dispositions
+    plan_cursor: int = 0                     # number of plan sources with a
+                                             # final disposition
 
     def __post_init__(self):
         """Validate and normalize the source-output provenance (read-only).
@@ -2283,8 +2536,18 @@ class DrizzleCheckpointResult:
         plan = tuple(self.resolved_plan_paths or ())
         object.__setattr__(self, "resolved_plan_paths", plan)
         n = int(self.next_source_index)
-        object.__setattr__(self, "resolved_completed_paths", plan[:n])
-        object.__setattr__(self, "resolved_remaining_paths", plan[n:])
+        resolved_completed = [
+            p for p in plan[:n] if p is not None
+        ]
+        resolved_remaining = [
+            p for p in plan[n:] if p is not None
+        ]
+        object.__setattr__(self, "resolved_completed_paths", tuple(resolved_completed))
+        object.__setattr__(self, "resolved_remaining_paths", tuple(resolved_remaining))
+        if self.rejected_sources is None:
+            object.__setattr__(self, "rejected_sources", ())
+        else:
+            object.__setattr__(self, "rejected_sources", tuple(self.rejected_sources))
 
 
 @dataclass(frozen=True)
@@ -2314,6 +2577,7 @@ class DrizzleContinuation:
     session: dict               # fresh loaded session binding (baseline)
     counters: dict              # fresh loaded counters (baseline)
     completed_sources: list     # fresh loaded ledger (baseline)
+    rejected_sources: list      # fresh loaded rejected dispositions (baseline)
     generation: int
     next_source_index: int
 
@@ -2454,7 +2718,8 @@ def _identity_key(ident):
     return (ident["path"], ident["size"], ident["mtime_ns"])
 
 
-def _resolve_sources(session, counters, resolver, output_dir):
+def _resolve_sources(session, counters, resolver, output_dir,
+                     rejected_sources=None, completed_sources=None):
     """Resolve the reference + ordered plan sources (strict or opt-in).
 
     Returns ``(resolved_reference, resolved_plan_paths)``.  Resolution is
@@ -2464,10 +2729,23 @@ def _resolve_sources(session, counters, resolver, output_dir):
     canonical identity is legitimate — the alignment reference is allowed to
     also be one of the plan observations — so it resolves to the same path
     without being reported as ambiguous.
+
+    Rejected (disposed) plan sources are *never* resolved: their disposition
+    is final, their science is absent by contract, and their physical location
+    (``unaligned_by_stacker``, possibly collision-renamed) is irrelevant to
+    both the scientific reconstruction and the remaining work.  Their slots in
+    ``resolved_plan_paths`` are ``None`` placeholders preserving plan
+    position.  A rejected identity appearing in the remaining suffix is
+    already refused by the disposition validation.
     """
     reference = session["reference"]
     plan_sources = session["plan"]["sources"]
-    frame_count = counters["frame_count"]
+    rejected_keys = {
+        (e["path"], e["size"], e["mtime_ns"]) for e in (rejected_sources or [])
+    }
+    completed_keys = {
+        (e["path"], e["size"], e["mtime_ns"]) for e in (completed_sources or [])
+    }
     input_roots = list(session.get("input_roots", []))
     real_output_dir = os.path.realpath(output_dir)
 
@@ -2492,7 +2770,12 @@ def _resolve_sources(session, counters, resolver, output_dir):
     claimed = {resolved_reference: (reference, "session reference")}
     resolved_plan = []
     for idx, ident in enumerate(plan_sources):
-        is_completed = idx < frame_count
+        if (ident["path"], ident["size"], ident["mtime_ns"]) in rejected_keys:
+            resolved_plan.append(None)
+            continue
+        is_completed = (
+            (ident["path"], ident["size"], ident["mtime_ns"]) in completed_keys
+        )
         path = _resolve_identity(
             ident, "session plan source", resolver,
             _context("plan", idx, is_completed),
@@ -2590,9 +2873,13 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
 
     Every persisted source (the reference, every plan source and every
     completed-ledger source) is re-stat'ed: path / size / mtime_ns must match
-    exactly.  The completed ledger must remain the exact ordered prefix of the
-    session plan.  The three accumulators are reconstructed only after the
-    entire checkpoint validates (no partial externally visible restore).
+    exactly (rejected disposition sources are terminal and never re-stat'ed —
+    their physical location is irrelevant to the science and the remaining
+    work).  The disposition partition (completed + rejected, plan-ordered, up
+    to ``plan_cursor``) is enforced; on a legacy prefix-only checkpoint this
+    is exactly the historical ``completed_sources == plan[:frame_count]``
+    contract.  The three accumulators are reconstructed only after the entire
+    checkpoint validates (no partial externally visible restore).
 
     When ``resolver`` is ``None`` (the default) source re-stat is **strict**:
     each identity must still exist at its original persisted path with the exact
@@ -2657,9 +2944,10 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
             "missing mandatory input-reference geometry in the v2 output-grid "
             "checkpoint"
         )
-    ledger = _validate_ledger(manifest, session, counters)
+    ledger, rejected = _validate_ledger(manifest, session, counters)
     resolved_reference, resolved_plan_paths = _resolve_sources(
-        session, counters, resolver, output_dir
+        session, counters, resolver, output_dir,
+        rejected_sources=rejected, completed_sources=ledger,
     )
     channels, support = _validate_channels(
         manifest, generation, ckpt_dir, output_shape_hw
@@ -2692,12 +2980,14 @@ def read_drizzle_checkpoint(output_dir, *, require_exact_versions=True,
         session=session,
         counters=counters,
         completed_sources=ledger,
+        rejected_sources=rejected,
+        plan_cursor=counters["plan_cursor"],
         config=config,
         wcs=wcs,
         output_shape_hw=output_shape_hw,
         accumulators=accumulators,
         support_accumulators=support_accumulators,
-        next_source_index=counters["frame_count"],
+        next_source_index=counters["plan_cursor"],
         generation=generation,
         source_output_dir=output_dir,
         resolved_reference=resolved_reference,
@@ -3000,7 +3290,16 @@ def _reconstruct_wcs(manifest, output_shape_hw):
 def _validate_counters(manifest):
     """Validate the persisted accepted-exposure counters (strict)."""
     frame_count = _strict_int(manifest.get("frame_count"), "frame_count")
-    if frame_count <= 0:
+    if frame_count < 0:
+        raise DrizzleCheckpointError("negative frame_count")
+    plan_cursor = _strict_int(
+        manifest.get("plan_cursor", frame_count), "plan_cursor"
+    )
+    if plan_cursor < frame_count:
+        raise DrizzleCheckpointError(
+            f"plan_cursor {plan_cursor} < frame_count {frame_count}"
+        )
+    if frame_count == 0 and plan_cursor == 0:
         raise DrizzleCheckpointError("empty checkpoint (frame_count <= 0)")
     stacked = _strict_int(
         manifest.get("stacked_batches_count"), "stacked_batches_count"
@@ -3039,6 +3338,7 @@ def _validate_counters(manifest):
         )
     return {
         "frame_count": frame_count,
+        "plan_cursor": plan_cursor,
         "stacked_batches_count": stacked,
         "total_exposure_seconds": total,
         "exposure_unknown_count": unknown,
@@ -3114,7 +3414,16 @@ def _validate_session(manifest):
 
 
 def _validate_ledger(manifest, session, counters):
-    """Validate the completed ledger and require the exact ordered plan prefix."""
+    """Validate the completed + rejected disposition ledgers (partition).
+
+    Returns ``(ledger, rejected)``.  Legacy checkpoints (no ``plan_cursor`` /
+    ``rejected_sources``) keep the exact historical prefix-only semantics;
+    rejection-aware checkpoints must satisfy the plan-ordered disposition
+    partition (see the writer's ``_validate_manifest_consistency``): every plan
+    source before ``plan_cursor`` carries exactly one final disposition
+    (accepted science or rejected), every disposition ledger is plan-ordered
+    and disjoint, and no disposed source reappears in the remaining suffix.
+    """
     raw = manifest.get("completed_sources")
     if not isinstance(raw, list):
         raise DrizzleCheckpointError("completed_sources must be a list")
@@ -3130,7 +3439,25 @@ def _validate_ledger(manifest, session, counters):
         seen.add(key)
         ledger.append(ident)
 
+    raw_rejected = manifest.get("rejected_sources")
+    if raw_rejected is None:
+        raw_rejected = []
+    if not isinstance(raw_rejected, list):
+        raise DrizzleCheckpointError("rejected_sources must be a list")
+    rejected = []
+    seen_rejected = set()
+    for entry in raw_rejected:
+        ident = _validate_identity(entry, "rejected disposition ledger")
+        key = (ident["path"], ident["size"], ident["mtime_ns"])
+        if key in seen_rejected:
+            raise DrizzleCheckpointError(
+                f"duplicate source identity in rejected ledger: {ident['name']}"
+            )
+        seen_rejected.add(key)
+        rejected.append(ident)
+
     frame_count = counters["frame_count"]
+    plan_cursor = counters["plan_cursor"]
     plan_sources = session["plan"]["sources"]
     if len(ledger) != frame_count:
         raise DrizzleCheckpointError(
@@ -3141,11 +3468,82 @@ def _validate_ledger(manifest, session, counters):
             f"frame_count {frame_count} exceeds session plan length "
             f"{len(plan_sources)}"
         )
-    if ledger != plan_sources[:frame_count]:
+    if plan_cursor > len(plan_sources):
+        raise DrizzleCheckpointError(
+            f"plan_cursor {plan_cursor} exceeds session plan length "
+            f"{len(plan_sources)}"
+        )
+    if plan_cursor != len(ledger) + len(rejected):
+        raise DrizzleCheckpointError(
+            f"plan_cursor {plan_cursor} != completed {len(ledger)} + rejected "
+            f"{len(rejected)}"
+        )
+    completed_keys = {(e["path"], e["size"], e["mtime_ns"]) for e in ledger}
+    rejected_keys = {(e["path"], e["size"], e["mtime_ns"]) for e in rejected}
+    reference = session["reference"]
+    reference_key = (reference["path"], reference["size"], reference["mtime_ns"])
+    if reference_key in rejected_keys:
+        raise DrizzleCheckpointError(
+            "the session reference observation cannot be rejected: a disposed "
+            "reference would make the alignment reference unresolvable on "
+            "Resume"
+        )
+    if completed_keys & rejected_keys:
+        raise DrizzleCheckpointError(
+            "a source identity is both accepted and rejected"
+        )
+    if not rejected and ledger != plan_sources[:frame_count]:
         raise DrizzleCheckpointError(
             "completed_sources is not the exact ordered prefix of the session plan"
         )
-    return ledger
+    for ident in plan_sources[plan_cursor:]:
+        key = (ident["path"], ident["size"], ident["mtime_ns"])
+        if key in rejected_keys:
+            raise DrizzleCheckpointError(
+                f"rejected source {ident['name']} reappears in the remaining "
+                "session plan"
+            )
+        if key in completed_keys:
+            raise DrizzleCheckpointError(
+                f"completed source {ident['name']} reappears in the remaining "
+                "session plan"
+            )
+    accepted_ptr = 0
+    rejected_ptr = 0
+    for plan_index, ident in enumerate(plan_sources[:plan_cursor]):
+        key = (ident["path"], ident["size"], ident["mtime_ns"])
+        if (
+            accepted_ptr < len(ledger)
+            and key
+            == (
+                ledger[accepted_ptr]["path"],
+                ledger[accepted_ptr]["size"],
+                ledger[accepted_ptr]["mtime_ns"],
+            )
+        ):
+            accepted_ptr += 1
+        elif (
+            rejected_ptr < len(rejected)
+            and key
+            == (
+                rejected[rejected_ptr]["path"],
+                rejected[rejected_ptr]["size"],
+                rejected[rejected_ptr]["mtime_ns"],
+            )
+        ):
+            rejected_ptr += 1
+        else:
+            raise DrizzleCheckpointError(
+                f"plan source at index {plan_index} has no matching "
+                f"accepted/rejected disposition ({ident['name']})"
+            )
+    if accepted_ptr != len(ledger) or rejected_ptr != len(rejected):
+        raise DrizzleCheckpointError(
+            "disposition ledgers do not exhaust the plan prefix "
+            f"(completed {accepted_ptr}/{len(ledger)}, rejected "
+            f"{rejected_ptr}/{len(rejected)})"
+        )
+    return ledger, rejected
 
 
 def _validate_channels(manifest, generation, ckpt_dir, output_shape_hw):

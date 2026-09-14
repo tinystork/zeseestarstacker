@@ -5123,6 +5123,12 @@ class SeestarQueuedStacker:
         self._drizzle_checkpoint_writer = None
         self._drizzle_checkpoint_plan = None
         self._drizzle_completed_sources = []
+        # RJK rejection-aware disposition contract: the plan cursor counts
+        # plan sources with a FINAL disposition (accepted science OR rejected),
+        # and the rejected ledger records the disposed, non-admitted sources so
+        # Resume continues beyond them without replaying or double-counting.
+        self._drizzle_plan_cursor = 0
+        self._drizzle_rejected_sources = []
         self._drizzle_checkpoint_last_committed_frames = 0
         # RSM2-D2B2B: read-only validated Drizzle resume token.  It is created
         # during the pre-reference startup preflight and consumed only by the
@@ -9190,6 +9196,16 @@ class SeestarQueuedStacker:
                             logger.debug(
                                 f"  DEBUG QM [_worker / Classique-DrizStd]: Échec _process_file pour '{file_name_for_log}'. Retour: {item_result_tuple}"
                             )
+                            # RJK rejection-aware Drizzle checkpoint: record
+                            # the final rejection disposition DUrably BEFORE
+                            # the source is moved away, so a crash can never
+                            # leave the persisted plan blind to the rejection.
+                            # A commit failure raises (mandatory-abort) and the
+                            # source stays at its original path for replay.
+                            if getattr(self, "drizzle_active_session", False):
+                                self._drizzle_checkpoint_after_rejection(
+                                    file_path
+                                )
                             if hasattr(self, "_move_to_unaligned"):
                                 self._move_to_unaligned(file_path)
 
@@ -11756,8 +11772,10 @@ class SeestarQueuedStacker:
                 f"Error_{type(proc_err).__name__}",
                 "Processing file error",
             )
-            if hasattr(self, "_move_to_unaligned"):
-                self._move_to_unaligned(file_path)
+            # RJK: do NOT move the source here.  The worker owns the single
+            # canonical disposal point (durable rejection disposition commit
+            # BEFORE the move), so a failed file must still be stat'able at
+            # its original path when the rejection disposition is recorded.
             return None, header_final_pour_retour, quality_scores, None, None, None
         except Exception as e:
             self.update_progress(
@@ -11777,8 +11795,9 @@ class SeestarQueuedStacker:
                 f"CritError_{type(e).__name__}",
                 "Critical processing error",
             )
-            if hasattr(self, "_move_to_unaligned"):
-                self._move_to_unaligned(file_path)
+            # RJK: same single-canonical-disposal-point rule as above; the
+            # worker moves the source only after the durable rejection
+            # disposition commit succeeds.
             return None, header_final_pour_retour, quality_scores, None, None, None
         finally:
             if img_data_array_loaded is not None:
@@ -16310,14 +16329,73 @@ class SeestarQueuedStacker:
         self.queue = new_queue
         self.use_batch_plan = True
 
+    def _install_resume_remaining_queue(self, drizzle_result) -> int:
+        """Replace the queue with the verified resolved remaining plan suffix.
+
+        The reader has already verified each remaining source's exact on-disk
+        location (original path or its stacked counterpart) and the plan
+        cursor excludes every final disposition (accepted science AND
+        rejected observations).  The queue is therefore rebuilt from
+        ``resolved_remaining_paths`` with the authoritative remaining batch
+        decomposition (break-token boundaries), so the worker processes
+        exactly the sources whose science is not yet represented.  Returns
+        the number of previously-scanned queue items replaced (for the
+        progress message).
+        """
+        previous_count = 0
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                previous_count += 1
+            except Empty:
+                break
+        remaining_paths = list(drizzle_result.resolved_remaining_paths or ())
+        persisted_plan = drizzle_result.session["plan"]
+        cursor = int(drizzle_result.next_source_index)
+        decomposition = persisted_plan.get("decomposition")
+        if isinstance(decomposition, list) and decomposition:
+            decomp_suffix = self._decomposition_suffix_at_index(
+                decomposition, cursor
+            )
+        else:
+            decomp_suffix = [len(remaining_paths)] if remaining_paths else []
+        new_queue = Queue()
+        idx = 0
+        n = len(decomp_suffix)
+        for bi, batch_size in enumerate(decomp_suffix):
+            for _ in range(int(batch_size)):
+                if idx >= len(remaining_paths):
+                    break
+                new_queue.put(remaining_paths[idx])
+                idx += 1
+            if bi < n - 1 and idx < len(remaining_paths):
+                new_queue.put(_BATCH_BREAK_TOKEN)
+        self.queue = new_queue
+        self.use_batch_plan = True
+        self.files_in_queue = len(remaining_paths)
+        for p in remaining_paths:
+            self.processed_files.add(os.path.abspath(p))
+        self._recalculate_total_batches()
+        return previous_count
+
     def _validate_plan_against_manifest(self):
         """Validate the persisted plan against the current (post-filter) queue.
 
-        Returns ``(True, None)`` or ``(False, reason)``.  The completed ledger
-        must be an exact ordered prefix of the persisted plan, and the remaining
-        queue must be the exact ordered suffix (identity, order and batch
-        decomposition).  Added/removed/replaced/reordered/regrouped
-        observations are refused (no method-specific equivalence guessing).
+        Returns ``(True, None)`` or ``(False, reason)``.  The disposition
+        partition (completed + rejected, plan-ordered) is enforced by the
+        checkpoint reader itself; here the **remaining** queue must be the
+        exact ordered suffix of the persisted plan starting at the plan
+        cursor (``frame_count`` on legacy checkpoints).  Added/removed/
+        replaced/reordered/regrouped observations are refused (no
+        method-specific equivalence guessing).
+
+        For a Drizzle resume the comparison is resolution-aware: a remaining
+        source that already carries the persisted identity evidence
+        (basename + size + mtime_ns) at its original path OR at the verified
+        ``<src_dir>/<stacked>/<basename>`` counterpart matches (a source moved
+        to ``stacked`` by a pre-crash accepted frame must replay, not refuse).
+        Any other location or evidence mismatch is refused.  Classic resume
+        keeps the historical literal comparison.
         """
         plan = getattr(self, "_resume_plan", None)
         if not isinstance(plan, dict) or not isinstance(plan.get("sources"), list):
@@ -16326,7 +16404,15 @@ class SeestarQueuedStacker:
         ledger = list(getattr(self, "_resume_completed_sources", []) or [])
         if len(ledger) > len(persisted_sources):
             return (False, "completed ledger exceeds the persisted plan")
-        if persisted_sources[: len(ledger)] != ledger:
+        drizzle_resume = getattr(self, "_drizzle_resume_result", None) is not None
+        cursor = int(
+            getattr(self, "_drizzle_plan_cursor", len(ledger)) or len(ledger)
+        )
+        if cursor < len(ledger):
+            return (False, "plan cursor precedes the completed ledger")
+        if cursor > len(persisted_sources):
+            return (False, "plan cursor exceeds the persisted plan")
+        if not drizzle_resume and persisted_sources[: len(ledger)] != ledger:
             return (False, "completed ledger is not an ordered prefix of the persisted plan")
 
         # Share the exact production decomposition rule with fresh plan
@@ -16339,8 +16425,25 @@ class SeestarQueuedStacker:
             _has_breaks,
         ) = self._scan_queue_decomposition()
 
-        expected_remaining = persisted_sources[len(ledger):]
-        if current_remaining != expected_remaining:
+        expected_remaining = persisted_sources[cursor:]
+        if drizzle_resume:
+            if len(current_remaining) != len(expected_remaining):
+                return (
+                    False,
+                    "remaining observation set/order differs from the persisted plan",
+                )
+            for queue_ident, expected_ident in zip(
+                current_remaining, expected_remaining
+            ):
+                if not self._queue_item_matches_plan_identity(
+                    queue_ident.get("path"), expected_ident
+                ):
+                    return (
+                        False,
+                        "remaining observation set/order differs from the "
+                        "persisted plan",
+                    )
+        elif current_remaining != expected_remaining:
             return (
                 False,
                 "remaining observation set/order differs from the persisted plan",
@@ -16348,20 +16451,73 @@ class SeestarQueuedStacker:
 
         persisted_decomp = plan.get("decomposition")
         if isinstance(persisted_decomp, list) and persisted_decomp:
-            cum = 0
-            completed_batches = 0
-            for b in persisted_decomp:
-                if cum + int(b) > len(ledger):
-                    break
-                cum += int(b)
-                completed_batches += 1
-                if cum == len(ledger):
-                    break
-            if cum != len(ledger):
-                return (False, "completed ledger does not align to persisted batch boundaries")
-            if current_decomposition != persisted_decomp[completed_batches:]:
+            if drizzle_resume:
+                # Rejection-aware: the cursor may sit mid-batch (a rejection
+                # disposition is legal inside a queue batch).  The expected
+                # remaining decomposition is the unconsumed tail of the
+                # containing batch followed by the later batches — the exact
+                # rule shared with `_install_resume_decomposition`.
+                try:
+                    expected_suffix = self._decomposition_suffix_at_index(
+                        persisted_decomp, cursor
+                    )
+                except DrizzleCheckpointError as exc:
+                    return (False, str(exc))
+            else:
+                # Classic historical semantics: the completed prefix must
+                # align to a persisted batch boundary.
+                cum = 0
+                completed_batches = 0
+                for b in persisted_decomp:
+                    if cum + int(b) > cursor:
+                        break
+                    cum += int(b)
+                    completed_batches += 1
+                    if cum == cursor:
+                        break
+                if cum != cursor:
+                    return (
+                        False,
+                        "completed ledger does not align to persisted batch "
+                        "boundaries",
+                    )
+                expected_suffix = persisted_decomp[completed_batches:]
+            if current_decomposition != expected_suffix:
                 return (False, "batch decomposition differs from the persisted plan")
         return (True, None)
+
+    def _queue_item_matches_plan_identity(self, queue_path, ident):
+        """True when ``queue_path`` carries ``ident``'s evidence at a legal
+        location (original path or its verified stacked counterpart).
+
+        Identity is basename + size + mtime_ns — never basename alone.  The
+        directory must be the persisted original directory or exactly the
+        configured ``stacked`` subdirectory of that directory (the only
+        destination ``_move_to_stacked`` uses).  Collision-renamed
+        destinations never match (explicit refusal, never a guess).
+        """
+        if not isinstance(ident, dict) or not ident.get("path"):
+            return False
+        cur = self._stat_identity(queue_path)
+        if cur is None:
+            return False
+        if cur["size"] != ident.get("size") or cur["mtime_ns"] != ident.get(
+            "mtime_ns"
+        ):
+            return False
+        if cur.get("name") != ident.get("name"):
+            return False
+        orig_dir = os.path.abspath(os.path.dirname(ident["path"]))
+        item_dir = os.path.abspath(os.path.dirname(queue_path))
+        allowed = {
+            os.path.normcase(orig_dir),
+            os.path.normcase(
+                os.path.join(
+                    orig_dir, getattr(self, "stacked_subdir_name", "stacked")
+                )
+            ),
+        }
+        return os.path.normcase(item_dir) in allowed
 
     def _checkpoint_preflight(self):
         """Session/reference/plan preflight before the worker starts.
@@ -17078,6 +17234,9 @@ class SeestarQueuedStacker:
             self._drizzle_support_available = True
             self._drizzle_support_unavailable_reason = None
         self._drizzle_frame_count = int(counters["frame_count"])
+        self._drizzle_plan_cursor = int(
+            counters.get("plan_cursor", counters["frame_count"])
+        )
         group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
         self._drizzle_group_index = self._drizzle_frame_count // group_size
         self.stacked_batches_count = int(counters["stacked_batches_count"])
@@ -17086,6 +17245,9 @@ class SeestarQueuedStacker:
         self._exposure_min = counters["exposure_min"]
         self._exposure_max = counters["exposure_max"]
         self._drizzle_completed_sources = list(restored.completed_sources)
+        self._drizzle_rejected_sources = list(
+            getattr(restored, "rejected_sources", None) or []
+        )
         self._resume_completed_sources = list(restored.completed_sources)
         self._resume_plan = restored.session["plan"]
         self._resume_input_roots = list(restored.session["input_roots"])
@@ -24602,7 +24764,20 @@ class SeestarQueuedStacker:
         # same-path/different-identity queue item is a hard refusal.
         if self._resume_requested and getattr(self, "_resume_active", False):
             try:
-                skipped = self._filter_queue_by_resume_ledger()
+                drizzle_result = getattr(self, "_drizzle_resume_result", None)
+                if drizzle_result is not None:
+                    # RJK: for a native Drizzle resume the persisted plan is
+                    # authoritative, and the reader has already verified the
+                    # resolved on-disk location of every remaining source
+                    # (original OR its exact stacked counterpart — a source
+                    # moved to stacked by a pre-crash accepted frame must be
+                    # replayed, and rejected dispositions are excluded by the
+                    # plan cursor).  Rebuild the queue from those verified
+                    # resolved paths instead of trusting the folder scan.
+                    self._install_resume_remaining_queue(drizzle_result)
+                    skipped = 0
+                else:
+                    skipped = self._filter_queue_by_resume_ledger()
             except _ResumeCheckpointError as ckpt_err:
                 self.update_progress(f"❌ Reprise impossible: {ckpt_err}", "ERROR")
                 self.processing_error = str(ckpt_err)
@@ -25194,6 +25369,7 @@ class SeestarQueuedStacker:
         """Snapshot the accepted-exposure truthfulness counters for the manifest."""
         return {
             "frame_count": int(getattr(self, "_drizzle_frame_count", 0) or 0),
+            "plan_cursor": int(getattr(self, "_drizzle_plan_cursor", 0) or 0),
             "stacked_batches_count": int(
                 getattr(self, "stacked_batches_count", 0) or 0
             ),
@@ -25267,11 +25443,22 @@ class SeestarQueuedStacker:
                 persisted_plan = resume_result.session["plan"]
                 persisted_sources = persisted_plan["sources"]
                 next_index = int(resume_result.next_source_index)
-                if current_remaining != persisted_sources[next_index:]:
+                expected_remaining = persisted_sources[next_index:]
+                if len(current_remaining) != len(expected_remaining):
                     raise DrizzleCheckpointError(
                         "remaining Drizzle observation set/order differs from "
                         "the validated checkpoint plan"
                     )
+                for queue_ident, expected_ident in zip(
+                    current_remaining, expected_remaining
+                ):
+                    if not self._queue_item_matches_plan_identity(
+                        queue_ident.get("path"), expected_ident
+                    ):
+                        raise DrizzleCheckpointError(
+                            "remaining Drizzle observation set/order differs "
+                            "from the validated checkpoint plan"
+                        )
                 expected_decomposition = self._decomposition_suffix_at_index(
                     persisted_plan["decomposition"], next_index
                 )
@@ -25343,6 +25530,9 @@ class SeestarQueuedStacker:
             completed_sources=list(
                 getattr(self, "_drizzle_completed_sources", []) or []
             ),
+            rejected_sources=list(
+                getattr(self, "_drizzle_rejected_sources", []) or []
+            ),
             support_accumulators=support_accumulators,
         )
         self._drizzle_checkpoint_last_committed_frames = int(
@@ -25381,11 +25571,82 @@ class SeestarQueuedStacker:
                 )
             keys.add(key)
         self._drizzle_completed_sources = ledger
+        # Final disposition recorded: this plan position is consumed (accepted).
+        self._drizzle_plan_cursor = (
+            int(getattr(self, "_drizzle_plan_cursor", 0) or 0) + 1
+        )
 
         group_size = max(1, int(getattr(self, "drizzle_group_size", 50) or 50))
         frame_count = int(getattr(self, "_drizzle_frame_count", 0) or 0)
         if frame_count % group_size == 0:
             self._drizzle_checkpoint_commit()
+
+    def _drizzle_checkpoint_after_rejection(self, source_path):
+        """Record a rejected (non-admitted) source disposition and commit it.
+
+        Called when ``_process_file`` failed for a Drizzle session observation,
+        BEFORE the source is moved to ``unaligned_by_stacker``.  A rejected
+        source never touches SCI/WHT/SUPPORT, never increments ``frame_count``
+        or ``stacked_batches_count``, and never enters the completed ledger;
+        it is recorded in the rejected disposition ledger and the plan cursor
+        advances so Resume continues beyond it without replaying it.
+
+        The disposition is committed **durably and immediately** (its own
+        generation) so a crash right after the move cannot leave the
+        checkpoint blind to the rejection (which would make the filesystem
+        disagree with the persisted plan).  A persistence failure raises
+        (mandatory-abort) and the caller must NOT move the source, so the
+        observation remains at its original path and is replayed on Resume —
+        deterministic and safe.
+        """
+        if not getattr(self, "_drizzle_checkpoint_enabled", False):
+            return
+        ident = self._source_identity(source_path)
+        reference = getattr(self, "_resume_reference_identity", None)
+        if isinstance(reference, dict) and reference.get("path"):
+            ref_key = (
+                reference.get("path"),
+                reference.get("size"),
+                reference.get("mtime_ns"),
+            )
+            if (
+                ident.get("path"),
+                ident.get("size"),
+                ident.get("mtime_ns"),
+            ) == ref_key:
+                raise DrizzleCheckpointError(
+                    "the session reference observation failed alignment; a "
+                    "disposed reference would make the alignment reference "
+                    "unresolvable on Resume — refusing to record the "
+                    "rejection (restart the session or choose another "
+                    "reference)"
+                )
+        rejected = list(getattr(self, "_drizzle_rejected_sources", []) or [])
+        rejected.append(ident)
+        keys = set()
+        for e in rejected:
+            key = (e.get("path"), e.get("size"), e.get("mtime_ns"))
+            if key in keys:
+                raise DrizzleCheckpointError(
+                    f"duplicate source identity in rejected ledger: "
+                    f"{e.get('name')}"
+                )
+            keys.add(key)
+        completed = list(getattr(self, "_drizzle_completed_sources", []) or [])
+        for e in completed:
+            key = (e.get("path"), e.get("size"), e.get("mtime_ns"))
+            if key in keys:
+                raise DrizzleCheckpointError(
+                    f"source both accepted and rejected: {e.get('name')}"
+                )
+        self._drizzle_rejected_sources = rejected
+        self._drizzle_plan_cursor = (
+            int(getattr(self, "_drizzle_plan_cursor", 0) or 0) + 1
+        )
+        # Durable rejection disposition: commit a cursor-only generation now
+        # (frame_count unchanged; the writer proves every scientific byte is
+        # unchanged and only the cursor/rejected ledger advance).
+        self._drizzle_checkpoint_commit()
 
     def _drizzle_checkpoint_force_flush(self):
         """Force a final clean snapshot for a trailing partial group.
