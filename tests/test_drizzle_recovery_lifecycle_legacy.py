@@ -649,3 +649,333 @@ def test_diagnostic_detail_is_bounded_and_precise(tmp_path):
     # Bounded: exactly one index reported, no full dump.
     assert "index 2" not in detail
     assert detail.count("actual[") == 1 and detail.count("expected[") == 1
+
+
+# ---------------------------------------------------------------------------
+# REWORK 2 — Windows path-identity case semantics (exact recovery lifecycle)
+# ---------------------------------------------------------------------------
+
+def _build_recovered_state_case_asymmetry(tmp_path):
+    """Same recovered geometry as ``_build_recovered_state`` but with the
+    REAL Windows casing asymmetry:
+
+    * files on disk carry lowercase names (the normcase()-normalized paths);
+    * the persisted identities preserve ORIGINAL display casing in ``name``
+      while ``path`` is the lowercase on-disk path.
+
+    On the real Windows host this arises naturally: the checkpoint writer
+    recorded ``name`` from the original-cased scanned path while ``path`` was
+    ``normcase()``-normalized; the reader then resolves the lowercase path
+    and every re-derived queue basename is lowercase."""
+    inputs = tmp_path / "inputs"
+    out = tmp_path / "out"
+    inputs.mkdir()
+    out.mkdir()
+
+    mixed_names = [
+        f"Light_SH2-101_20.0s_IRCUT_20260815-{214000 + i}.fit"
+        for i in range(PLAN_LEN_ORIG)
+    ]
+    lower_names = [n.lower() for n in mixed_names]
+    for i, lower in enumerate(lower_names):
+        fits.PrimaryHDU(
+            np.full(SHAPE, (i % 200) + 1, dtype=np.uint16)
+        ).writeto(inputs / lower)
+    paths = [inputs / lower for lower in lower_names]
+
+    def _case_mixed_identity(p, mixed_name):
+        st = os.stat(p)
+        return {
+            "path": os.path.normcase(os.path.abspath(str(p))),
+            "name": mixed_name,
+            "size": int(st.st_size),
+            "mtime_ns": int(st.st_mtime_ns),
+        }
+
+    idents = [
+        _case_mixed_identity(p, mixed_names[i]) for i, p in enumerate(paths)
+    ]
+
+    ref_lower = "light_sh2-101_20.0s_ircut_20260707-003517.fit"
+    ref_mixed = "Light_SH2-101_20.0s_IRCUT_20260707-003517.fit"
+    fits.PrimaryHDU(np.full(SHAPE, 9, dtype=np.uint16)).writeto(
+        inputs / ref_lower
+    )
+    reference_ident = _case_mixed_identity(inputs / ref_lower, ref_mixed)
+
+    decomp_rec = _recovered_decomposition()
+    removed = set(REJECTED_INDICES)
+    plan_idents = [
+        ident for i, ident in enumerate(idents) if i not in removed
+    ]
+    assert len(plan_idents) == PLAN_LEN_ORIG - 5
+    assert plan_idents[:FRAME_COUNT] == idents[:FRAME_COUNT]
+
+    qm = object.__new__(SeestarQueuedStacker)
+    _configure(qm, out, inputs, kernel="lanczos3", group_size=10)
+    qm._resume_reference_identity = reference_ident
+    cfg = build_drizzle_canonical_config(
+        qm, product_version=qm._canonical_product_version()
+    )
+    writer = DrizzleCheckpointWriter(
+        str(out), qm._canonical_product_version(), cfg, _wcs(), SHAPE
+    )
+    accs = [
+        DrizzleAccumulator(SHAPE, kernel="lanczos3", pixfrac=1.0) for _ in range(3)
+    ]
+    _add(accs, _frame(0))
+    _add(accs, _frame(1))
+    writer.commit(
+        accs,
+        session_binding={
+            "input_roots": [str(inputs)],
+            "reference": reference_ident,
+            "plan": {"sources": plan_idents, "decomposition": decomp_rec},
+            "reference_geometry": _reference_geometry(),
+        },
+        counters={
+            "frame_count": 2,
+            "stacked_batches_count": 2,
+            "total_exposure_seconds": 2.0,
+            "exposure_unknown_count": 0,
+            "exposure_min": 1.0,
+            "exposure_max": 1.0,
+        },
+        completed_sources=plan_idents[:2],
+    )
+    ckpt_dir = out / CHECKPOINT_DIRNAME
+    manifest = json.loads((ckpt_dir / MANIFEST_FILENAME).read_text())
+    for ch in manifest["channels"]:
+        for key in ("out_img", "out_wht"):
+            old = ch[key]["file"]
+            new = old.replace(f"gen-{1:08d}-", f"gen-{GENERATION:08d}-")
+            (ckpt_dir / old).rename(ckpt_dir / new)
+            ch[key]["file"] = new
+    manifest["generation"] = GENERATION
+    manifest["frame_count"] = FRAME_COUNT
+    manifest["stacked_batches_count"] = FRAME_COUNT
+    manifest["total_exposure_seconds"] = float(FRAME_COUNT)
+    manifest["exposure_unknown_count"] = 0
+    manifest["exposure_min"] = 1.0
+    manifest["exposure_max"] = 1.0
+    manifest["session"]["plan"]["sources"] = plan_idents
+    manifest["session"]["plan"]["decomposition"] = decomp_rec
+    manifest["completed_sources"] = plan_idents[:FRAME_COUNT]
+    (ckpt_dir / MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+
+    stacked = inputs / "stacked"
+    stacked.mkdir()
+    for p in paths[:FRAME_COUNT]:
+        p.rename(stacked / p.name)
+    unaligned = inputs / "unaligned_by_stacker"
+    unaligned.mkdir()
+    for i in REJECTED_INDICES:
+        paths[i].rename(unaligned / paths[i].name)
+    for i in ACCEPTED_UNCOMMITTED_INDICES:
+        paths[i].rename(stacked / paths[i].name)
+    for i in ACCEPTED_UNCOMMITTED_INDICES:
+        (stacked / paths[i].name).rename(paths[i])
+
+    remaining = [p for p in paths if p.exists() and p.parent == inputs]
+    assert len(remaining) == PLAN_LEN_ORIG - 5 - FRAME_COUNT
+    return (
+        inputs, out, paths, idents, plan_idents, decomp_rec, reference_ident,
+        lower_names,
+    )
+
+
+def _start_recovery_lifecycle(monkeypatch, inputs, out, simulate_windows_case):
+    monkeypatch.setattr(
+        queue_manager_module,
+        "ProcessPoolExecutor",
+        lambda **kwargs: _NoopExecutor(**kwargs),
+    )
+    if simulate_windows_case:
+        import ntpath
+        import seestar.core.drizzle_checkpoint as core_ckpt
+
+        helper = getattr(queue_manager_module, "_source_names_equivalent", None)
+        if helper is not None:
+            monkeypatch.setattr(
+                queue_manager_module,
+                "_source_names_equivalent",
+                lambda a, b: helper(a, b, normcase=ntpath.normcase),
+            )
+        # The writer/reader whole-identity comparisons (ledger prefix checks)
+        # live in the core checkpoint module and must observe the same host
+        # semantics for the simulated Windows host.
+        if hasattr(core_ckpt, "identity_names_equivalent"):
+            orig_core_names = core_ckpt.identity_names_equivalent
+            monkeypatch.setattr(
+                core_ckpt,
+                "identity_names_equivalent",
+                lambda a, b, normcase=None: orig_core_names(
+                    a, b, normcase=ntpath.normcase
+                ),
+            )
+    qm = SeestarQueuedStacker(batch_size=0, autotune=False)
+    qm.update_progress = lambda *args, **kwargs: None
+    aligner = _LifecycleAligner()
+    qm.aligner = aligner
+    monkeypatch.setattr(qm, "_estimate_batch_size", lambda: BATCH)
+    worker_started = threading.Event()
+    worker_snapshot = {}
+
+    def _worker():
+        worker_snapshot["queue"] = list(qm.queue.queue)
+        worker_snapshot["frame_count"] = qm._drizzle_frame_count
+        worker_snapshot["plan_cursor"] = qm._drizzle_plan_cursor
+        worker_snapshot["continuation"] = qm._drizzle_resume_continuation
+        worker_started.set()
+
+    qm._worker = _worker
+    qm._solve_astrometry_async = lambda *args, **kwargs: _wcs()
+    started = qm.start_processing(
+        input_dir=str(inputs),
+        output_dir=str(out),
+        use_drizzle=True,
+        drizzle_scale=2.0,
+        drizzle_kernel="lanczos3",
+        drizzle_pixfrac=1.0,
+        drizzle_wht_threshold=0.0,
+        drizzle_group_size=10,
+        batch_size=0,
+        min_w=0.01,
+        move_stacked=True,
+        perform_cleanup=False,
+        resume_intent="resume",
+        reproject_between_batches=False,
+        reproject_coadd_final=False,
+    )
+    if qm.processing_thread is not None:
+        qm.processing_thread.join(timeout=5)
+    return qm, started, worker_started, worker_snapshot
+
+
+def test_lifecycle_case_asymmetry_posix_control_refuses(tmp_path, monkeypatch):
+    """POSIX semantics: the SAME casing asymmetry MUST refuse (case-only
+    display-name difference is a real identity difference on a
+    case-sensitive filesystem).  This is also the faithful Linux reproducer
+    of the pre-fix Windows behavior — the first-difference diagnostic names
+    the case-only divergence at index 0."""
+    inputs, out, paths, idents, plan_idents, decomp_rec, reference_ident, _ = (
+        _build_recovered_state_case_asymmetry(tmp_path)
+    )
+    qm, started, worker_started, _snapshot = _start_recovery_lifecycle(
+        monkeypatch, inputs, out, simulate_windows_case=False
+    )
+    assert started is False
+    assert not worker_started.is_set()
+    error = qm.processing_error or ""
+    assert "differs" in error
+    assert "resume cursor 4620" in error
+    assert "expected remaining 704" in error
+    assert "actual remaining 704" in error
+    assert "first difference at index 0" in error
+
+
+def test_lifecycle_case_asymmetry_windows_semantics_full(tmp_path, monkeypatch):
+    """Windows semantics: the exact real-world casing asymmetry must resume
+    through the REAL start_processing lifecycle — worker starts with the 704
+    authoritative sources, generation 463 commits, reload succeeds, and a
+    post-recovery rejection uses the disposition contract."""
+    import ntpath
+
+    from seestar.core.drizzle_checkpoint import SafeStackedSourceResolver
+    import seestar.core.drizzle_checkpoint as core_ckpt
+
+    def _names_equivalent(a, b):
+        helper = getattr(
+            core_ckpt, "identity_names_equivalent", None
+        ) or (lambda x, y, normcase=None: normcase(str(x)) == normcase(str(y)))
+        return helper(a, b, normcase=ntpath.normcase)
+
+    inputs, out, paths, idents, plan_idents, decomp_rec, reference_ident, _ = (
+        _build_recovered_state_case_asymmetry(tmp_path)
+    )
+    qm, started, worker_started, snapshot = _start_recovery_lifecycle(
+        monkeypatch, inputs, out, simulate_windows_case=True
+    )
+    assert started is True, f"start_processing refused: {qm.processing_error}"
+    assert worker_started.is_set()
+
+    queue_items = [
+        q for q in snapshot["queue"]
+        if q != queue_manager_module._BATCH_BREAK_TOKEN
+    ]
+    assert len(queue_items) == PLAN_LEN_ORIG - 5 - FRAME_COUNT
+    assert snapshot["frame_count"] == FRAME_COUNT
+    assert snapshot["plan_cursor"] == FRAME_COUNT
+    # First queue source is the restored old plan[4620] observation (its
+    # on-disk lowercase name; the persisted display name is mixed-case).
+    assert Path(queue_items[0]).name == paths[
+        ACCEPTED_UNCOMMITTED_INDICES[0]
+    ].name
+    # Ordered queue identity == recovered plan[4620:] under host semantics.
+    expected_names = [x["name"] for x in plan_idents[FRAME_COUNT:]]
+    for actual, expected in zip(queue_items, expected_names):
+        assert _names_equivalent(Path(actual).name, expected)
+
+    continuation = snapshot["continuation"]
+    assert continuation is not None
+    assert continuation.next_source_index == FRAME_COUNT
+    assert qm._drizzle_checkpoint_writer.current_generation == GENERATION
+
+    # First post-resume admission -> generation 463 -> reload.
+    next_path = queue_items[0]
+    ok = qm._add_frame_to_drizzle_accumulators(
+        np.stack([_frame(0)[0]] * 3, axis=-1).astype(np.float32),
+        fits.Header([("EXPTIME", 1.0)]),
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64),
+        _frame(0)[1],
+        native_wcs=_wcs(),
+    )
+    assert ok is True
+    qm._drizzle_group_tick()
+    qm._admit_exposure(1.0, 0, 1.0, 1.0)
+    qm.stacked_batches_count += 1
+    qm._drizzle_checkpoint_after_frame(str(next_path))
+    qm._drizzle_checkpoint_force_flush()
+
+    manifest_after = json.loads(
+        (out / CHECKPOINT_DIRNAME / MANIFEST_FILENAME).read_text()
+    )
+    assert manifest_after["generation"] == GENERATION + 1
+    assert manifest_after["frame_count"] == FRAME_COUNT + 1
+    result4 = read_drizzle_checkpoint(
+        str(out), resolver=SafeStackedSourceResolver("stacked")
+    )
+    assert result4.generation == GENERATION + 1
+    assert result4.next_source_index == FRAME_COUNT + 1
+    assert result4.completed_sources[:FRAME_COUNT] == plan_idents[:FRAME_COUNT]
+    completed_keys = {
+        (s["path"], s["size"], s["mtime_ns"]) for s in result4.completed_sources
+    }
+    for i in REJECTED_INDICES:
+        key = (idents[i]["path"], idents[i]["size"], idents[i]["mtime_ns"])
+        assert key not in completed_keys
+    assert result4.counters["frame_count"] == FRAME_COUNT + 1
+    assert result4.counters["stacked_batches_count"] == FRAME_COUNT + 1
+
+    # Post-recovery rejection -> cursor-only generation -> reload.
+    rejected_path = queue_items[1]
+    qm._drizzle_checkpoint_after_rejection(str(rejected_path))
+    manifest_rej = json.loads(
+        (out / CHECKPOINT_DIRNAME / MANIFEST_FILENAME).read_text()
+    )
+    assert manifest_rej["generation"] == GENERATION + 2
+    assert manifest_rej["frame_count"] == FRAME_COUNT + 1
+    assert manifest_rej["plan_cursor"] == FRAME_COUNT + 2
+    assert [x["name"] for x in manifest_rej["rejected_sources"]] == [
+        Path(rejected_path).name
+    ]
+    result5 = read_drizzle_checkpoint(
+        str(out), resolver=SafeStackedSourceResolver("stacked")
+    )
+    assert result5.generation == GENERATION + 2
+    assert result5.next_source_index == FRAME_COUNT + 2
+    assert [x["name"] for x in result5.rejected_sources] == [
+        Path(rejected_path).name
+    ]

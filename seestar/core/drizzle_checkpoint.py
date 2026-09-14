@@ -1558,7 +1558,9 @@ class DrizzleCheckpointWriter:
             raise DrizzleCheckpointError(
                 "a source identity is both accepted and rejected"
             )
-        if not rejected_clean and ledger_clean != plan_sources[:frame_count]:
+        if not rejected_clean and not identity_lists_equal(
+            ledger_clean, plan_sources[:frame_count]
+        ):
             raise DrizzleCheckpointError(
                 "completed_sources is not the exact ordered prefix of the "
                 "session plan"
@@ -1711,7 +1713,7 @@ class DrizzleCheckpointWriter:
             # Cursor-only extension: a rejection disposition commit.  Science
             # must be byte-proven unchanged; only the plan cursor / rejected
             # ledger may advance.
-            if ledger_clean != loaded_ledger:
+            if not identity_lists_equal(ledger_clean, loaded_ledger):
                 raise DrizzleCheckpointError(
                     "cursor-only continuation must preserve the exact loaded "
                     "completed ledger (no rewrite/reorder/divergence)"
@@ -1721,7 +1723,9 @@ class DrizzleCheckpointWriter:
                     f"cursor-only continuation must advance plan_cursor "
                     f"({new_cursor} <= loaded {loaded_cursor})"
                 )
-            if rejected_clean[: len(loaded_rejected)] != loaded_rejected:
+            if not identity_lists_equal(
+                rejected_clean[: len(loaded_rejected)], loaded_rejected
+            ):
                 raise DrizzleCheckpointError(
                     "continuation rejected_sources must preserve the exact "
                     "loaded rejected ledger prefix"
@@ -1777,12 +1781,16 @@ class DrizzleCheckpointWriter:
         self._check_channel_total_monotonic(loaded, snapshots)
         self._check_support_monotonic(loaded, support_snapshot)
 
-        if ledger_clean[: len(loaded_ledger)] != loaded_ledger:
+        if not identity_lists_equal(
+            ledger_clean[: len(loaded_ledger)], loaded_ledger
+        ):
             raise DrizzleCheckpointError(
                 "continuation completed_sources must preserve the exact loaded "
                 "ledger prefix (no rewrite/reorder/divergent prefix)"
             )
-        if rejected_clean[: len(loaded_rejected)] != loaded_rejected:
+        if not identity_lists_equal(
+            rejected_clean[: len(loaded_rejected)], loaded_rejected
+        ):
             raise DrizzleCheckpointError(
                 "continuation rejected_sources must preserve the exact loaded "
                 "rejected ledger prefix"
@@ -2718,6 +2726,68 @@ def _identity_key(ident):
     return (ident["path"], ident["size"], ident["mtime_ns"])
 
 
+def identity_names_equivalent(name_a, name_b, normcase=None):
+    """Host-aware basename identity comparison (filesystem path semantics).
+
+    On a case-insensitive filesystem (Windows) ``os.path.normcase`` maps both
+    names to the same normalized form, so a case-only difference is the same
+    basename.  On POSIX ``os.path.normcase`` is the identity, so case-only
+    differences remain distinct names.  Never a custom lowercase rule.
+
+    ``normcase`` is injectable (default :func:`os.path.normcase`) so Windows
+    semantics can be exercised explicitly (``ntpath.normcase``) on a POSIX
+    test host without monkeypatching unrelated filesystem behavior.
+    """
+    if normcase is None:
+        normcase = os.path.normcase
+    try:
+        return normcase(str(name_a)) == normcase(str(name_b))
+    except Exception:  # noqa: BLE001 - malformed name never matches
+        return False
+
+
+def identities_equivalent_host(a, b, normcase=None):
+    """Whole-identity equality under host filesystem path semantics.
+
+    ``size`` / ``mtime_ns`` must match exactly (strict evidence); ``path``
+    and the basename ``name`` follow host path semantics via ``normcase``
+    (case-insensitive on Windows, case-sensitive on POSIX).  Used wherever
+    two canonical identities are compared as whole dicts (ledger/plan prefix
+    checks), so a case-only display-name difference on Windows can never
+    produce a false rejection.
+    """
+    if a is b:
+        return True
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    if normcase is None:
+        normcase = os.path.normcase
+    if a.get("size") != b.get("size") or a.get("mtime_ns") != b.get(
+        "mtime_ns"
+    ):
+        return False
+    try:
+        if normcase(str(a.get("path", ""))) != normcase(
+            str(b.get("path", ""))
+        ):
+            return False
+    except Exception:  # noqa: BLE001 - malformed identity never matches
+        return False
+    return identity_names_equivalent(
+        a.get("name"), b.get("name"), normcase=normcase
+    )
+
+
+def identity_lists_equal(list_a, list_b, normcase=None):
+    """Element-wise host-aware identity-list equality (order preserved)."""
+    if len(list_a) != len(list_b):
+        return False
+    return all(
+        identities_equivalent_host(x, y, normcase=normcase)
+        for x, y in zip(list_a, list_b)
+    )
+
+
 def _resolve_sources(session, counters, resolver, output_dir,
                      rejected_sources=None, completed_sources=None):
     """Resolve the reference + ordered plan sources (strict or opt-in).
@@ -3492,7 +3562,9 @@ def _validate_ledger(manifest, session, counters):
         raise DrizzleCheckpointError(
             "a source identity is both accepted and rejected"
         )
-    if not rejected and ledger != plan_sources[:frame_count]:
+    if not rejected and not identity_lists_equal(
+        ledger, plan_sources[:frame_count]
+    ):
         raise DrizzleCheckpointError(
             "completed_sources is not the exact ordered prefix of the session plan"
         )

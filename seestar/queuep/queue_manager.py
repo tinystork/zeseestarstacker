@@ -363,6 +363,7 @@ from ..core.drizzle_checkpoint import (
     DrizzleCheckpointWriter,
     SafeStackedSourceResolver,
     build_drizzle_canonical_config,
+    identity_names_equivalent,
     output_grid_contract_identity,
     read_drizzle_checkpoint,
     reconstruct_input_reference_wcs,
@@ -1588,6 +1589,24 @@ def _identities_equivalent(a, b):
         ) == int(b.get("mtime_ns"))
     except (TypeError, ValueError):
         return False
+
+
+def _source_names_equivalent(name_a, name_b, normcase=None):
+    """Host-aware basename identity comparison (filesystem path semantics).
+
+    On a case-insensitive filesystem (Windows) ``os.path.normcase`` maps both
+    names to the same normalized form, so a case-only difference is the same
+    basename.  On POSIX ``os.path.normcase`` is the identity, so case-only
+    differences remain distinct names.  Never a custom lowercase rule: the
+    normalization is exactly the standard-library path semantics of the host
+    (or the explicitly injected one for cross-platform testing).
+
+    ``normcase`` is an injectable normalization callable (default
+    :func:`os.path.normcase`) so Windows semantics can be exercised
+    explicitly (``ntpath.normcase``) on a POSIX test host without
+    monkeypatching unrelated filesystem behavior.
+    """
+    return identity_names_equivalent(name_a, name_b, normcase=normcase)
 
 
 def _canon_projection_value(value):
@@ -16506,6 +16525,13 @@ class SeestarQueuedStacker:
         configured ``stacked`` subdirectory of that directory (the only
         destination ``_move_to_stacked`` uses).  Collision-renamed
         destinations never match (explicit refusal, never a guess).
+
+        Basename comparison follows HOST filesystem path semantics via
+        :func:`_source_names_equivalent` (case-insensitive on Windows,
+        case-sensitive on POSIX): the persisted identity may preserve
+        original display casing while a re-derived queue basename came from
+        an already ``normcase``-normalized path — on Windows those are the
+        same name and must not be refused.
         """
         if not isinstance(ident, dict) or not ident.get("path"):
             return False
@@ -16516,7 +16542,9 @@ class SeestarQueuedStacker:
             "mtime_ns"
         ):
             return False
-        if cur.get("name") != ident.get("name"):
+        if not _source_names_equivalent(
+            cur.get("name"), ident.get("name")
+        ):
             return False
         orig_dir = os.path.abspath(os.path.dirname(ident["path"]))
         item_dir = os.path.abspath(os.path.dirname(queue_path))
@@ -16552,7 +16580,7 @@ class SeestarQueuedStacker:
                 zip(current_remaining, expected_remaining)
             ):
                 if (
-                    cur.get("name") != exp.get("name")
+                    not _source_names_equivalent(cur.get("name"), exp.get("name"))
                     or cur.get("size") != exp.get("size")
                     or cur.get("mtime_ns") != exp.get("mtime_ns")
                 ):
