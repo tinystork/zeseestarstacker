@@ -676,6 +676,14 @@ def _init_qm_writer(qm, source_paths=None):
     else:
         idents = [_file_identity(Path(p)) for p in source_paths]
     qm._drizzle_checkpoint_plan = _plan(idents)
+    physical_paths = (
+        [str(Path(qm.output_folder) / "reference.fit")]
+        if source_paths is None
+        else [str(p) for p in source_paths]
+    )
+    qm._drizzle_rebuild_plan_path_map(
+        qm._drizzle_checkpoint_plan["sources"], physical_paths
+    )
 
 
 def test_init_drizzle_checkpoint_binds_plan_and_writer(tmp_path):

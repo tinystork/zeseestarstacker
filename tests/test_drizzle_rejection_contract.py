@@ -212,6 +212,7 @@ def _arm_fresh_writer(qm, output, paths):
         "sources": idents,
         "decomposition": [len(idents)],
     }
+    qm._drizzle_rebuild_plan_path_map(idents, [str(p) for p in paths])
     qm._resume_reference_identity = reference_ident
     cfg = build_drizzle_canonical_config(
         qm, product_version=qm._canonical_product_version()

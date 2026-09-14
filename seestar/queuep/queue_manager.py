@@ -5148,6 +5148,11 @@ class SeestarQueuedStacker:
         # Resume continues beyond them without replaying or double-counting.
         self._drizzle_plan_cursor = 0
         self._drizzle_rejected_sources = []
+        # RJK-R3: physical-path -> authoritative session-plan identity map.
+        # The durable disposition identity ALWAYS comes from the persisted
+        # plan (logical identity); the physical replay path (original or the
+        # exact canonical stacked counterpart) is only the lookup key.
+        self._drizzle_plan_path_map = {}
         self._drizzle_checkpoint_last_committed_frames = 0
         # RSM2-D2B2B: read-only validated Drizzle resume token.  It is created
         # during the pre-reference startup preflight and consumed only by the
@@ -5524,7 +5529,22 @@ class SeestarQueuedStacker:
             )
             return
 
-        original_folder_abs = os.path.abspath(os.path.dirname(file_path))
+        # RJK-R3: the canonical unaligned location is
+        # ``<source_root>\unaligned_by_stacker``.  A rejected source that was
+        # replayed from the canonical stacked counterpart must land in the
+        # SOURCE ROOT's unaligned directory (never ``stacked\unaligned_...``).
+        physical_dir = os.path.abspath(os.path.dirname(file_path))
+        if (
+            os.path.normcase(os.path.basename(physical_dir))
+            == os.path.normcase(
+                getattr(self, "stacked_subdir_name", "stacked")
+            )
+        ):
+            original_folder_abs = os.path.abspath(
+                os.path.dirname(physical_dir)
+            )
+        else:
+            original_folder_abs = physical_dir
         file_basename = os.path.basename(file_path)
 
         # Ce check doit être fait après avoir extrait le basename pour un meilleur log
@@ -13875,13 +13895,30 @@ class SeestarQueuedStacker:
         / ``_process_completed_batch`` / last-batch combine succeeded) — never
         prematurely, and never for rejected/unaligned images (those go to
         ``unaligned_by_stacker``, handled separately).
+
+        RJK-R3 (idempotent canonical placement): a source that is ALREADY at
+        its exact canonical stacked location (its parent directory IS the
+        ``stacked`` subdirectory — a replayed accepted observation) is a
+        NO-OP.  The move must never create a nested ``stacked/stacked``
+        directory.
         """
         if not self.move_stacked:
             return
         for p in paths:
             if not p or not os.path.exists(p):
                 continue
-            src_dir = os.path.dirname(os.path.abspath(p))
+            abs_p = os.path.abspath(p)
+            src_dir = os.path.dirname(abs_p)
+            # Already at the canonical stacked location: idempotent no-op.
+            if (
+                os.path.normcase(os.path.basename(src_dir))
+                == os.path.normcase(self.stacked_subdir_name)
+            ):
+                self.update_progress(
+                    f"📦 Déjà dans stacked (no-op): {os.path.basename(p)}",
+                    "INFO_DETAIL",
+                )
+                continue
             dst_dir = os.path.join(src_dir, self.stacked_subdir_name)
             os.makedirs(dst_dir, exist_ok=True)
             base = os.path.basename(p)
@@ -16392,6 +16429,14 @@ class SeestarQueuedStacker:
         self.queue = new_queue
         self.use_batch_plan = True
         self.files_in_queue = len(remaining_paths)
+        # RJK-R3: bind every remaining physical replay path to its
+        # authoritative persisted plan identity (logical identity), so the
+        # durable disposition never records the replay path.
+        persisted_sources = drizzle_result.session["plan"]["sources"]
+        cursor = int(drizzle_result.next_source_index)
+        self._drizzle_rebuild_plan_path_map(
+            persisted_sources[cursor:], remaining_paths
+        )
         processed = getattr(self, "processed_files", None)
         if processed is None:
             processed = set()
@@ -25498,6 +25543,39 @@ class SeestarQueuedStacker:
             "exposure_max": getattr(self, "_exposure_max", None),
         }
 
+    def _drizzle_plan_identity_for_path(self, physical_path):
+        """Resolve the AUTHORITATIVE session-plan identity for a physical path.
+
+        The durable disposition identity (accepted or rejected) always comes
+        from the persisted session plan; the physical replay path (original
+        canonical source path or its exact canonical ``stacked`` counterpart)
+        is only the lookup key.  Returns the plan identity dict or raises
+        (fail closed) when the path is not part of the active session plan.
+        """
+        if not physical_path:
+            raise DrizzleCheckpointError(
+                "cannot resolve a Drizzle plan identity for an empty path"
+            )
+        plan_map = getattr(self, "_drizzle_plan_path_map", None) or {}
+        key = os.path.normcase(os.path.abspath(str(physical_path)))
+        ident = plan_map.get(key)
+        if ident is None:
+            raise DrizzleCheckpointError(
+                "physical Drizzle source path is not part of the authoritative "
+                f"session plan: {physical_path}"
+            )
+        return ident
+
+    def _drizzle_rebuild_plan_path_map(self, plan_identities, physical_paths):
+        """Rebuild the physical-path -> plan-identity map (host-aware keys)."""
+        plan_map = {}
+        for ident, physical in zip(plan_identities, physical_paths):
+            if not physical:
+                continue
+            key = os.path.normcase(os.path.abspath(str(physical)))
+            plan_map[key] = ident
+        self._drizzle_plan_path_map = plan_map
+
     def _drizzle_checkpoint_session_binding(self):
         """Return the scientific-session binding (input roots/reference/plan).
 
@@ -25625,6 +25703,16 @@ class SeestarQueuedStacker:
                 return True
 
             self._drizzle_checkpoint_plan = self._capture_plan_from_queue()
+            # RJK-R3: bind every fresh queue item to its authoritative plan
+            # identity (both are the original canonical paths on a fresh run).
+            fresh_paths = [
+                item
+                for item in list(self.queue.queue)
+                if item != _BATCH_BREAK_TOKEN
+            ]
+            self._drizzle_rebuild_plan_path_map(
+                self._drizzle_checkpoint_plan["sources"], fresh_paths
+            )
             cfg = build_drizzle_canonical_config(
                 self, product_version=self._canonical_product_version()
             )
@@ -25689,12 +25777,34 @@ class SeestarQueuedStacker:
         and the accepted counters/exposure have advanced, but BEFORE the source
         is moved.  Never runs between channel adds, never on a failed add, and
         never publishes an empty checkpoint (``frame_count`` is already >= 1).
+
+        RJK-R3: the durable identity is the AUTHORITATIVE session-plan
+        identity for the physical path that was just processed (the physical
+        replay path — original or exact canonical stacked counterpart — is
+        only the lookup key, never the persisted identity).  The physical
+        evidence is still cross-checked strictly (the file was just read, so
+        its size/mtime must match the plan identity).
         """
         if not getattr(self, "_drizzle_checkpoint_enabled", False):
             return
-        # Fail closed: an unstat'able source must not become a ledger entry
-        # with size=None / mtime_ns=None.
-        ident = self._source_identity(source_path)
+        ident = self._drizzle_plan_identity_for_path(source_path)
+        physical = self._stat_identity(source_path)
+        if physical is None:
+            raise DrizzleCheckpointError(
+                "accepted Drizzle source disappeared before the durable "
+                f"disposition: {source_path}"
+            )
+        if (
+            physical.get("size") != ident.get("size")
+            or physical.get("mtime_ns") != ident.get("mtime_ns")
+            or not _source_names_equivalent(
+                physical.get("name"), ident.get("name")
+            )
+        ):
+            raise DrizzleCheckpointError(
+                "accepted Drizzle source evidence diverges from the "
+                f"authoritative session-plan identity ({source_path})"
+            )
         ledger = list(getattr(self, "_drizzle_completed_sources", []) or [])
         ledger.append(ident)
         keys = set()
@@ -25733,10 +25843,32 @@ class SeestarQueuedStacker:
         (mandatory-abort) and the caller must NOT move the source, so the
         observation remains at its original path and is replayed on Resume —
         deterministic and safe.
+
+        RJK-R3: the durable identity is the AUTHORITATIVE session-plan
+        identity resolved from the physical path — a late ``stat()`` of the
+        physical source is never required (the source may already have been
+        moved, invalidated or become unavailable).  When the physical path
+        IS still stat'able its evidence is cross-checked best-effort (a
+        mismatch is logged, never trusted into the ledger).
         """
         if not getattr(self, "_drizzle_checkpoint_enabled", False):
             return
-        ident = self._source_identity(source_path)
+        ident = self._drizzle_plan_identity_for_path(source_path)
+        physical = self._stat_identity(source_path)
+        if physical is not None and (
+            physical.get("size") != ident.get("size")
+            or physical.get("mtime_ns") != ident.get("mtime_ns")
+            or not _source_names_equivalent(
+                physical.get("name"), ident.get("name")
+            )
+        ):
+            logger.warning(
+                "Drizzle rejection: physical evidence at %s diverges from the "
+                "authoritative session-plan identity %s; the plan identity is "
+                "authoritative (best-effort check only).",
+                source_path,
+                ident.get("name"),
+            )
         reference = getattr(self, "_resume_reference_identity", None)
         if isinstance(reference, dict) and reference.get("path"):
             ref_key = (

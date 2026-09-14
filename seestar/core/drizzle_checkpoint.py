@@ -2714,11 +2714,48 @@ def _resolve_identity(ident, where, resolver, context):
             )
         if _verify_candidate(ident, cand):
             return cand
+    # RJK-R3: a nested non-canonical replay location (stacked/stacked or any
+    # deeper nesting) must be named explicitly instead of surfacing as a
+    # generic missing/tampered refusal.
+    nested = _probe_nested_stacked(ident, resolver)
+    if nested is not None:
+        raise DrizzleCheckpointError(
+            f"{where} source {ident['path']!r} was found at a non-canonical "
+            f"nested stacked location {nested!r}: only the canonical original "
+            "path or the exact canonical stacked counterpart are legal; "
+            "refusing"
+        )
     raise DrizzleCheckpointError(
         f"{where} source {ident['path']!r} could not be resolved: no candidate "
         "matches the persisted size/mtime_ns (missing, moved off-policy, "
         "tampered, duplicated, or a symlink)"
     )
+
+
+def _probe_nested_stacked(ident, resolver):
+    """Probe for a nested ``<src>/<stacked>/<stacked>/<basename>`` location.
+
+    Diagnostic only (never a legal resolution): returns the nested path when
+    it exists as a regular file, else ``None``.  Used to name the
+    non-canonical nested-stacked failure mode explicitly.
+    """
+    path = ident.get("path") if isinstance(ident, dict) else None
+    if not isinstance(path, str) or not path:
+        return None
+    sub = "stacked"
+    if type(resolver) is SafeStackedSourceResolver:
+        sub = resolver.stacked_subdir_name
+    src_dir = os.path.dirname(path)
+    base = os.path.basename(path)
+    if not src_dir or not base:
+        return None
+    probe = os.path.join(src_dir, sub, sub, base)
+    try:
+        if os.path.isfile(probe):
+            return probe
+    except OSError:  # noqa: BLE001 - diagnostic only
+        return None
+    return None
 
 
 def _identity_key(ident):

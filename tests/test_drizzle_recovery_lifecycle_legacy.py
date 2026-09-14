@@ -968,8 +968,15 @@ def test_lifecycle_case_asymmetry_windows_semantics_full(tmp_path, monkeypatch):
     assert manifest_rej["generation"] == GENERATION + 2
     assert manifest_rej["frame_count"] == FRAME_COUNT + 1
     assert manifest_rej["plan_cursor"] == FRAME_COUNT + 2
+    # RJK-R3: the rejected disposition persists the AUTHORITATIVE plan
+    # identity (mixed-case display name + canonical original path), never
+    # the lowercase physical replay path.
+    rejected_plan_ident = plan_idents[FRAME_COUNT + 1]
     assert [x["name"] for x in manifest_rej["rejected_sources"]] == [
-        Path(rejected_path).name
+        rejected_plan_ident["name"]
+    ]
+    assert [x["path"] for x in manifest_rej["rejected_sources"]] == [
+        rejected_plan_ident["path"]
     ]
     result5 = read_drizzle_checkpoint(
         str(out), resolver=SafeStackedSourceResolver("stacked")
@@ -977,5 +984,5 @@ def test_lifecycle_case_asymmetry_windows_semantics_full(tmp_path, monkeypatch):
     assert result5.generation == GENERATION + 2
     assert result5.next_source_index == FRAME_COUNT + 2
     assert [x["name"] for x in result5.rejected_sources] == [
-        Path(rejected_path).name
+        rejected_plan_ident["name"]
     ]
