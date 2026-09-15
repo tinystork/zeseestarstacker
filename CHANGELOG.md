@@ -2,6 +2,36 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.5.2] — Phoenix consedit
+
+Recovery patch for native Drizzle Resume after an alignment-rejection
+incident.  Validated against a real Windows recovery run (4620 historical
+committed frames preserved; recovered checkpoint progression intact;
+accepted-but-uncommitted observations replayed safely from the canonical
+`stacked` directory).
+
+- Native Drizzle Resume records rejected observations independently from
+  the accepted scientific frame count: a persisted `plan_cursor` and
+  rejection disposition ledger preserve observation-order progress without
+  ever adding rejected frames to SCI/WHT/SUPPORT.
+- Resume reconstructs the authoritative remaining queue from the validated
+  checkpoint continuation instead of trusting an ambient filesystem scan.
+- Windows source-identity comparison follows host filesystem case
+  semantics while POSIX case sensitivity is preserved.
+- Accepted-but-uncommitted observations can be replayed from the canonical
+  `stacked` directory; replay is idempotent and never creates recursive
+  `stacked/stacked`.
+- Accepted and rejected durable identities come from the persisted session
+  plan rather than temporary physical replay paths.
+- A rejection is checkpointed durably before the destructive move to
+  `unaligned_by_stacker`; an invalid/unloadable FITS rejection no longer
+  depends on a late `stat()` of a potentially moved source.
+- Strict fail-closed source validation remains in place: size, mtime,
+  legal location, collision, duplication, tampering and illegal nested
+  stacked paths are all still refused.
+- No change to Drizzle SCI/WHT/SUPPORT math, reference grid, kernel
+  science, normalization science or accepted-frame membership.
+
 ## [8.5.1] — Phoenix consedit
 
 - Drizzle Standard output grid now preserves the frozen reference WCS
