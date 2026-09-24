@@ -10,10 +10,10 @@ import traceback
 # detector (see ``detect_and_correct_hot_pixels_cfa``): a candidate photosite
 # is corrected only if it is at least this many times brighter than its
 # brightest immediate full-resolution neighbour.  A healthy compact star core
-# (FWHM ~ 1.0) peaks at ~16x its orthogonal neighbour, so a 20x factor keeps
+# (FWHM ~ 1.0) peaks at ~16x its orthogonal neighbour, so an 18x factor keeps
 # every coherent PSF untouched while still catching gross isolated defects
 # (hundreds to thousands of times above their immediate neighbourhood).
-_CFA_SPIKE_FACTOR = 20.0
+_CFA_SPIKE_FACTOR = 18.0
 
 
 def detect_and_correct_hot_pixels(image, threshold=3.0, neighborhood_size=5):

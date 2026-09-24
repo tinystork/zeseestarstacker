@@ -111,6 +111,42 @@ def test_low_background_hot_pixel():
 
 
 # ---------------------------------------------------------------------------
+# Spike-factor boundary regression (production factor 18)
+# ---------------------------------------------------------------------------
+def test_isolated_19x_neighbour_ratio_corrected():
+    """A candidate ~19x its brightest immediate neighbour is corrected.
+
+    The production spike factor is 18: a photosite 19x above its immediate
+    full-resolution neighbourhood is a genuine isolated defect (no coherent
+    PSF is that peaked) and must be corrected.  This is the behavioral pin
+    that distinguishes factor 18 from factor 20 (at 20x this photosite would
+    NOT be corrected).  The photosite also satisfies the same-color candidate
+    gate (bright relative to its own colour plane).
+    """
+    img = _img()  # 16x16, bg=100.0
+    img[6, 6] = 19.0 * 100.0  # 19x the background / immediate neighbours
+    corr, diag = detect_and_correct_hot_pixels_cfa(img, "RGGB", threshold=3.0)
+    assert diag["corrected"] == 1
+    assert corr[6, 6] == pytest.approx(100.0, abs=1.0)
+
+
+def test_isolated_at_18x_not_corrected_strict():
+    """A candidate exactly at the 18x boundary is NOT corrected (strict >).
+
+    The spike test uses a STRICT ``img > factor * near_max`` comparison, so an
+    isolated photosite exactly 18x its brightest immediate neighbour is NOT a
+    spike.  This protects the conservative boundary: the factor must stay
+    strictly above the ~16x coherent-PSF peak, and nothing AT the boundary is
+    corrected.
+    """
+    img = _img()
+    img[6, 6] = 18.0 * 100.0  # exactly at the boundary
+    corr, diag = detect_and_correct_hot_pixels_cfa(img, "RGGB", threshold=3.0)
+    assert diag["corrected"] == 0
+    assert corr[6, 6] == pytest.approx(18.0 * 100.0)
+
+
+# ---------------------------------------------------------------------------
 # No cross-color replacement
 # ---------------------------------------------------------------------------
 def test_no_cross_color_neighbours():
