@@ -1,0 +1,178 @@
+[
+ {
+  "key": "hc_lanczos2_p5000_d2",
+  "kernel": "lanczos2",
+  "sci_min": 99.9999771118164,
+  "sci_max": 4937.46875,
+  "sci_abs_max": 4937.46875,
+  "neg_frac": 0.0,
+  "wht_min": -0.14565034210681915,
+  "wht_max": 0.6538340449333191,
+  "wht_pos_min": 0.008111393079161644
+ },
+ {
+  "key": "hc_lanczos3_p5000_d2",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 4790.8818359375,
+  "sci_abs_max": 4790.8818359375,
+  "neg_frac": 0.0,
+  "wht_min": -0.3409677743911743,
+  "wht_max": 0.7962669134140015,
+  "wht_pos_min": 0.03650126978754997
+ },
+ {
+  "key": "hc_lanczos2_p20000_d2",
+  "kernel": "lanczos2",
+  "sci_min": 99.9999771118164,
+  "sci_max": 19449.875,
+  "sci_abs_max": 19449.875,
+  "neg_frac": 0.0,
+  "wht_min": -0.14565034210681915,
+  "wht_max": 0.6538340449333191,
+  "wht_pos_min": 0.008111393079161644
+ },
+ {
+  "key": "hc_lanczos3_p20000_d2",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 18863.525390625,
+  "sci_abs_max": 18863.525390625,
+  "neg_frac": 0.0,
+  "wht_min": -0.3409677743911743,
+  "wht_max": 0.7962669134140015,
+  "wht_pos_min": 0.03650126978754997
+ },
+ {
+  "key": "hc_lanczos2_p100000_d2",
+  "kernel": "lanczos2",
+  "sci_min": 99.9999771118164,
+  "sci_max": 96849.3671875,
+  "sci_abs_max": 96849.3671875,
+  "neg_frac": 0.0,
+  "wht_min": -0.14565034210681915,
+  "wht_max": 0.6538340449333191,
+  "wht_pos_min": 0.008111393079161644
+ },
+ {
+  "key": "hc_lanczos3_p100000_d2",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 93917.6328125,
+  "sci_abs_max": 93917.6328125,
+  "neg_frac": 0.0,
+  "wht_min": -0.3409677743911743,
+  "wht_max": 0.7962669134140015,
+  "wht_pos_min": 0.03650126978754997
+ },
+ {
+  "key": "hc_lanczos2_p10000_d3",
+  "kernel": "lanczos2",
+  "sci_min": 99.99996948242188,
+  "sci_max": 9354.6005859375,
+  "sci_abs_max": 9354.6005859375,
+  "neg_frac": 0.0,
+  "wht_min": -0.21847550570964813,
+  "wht_max": 0.9807510375976562,
+  "wht_pos_min": 0.012167089618742466
+ },
+ {
+  "key": "hc_lanczos3_p10000_d3",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 9100.7783203125,
+  "sci_abs_max": 9100.7783203125,
+  "neg_frac": 0.0,
+  "wht_min": -0.5114516615867615,
+  "wht_max": 1.1944003105163574,
+  "wht_pos_min": 0.05475190281867981
+ },
+ {
+  "key": "hc_lanczos2_p100000_d3",
+  "kernel": "lanczos2",
+  "sci_min": 99.99996948242188,
+  "sci_max": 92646.0078125,
+  "sci_abs_max": 92646.0078125,
+  "neg_frac": 0.0,
+  "wht_min": -0.21847550570964813,
+  "wht_max": 0.9807510375976562,
+  "wht_pos_min": 0.012167089618742466
+ },
+ {
+  "key": "hc_lanczos3_p100000_d3",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 90107.765625,
+  "sci_abs_max": 90107.765625,
+  "neg_frac": 0.0,
+  "wht_min": -0.5114516615867615,
+  "wht_max": 1.1944003105163574,
+  "wht_pos_min": 0.05475190281867981
+ },
+ {
+  "key": "hc_lanczos2_border6",
+  "kernel": "lanczos2",
+  "sci_min": 100.0,
+  "sci_max": 100100.0,
+  "sci_abs_max": 100100.0,
+  "neg_frac": 0.0,
+  "wht_min": -0.07282517105340958,
+  "wht_max": 0.32691702246665955,
+  "wht_pos_min": 0.004055696539580822
+ },
+ {
+  "key": "hc_lanczos3_border6",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 96572.28125,
+  "sci_abs_max": 96572.28125,
+  "neg_frac": 0.0,
+  "wht_min": -0.17048388719558716,
+  "wht_max": 0.39813345670700073,
+  "wht_pos_min": 0.018250634893774986
+ },
+ {
+  "key": "hc_lanczos2_border3",
+  "kernel": "lanczos2",
+  "sci_min": 100.0,
+  "sci_max": 100100.0,
+  "sci_abs_max": 100100.0,
+  "neg_frac": 0.0,
+  "wht_min": -0.07282517105340958,
+  "wht_max": 0.32691702246665955,
+  "wht_pos_min": 0.004055696539580822
+ },
+ {
+  "key": "hc_lanczos3_border3",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 96572.28125,
+  "sci_abs_max": 96572.28125,
+  "neg_frac": 0.0,
+  "wht_min": -0.17048388719558716,
+  "wht_max": 0.39813345670700073,
+  "wht_pos_min": 0.018250634893774986
+ },
+ {
+  "key": "hc_lanczos2_double",
+  "kernel": "lanczos2",
+  "sci_min": 99.9999771118164,
+  "sci_max": 65758.9453125,
+  "sci_abs_max": 65758.9453125,
+  "neg_frac": 0.0,
+  "wht_min": -0.14565034210681915,
+  "wht_max": 0.6538340449333191,
+  "wht_pos_min": 0.008111393079161644
+ },
+ {
+  "key": "hc_lanczos3_double",
+  "kernel": "lanczos3",
+  "sci_min": 99.99999237060547,
+  "sci_max": 64866.4609375,
+  "sci_abs_max": 64866.4609375,
+  "neg_frac": 0.0,
+  "wht_min": -0.3409677743911743,
+  "wht_max": 0.7962669134140015,
+  "wht_pos_min": 0.03650126978754997
+ }
+]

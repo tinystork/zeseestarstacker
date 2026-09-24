@@ -1,0 +1,54 @@
+[
+ {
+  "bin": "<=0",
+  "count": 9216,
+  "sci_abs_max": 78721.1328125,
+  "sci_abs_p99": 2133.473510742208,
+  "sci_abs_p95": 100.00032234191895,
+  "sci_neg_fraction": 0.0,
+  "sci_median": 99.99999237060547
+ },
+ {
+  "bin": "(0,1e-9]",
+  "count": 0
+ },
+ {
+  "bin": "(1e-9,1e-7]",
+  "count": 0
+ },
+ {
+  "bin": "(1e-7,1e-5]",
+  "count": 0
+ },
+ {
+  "bin": "(1e-5,1e-3]",
+  "count": 0
+ },
+ {
+  "bin": "(1e-3,1e-1]",
+  "count": 1,
+  "sci_abs_max": 100.0,
+  "sci_abs_p99": 100.0,
+  "sci_abs_p95": 100.0,
+  "sci_neg_fraction": 0.0,
+  "sci_median": 100.0
+ },
+ {
+  "bin": "(1e-1,1]",
+  "count": 2303,
+  "sci_abs_max": 62742.8828125,
+  "sci_abs_p99": 2482.3277636718767,
+  "sci_abs_p95": 100.00101470947266,
+  "sci_neg_fraction": 0.0,
+  "sci_median": 100.00001525878906
+ },
+ {
+  "bin": ">1",
+  "count": 9216,
+  "sci_abs_max": 90107.765625,
+  "sci_abs_p99": 1409.190979003984,
+  "sci_abs_p95": 100.00018310546875,
+  "sci_neg_fraction": 0.0,
+  "sci_median": 100.00000762939453
+ }
+]
