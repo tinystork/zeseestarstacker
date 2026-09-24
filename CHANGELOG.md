@@ -2,6 +2,14 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.5.4] — Phoenix consedit
+
+- Lower the conservative CFA isolated-spike ratio from 20 to 18 so the
+  recurring M74 photosite at `(2284,1079)` is corrected in all 44 qualified
+  frames while preserving the strict isolation boundary.
+- Keep healthy stellar structure unchanged across the 336-case synthetic PSF
+  matrix and the bounded real-star/background validation set.
+
 ## [8.5.3] — Phoenix consedit
 
 - Correct gross isolated hot photosites in the Bayer/CFA domain before
