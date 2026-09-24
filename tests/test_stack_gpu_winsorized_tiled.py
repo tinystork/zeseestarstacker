@@ -282,6 +282,11 @@ _add_cases(560, [22], {"winsor_limits": (0.05, 0.0), "apply_rewinsor": False})
 def test_row_bands_bitwise_full_equals_tiled(tag, seed, n, color, weighted, kw):
     H, W = _frame_dims(seed, color)
     a = _make_stack(n, (H, W), channels=3 if color else None, seed=seed)
+    limits = kw.get("winsor_limits", DEFAULT_LIMITS)
+    if _winsor_zero_rank_regime(limits, n):
+        # Zero-rank fast path: the one-pass guard rejects only gross isolated
+        # extremes, so inject a deterministic unambiguous gross witness.
+        a[3, H // 2, W // 2] = 1e6
     w = _weights(n, seed=11) if weighted else None
     cpu = _cpu(a, w, **kw)
     full = _gpu_full(a, w, **kw)
@@ -646,12 +651,14 @@ def test_micro_tiles_stay_within_float32_placement_tolerance(
 
 
 @pytest.mark.parametrize("n", [12, 19])
-def test_tiled_fastpath_skips_all_winsor_sorts_per_tile(n, monkeypatch):
-    """N_batch <= 19 (default limits): the tiled run takes the Phase C
-    zero-rank fast path on EVERY tile — not one call to the winsorize
-    axis-0 sort helper nor to the survivor-bound sort helper — while the
-    result stays CPU-exact and exercises real rejection."""
+def test_tiled_fastpath_skips_iterative_winsor_sort_per_tile(n, monkeypatch):
+    """N_batch <= 19 (default limits): the tiled run takes the all-zero-rank
+    fast path on EVERY tile — the per-iteration winsor sort helper is NOT
+    called (the one-pass gross-outlier guard decides those columns) — while
+    the survivor-bound sort (apply_rewinsor) runs once and the result stays
+    CPU-exact and exercises real rejection."""
     a = _make_stack(n, (40, 96), seed=800 + n)
+    a[3, 20, 48] = 1e6  # deterministic gross isolated outlier (guard rejects it)
     w = _weights(n, seed=21)
     calls = {"axis0": 0, "bounds": 0}
     real_axis0 = sgp._winsorize_axis0_cp
@@ -670,8 +677,11 @@ def test_tiled_fastpath_skips_all_winsor_sorts_per_tile(n, monkeypatch):
     cpu = _cpu(a, w)
     full = _gpu_full(a, w)
     tiled = _gpu_tiled(a, w, 16)
-    assert calls == {"axis0": 0, "bounds": 0}, calls
-    assert float(cpu[2]) > 0.0, "test design: expected real rejections"
+    # Topology: the untiled full GPU calls the survivor-bound sort once; the
+    # tiled driver calls it once PER TILE (derived from the decomposition).
+    n_tiles = len(_winsor_tile_slices((40, 96), 16))
+    assert calls == {"axis0": 0, "bounds": 1 + n_tiles}, calls
+    assert float(cpu[2]) > 0.0, "test design: gross witness must be rejected"
     _assert_bitwise_equal("tiled fastpath n=%d" % n, cpu, full, tiled)
 
 
@@ -753,10 +763,12 @@ def test_tiled_extreme_limits_index_error_matches_untiled():
 
 
 def test_tiled_zero_limits_any_n_fastpath(monkeypatch):
-    """(0.0, 0.0) limits: fast path for ANY N on the tiled path, bitwise
+    """(0.0, 0.0) limits: all-zero-rank fast path for ANY N on the tiled path
+    (per-iteration winsor sort skipped; survivor-bound sort retained), bitwise
     with the untiled twin."""
     n = 30
     a = _make_stack(n, (40, 96), seed=807)
+    a[3, 20, 48] = 1e6  # deterministic gross isolated outlier (guard rejects it)
     kw = {"winsor_limits": (0.0, 0.0)}
     calls = {"axis0": 0, "bounds": 0}
     real_axis0 = sgp._winsorize_axis0_cp
@@ -775,7 +787,9 @@ def test_tiled_zero_limits_any_n_fastpath(monkeypatch):
     cpu = _cpu(a, None, **kw)
     full = _gpu_full(a, None, **kw)
     tiled = _gpu_tiled(a, None, 16, **kw)
-    assert calls == {"axis0": 0, "bounds": 0}, calls
+    n_tiles = len(_winsor_tile_slices((40, 96), 16))
+    assert calls == {"axis0": 0, "bounds": 1 + n_tiles}, calls
+    assert float(cpu[2]) > 0.0, "test design: gross witness must be rejected"
     _assert_bitwise_equal("tiled zero limits n=30", cpu, full, tiled)
 
 
@@ -809,3 +823,41 @@ def test_zero_rank_regime_identical_across_tiles():
         (50, (0.03, 0.03), False),
     ]:
         assert _winsor_zero_rank_regime(limits, n) is expected
+
+
+# ---------------------------------------------------------------------------
+# R3: small-N normalized witness — full vs tiled bitwise + CPU parity
+# ---------------------------------------------------------------------------
+def test_tiled_small_n_normalized_witness():
+    """N=5 normalized witness (isolated .9978 over a ~.04 background in every
+    column) reduces identically full vs tiled (bitwise) and matches the CPU,
+    with the one-pass guard rejecting exactly the .9978 frame (20%%)."""
+    n = 5
+    H, W = 4, 96
+    a = np.full((n, H, W), 0.04, dtype=np.float32)
+    a[0, :, :] = 0.0401
+    a[1, :, :] = 0.0399
+    a[2, :, :] = 0.0402
+    a[4, :, :] = 0.9978
+    cpu = _cpu(a, None)
+    full = _gpu_full(a, None)
+    assert cpu[2] == pytest.approx(20.0)
+    for ts in (1, 2, (2, 32)):
+        tiled = _gpu_tiled(a, None, ts)
+        _assert_bitwise_equal("small_n_normalized ts=%s" % (ts,), cpu, full, tiled)
+
+
+def test_tiled_small_n_normalized_scaled_parity():
+    """The small-N normalized witness, scaled, stays full-vs-tiled bitwise
+    and CPU-exact (the guard classification is scale-invariant)."""
+    base = [0.0400, 0.0401, 0.0399, 0.0402, 0.9978]
+    H, W = 4, 96
+    for scale in (1000.0, 65535.0, 1e-3):
+        a = np.empty((5, H, W), dtype=np.float32)
+        for i, v in enumerate(base):
+            a[i, :, :] = v * scale
+        cpu = _cpu(a, None)
+        full = _gpu_full(a, None)
+        assert cpu[2] == pytest.approx(20.0)
+        tiled = _gpu_tiled(a, None, 2)
+        _assert_bitwise_equal("small_n_scaled_%.4g ts=2" % scale, cpu, full, tiled)

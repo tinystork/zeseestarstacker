@@ -2490,7 +2490,11 @@ except ImportError as e:
     raise
 # Core Hot Pixels (Utilisé dans _worker -> _process_file)
 try:
-    from ..core.hot_pixels import detect_and_correct_hot_pixels
+    from ..core.hot_pixels import (
+        detect_and_correct_hot_pixels,
+        detect_and_correct_hot_pixels_cfa,
+        is_bayer_pattern,
+    )
 
     logger.debug("Import detect_and_correct_hot_pixels OK.")
 except ImportError as e:
@@ -11179,7 +11183,15 @@ class SeestarQueuedStacker:
             )
 
             is_color_after_preprocessing = False
+            cfa_hot_pixel_corrected = False
             if prepared_img_after_initial_proc.ndim == 2:
+                # CFA recognition is header-driven only: ``BAYERPAT`` from the
+                # FITS header (or the user-configured ``self.bayer_pattern``
+                # default when the header key is absent).  Only one of the four
+                # 2x2 Bayer patterns (GRBG/RGGB/GBRG/BGGR) triggers the
+                # CFA-before-debayer correction; there is NO inference from the
+                # array shape, and the configured fallback is preserved (never
+                # removed).
                 bayer_pattern_from_header = header_final_pour_retour.get(
                     "BAYERPAT", self.bayer_pattern
                 )
@@ -11189,6 +11201,37 @@ class SeestarQueuedStacker:
                     else self.bayer_pattern.upper()
                 )
                 if pattern_upper in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                    # CFA-domain hot-pixel correction BEFORE debayer: the
+                    # input is reliably a Bayer/CFA mosaic, so defective
+                    # photosites are detected/corrected in the CFA domain
+                    # (same-color neighbours only).  The post-debayer RGB
+                    # hot-pixel correction is skipped for this frame to
+                    # avoid a destructive double pass.
+                    if self.correct_hot_pixels:
+                        try:
+                            (
+                                prepared_img_after_initial_proc,
+                                cfa_cosmetic,
+                            ) = detect_and_correct_hot_pixels_cfa(
+                                prepared_img_after_initial_proc,
+                                pattern_upper,
+                                self.hot_pixel_threshold,
+                                self.neighborhood_size,
+                            )
+                            cfa_hot_pixel_corrected = True
+                            logger.debug(
+                                "CFA_COSMETIC enabled=%s pattern=%s "
+                                "candidates=%d corrected=%d",
+                                cfa_cosmetic["enabled"],
+                                cfa_cosmetic["pattern"],
+                                cfa_cosmetic["candidates"],
+                                cfa_cosmetic["corrected"],
+                            )
+                        except Exception as e_cfa:
+                            cfa_hot_pixel_corrected = False
+                            logger.debug(
+                                f"WARN QM [_process_file]: Erreur CFA HP: {e_cfa}"
+                            )
                     prepared_img_after_initial_proc = debayer_image(
                         prepared_img_after_initial_proc, pattern_upper
                     )
@@ -11222,7 +11265,10 @@ class SeestarQueuedStacker:
                 except Exception as e_wb:
                     logger.debug(f"WARN QM [_process_file]: Erreur WB basique: {e_wb}")
 
-            if self.correct_hot_pixels:
+            # Skip the destructive post-debayer RGB hot-pixel correction for
+            # frames already corrected in the CFA domain; RGB/non-CFA inputs
+            # keep the existing behavior unchanged.
+            if self.correct_hot_pixels and not cfa_hot_pixel_corrected:
                 prepared_img_after_initial_proc = detect_and_correct_hot_pixels(
                     prepared_img_after_initial_proc,
                     self.hot_pixel_threshold,

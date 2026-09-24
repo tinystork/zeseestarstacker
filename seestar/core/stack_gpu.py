@@ -83,6 +83,10 @@ import time as _time
 
 import numpy as np
 
+import logging as _logging
+
+logger = _logging.getLogger(__name__)
+
 __all__ = [
     "stack_kappa_sigma_gpu",
     "stack_linear_fit_clip_gpu",
@@ -422,6 +426,115 @@ def _winsor_zero_rank_regime(limits, n_batch):
         return False
     n = int(n_batch)
     return _math.floor(float(low) * n) == 0 and _math.floor(float(high) * n) == 0
+
+
+def _winsor_zero_rank_cols_cp(cp, limits, n_valid_col):
+    """CuPy twin of ``stack_methods._winsor_zero_rank_cols`` (per column).
+
+    ``floor(low * n) == 0`` and ``floor(high * n) == 0`` for ``n =
+    n_valid_col`` (the ACTUAL per-column valid population).  Negative /
+    non-finite limits never qualify (no column zero-rank).
+    """
+    low, high = float(limits[0]), float(limits[1])
+    if not (low >= 0.0 and high >= 0.0):
+        return cp.zeros_like(n_valid_col, dtype=bool)
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return cp.zeros_like(n_valid_col, dtype=bool)
+    return (cp.floor(low * n_valid_col) == 0) & (
+        cp.floor(high * n_valid_col) == 0
+    )
+
+
+def _gross_outlier_keep_cp(cp, arr, valid):
+    """CuPy twin of ``stack_methods._gross_outlier_keep`` (one-pass guard).
+
+    Same per-column extreme-gap-vs-survivor-consensus rule (gap factor 100) AND
+    local relative deviation rule (``|extreme - median| > 3*|median|``, median
+    != 0), computed on the device (never a CPU reduction / ``cp.asnumpy``).
+    Both criteria are invariant under positive multiplicative scaling (no
+    absolute unit floor, no unit-dependent epsilon).  Returns a boolean
+    keep-mask shaped like ``arr``; missing (NaN) samples are excluded.
+    """
+    n_valid = cp.count_nonzero(valid, axis=0)
+    if not bool(cp.any(n_valid >= 3)):
+        # No column has enough valid samples to guard (N < 3 or all columns
+        # n_valid <= 2): no safe rejection, keep everything.
+        return valid
+    # Sort valid samples ascending; NaN -> +inf (kept out of the extremes).
+    sort_key = cp.where(valid, arr, cp.float32(cp.inf))
+    sorted_vals = cp.sort(sort_key, axis=0)  # (N, ...)
+    # Free the sort key early: only the sorted values are needed downstream, and
+    # releasing the (N, H, W) key lets the CuPy pool reuse that block (avoids the
+    # full-frame OOM on 2 GB cards).
+    del sort_key
+
+    # Extract every value needed downstream as independent (H, W) arrays (min1
+    # is copied to break the slice view) so the (N, H, W) sort output can be
+    # released immediately, keeping the peak footprint low on 2 GB cards.
+    min1 = sorted_vals[0].copy()
+    min2 = sorted_vals[1]
+    max1_idx = cp.clip(n_valid - 1, 0, None)
+    max2_idx = cp.clip(n_valid - 2, 0, None)
+    max1 = cp.take_along_axis(sorted_vals, max1_idx[cp.newaxis], axis=0)[0]
+    max2 = cp.take_along_axis(sorted_vals, max2_idx[cp.newaxis], axis=0)[0]
+    lo = cp.clip((n_valid - 1) // 2, 0, None)
+    hi = cp.clip(n_valid // 2, 0, None)
+    lo_val = cp.take_along_axis(sorted_vals, lo[cp.newaxis, ...], axis=0)[0]
+    hi_val = cp.take_along_axis(sorted_vals, hi[cp.newaxis, ...], axis=0)[0]
+
+    guardable = n_valid >= 3
+
+    # Mixed tiles can contain guardable and all-invalid columns.  Compute the
+    # gaps/spans on SAFE finite operands: ``cp.where`` zeros the +inf sentinels
+    # on the non-guardable columns so no inf-inf NaN is ever produced (no
+    # ``cp.errstate``, which CuPy 14.2 does not support), then mask the
+    # rejection with ``guardable``.  Mirrors the CPU exactly.
+    max1_s = cp.where(guardable, max1, cp.float32(0.0))
+    max2_s = cp.where(guardable, max2, cp.float32(0.0))
+    min1_s = cp.where(guardable, min1, cp.float32(0.0))
+    min2_s = cp.where(guardable, min2, cp.float32(0.0))
+    del sorted_vals, min2  # release the (N, H, W) sort output (min1 is a copy)
+    high_gap = max1_s - max2_s
+    high_span = max2_s - min1_s
+    low_gap = min2_s - min1_s
+    low_span = max1_s - min2_s
+
+    high_a = high_gap > cp.float32(100.0) * high_span
+    low_a = low_gap > cp.float32(100.0) * low_span
+
+    # Local relative deviation criterion (scale-invariant).  ``median == 0``
+    # has no finite relative scale -> conservative (no deviation rejection).
+    # Median derived DIRECTLY from sorted_vals (no second nanmedian
+    # masked-array/sort allocation): sorted_vals[0:n_valid] hold the valid
+    # samples ascending, so the median is the middle value (odd n_valid) or the
+    # mean of the two middle values (even n_valid) — exact cp.nanmedian
+    # semantics for every valid-count case.
+    median = cp.where(
+        (n_valid % 2) == 1, lo_val, (lo_val + hi_val) * cp.float32(0.5)
+    )
+    median = cp.where(n_valid == 0, cp.float32(0.0), median)
+    median_abs = cp.abs(median)
+    has_scale = median_abs > 0
+    dev_threshold = cp.float32(3.0) * median_abs
+    high_b = has_scale & (cp.abs(max1 - median) > dev_threshold)
+    low_b = has_scale & (cp.abs(min1 - median) > dev_threshold)
+
+    reject_high = high_a & high_b & guardable
+    reject_low = low_a & low_b & guardable
+
+    is_max1 = valid & (arr == max1[cp.newaxis, ...])
+    is_min1 = valid & (arr == min1[cp.newaxis, ...])
+    reject = (is_max1 & reject_high[cp.newaxis, ...]) | (
+        is_min1 & reject_low[cp.newaxis, ...]
+    )
+    keep = valid & ~reject
+
+    n_rej = int(cp.count_nonzero(reject))
+    if n_rej:
+        logger.debug(
+            "ROBUST_SMALL_N mode=gross_outlier_guard (gpu) rejected=%d", n_rej
+        )
+    return keep
 
 
 def _winsorize_bounds_minmax_cp(cp, arr, mask):
@@ -766,79 +879,93 @@ def stack_winsorized_sigma_gpu(
     # and the winsor rank is zero everywhere -> winsorization is the
     # identity.  All other inputs keep the exact slow path below.
     n_batch = int(arr.shape[0])
-    zero_rank = _winsor_zero_rank_regime(winsor_limits, n_batch)
-    _p_note("zero_rank_fastpath=%s n_batch=%d" % (zero_rank, n_batch))
-    if zero_rank:
-        _p_event("fastpath_decided")
-    kappa_iter = float(kappa)
 
-    for itr in range(int(max_iters)):
-        _p_event("iter%d_loop_top" % itr)
-        arr_masked = cp.where(mask, arr, cp.float32(cp.nan))
-        _p_event("iter%d_masked" % itr)
-        if zero_rank:
-            # Zero-rank regime: winsorization is the identity, so the
-            # per-iteration sort block of _winsorize_axis0_cp (argsort +
-            # take_along_axis + inverse-rank argsort + replacement) is
-            # skipped and the location/scale statistics are computed
-            # directly on the masked stack.  The slow path would return an
-            # exact copy of arr_masked here, so mu_w/sigma_w and everything
-            # downstream are bit-identical.
-            arr_w_data = arr_masked
-            _p_event("iter%d_winsor_skipped_zero_rank" % itr)
-        else:
+    # Per-column zero-rank classification from the ORIGINAL valid population
+    # (registration NaNs / support mask), never the nominal N_batch.
+    n_valid_col = cp.count_nonzero(valid, axis=0)
+    zero_rank_cols = _winsor_zero_rank_cols_cp(cp, winsor_limits, n_valid_col)
+    rank_cols = ~zero_rank_cols
+    n_zero_rank = int(cp.count_nonzero(zero_rank_cols))
+    _p_note("gross_guard_zero_rank_cols=%d n_batch=%d" % (n_zero_rank, n_batch))
+    if n_zero_rank:
+        logger.debug(
+            "ROBUST_SMALL_N mode=gross_outlier_guard zero_rank_cols=%d "
+            "rank_cols=%d n_batch=%d",
+            n_zero_rank,
+            int(cp.count_nonzero(rank_cols)),
+            n_batch,
+        )
+
+    # One-pass gross-outlier guard (zero-rank columns only).
+    guard_keep = (
+        _gross_outlier_keep_cp(cp, arr, valid) if n_zero_rank else valid
+    )
+
+    # Historical Winsor on rank-sufficient columns only (zero-rank columns
+    # NaN-masked out so they don't feed the schedule / kappa decay).
+    # All-zero-rank fast path: no rank columns -> the Winsor loop is skipped
+    # entirely (the guard alone decides the zero-rank columns).
+    rank_cols3 = rank_cols[cp.newaxis, ...]
+    if bool(cp.any(rank_cols)):
+        arr_w = cp.where(rank_cols3, arr, cp.float32(cp.nan))
+        mask_w = ~cp.isnan(arr_w)
+
+        kappa_iter = float(kappa)
+        for itr in range(int(max_iters)):
+            _p_event("iter%d_loop_top" % itr)
+            arr_masked = cp.where(mask_w, arr_w, cp.float32(cp.nan))
+            _p_event("iter%d_masked" % itr)
             arr_w_data = _winsorize_axis0_cp(cp, arr_masked, winsor_limits)
             _p_event("iter%d_winsorized" % itr)
 
-        mu_w = cp.nanmean(arr_w_data, axis=0)
-        _p_event("iter%d_nanmean" % itr)
-        sigma_w = cp.nanstd(arr_w_data, axis=0, ddof=1)
-        _p_event("iter%d_nanstd" % itr)
+            mu_w = cp.nanmean(arr_w_data, axis=0)
+            _p_event("iter%d_nanmean" % itr)
+            sigma_w = cp.nanstd(arr_w_data, axis=0, ddof=1)
+            _p_event("iter%d_nanstd" % itr)
 
-        # Columns with <= 1 valid sample have undefined ddof=1 std -> treat as
-        # no-rejection identity (sigma == 0), identical to the CPU guard.
-        n_valid_col = cp.count_nonzero(mask, axis=0)
-        sigma_w = cp.where(
-            n_valid_col <= 1, cp.float32(0.0), sigma_w
-        )
-        _p_event("iter%d_sigma_guard" % itr)
+            # Columns with <= 1 valid sample have undefined ddof=1 std ->
+            # treat as no-rejection identity (sigma == 0), identical to the
+            # CPU guard.
+            n_valid_col = cp.count_nonzero(mask_w, axis=0)
+            sigma_w = cp.where(
+                n_valid_col <= 1, cp.float32(0.0), sigma_w
+            )
+            _p_event("iter%d_sigma_guard" % itr)
 
-        low = mu_w - cp.float32(kappa_iter) * sigma_w
-        high = mu_w + cp.float32(kappa_iter) * sigma_w
-        new_mask = mask & (arr >= low) & (arr <= high)
-        _p_event("iter%d_new_mask" % itr)
-        _p_wall_start("iter%d_sync_nrej" % itr)
-        n_rej = int(cp.count_nonzero(mask)) - int(cp.count_nonzero(new_mask))
-        _p_wall_end()
-        _p_note("iter=%d n_rej=%d" % (itr, n_rej))
-        _p_event("iter%d_nrej_sync" % itr)
-        mask = new_mask
-        if n_rej == 0:
-            _p_note("early_exit_iteration=%d" % itr)
-            break
-        if kappa_decay < 1.0:
-            kappa_iter = kappa * (kappa_decay ** (itr + 1))
+            low = mu_w - cp.float32(kappa_iter) * sigma_w
+            high = mu_w + cp.float32(kappa_iter) * sigma_w
+            new_mask = mask_w & (arr_w >= low) & (arr_w <= high)
+            _p_event("iter%d_new_mask" % itr)
+            _p_wall_start("iter%d_sync_nrej" % itr)
+            n_rej = int(cp.count_nonzero(mask_w)) - int(cp.count_nonzero(new_mask))
+            _p_wall_end()
+            _p_note("iter=%d n_rej=%d" % (itr, n_rej))
+            _p_event("iter%d_nrej_sync" % itr)
+            mask_w = new_mask
+            if n_rej == 0:
+                _p_note("early_exit_iteration=%d" % itr)
+                break
+            if kappa_decay < 1.0:
+                kappa_iter = kappa * (kappa_decay ** (itr + 1))
+        else:
+            _p_note("max_iters_reached=%d" % int(max_iters))
     else:
-        _p_note("max_iters_reached=%d" % int(max_iters))
+        mask_w = valid & rank_cols3  # all-False (no rank columns)
+
+    # Combine: zero-rank columns use the frozen guard mask; rank-sufficient
+    # columns use the iterative Winsor mask.
+    mask = cp.where(rank_cols3, mask_w, guard_keep)
 
     if apply_rewinsor:
         # Rejected-but-valid samples are substituted with the winsorized bound
         # of the SURVIVOR distribution; survivors are preserved exactly;
-        # missing samples remain NaN.  Same as the CPU branch.
-        if zero_rank:
-            # Survivor counts are also <= N_batch, so the survivor rank
-            # floors are zero too: the CPU _winsorize_bounds order
-            # statistics degenerate to the survivor min (low) / max (high).
-            # The min/max reduction preserves the reference degenerate
-            # behavior exactly (empty survivor column -> +inf sentinel on
-            # both sides); no sort is performed.
-            low_b, high_b = _winsorize_bounds_minmax_cp(cp, arr, mask)
-            _p_event("rewinsor_bounds_minmax")
-        else:
-            low_b, high_b = _winsorize_bounds_cp(
-                cp, cp.where(mask, arr, cp.float32(cp.nan)), winsor_limits
-            )
-            _p_event("rewinsor_bounds_done")
+        # missing samples remain NaN.  Same as the CPU branch.  The bounds
+        # are per-column (survivor order statistics); zero-rank columns
+        # degenerate to survivor min/max exactly like the CPU.
+        low_b, high_b = _winsorize_bounds_cp(
+            cp, cp.where(mask, arr, cp.float32(cp.nan)), winsor_limits
+        )
+        _p_event("rewinsor_bounds_done")
         clipped = cp.clip(arr, low_b, high_b)
         _p_event("rewinsor_clip")
         arr_final = cp.where(
@@ -1037,7 +1164,6 @@ def _winsorized_tile_iterations_cp(
     arr,
     kappa,
     winsor_limits,
-    zero_rank,
     n_iters,
     kappa_decay,
     collect_counts,
@@ -1046,50 +1172,62 @@ def _winsorized_tile_iterations_cp(
     """Run ``n_iters`` schedule iterations on one device tile (full stack
     axis preserved) with NO early exit; mirror of the reference loop body.
 
-    ``arr``: device ``(N_batch, tile_h, tile_w[, C])`` float32 (contiguous
-    tile copy).  Returns ``(final_mask, counts)`` where ``counts`` is a
-    list of ``n_iters`` per-iteration LOCAL rejection counts when
-    ``collect_counts`` else ``None`` (pass 2 skips the counting syncs).
-    ``zero_rank`` selects the Phase C exact fast path per iteration
-    exactly like the untiled twin; otherwise the Phase D clip/sort slow
-    path (``_winsorize_axis0_cp``, including its overlap rank fallback and
-    extreme-limit ``IndexError``) runs on the tile.
+    Per-column zero-rank classification from the ORIGINAL valid population:
+    zero-rank columns get the one-pass gross-outlier guard (frozen, never
+    consuming the global schedule); rank-sufficient columns run the historical
+    Winsor iterations (their per-iteration rejection counts feed the
+    schedule).  Returns ``(final_mask, counts)``.
     """
-    mask = ~cp.isnan(arr)
-    kappas = _winsor_schedule_kappas(kappa, kappa_decay, n_iters)
-    counts = [] if collect_counts else None
-    for itr in range(int(n_iters)):
-        kappa_iter = kappas[itr]
-        _p_event("tiled_%s_iter%d" % (tile_tag, itr))
-        arr_masked = cp.where(mask, arr, cp.float32(cp.nan))
-        if zero_rank:
-            # Phase C zero-rank regime: winsorization is the identity on
-            # every pixel (floor(low*N_batch) == floor(high*N_batch) == 0),
-            # so the per-iteration sort block is skipped, exactly like the
-            # untiled twin.
-            arr_w_data = arr_masked
-        else:
+    valid = ~cp.isnan(arr)
+    n_valid_col = cp.count_nonzero(valid, axis=0)
+    zero_rank_cols = _winsor_zero_rank_cols_cp(cp, winsor_limits, n_valid_col)
+    rank_cols = ~zero_rank_cols
+    rank_cols3 = rank_cols[cp.newaxis, ...]
+
+    # One-pass gross-outlier guard (zero-rank columns only).
+    guard_keep = (
+        _gross_outlier_keep_cp(cp, arr, valid)
+        if bool(cp.any(zero_rank_cols))
+        else valid
+    )
+
+    # Historical Winsor iterations on rank-sufficient columns only (the
+    # all-zero-rank fast path skips the loop entirely).
+    if bool(cp.any(rank_cols)):
+        arr_w = cp.where(rank_cols3, arr, cp.float32(cp.nan))
+        mask_w = ~cp.isnan(arr_w)
+        kappas = _winsor_schedule_kappas(kappa, kappa_decay, n_iters)
+        counts = [] if collect_counts else None
+        for itr in range(int(n_iters)):
+            kappa_iter = kappas[itr]
+            _p_event("tiled_%s_iter%d" % (tile_tag, itr))
+            arr_masked = cp.where(mask_w, arr_w, cp.float32(cp.nan))
             arr_w_data = _winsorize_axis0_cp(cp, arr_masked, winsor_limits)
-        mu_w = cp.nanmean(arr_w_data, axis=0)
-        sigma_w = cp.nanstd(arr_w_data, axis=0, ddof=1)
-        n_valid_col = cp.count_nonzero(mask, axis=0)
-        sigma_w = cp.where(n_valid_col <= 1, cp.float32(0.0), sigma_w)
-        low = mu_w - cp.float32(kappa_iter) * sigma_w
-        high = mu_w + cp.float32(kappa_iter) * sigma_w
-        new_mask = mask & (arr >= low) & (arr <= high)
-        if collect_counts:
-            _p_wall_start("tiled_%s_nrej_sync" % tile_tag)
-            n_rej = int(cp.count_nonzero(mask)) - int(
-                cp.count_nonzero(new_mask)
-            )
-            _p_wall_end()
-            counts.append(n_rej)
-        mask = new_mask
-    return mask, counts
+            mu_w = cp.nanmean(arr_w_data, axis=0)
+            sigma_w = cp.nanstd(arr_w_data, axis=0, ddof=1)
+            n_valid_col = cp.count_nonzero(mask_w, axis=0)
+            sigma_w = cp.where(n_valid_col <= 1, cp.float32(0.0), sigma_w)
+            low = mu_w - cp.float32(kappa_iter) * sigma_w
+            high = mu_w + cp.float32(kappa_iter) * sigma_w
+            new_mask = mask_w & (arr_w >= low) & (arr_w <= high)
+            if collect_counts:
+                _p_wall_start("tiled_%s_nrej_sync" % tile_tag)
+                n_rej = int(cp.count_nonzero(mask_w)) - int(
+                    cp.count_nonzero(new_mask)
+                )
+                _p_wall_end()
+                counts.append(n_rej)
+            mask_w = new_mask
+    else:
+        mask_w = valid & rank_cols3  # all-False (no rank columns)
+        counts = [0] * int(n_iters) if collect_counts else None
+
+    final_mask = cp.where(rank_cols3, mask_w, guard_keep)
+    return final_mask, counts
 
 
 def _winsorized_tile_finalize_cp(
-    cp, arr, mask, valid, weights, apply_rewinsor, zero_rank, winsor_limits
+    cp, arr, mask, valid, weights, apply_rewinsor, winsor_limits
 ):
     """Final tail of one tile: survivor ``apply_rewinsor`` substitution,
     contribution mask and the weighted / unweighted reduction — the exact
@@ -1098,13 +1236,9 @@ def _winsorized_tile_finalize_cp(
     extent ``(tile_h, tile_w[, C])``.
     """
     if apply_rewinsor:
-        if zero_rank:
-            # Phase C min/max degenerate survivor bounds (no sort).
-            low_b, high_b = _winsorize_bounds_minmax_cp(cp, arr, mask)
-        else:
-            low_b, high_b = _winsorize_bounds_cp(
-                cp, cp.where(mask, arr, cp.float32(cp.nan)), winsor_limits
-            )
+        low_b, high_b = _winsorize_bounds_cp(
+            cp, cp.where(mask, arr, cp.float32(cp.nan)), winsor_limits
+        )
         clipped = cp.clip(arr, low_b, high_b)
         arr_final = cp.where(
             mask, arr, cp.where(valid, clipped, cp.float32(cp.nan))
@@ -1198,10 +1332,9 @@ def stack_winsorized_sigma_gpu_tiled(
         )
     if _tile_order == "reversed":
         spatial = list(reversed(spatial))
-    zero_rank = _winsor_zero_rank_regime(winsor_limits, n_batch)
     _p_note(
-        "tiled n_batch=%d zero_rank_fastpath=%s n_tiles=%d tile_shape=%s"
-        % (n_batch, zero_rank, len(spatial), tile_shape)
+        "tiled n_batch=%d n_tiles=%d tile_shape=%s"
+        % (n_batch, len(spatial), tile_shape)
     )
 
     # ---- pass 1: schedule discovery (deterministic kappa schedule,
@@ -1222,7 +1355,6 @@ def stack_winsorized_sigma_gpu_tiled(
                 arr_t,
                 kappa,
                 winsor_limits,
-                zero_rank,
                 int(max_iters),
                 kappa_decay,
                 collect_counts=True,
@@ -1251,20 +1383,19 @@ def stack_winsorized_sigma_gpu_tiled(
         arr_t = cp.asarray(host[:, y0:y1, x0:x1])
         _p_event("tiled_p2_tile%d" % t)
         valid_t = ~cp.isnan(arr_t)
-        if z_eff == 0:
-            mask_t = valid_t  # reference iteration 0 rejected nothing
-        else:
-            mask_t, _ = _winsorized_tile_iterations_cp(
-                cp,
-                arr_t,
-                kappa,
-                winsor_limits,
-                zero_rank,
-                z_eff,
-                kappa_decay,
-                collect_counts=False,
-                tile_tag="p2_t%d" % t,
-            )
+        # Always run the tile helper: it applies the one-pass gross-outlier
+        # guard to zero-rank columns AND replays ``z_eff`` Winsor iterations
+        # on rank-sufficient columns (``z_eff == 0`` -> guard only, no Winsor).
+        mask_t, _ = _winsorized_tile_iterations_cp(
+            cp,
+            arr_t,
+            kappa,
+            winsor_limits,
+            z_eff,
+            kappa_decay,
+            collect_counts=False,
+            tile_tag="p2_t%d" % t,
+        )
         res_t, sumw_t = _winsorized_tile_finalize_cp(
             cp,
             arr_t,
@@ -1272,7 +1403,6 @@ def stack_winsorized_sigma_gpu_tiled(
             valid_t,
             weights,
             apply_rewinsor,
-            zero_rank,
             winsor_limits,
         )
         _p_wall_start("tiled_tile_counts_sync")

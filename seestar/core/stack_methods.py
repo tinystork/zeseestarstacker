@@ -33,6 +33,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Small-N gross-outlier guard (zero-rank regime) — constants
+# ---------------------------------------------------------------------------
+#
+# When a column's winsor rank is zero (``floor(low * n_valid) ==
+# floor(high * n_valid) == 0``), winsorization is the identity and the
+# canonical mean/std clip band is dominated by a single huge outlier: it lets
+# e.g. ``[100, 101, 99, 102, 63000]`` at N=5 through.  Those columns get a
+# ONE-PASS translation/scale-conservative gross-outlier guard (not a sigma
+# clip, never consuming kappa-decay iterations) — see ``_gross_outlier_keep``.
+#
+# The guard rejects only the lowest/highest extreme of a column, and only when
+# BOTH (a) its gap to the survivor consensus exceeds GAP_FACTOR x the survivor
+# span (a pure ratio: Gaussian noise has a top-order gap ~0.1x the survivor span
+# regardless of mean/sigma, while a gross isolated outlier has one in the
+# hundreds to thousands) AND (b) its deviation from the median exceeds
+# DEV_FACTOR x |median| — a LOCAL RELATIVE scale.  Both criteria are invariant
+# under positive multiplicative scaling (no ``max(|median|, 1)`` unit floor, no
+# unit-dependent epsilon): scaling the whole column scales |median|, the gaps
+# and the spans identically, so the decision is unchanged (normalized [0,1]
+# floats and raw 16-bit counts alike).  Criterion (b) is conservative at
+# median == 0 (there is no finite relative scale, so no deviation rejection) —
+# that is what keeps a small lone value over a flat zero consensus (e.g.
+# ``[0]*9 + [2]``) while still rejecting a gross outlier over a flat nonzero
+# consensus (``[100]*4 + [63000]``, deviation ~629x the median).
+_SMALL_N_GROSS_GAP_FACTOR = np.float32(100.0)
+_SMALL_N_GROSS_DEV_FACTOR = np.float32(3.0)
+
+
+# ---------------------------------------------------------------------------
 # Provenance contract
 # ---------------------------------------------------------------------------
 #
@@ -349,6 +378,132 @@ def _winsor_zero_rank_regime(limits, n):
     return math.floor(low * n_int) == 0 and math.floor(high * n_int) == 0
 
 
+def _winsor_zero_rank_cols(limits, n_valid_col):
+    """Per-column zero-rank mask (vectorized ``_winsor_zero_rank_regime``).
+
+    ``floor(low * n) == 0`` and ``floor(high * n) == 0`` for ``n =
+    n_valid_col`` (the ACTUAL valid population of each column, from the
+    original registration-NaN/support mask — never the nominal N_batch).
+    Negative or non-finite limits never qualify (no column is zero-rank).
+    Returns a boolean array shaped like ``n_valid_col``.
+    """
+    low, high = float(limits[0]), float(limits[1])
+    if not (low >= 0.0 and high >= 0.0):
+        return np.zeros_like(n_valid_col, dtype=bool)
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return np.zeros_like(n_valid_col, dtype=bool)
+    return (np.floor(low * n_valid_col) == 0) & (
+        np.floor(high * n_valid_col) == 0
+    )
+
+
+def _gross_outlier_keep(arr, valid):
+    """One-pass translation/scale-conservative gross-outlier guard (keep mask).
+
+    Rejects only the lowest / highest EXTREME of each column, and only when it
+    is BOTH (a) isolated by an extreme gap from the survivor consensus AND
+    (b) far from the median in a LOCAL RELATIVE sense:
+
+        high_gap = max1 - max2 ; high_survivor_span = max2 - min1
+        low_gap  = min2 - min1 ; low_survivor_span  = max1 - min2
+        reject extreme iff
+            extreme_gap > GAP_FACTOR * survivor_span   AND
+            |extreme - median| > DEV_FACTOR * |median|   (median != 0)
+
+    Both criteria are invariant under positive multiplicative scaling (no
+    ``max(|median|, 1)`` unit floor, no unit-dependent epsilon): the gap/span
+    ratio and the deviation/|median| ratio scale identically with the data.
+    Criterion (b) is conservative at ``median == 0`` (no finite relative scale,
+    so no deviation rejection) — that keeps a small lone value over a flat zero
+    consensus (``[0]*9 + [2]``) while still rejecting a gross outlier over a
+    flat nonzero consensus (``[100]*4 + [63000]``).  One pass only;
+    ``n_valid <= 2`` -> no safe rejection; ties (no unique extreme) -> no
+    rejection.
+    """
+    n_valid = np.count_nonzero(valid, axis=0)
+    if not np.any(n_valid >= 3):
+        # No column has enough valid samples to guard (N < 3 or all columns
+        # n_valid <= 2): no safe rejection, keep everything.
+        return valid
+    # Sort valid samples ascending; NaN -> +inf (kept out of the extremes).
+    sort_key = np.where(valid, arr, np.float32(np.inf))
+    sorted_vals = np.sort(sort_key, axis=0)  # (N, ...)
+    del sort_key
+
+    # Extract every value needed downstream as independent (H, W) arrays (min1
+    # is copied to break the slice view) so the (N, H, W) sort output can be
+    # released immediately, keeping the peak footprint low.
+    min1 = sorted_vals[0].copy()
+    min2 = sorted_vals[1]
+    max1_idx = np.clip(n_valid - 1, 0, None)
+    max2_idx = np.clip(n_valid - 2, 0, None)
+    max1 = np.take_along_axis(sorted_vals, max1_idx[np.newaxis], axis=0)[0]
+    max2 = np.take_along_axis(sorted_vals, max2_idx[np.newaxis], axis=0)[0]
+    lo = np.clip((n_valid - 1) // 2, 0, None)
+    hi = np.clip(n_valid // 2, 0, None)
+    lo_val = np.take_along_axis(sorted_vals, lo[np.newaxis, ...], axis=0)[0]
+    hi_val = np.take_along_axis(sorted_vals, hi[np.newaxis, ...], axis=0)[0]
+
+    guardable = n_valid >= 3
+
+    # Mixed tiles can contain both guardable columns and columns with no valid
+    # samples.  The latter use +inf sentinels above; compute the gaps/spans on
+    # SAFE finite operands (``np.where`` zeros the +inf sentinels on the
+    # non-guardable columns) so no inf-inf NaN is ever produced, then mask the
+    # rejection with ``guardable``.
+    max1_s = np.where(guardable, max1, np.float32(0.0))
+    max2_s = np.where(guardable, max2, np.float32(0.0))
+    min1_s = np.where(guardable, min1, np.float32(0.0))
+    min2_s = np.where(guardable, min2, np.float32(0.0))
+    del sorted_vals, min2  # release the (N, H, W) sort output (min1 is a copy)
+    high_gap = max1_s - max2_s
+    high_span = max2_s - min1_s
+    low_gap = min2_s - min1_s
+    low_span = max1_s - min2_s
+
+    high_a = high_gap > _SMALL_N_GROSS_GAP_FACTOR * high_span
+    low_a = low_gap > _SMALL_N_GROSS_GAP_FACTOR * low_span
+
+    # Local relative deviation criterion (scale-invariant): the extreme must be
+    # far from the median relative to |median|.  ``median == 0`` has no finite
+    # relative scale -> conservative (no deviation rejection).  The per-column
+    # median is derived DIRECTLY from the already-sorted valid values (no second
+    # nanmedian masked-array/sort allocation): the valid samples are
+    # ``sorted_vals[0:n_valid]`` ascending, so the median is the middle value
+    # (odd n_valid) or the mean of the two middle values (even n_valid) —
+    # exactly ``np.nanmedian`` semantics for every valid-count case.
+    median = np.where(
+        (n_valid % 2) == 1, lo_val, (lo_val + hi_val) * np.float32(0.5)
+    )
+    median = np.where(n_valid == 0, np.float32(0.0), median)
+    median_abs = np.abs(median)
+    has_scale = median_abs > 0
+    dev_threshold = _SMALL_N_GROSS_DEV_FACTOR * median_abs
+    with np.errstate(invalid="ignore"):
+        high_b = has_scale & (np.abs(max1 - median) > dev_threshold)
+        low_b = has_scale & (np.abs(min1 - median) > dev_threshold)
+
+    reject_high = high_a & high_b & guardable
+    reject_low = low_a & low_b & guardable
+
+    # A tie (max1 == max2, or min1 == min2) has a zero gap, so reject_* is
+    # already False; the equality match below is harmless in that case.
+    is_max1 = valid & (arr == max1[np.newaxis, ...])
+    is_min1 = valid & (arr == min1[np.newaxis, ...])
+    reject = (is_max1 & reject_high[np.newaxis, ...]) | (
+        is_min1 & reject_low[np.newaxis, ...]
+    )
+    keep = valid & ~reject
+
+    n_rej = int(np.count_nonzero(reject))
+    if n_rej:
+        logger.debug(
+            "ROBUST_SMALL_N mode=gross_outlier_guard rejected=%d", n_rej
+        )
+    return keep
+
+
+
 def _stack_winsorized_sigma_iter(
     images: Sequence[np.ndarray],
     weights: Optional[np.ndarray],
@@ -425,19 +580,58 @@ def _stack_winsorized_sigma_iter(
     valid = mask
     kappas = _winsor_schedule_kappas(kappa, kappa_decay, max_iters)
 
-    for itr in range(int(max_iters)):
-        new_mask, n_rej = _winsorized_sigma_iteration_body(
-            arr, mask, kappas[itr], winsor_limits
-        )
+    # Per-column zero-rank classification from the ORIGINAL valid population
+    # (registration NaNs / support mask), never the nominal N_batch.  A
+    # column with floor(low*n_valid)==floor(high*n_valid)==0 is zero-rank and
+    # gets the one-pass gross-outlier guard; a rank-sufficient column keeps
+    # the historical iterative Winsor path (even if its survivor count later
+    # drops below the boundary).
+    n_valid_col = np.count_nonzero(valid, axis=0)
+    zero_rank_cols = _winsor_zero_rank_cols(winsor_limits, n_valid_col)
+    rank_cols = ~zero_rank_cols
+    n_zero_rank = int(np.count_nonzero(zero_rank_cols))
+    if n_zero_rank:
         logger.debug(
-            "WinsorSig iter=%d : rej=%d (%.2f%%)",
-            itr + 1,
-            n_rej,
-            100.0 * n_rej / max(mask.size, 1),
+            "ROBUST_SMALL_N mode=gross_outlier_guard zero_rank_cols=%d "
+            "rank_cols=%d n_batch=%d",
+            n_zero_rank,
+            int(np.count_nonzero(rank_cols)),
+            len(images),
         )
-        mask = new_mask
-        if n_rej == 0:
-            break
+
+    # One-pass gross-outlier guard for the zero-rank columns (frozen once;
+    # never consumes kappa-decay iterations).
+    guard_keep = _gross_outlier_keep(arr, valid) if n_zero_rank else valid
+
+    # Historical iterative Winsor on the rank-sufficient columns only: the
+    # zero-rank columns are NaN-masked out so they do not contribute to the
+    # iteration count / early exit / kappa decay.  All-zero-rank fast path:
+    # no rank columns -> the Winsor loop is skipped entirely (the guard alone
+    # decides the zero-rank columns).
+    rank_cols3 = rank_cols[np.newaxis, ...]  # (1, H, W[, C]) broadcast
+    if np.any(rank_cols):
+        arr_w = np.where(rank_cols3, arr, np.nan)
+        mask_w = ~np.isnan(arr_w)  # == valid & rank_cols
+
+        for itr in range(int(max_iters)):
+            new_mask, n_rej = _winsorized_sigma_iteration_body(
+                arr_w, mask_w, kappas[itr], winsor_limits
+            )
+            logger.debug(
+                "WinsorSig iter=%d : rej=%d (%.2f%%)",
+                itr + 1,
+                n_rej,
+                100.0 * n_rej / max(mask_w.size, 1),
+            )
+            mask_w = new_mask
+            if n_rej == 0:
+                break
+    else:
+        mask_w = valid & rank_cols3  # all-False (no rank columns)
+
+    # Combine: zero-rank columns use the frozen guard mask; rank-sufficient
+    # columns use the iterative Winsor mask.
+    mask = np.where(rank_cols3, mask_w, guard_keep)
 
     if apply_rewinsor:
         # Rejected (valid but clipped) samples are substituted with the

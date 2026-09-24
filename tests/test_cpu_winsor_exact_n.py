@@ -62,24 +62,38 @@ def _legacy_winsorized_sigma_iter(
     arr = np.stack([im.astype(np.float32, copy=False) for im in images], axis=0)
     mask = ~np.isnan(arr)
     valid = mask
+    n_valid_col = np.count_nonzero(valid, axis=0)
+    zero_rank_cols = sm._winsor_zero_rank_cols(winsor_limits, n_valid_col)
+    rank_cols = ~zero_rank_cols
+    rank_cols3 = rank_cols[np.newaxis, ...]
+
+    guard_keep = (
+        sm._gross_outlier_keep(arr, valid)
+        if np.any(zero_rank_cols)
+        else valid
+    )
+
+    arr_w = np.where(rank_cols3, arr, np.nan)
+    mask_w = ~np.isnan(arr_w)
     kappa_iter = float(kappa)
     for itr in range(max_iters):
-        arr_masked = np.where(mask, arr, np.nan)
+        arr_masked = np.where(mask_w, arr_w, np.nan)
         arr_w_data = sm._winsorize_axis0_numpy(arr_masked, winsor_limits)
         with np.errstate(invalid="ignore"):
             mu_w = sm.NANMEAN(arr_w_data, axis=0)
             sigma_w = sm.NANSTD(arr_w_data, axis=0, ddof=1)
-        n_valid_col = np.count_nonzero(mask, axis=0)
+        n_valid_col = np.count_nonzero(mask_w, axis=0)
         sigma_w = np.where(n_valid_col <= 1, np.float32(0.0), sigma_w)
         low = mu_w - kappa_iter * sigma_w
         high = mu_w + kappa_iter * sigma_w
-        new_mask = mask & (arr >= low) & (arr <= high)
-        n_rej = np.count_nonzero(mask) - np.count_nonzero(new_mask)
-        mask = new_mask
+        new_mask = mask_w & (arr_w >= low) & (arr_w <= high)
+        n_rej = np.count_nonzero(mask_w) - np.count_nonzero(new_mask)
+        mask_w = new_mask
         if n_rej == 0:
             break
         if kappa_decay < 1.0:
             kappa_iter = kappa * (kappa_decay ** (itr + 1))
+    mask = np.where(rank_cols3, mask_w, guard_keep)
     if apply_rewinsor:
         low_b, high_b = sm._winsorize_bounds(
             np.where(mask, arr, np.nan), winsor_limits
@@ -255,11 +269,10 @@ def test_tiled_bitwise_parity_full(color, n, H, W, nan_frac, zero_frac,
         assert np.array_equal(full[0], tiled[0]), (label, tile_shape, "SCI")
         assert np.array_equal(full[1], tiled[1]), (label, tile_shape, "WHT")
         assert full[2] == tiled[2], (label, tile_shape, "rejected_pct")
-        # every canonical invocation of this execution saw the FULL stack
-        # population (never split) -- multi-tile runs always invoke the
-        # per-iteration body at least once
-        if n_slices > 1:
-            assert len(seen) > before, (label, tile_shape)
+        # The all-zero-rank fast path skips the per-iteration Winsor body
+        # entirely (the gross-outlier guard alone decides those columns), so
+        # the body may or may not be invoked here; the invariant that matters
+        # is that every invocation saw the FULL stack population (never split).
         assert all(s == n for s in seen[before:]), (
             f"tile N split observed: {set(seen[before:])}")
 
@@ -505,19 +518,22 @@ def test_no_empty_success_on_refusal():
 def test_adversarial_global_vs_subgroup_composition_witness():
     """Global Winsorized(N) != subgroup composition — intentionally divergent.
 
-    N=20 with values ``[0]*19 + [100]``: the GLOBAL reduction (winsorized
-    sigma over all 20 samples) returns SCI 0 / W 20 (the 100 is clipped out),
-    while composing two independent subgroup reductions of 10 yields SCI 5 —
-    the historical generic-HQ subgroup debt.  This divergence is the reason
-    the exact-N tiled driver must coordinate the GLOBAL stop schedule, and it
-    must stay divergent (never 'fixed' by subgroup composition)."""
-    vals = [0.0] * 19 + [100.0]
+    N=20 with values ``[0]*19 + [2]``: the GLOBAL reduction is rank-sufficient
+    (``floor(0.05*20) == 1``), so the rank-1 winsorization clips the 2 out and
+    returns SCI 0 / W 20.  Composing two independent N=10 subgroup reductions
+    puts the 2 into a zero-rank subgroup (``floor(0.05*10) == 0``), whose
+    one-pass gross-outlier guard keeps it (the 2 is not a sufficiently
+    isolated extreme), yielding a composed SCI of 0.1.  This genuine global vs
+    subgroup divergence is the reason the exact-N tiled driver must coordinate
+    the GLOBAL stop schedule, and it must stay divergent (never 'fixed' by
+    subgroup composition)."""
+    vals = [0.0] * 19 + [2.0]
     imgs = [np.full((1, 1), v, dtype=np.float32) for v in vals]
     global_res = _stack_winsorized_sigma_iter(
         imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
         apply_rewinsor=True, return_weights=True,
     )
-    assert global_res[0].ravel()[0] == 0.0  # archaeology: global SCI 0
+    assert global_res[0].ravel()[0] == 0.0  # global SCI 0 (the 2 clipped out)
     assert global_res[1].ravel()[0] == 20.0  # WHT 20
 
     def _subgroup(group):
@@ -534,7 +550,9 @@ def test_adversarial_global_vs_subgroup_composition_witness():
         s += float(V.ravel()[0]) * float(W.ravel()[0])
         w += float(W.ravel()[0])
     composed = s / w
-    assert composed == pytest.approx(5.0)  # archaeology: subgroup SCI 5
+    # The zero-rank N=10 subgroup keeps the 2 (gross-outlier guard),
+    # so the composed value genuinely diverges from the global reduction.
+    assert composed == pytest.approx(0.1)
     assert composed != float(global_res[0].ravel()[0])  # intentionally divergent
 
     # The exact-N tiled driver must equal the GLOBAL reference, never the

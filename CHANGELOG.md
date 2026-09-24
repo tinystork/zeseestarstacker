@@ -2,6 +2,28 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.5.4] — Phoenix consedit
+
+- Lower the conservative CFA isolated-spike ratio from 20 to 18 so the
+  recurring M74 photosite at `(2284,1079)` is corrected in all 44 qualified
+  frames while preserving the strict isolation boundary.
+- Keep healthy stellar structure unchanged across the 336-case synthetic PSF
+  matrix and the bounded real-star/background validation set.
+
+## [8.5.3] — Phoenix consedit
+
+- Correct gross isolated hot photosites in the Bayer/CFA domain before
+  debayering, using same-phase replacement while preserving coherent stellar
+  structure and excluding the image border.
+- Harden small-N Winsorized rejection with a conservative one-pass guard for
+  gross isolated temporal outliers while preserving the historical
+  rank-sufficient reducer.
+- Keep CPU, full-GPU and tiled-GPU scientific decisions aligned, including
+  odd/even and partially invalid temporal populations.
+- Validate the change on the NVIDIA MX150 and real M74 data; full-frame
+  untiled workloads that exceed the 2 GB device budget continue to fall back
+  explicitly to the qualified CPU path.
+
 ## [8.5.2] — Phoenix consedit
 
 Recovery patch for native Drizzle Resume after an alignment-rejection

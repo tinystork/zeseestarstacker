@@ -493,12 +493,13 @@ def test_regime_predicate_default_limit_boundary_is_19():
 
 
 @pytest.mark.parametrize("n", [12, 19])
-def test_zero_rank_fastpath_skips_all_winsor_sorts(n, monkeypatch):
-    """N_batch=12 and 19 (default limits): NOT one call to the winsorize
-    axis-0 sort helper nor to the survivor-bound sort helper — the fast path
-    is taken — while the result stays CPU-exact and genuinely exercises
-    rejection (rejected_pct > 0, i.e. the iterative loop really ran)."""
+def test_zero_rank_fastpath_skips_iterative_winsor_sort(n, monkeypatch):
+    """N_batch=12 and 19 (default limits): the per-iteration winsor sort
+    helper is NOT called (the all-zero-rank fast path applies the one-pass
+    gross-outlier guard and skips the Winsor loop), while the survivor-bound
+    sort (apply_rewinsor) still runs once and the result stays CPU-exact."""
     a = _make_stack(n, (_H, _W), seed=200 + n, nan_frac=0.03, spike=0.06)
+    a[3, 12, 16] = 1e6  # deterministic gross isolated outlier (guard rejects it)
     w = _weights(n, seed=21)
     calls = {"axis0": 0, "bounds": 0}
     real_axis0 = sgp._winsorize_axis0_cp
@@ -516,19 +517,19 @@ def test_zero_rank_fastpath_skips_all_winsor_sorts(n, monkeypatch):
     monkeypatch.setattr(sgp, "_winsorize_bounds_cp", bounds_spy)
     cpu = _cpu(a, w)
     gpu = _gpu(a, w)
-    assert calls == {"axis0": 0, "bounds": 0}, calls
+    assert calls == {"axis0": 0, "bounds": 1}, calls
     assert float(cpu[2]) > 0.0, "test design: expected real rejections"
     assert_parity(f"fastpath_n{n}", cpu, gpu)
 
 
-def test_n19_zero_rank_fastpath_rewinsor_true_bounds_minmax_no_sort(
-    monkeypatch,
-):
+def test_n19_zero_rank_fastpath_rewinsor_true(monkeypatch):
     """N_batch=19 with apply_rewinsor=True: rejected samples ARE rewinsor-
-    substituted (rejected_pct > 0) yet the survivor-bound sort helper is
-    never called (min/max replacement), and parity with the CPU holds."""
+    substituted (rejected_pct > 0); the per-iteration winsor sort is skipped
+    (fast path) but the survivor-bound sort runs once; parity with the CPU
+    holds."""
     n = 19
     a = _make_stack(n, (_H, _W), seed=201, nan_frac=0.03, spike=0.08)
+    a[3, 12, 16] = 1e6  # deterministic gross isolated outlier (guard rejects it)
     w = _weights(n, seed=22)
     calls = {"axis0": 0, "bounds": 0}
     real_axis0 = sgp._winsorize_axis0_cp
@@ -546,7 +547,7 @@ def test_n19_zero_rank_fastpath_rewinsor_true_bounds_minmax_no_sort(
     monkeypatch.setattr(sgp, "_winsorize_bounds_cp", bounds_spy)
     cpu = _cpu(a, w)
     gpu = _gpu(a, w)
-    assert calls == {"axis0": 0, "bounds": 0}, calls
+    assert calls == {"axis0": 0, "bounds": 1}, calls
     assert float(cpu[2]) > 0.0, "test design: expected real rejections"
     assert_parity("fastpath_n19_rewinsor", cpu, gpu)
 
@@ -603,6 +604,7 @@ def test_rewinsor_false_fastpath_no_sort_at_all(monkeypatch):
     all (neither iterative nor survivor-bound) while rejections still occur."""
     n = 12
     a = _make_stack(n, (_H, _W), seed=204, nan_frac=0.03, spike=0.08)
+    a[3, 12, 16] = 1e6  # deterministic gross isolated outlier (guard rejects it)
     w = _weights(n, seed=24)
     calls = {"axis0": 0, "bounds": 0}
     real_axis0 = sgp._winsorize_axis0_cp
@@ -626,7 +628,9 @@ def test_rewinsor_false_fastpath_no_sort_at_all(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 3. bit-identity of the fast path vs the slow path (forced regime)
+# 3. small-N robustness: the zero-rank fast path now uses the one-pass
+# gross-outlier guard (same as the CPU guard), replacing the old bit-identity
+# with the slow path (which kept the outlier-dominated mean/std band).
 # ---------------------------------------------------------------------------
 
 
@@ -641,23 +645,18 @@ def test_rewinsor_false_fastpath_no_sort_at_all(monkeypatch):
         "rewinsor_false",
     ],
 )
-def test_fastpath_bitwise_identical_to_slowpath(tag, monkeypatch):
-    """Forcing the slow path (regime predicate -> False) must produce a
-    BITWISE identical result, weight map and rejected_pct to the fast path."""
+def test_fastpath_robust_band_matches_cpu(tag):
+    """Zero-rank fast path uses the one-pass gross-outlier guard, exactly like
+    the CPU small-N guard; it must match the CPU reference within the documented
+    tolerance (the small-N robustness change replaced the old bit-identity
+    with the forced slow path, which kept the outlier-dominated mean/std
+    band)."""
     entry = next(e for e in FP_MATRIX if e[0] == tag)
     _, builder, expected_fast = entry
-    assert expected_fast is True, "bit-identity test needs a fast-regime case"
+    assert expected_fast is True, "robust-band test needs a fast-regime case"
     a, w, kw = builder()
 
-    monkeypatch.setattr(sgp, "_winsor_zero_rank_regime", lambda *a: False)
-    slow = _gpu(a, w, **kw)
-    monkeypatch.undo()
     fast = _gpu(a, w, **kw)
-
-    assert np.array_equal(fast[0], slow[0], equal_nan=True), tag
-    assert np.array_equal(fast[1], slow[1], equal_nan=True), tag
-    assert fast[2] == slow[2], tag
-    # and both agree with the CPU reference within the documented tolerance
     cpu = _cpu(a, w, **kw)
     assert_parity(tag + "_fast_vs_cpu", cpu, fast)
 
@@ -683,13 +682,17 @@ def test_qualification_matrix(tag):
     assert_parity(tag, cpu, gpu)
 
 
-def test_full_max_iters_fast_regime_ran_multiple_iterations(monkeypatch):
-    """The n=19 fast-regime drift case runs the FULL max_iters on the CPU
-    reference (5 winsorize calls; no early exit) — proven by a CPU spy — and
-    the GPU fast path still reproduces the CPU exactly."""
+def test_full_max_iters_fast_regime_guard_only_no_winsor_iterations(monkeypatch):
+    """Zero-rank columns (n=19, default regime) run the one-pass gross-outlier
+    guard and ZERO historical Winsor iterations even under a drifting stack +
+    decaying kappa: both the CPU and GPU iterative winsor-sort helpers are
+    called 0 times, a deterministic gross witness is genuinely rejected by the
+    guard, and CPU/GPU parity holds.  (The old "full max_iters" expectation was
+    stale: zero-rank columns intentionally skip the Winsor loop.)"""
     n = 19
     a = _make_stack(n, (16, 16), seed=125, nan_frac=0.02, spike=0.05)
     a = a + np.linspace(0.0, 60.0, n).reshape(n, 1, 1).astype(np.float32)
+    a[7, 8, 8] = 1e6  # deterministic gross isolated outlier (guard rejects it)
     w = _weights(n, seed=17)
     kw = dict(kappa=2.0, max_iters=5, kappa_decay=0.6)
 
@@ -709,10 +712,10 @@ def test_full_max_iters_fast_regime_ran_multiple_iterations(monkeypatch):
     monkeypatch.setattr(sgp, "_winsorize_axis0_cp", gpu_spy)
     cpu = _cpu(a, w, **kw)
     gpu = _gpu(a, w, **kw)
-    assert calls["cpu"] == 5, calls  # full max_iters, no early exit
-    assert calls["gpu"] == 0, calls  # fast path: no iterative winsor sort
-    assert float(cpu[2]) > 50.0, "test design: heavy multi-iteration cascade"
-    assert_parity("full_max_iters_fast_regime", cpu, gpu)
+    assert calls["cpu"] == 0, calls  # guard only: no CPU winsor iterations
+    assert calls["gpu"] == 0, calls  # guard only: no GPU winsor iterations
+    assert float(cpu[2]) > 0.0, "test design: gross witness must be rejected"
+    assert_parity("full_max_iters_fast_regime_guard_only", cpu, gpu)
 
 
 def test_partial_final_batch_uses_actual_population_not_frozen_resolved(
@@ -756,3 +759,103 @@ def test_nan_padded_batch_remains_exact_on_slow_path():
     cpu = _cpu(padded, w)
     gpu = _gpu(padded, w)
     assert_parity("nan_padded_20_exact_slow", cpu, gpu)
+
+
+# ---------------------------------------------------------------------------
+# R3: small-N normalized witness — CPU/GPU parity + scaling invariance
+# ---------------------------------------------------------------------------
+def _normalized_col(scale, outlier=True):
+    vals = ([0.0400, 0.0401, 0.0399, 0.0402, 0.9978] if outlier
+            else [0.0400, 0.0401, 0.0399, 0.0402, 0.0398])
+    return np.array([v * scale for v in vals], dtype=np.float32).reshape(5, 1, 1)
+
+
+@pytest.mark.parametrize("scale", [1.0, 1000.0, 65535.0, 1e-3])
+def test_gpu_small_n_normalized_scaled_parity(scale):
+    """CPU and GPU both reject only the .9978*scale outlier at every scale
+    (identical result / weights / pct), and reject nothing on the clean
+    cluster."""
+    a = _normalized_col(scale, outlier=True)
+    cpu = _cpu(a, None)
+    gpu = _gpu(a, None)
+    assert cpu[2] == pytest.approx(20.0)
+    assert_parity("small_n_scaled_%.4g" % scale, cpu, gpu)
+
+    a_clean = _normalized_col(scale, outlier=False)
+    cpu_c = _cpu(a_clean, None)
+    gpu_c = _gpu(a_clean, None)
+    assert cpu_c[2] == 0.0
+    assert_parity("small_n_clean_scaled_%.4g" % scale, cpu_c, gpu_c)
+
+
+@pytest.mark.parametrize("rewinsor", [True, False])
+def test_gpu_small_n_normalized_rewinsor(rewinsor):
+    """Rewinsor true/false on the normalized witness: identical rejection
+    decision and CPU/GPU parity."""
+    a = _normalized_col(1.0, outlier=True)
+    cpu = _cpu(a, None, apply_rewinsor=rewinsor)
+    gpu = _gpu(a, None, apply_rewinsor=rewinsor)
+    assert cpu[2] == pytest.approx(20.0)
+    assert_parity("small_n_rewinsor_%s" % rewinsor, cpu, gpu)
+
+
+def test_gpu_mixed_n_valid_n44_parity():
+    """N=44 cube with per-column valid counts 5/10/19/20/44: the n_valid=5
+    column (zero-rank -> one-pass guard) rejects a gross outlier while the
+    rank-sufficient columns (20, 44) keep the historical Winsor; CPU == GPU."""
+    rng = np.random.default_rng(0)
+    N = 44
+    arr = rng.normal(0.04, 0.002, size=(N, 1, 5)).astype(np.float32)
+    for i in range(5, N):
+        arr[i, 0, 0] = np.nan
+    for i in range(10, N):
+        arr[i, 0, 1] = np.nan
+    for i in range(19, N):
+        arr[i, 0, 2] = np.nan
+    for i in range(20, N):
+        arr[i, 0, 3] = np.nan
+    arr[0, 0, 0] = 0.9978  # gross outlier in the n_valid=5 column
+    cpu = _cpu(arr, None)
+    gpu = _gpu(arr, None)
+    assert float(cpu[0][0, 0]) < 0.2  # outlier rejected, not pulled up
+    assert_parity("n44_mixed_validity", cpu, gpu)
+
+
+def _median_edge_stack():
+    """Crafted (6, 4, 6) stack; each of the 6 columns is a distinct median case
+    (odd/even valid counts, NaN partial, zero median, negative values, ties),
+    replicated across 4 rows so the tiled path is genuinely exercised."""
+    cols = [
+        [100.0, 101.0, 99.0, 63000.0, np.nan, np.nan],      # even, high outlier
+        [-100.0, -100.0, -100.0, -63000.0, np.nan, np.nan],  # even, low (neg)
+        [100.0, 101.0, 99.0, 102.0, 63000.0, np.nan],        # odd, high outlier
+        [100.0, 101.0, 99.0, np.nan, 63000.0, np.nan],       # NaN partial, even
+        [0.0, 0.0, 0.0, 0.0, 5.0, np.nan],                  # zero median
+        [100.0, 100.0, 100.0, 100.0, 100.0, np.nan],         # ties
+    ]
+    n = 6
+    a = np.full((n, 4, 6), np.nan, dtype=np.float32)
+    for x, col in enumerate(cols):
+        for i, v in enumerate(col):
+            if not np.isnan(v):
+                a[i, :, x] = v
+    return a
+
+
+def test_gpu_median_extraction_edges_full_and_tiled_parity():
+    """The sorted-values-derived median (odd/even/NaN/zero/negative/ties) must
+    yield identical keep masks and CPU == GPU-full == GPU-tiled reducer outputs."""
+    a = _median_edge_stack()
+    cpu = _cpu(a, None)
+    gpu = _gpu(a, None)
+    assert float(cpu[2]) > 0.0  # gross outliers actually rejected
+    assert_parity("median_extraction_edges_full", cpu, gpu)
+
+    tiled = sgp.stack_winsorized_sigma_gpu_tiled(
+        _images(a), None, return_weights=True, tile_shape=(2,)
+    )
+    assert_parity("median_extraction_edges_tiled", cpu, tiled)
+    # and the tiled keep decisions are exact vs the full GPU
+    assert np.array_equal(tiled[0], gpu[0], equal_nan=True)
+    assert np.array_equal(tiled[1], gpu[1])
+    assert tiled[2] == gpu[2]
