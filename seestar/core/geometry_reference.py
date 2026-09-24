@@ -217,7 +217,11 @@ def reference_quality_metric(
     seestar.core.alignment.SeestarAligner.
     """
     from .image_processing import debayer_image, load_and_validate_fits
-    from .hot_pixels import detect_and_correct_hot_pixels
+    from .hot_pixels import (
+        detect_and_correct_hot_pixels,
+        detect_and_correct_hot_pixels_cfa,
+        is_bayer_pattern,
+    )
 
     try:
         loaded = load_and_validate_fits(path)
@@ -229,14 +233,28 @@ def reference_quality_metric(
         if float(np.std(image)) < 0.0005:
             return None
         prepared = image.astype(np.float32, copy=True)
+        cfa_corrected = False
         if prepared.ndim == 2:
             bayer = header.get("BAYERPAT", bayer_pattern)
-            if isinstance(bayer, str) and bayer.upper() in ("GRBG", "RGGB", "GBRG", "BGGR"):
+            if is_bayer_pattern(bayer):
+                # CFA-domain hot-pixel correction BEFORE debayer; the RGB
+                # hot-pixel pass is then skipped for this frame.
+                if correct_hot_pixels:
+                    try:
+                        prepared, _cfa_diag = detect_and_correct_hot_pixels_cfa(
+                            prepared,
+                            bayer.upper(),
+                            hot_pixel_threshold,
+                            neighborhood_size,
+                        )
+                        cfa_corrected = True
+                    except Exception:
+                        pass
                 try:
                     prepared = debayer_image(prepared, bayer.upper())
                 except ValueError:
                     pass
-        if correct_hot_pixels:
+        if correct_hot_pixels and not cfa_corrected:
             try:
                 prepared = detect_and_correct_hot_pixels(
                     prepared, hot_pixel_threshold, neighborhood_size

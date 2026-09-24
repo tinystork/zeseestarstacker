@@ -65,7 +65,9 @@ import numpy as np
 from seestar.core.stack_methods import (
     NANMEAN,
     _broadcast_weights,
+    _gross_outlier_keep,
     _winsor_schedule_kappas,
+    _winsor_zero_rank_cols,
     _winsorize_bounds,
     _winsorized_sigma_iteration_body,
 )
@@ -223,25 +225,50 @@ def _shrink_geometry(frame_shape, tile_shape, min_tile_out):
 
 
 def _winsorized_tile_iterations_np(
-    arr_t, kappa, winsor_limits, n_iters, kappa_decay, collect_counts
+    arr_t, kappa, winsor_limits, n_iters, kappa_decay, collect_counts,
 ):
     """Run ``n_iters`` schedule iterations on one tile (full stack axis kept).
 
-    Verbatim canonical per-iteration body (no early exit).  Returns
-    ``(final_mask, counts)`` where ``counts`` is a list of local per-iteration
-    rejection counts when ``collect_counts`` else ``None``.
+    Per-column zero-rank classification from the ORIGINAL valid population:
+    zero-rank columns get the one-pass gross-outlier guard (frozen, never
+    consuming the global schedule); rank-sufficient columns run the historical
+    Winsor iterations (their per-iteration rejection counts feed the schedule).
+    Returns ``(final_mask, counts)`` where ``counts`` is a list of local
+    per-iteration rejection counts when ``collect_counts`` else ``None``.
     """
-    mask = ~np.isnan(arr_t)
-    kappas = _winsor_schedule_kappas(kappa, kappa_decay, n_iters)
-    counts = [] if collect_counts else None
-    for itr in range(int(n_iters)):
-        new_mask, n_rej = _winsorized_sigma_iteration_body(
-            arr_t, mask, kappas[itr], winsor_limits
-        )
-        if collect_counts:
-            counts.append(n_rej)
-        mask = new_mask
-    return mask, counts
+    valid = ~np.isnan(arr_t)
+    n_valid_col = np.count_nonzero(valid, axis=0)
+    zero_rank_cols = _winsor_zero_rank_cols(winsor_limits, n_valid_col)
+    rank_cols = ~zero_rank_cols
+    rank_cols3 = rank_cols[np.newaxis, ...]
+
+    # One-pass gross-outlier guard (zero-rank columns only).
+    guard_keep = (
+        _gross_outlier_keep(arr_t, valid)
+        if np.any(zero_rank_cols)
+        else valid
+    )
+
+    # Historical Winsor iterations on rank-sufficient columns only (the
+    # all-zero-rank fast path skips the loop entirely).
+    if np.any(rank_cols):
+        arr_w = np.where(rank_cols3, arr_t, np.nan)
+        mask_w = ~np.isnan(arr_w)
+        kappas = _winsor_schedule_kappas(kappa, kappa_decay, n_iters)
+        counts = [] if collect_counts else None
+        for itr in range(int(n_iters)):
+            new_mask, n_rej = _winsorized_sigma_iteration_body(
+                arr_w, mask_w, kappas[itr], winsor_limits
+            )
+            if collect_counts:
+                counts.append(n_rej)
+            mask_w = new_mask
+    else:
+        mask_w = valid & rank_cols3  # all-False (no rank columns)
+        counts = [0] * int(n_iters) if collect_counts else None
+
+    final_mask = np.where(rank_cols3, mask_w, guard_keep)
+    return final_mask, counts
 
 
 def _winsorized_tile_finalize_np(
@@ -345,13 +372,13 @@ def _run_tiled_geometry(
     for (y0, y1, x0, x1) in spatial:
         arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
         valid_t = ~np.isnan(arr_t)
-        if z_eff == 0:
-            mask_t = valid_t  # reference iteration 0 rejected nothing
-        else:
-            mask_t, _ = _winsorized_tile_iterations_np(
-                arr_t, kappa, winsor_limits, z_eff, kappa_decay,
-                collect_counts=False,
-            )
+        # Always run the tile helper: it applies the one-pass gross-outlier
+        # guard to zero-rank columns AND replays ``z_eff`` Winsor iterations
+        # on rank-sufficient columns (``z_eff == 0`` -> guard only, no Winsor).
+        mask_t, _ = _winsorized_tile_iterations_np(
+            arr_t, kappa, winsor_limits, z_eff, kappa_decay,
+            collect_counts=False,
+        )
         res_t, sumw_t = _winsorized_tile_finalize_np(
             arr_t, mask_t, valid_t, weights, apply_rewinsor, winsor_limits
         )

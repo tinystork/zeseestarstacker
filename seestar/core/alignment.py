@@ -25,7 +25,11 @@ from .image_processing import (
     save_fits_image,        # Expects float32 0-1, saves uint16
     save_preview_image      # For saving reference preview
 )
-from .hot_pixels import detect_and_correct_hot_pixels
+from .hot_pixels import (
+    detect_and_correct_hot_pixels,
+    detect_and_correct_hot_pixels_cfa,
+    is_bayer_pattern,
+)
 from .reference_state import FrozenReference
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -473,14 +477,24 @@ class SeestarAligner:
                 
                 ref_img_loaded_manual, ref_hdr_loaded_manual = ref_img_tuple_manual 
                 
-                prepared_ref_manual = ref_img_loaded_manual.astype(np.float32) 
-                if prepared_ref_manual.ndim == 2: 
+                prepared_ref_manual = ref_img_loaded_manual.astype(np.float32)
+                cfa_ref_manual_corrected = False
+                if prepared_ref_manual.ndim == 2:
                     bayer_pat_ref_manual = ref_hdr_loaded_manual.get('BAYERPAT', self.bayer_pattern)
-                    if isinstance(bayer_pat_ref_manual, str) and bayer_pat_ref_manual.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                    if is_bayer_pattern(bayer_pat_ref_manual):
+                        if self.correct_hot_pixels:
+                            try:
+                                prepared_ref_manual, _cfa_ref_diag = detect_and_correct_hot_pixels_cfa(
+                                    prepared_ref_manual, bayer_pat_ref_manual.upper(),
+                                    self.hot_pixel_threshold, self.neighborhood_size,
+                                )
+                                cfa_ref_manual_corrected = True
+                            except Exception as cfa_err_manual:
+                                if hasattr(self, 'update_progress'): self.update_progress(f"⚠️ Réf Manuelle: Erreur correction CFA px chauds: {cfa_err_manual}")
                         try: prepared_ref_manual = debayer_image(prepared_ref_manual, bayer_pat_ref_manual.upper())
                         except ValueError as deb_err_manual:
                             if hasattr(self, 'update_progress'): self.update_progress(f"⚠️ Réf Manuelle: Erreur Debayer ({deb_err_manual}). Utilisation N&B.")
-                if self.correct_hot_pixels:
+                if self.correct_hot_pixels and not cfa_ref_manual_corrected:
                     try: prepared_ref_manual = detect_and_correct_hot_pixels(prepared_ref_manual, self.hot_pixel_threshold, self.neighborhood_size)
                     except Exception as hp_err_manual:
                         if hasattr(self, 'update_progress'): self.update_progress(f"⚠️ Réf Manuelle: Erreur correction px chauds: {hp_err_manual}")
@@ -573,15 +587,26 @@ class SeestarAligner:
                     if hdr_cand is None: hdr_cand = fits.Header() 
                     std_dev_cand = np.std(img_cand); variance_threshold_cand = 0.0005 
                     if std_dev_cand < variance_threshold_cand: rejection_reason_cand = "variance"; raise ValueError(f"Faible variance ({std_dev_cand:.6f})")
-                    prepared_img_cand = img_cand.astype(np.float32, copy=True) 
-                    if prepared_img_cand.ndim == 2: 
+                    prepared_img_cand = img_cand.astype(np.float32, copy=True)
+                    cfa_img_cand_corrected = False
+                    if prepared_img_cand.ndim == 2:
                          bayer_pat_s_cand = hdr_cand.get('BAYERPAT', self.bayer_pattern)
-                         if isinstance(bayer_pat_s_cand, str) and bayer_pat_s_cand.upper() in ["GRBG", "RGGB", "GBRG", "BGGR"]:
+                         if is_bayer_pattern(bayer_pat_s_cand):
+                              if self.correct_hot_pixels:
+                                   try:
+                                        prepared_img_cand, _cfa_cand_diag = detect_and_correct_hot_pixels_cfa(
+                                             prepared_img_cand, bayer_pat_s_cand.upper(),
+                                             self.hot_pixel_threshold, self.neighborhood_size,
+                                        )
+                                        cfa_img_cand_corrected = True
+                                   except Exception as cfa_err_cand:
+                                        logger.debug(f"WARN ALIGNER [auto ref]: Erreur correction CFA px chauds: {cfa_err_cand}")
+                                        if hasattr(self, 'update_progress'): self.update_progress(f"⚠️ Réf Auto: Erreur correction CFA px chauds: {cfa_err_cand}")
                               try: prepared_img_cand = debayer_image(prepared_img_cand, bayer_pat_s_cand.upper())
-                              except ValueError: pass 
-                    if self.correct_hot_pixels:
+                              except ValueError: pass
+                    if self.correct_hot_pixels and not cfa_img_cand_corrected:
                          try: prepared_img_cand = detect_and_correct_hot_pixels(prepared_img_cand, self.hot_pixel_threshold, self.neighborhood_size)
-                         except Exception: pass 
+                         except Exception: pass
                     median_val_cand = np.median(prepared_img_cand); mad_val_cand = np.median(np.abs(prepared_img_cand - median_val_cand)); approx_std_cand = mad_val_cand * 1.4826 
                     metric_cand = median_val_cand / (approx_std_cand + 1e-9) if median_val_cand > 1e-9 and approx_std_cand > 1e-9 else -np.inf 
                     if not np.isfinite(metric_cand) or metric_cand < -1e8: rejection_reason_cand = "metric"; raise ValueError(f"Métrique non finie ou trop basse: {metric_cand}")
