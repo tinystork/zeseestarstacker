@@ -2,6 +2,20 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.5.3] — Phoenix consedit
+
+- Correct gross isolated hot photosites in the Bayer/CFA domain before
+  debayering, using same-phase replacement while preserving coherent stellar
+  structure and excluding the image border.
+- Harden small-N Winsorized rejection with a conservative one-pass guard for
+  gross isolated temporal outliers while preserving the historical
+  rank-sufficient reducer.
+- Keep CPU, full-GPU and tiled-GPU scientific decisions aligned, including
+  odd/even and partially invalid temporal populations.
+- Validate the change on the NVIDIA MX150 and real M74 data; full-frame
+  untiled workloads that exceed the 2 GB device budget continue to fall back
+  explicitly to the qualified CPU path.
+
 ## [8.5.2] — Phoenix consedit
 
 Recovery patch for native Drizzle Resume after an alignment-rejection
