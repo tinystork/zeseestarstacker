@@ -17730,6 +17730,24 @@ class SeestarQueuedStacker:
                     )
             except Exception:  # noqa: BLE001 - fail-open adoption only
                 pass
+            # C19: rebuild the calibration freeze with the persisted light
+            # paths (resume validation runs BEFORE the batch freeze point), so
+            # the plan_map matches the persisted freeze; then hard-refuse on
+            # any calibration divergence naming the diverging field.
+            if getattr(self, "_calibration_integrator", None) is not None:
+                persisted_lights = [
+                    p for p in (result.resolved_plan_paths or ())
+                    if isinstance(p, str)
+                ]
+                ref = result.resolved_reference
+                if isinstance(ref, str) and ref not in persisted_lights:
+                    persisted_lights.append(ref)
+                self._build_calibration_freeze(persisted_lights)
+            ok_cal, field = self._check_calibration_resume(
+                dict(getattr(result.config, "calibration", {}) or {})
+            )
+            if not ok_cal:
+                return (False, field, None)
             current_cfg = build_drizzle_canonical_config(
                 self, product_version=self._canonical_product_version()
             )
