@@ -52,9 +52,14 @@ class GroupSummary:
 
 @dataclass(frozen=True)
 class LightPlanEntry:
-    """Per-light freeze entry (for ``calibration_plan_map``)."""
+    """Per-class freeze entry (for ``calibration_plan_map``).
 
-    signature: str  # content SHA-256 of the light file (stable, not a filename)
+    ``signature`` is the **acquisition signature** (header-only: exposure, gain,
+    binning, CFA phase, detector, dimensions) — never a per-frame content hash.
+    Lights sharing a signature share the same auto-routed plan class.
+    """
+
+    signature: str  # acquisition signature (header-only, not a content hash)
     plan_id: str
     composition: Mapping[str, Any]  # JSON-safe
 
@@ -86,6 +91,67 @@ def light_signature(path: str) -> str:
         for chunk in iter(lambda: fh.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _read_header(path: str):
+    """Read a light's FITS header (metadata only — never decodes pixels)."""
+    try:
+        from astropy.io import fits
+    except Exception:  # noqa: BLE001 - astropy optional for header reads
+        return None
+    try:
+        with fits.open(path) as hdul:
+            return hdul[0].header
+    except Exception:  # noqa: BLE001 - never crash the preflight on a header read
+        return None
+
+
+def acquisition_signature(path: str) -> str:
+    """Return a stable acquisition signature from a light's FITS **header only**.
+
+    Key = (exposure, gain, binning, CFA phase, detector, dimensions).  This is a
+    header-only read (no pixel decode): two lights sharing the signature share
+    the same auto-routed plan class (same dark/bias/flat matching inputs), so a
+    preflight can resolve ONE representative per class instead of every frame.
+
+    Deterministic string; never a content hash and never a filename rule.
+    """
+    hdr = _read_header(path)
+    if hdr is None:
+        return "unknown"
+
+    exposure = None
+    for key in ("EXPTIME", "EXPOSURE"):
+        v = hdr.get(key)
+        if v is not None:
+            try:
+                exposure = float(v)
+            except (TypeError, ValueError):
+                exposure = None
+            if exposure is not None:
+                break
+
+    gain = hdr.get("GAIN")
+    binx = hdr.get("XBINNING", hdr.get("BINNING"))
+    biny = hdr.get("YBINNING", hdr.get("BINNING"))
+    cfa = hdr.get("BAYERPAT", hdr.get("BAYERPOL"))
+    detector = hdr.get("INSTRUME", hdr.get("DETECTOR"))
+    nx = hdr.get("NAXIS1")
+    ny = hdr.get("NAXIS2")
+
+    def _s(v) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return str(v)
+        if isinstance(v, (int, float)):
+            return str(v)
+        return str(v).strip().upper()
+
+    return "|".join([
+        _s(exposure), _s(gain), f"{_s(binx)}x{_s(biny)}",
+        _s(cfa), _s(detector), f"{_s(nx)}x{_s(ny)}",
+    ])
 
 
 def flat_policy(flat_applied_flags: Sequence[bool]) -> Tuple[bool, str]:
@@ -159,23 +225,32 @@ def preflight_calibration(
     if session is None:
         return PreflightResult(available=False, error="no admissible masters (empty session)")
 
-    resolved: List[Tuple[str, RouteResolution]] = []
+    # Group lights by acquisition signature (header-only, no pixel decode).
+    lights_by_acq: Dict[str, List[str]] = {}
     for path in lights:
-        rr = session.resolve_light(LightSource(path=path))
-        resolved.append((path, rr))
+        lights_by_acq.setdefault(acquisition_signature(path), []).append(path)
 
-    # Group by exposure label for display (additive plan is per-light).
-    groups_by_exposure: Dict[str, List[RouteResolution]] = {}
-    for path, rr in resolved:
-        label = _exposure_label(path)
-        groups_by_exposure.setdefault(label, []).append(rr)
+    # Resolve ONE representative per acquisition class (1 decode per class,
+    # never one per frame).  ``resolved`` = [(acq_sig, representative_path, rr)].
+    resolved: List[Tuple[str, str, RouteResolution]] = []
+    for acq_sig, paths in lights_by_acq.items():
+        rep = paths[0]
+        rr = session.resolve_light(LightSource(path=rep))
+        resolved.append((acq_sig, rep, rr))
 
+    # Flat policy (whole-run, mission §6) from the representatives' flat decision.
     flat_flags = [
         bool(getattr(rr.composition, "flat_applied", False))
-        for _p, rr in resolved
+        for _sig, _rep, rr in resolved
         if rr.composition is not None
     ]
     flat_applied, flat_message = flat_policy(flat_flags)
+
+    # Group by exposure label for display (additive plan is per-class).
+    groups_by_exposure: Dict[str, List[RouteResolution]] = {}
+    for _sig, rep, rr in resolved:
+        label = _exposure_label(rep)
+        groups_by_exposure.setdefault(label, []).append(rr)
 
     groups: List[GroupSummary] = []
     for label, rrs in groups_by_exposure.items():
@@ -190,13 +265,14 @@ def preflight_calibration(
         )
     groups.sort(key=lambda g: _exposure_sort_key(g.exposure_label))
 
+    # One freeze entry per acquisition class (key = acquisition signature).
     plan_entries: List[LightPlanEntry] = []
-    for path, rr in resolved:
+    for acq_sig, _rep, rr in resolved:
         if rr.plan is None or rr.composition is None:
             continue
         plan_entries.append(
             LightPlanEntry(
-                signature=light_signature(path),
+                signature=acq_sig,
                 plan_id=rr.plan.plan_id,
                 composition=rr.composition.to_dict(),
             )
@@ -283,6 +359,7 @@ __all__ = [
     "GroupSummary",
     "LightPlanEntry",
     "PreflightResult",
+    "acquisition_signature",
     "build_freeze",
     "flat_policy",
     "light_signature",

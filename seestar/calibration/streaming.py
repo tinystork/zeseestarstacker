@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-from seestar.calibration.preflight import light_signature
+from seestar.calibration.preflight import acquisition_signature
 from seestar.calibration.zecalibrator_adapter import ZeCalibratorProvider
 from seestar.core.calibration_port import CalibrationState, LightSource
 
@@ -35,6 +35,7 @@ class CalibrationIntegrator:
         self._provider = provider or ZeCalibratorProvider()
         self._masters_folder = masters_folder
         self._plan_map = dict(plan_map) if plan_map else None
+        self._plan_cache: dict = {}  # acquisition signature -> resolved plan object
         self._session = None
         self._session_result = None
 
@@ -62,22 +63,38 @@ class CalibrationIntegrator:
         return getattr(self._session, "context_preparation_count", 0)
 
     def is_planned(self, file_path: str) -> bool:
-        """True when the light has a frozen plan (or when there is no plan map)."""
+        """True when the light's acquisition class has a frozen plan.
+
+        Keyed by the **acquisition signature** (header-only), not a content hash:
+        the plan is per-class, so a light is planned when its acquisition class
+        was resolved at preflight (or when there is no plan map at all).
+        """
         if self._plan_map is None:
             return True
-        return light_signature(file_path) in self._plan_map
+        return acquisition_signature(file_path) in self._plan_map
 
     # ---------------------------------------------------------------- per frame
     def resolve(self, file_path: str):
-        """Resolve a light's plan (None when not MATCHED or not planned)."""
+        """Resolve a light's plan (cached by acquisition class — no re-decode).
+
+        The plan is looked up by the light's **acquisition signature** (header-
+        only read).  A class already resolved at preflight returns the cached
+        plan object with no ``resolve_light`` decode; a new class (not in the
+        frozen map) falls back to a direct resolve.  Returns ``None`` when not
+        MATCHED / not planned.
+        """
         if self._session is None:
             return None
+        acq_sig = acquisition_signature(file_path)
+        cached = self._plan_cache.get(acq_sig)
+        if cached is not None:
+            return cached
         if not self.is_planned(file_path):
             return None
-        rr = self._session.resolve_light(LightSource(path=file_path))
-        if getattr(rr, "state", None) is not CalibrationState.COMPLETED:
-            return None
-        return getattr(rr, "plan", None)
+        plan, _composition = self._resolve_direct(file_path)
+        if plan is not None:
+            self._plan_cache[acq_sig] = plan
+        return plan
 
     def calibrate(self, file_path: str, plan) -> Optional[Tuple]:
         """Calibrate one light -> ``(physical_float32, mask)`` or ``None``.
@@ -97,8 +114,11 @@ class CalibrationIntegrator:
         """Build the JSON-safe calibration freeze (7 fields) for the run contract.
 
         Provider id / api / product version come from ``probe()``; the library
-        fingerprint from the open session; the plan_map is built by resolving
-        each light (signature -> plan_id + composition).  Returns ``{}`` when no
+        fingerprint from the open session.  The ``calibration_plan_map`` is keyed
+        by the **acquisition signature** (header-only): lights are grouped by
+        acquisition class and ONE representative per class is resolved (1 decode
+        per class, never one per frame).  The resolved plan objects are cached
+        in ``self._plan_cache`` for the streaming loop.  Returns ``{}`` when no
         session is open (== "calibration disabled").  Never carries a provider
         object.
         """
@@ -106,11 +126,15 @@ class CalibrationIntegrator:
             return {}
         info = self._provider.probe()
         plan_map = {}
+        representatives: dict = {}
         for path in lights or ():
-            plan, composition = self._resolve_full(path)
+            representatives.setdefault(acquisition_signature(path), path)
+        for acq_sig, rep in representatives.items():
+            plan, composition = self._resolve_direct(rep)
             if plan is None or composition is None:
                 continue
-            plan_map[light_signature(path)] = {
+            self._plan_cache[acq_sig] = plan
+            plan_map[acq_sig] = {
                 "plan_id": plan.plan_id,
                 "composition": composition.to_dict(),
             }
@@ -124,9 +148,9 @@ class CalibrationIntegrator:
             "calibration_plan_map": plan_map,
         }
 
-    def _resolve_full(self, file_path: str):
-        """Return ``(plan, composition)`` for a light, or ``(None, None)``."""
-        if self._session is None or not self.is_planned(file_path):
+    def _resolve_direct(self, file_path: str):
+        """Directly resolve a light (decode) -> ``(plan, composition)`` or ``(None, None)``."""
+        if self._session is None:
             return None, None
         rr = self._session.resolve_light(LightSource(path=file_path))
         if getattr(rr, "state", None) is not CalibrationState.COMPLETED:

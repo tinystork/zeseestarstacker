@@ -25145,6 +25145,14 @@ class SeestarQueuedStacker:
                     "⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente."
                 )
 
+        # C11: (re)build the calibration freeze with the ACTUAL light list.
+        # The preflight groups lights by acquisition signature (header-only) and
+        # resolves ONE representative per class, so the plan_map is keyed by
+        # acquisition signature and the per-frame lookup never decodes all
+        # frames.  No-op when no calibration session is open (disabled path).
+        if getattr(self, "_calibration_integrator", None) is not None:
+            self._build_calibration_freeze(list(self.all_input_filepaths))
+
         # =====================================================================
         # Phase B1 — FREEZE POINT: B_resolved is frozen HERE, once, before any
         # scientific batch execution.  Every subsequent manifest/resume write
