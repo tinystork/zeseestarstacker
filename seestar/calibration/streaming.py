@@ -18,6 +18,11 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from seestar.calibration.preflight import acquisition_signature
+from seestar.calibration.scan import (
+    FITS_SUFFIXES,
+    flatten_masters,
+    scan_masters_recursive,
+)
 from seestar.calibration.zecalibrator_adapter import ZeCalibratorProvider
 from seestar.core.calibration_port import CalibrationState, LightSource
 
@@ -36,13 +41,43 @@ class CalibrationIntegrator:
         self._masters_folder = masters_folder
         self._plan_map = dict(plan_map) if plan_map else None
         self._plan_cache: dict = {}  # acquisition signature -> resolved plan object
+        self._flat_dir = None  # scratch dir for the flattened recursive scan
         self._session = None
         self._session_result = None
 
     # ------------------------------------------------------------------ open
     def open(self) -> bool:
-        """Open the session (admission only). Returns True when usable."""
-        result = self._provider.open_session(self._masters_folder)
+        """Open the session (admission only). Returns True when usable.
+
+        The chosen masters folder may be nested (e.g. M74 masters depth 3-4);
+        ZeCalibrator's admission is top-level only, so when the root has no
+        top-level FITS it is scanned **recursively (bounded)** and the candidates
+        are flattened into a scratch dir before admission.  Admission and role
+        identification stay ZeCalibrator's (raw non-masters are rejected with
+        diagnostics).
+        """
+        import os
+        import tempfile
+
+        root = self._masters_folder
+        admit_root = root
+        self._flat_dir = None
+        has_top_level_fits = False
+        if os.path.isdir(root):
+            try:
+                has_top_level_fits = any(
+                    os.path.isfile(os.path.join(root, e))
+                    and e.lower().endswith(FITS_SUFFIXES)
+                    for e in os.listdir(root)
+                )
+            except OSError:
+                has_top_level_fits = False
+        if not has_top_level_fits:
+            candidates = scan_masters_recursive(root)
+            if candidates:
+                self._flat_dir = tempfile.mkdtemp(prefix="zsss_masters_flat_")
+                admit_root = flatten_masters(candidates, self._flat_dir)
+        result = self._provider.open_session(admit_root)
         self._session_result = result
         self._session = getattr(result, "session", None)
         return self._session is not None
@@ -162,6 +197,11 @@ class CalibrationIntegrator:
             self._session.close()
             self._session = None
             self._session_result = None
+        if getattr(self, "_flat_dir", None):
+            import shutil
+
+            shutil.rmtree(self._flat_dir, ignore_errors=True)
+            self._flat_dir = None
 
 
 __all__ = ["CalibrationIntegrator"]

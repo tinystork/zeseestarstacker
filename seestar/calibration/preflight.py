@@ -106,15 +106,36 @@ def _read_header(path: str):
         return None
 
 
+def _night_from_dateobs(hdr) -> str:
+    """Return the observing **night** (coarse calendar date) for a light.
+
+    Astronomical nights cross midnight: an observation at 00:30 belongs to the
+    PREVIOUS evening's night, not the wall-clock date.  The day boundary is
+    therefore shifted to local noon (DATE-OBS minus 12h) before taking the
+    calendar date — so 2026-09-14T23:41 and 2026-09-15T00:41 both map to
+    ``2026-09-14``.  A full timestamp would make one class per image and destroy
+    the per-class cache; this coarse night keeps a whole night as one class.
+    """
+    val = hdr.get("DATE-OBS")
+    if val is None:
+        return ""
+    try:
+        from datetime import datetime, timedelta
+
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return ""
+    return (dt - timedelta(hours=12)).date().isoformat()
+
+
 def acquisition_signature(path: str) -> str:
     """Return a stable acquisition signature from a light's FITS **header only**.
 
-    Key = (exposure, gain, binning, CFA phase, detector, dimensions).  This is a
-    header-only read (no pixel decode): two lights sharing the signature share
-    the same auto-routed plan class (same dark/bias/flat matching inputs), so a
-    preflight can resolve ONE representative per class instead of every frame.
-
-    Deterministic string; never a content hash and never a filename rule.
+    Key = (exposure, gain, binning, CFA phase, detector, dimensions, night,
+    filter).  ``night`` is the coarse observing night (see :func:`_night_from_dateobs`),
+    never a full timestamp.  Header-only (no pixel decode): two lights sharing the
+    signature share the same auto-routed plan class.  Deterministic; never a
+    content hash and never a filename rule.
     """
     hdr = _read_header(path)
     if hdr is None:
@@ -138,6 +159,8 @@ def acquisition_signature(path: str) -> str:
     detector = hdr.get("INSTRUME", hdr.get("DETECTOR"))
     nx = hdr.get("NAXIS1")
     ny = hdr.get("NAXIS2")
+    filter_ = hdr.get("FILTER")
+    night = _night_from_dateobs(hdr)
 
     def _s(v) -> str:
         if v is None:
@@ -151,6 +174,7 @@ def acquisition_signature(path: str) -> str:
     return "|".join([
         _s(exposure), _s(gain), f"{_s(binx)}x{_s(biny)}",
         _s(cfa), _s(detector), f"{_s(nx)}x{_s(ny)}",
+        night, _s(filter_),
     ])
 
 
