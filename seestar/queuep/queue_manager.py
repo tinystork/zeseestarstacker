@@ -5002,6 +5002,9 @@ class SeestarQueuedStacker:
         self._calibration_master_folder = ""
         self._calibration_integrator = None
         self._calibration_masks: dict = {}
+        # C6 audit counter: number of pixels invalidated by the calibration DQ
+        # (``mask != 0``) when combined into the support/valid mask.
+        self._dq_invalidated_count = 0
         # ZSSS-LIFECYCLE-01: structured startup refusal (reset per start attempt)
         # and fail-open lifecycle callback (installed by the Qt adapter so the
         # engine can record durable lifecycle events without ever touching Qt).
@@ -11127,7 +11130,7 @@ class SeestarQueuedStacker:
         light has no plan or calibration fails — the caller falls back to the
         historical path (never a hard failure).
         """
-        integrator = self._calibration_integrator
+        integrator = getattr(self, "_calibration_integrator", None)
         if integrator is None:
             return None
         phys = load_and_validate_fits(
@@ -11148,6 +11151,45 @@ class SeestarQueuedStacker:
             return None
         working = normalize_physical_to_working(calibrated_physical)
         return working, header, mask
+
+    def _combine_dq_into_valid_mask(self, file_name, valid_mask, M, is_original_grid):
+        """AND the calibration DQ invalidity into the valid mask (C6, §5).
+
+        DQ is PRIMARY: a DQ-invalid pixel is excluded from support regardless of
+        the luminance mask (never the reverse).  ``is_original_grid`` selects the
+        grid: Drizzle Standard keeps the ORIGINAL frame (the DQ mask already
+        lives there -> direct AND); Classic warps the DQ mask by ``M``
+        (nearest-neighbour) into the aligned grid.  A malformed/unwarpable DQ
+        mask never degrades the existing support truthfulness (returns the mask
+        unchanged).  Increments the C6 audit counter.
+        """
+        dq = getattr(self, "_calibration_masks", {}).get(file_name)
+        if dq is None:
+            return valid_mask
+        dq_arr = np.asarray(dq)
+        if dq_arr.size == 0:
+            return valid_mask
+        try:
+            dq_invalid = dq_arr != 0
+            if is_original_grid or dq_invalid.shape == valid_mask.shape:
+                combined = valid_mask & ~dq_invalid
+            else:
+                if M is None:
+                    return valid_mask
+                warped = cv2.warpAffine(
+                    dq_invalid.astype(np.uint8),
+                    np.asarray(M, dtype=np.float64),
+                    (int(valid_mask.shape[1]), int(valid_mask.shape[0])),
+                    flags=cv2.INTER_NEAREST,
+                )
+                combined = valid_mask & (warped == 0)
+        except Exception:
+            return valid_mask
+        n_new_invalid = int(np.sum(valid_mask) - np.sum(combined))
+        self._dq_invalidated_count = (
+            getattr(self, "_dq_invalidated_count", 0) + max(0, n_new_invalid)
+        )
+        return combined
 
     def _process_file(
         self,
@@ -11214,7 +11256,7 @@ class SeestarQueuedStacker:
             # historical loader runs unchanged (zero change by default).
             calibration_mask = None
             calibration_applied = False
-            if self._calibration_integrator is not None:
+            if getattr(self, "_calibration_integrator", None) is not None:
                 cal_tuple = self._calibrate_frame_to_working(file_path)
                 if cal_tuple is not None:
                     img_data_array_loaded, header_final_pour_retour, calibration_mask = (
@@ -11789,6 +11831,17 @@ class SeestarQueuedStacker:
                     logger.debug(
                         f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}"
                     )
+
+            # C6: combine the calibration DQ (PRIMARY) into the valid mask.
+            # Drizzle Standard keeps the ORIGINAL grid (same as the DQ mask ->
+            # direct AND); Classic warps the DQ mask by M into the aligned grid.
+            # Zero change when no calibration DQ is present (default path).
+            valid_pixel_mask_2d = self._combine_dq_into_valid_mask(
+                file_name,
+                valid_pixel_mask_2d,
+                matrice_M_calculee,
+                bool(self.drizzle_active_session and not self.is_mosaic_run),
+            )
 
             # --- Background equalization for batch_size == 1 -------------------
             # Phase-1 (support-aware overlap): the hidden additive sky
