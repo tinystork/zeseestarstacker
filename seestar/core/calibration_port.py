@@ -246,6 +246,7 @@ class SessionResult:
     counts_by_role: Mapping[str, int] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     error: CalibrationError | None = None
+    sensor_orientation: str | None = None  # neutral fallback-only declaration ("identity" | None)
 
     @property
     def context_preparations(self) -> int:
@@ -331,7 +332,11 @@ class CalibrationProvider(Protocol):
     def probe(self) -> ProviderInfo: ...
 
     def open_session(
-        self, root: str, *, cancel: CancellationHandle | None = None
+        self,
+        root: str,
+        *,
+        cancel: CancellationHandle | None = None,
+        sensor_orientation: str | None = None,
     ) -> SessionResult: ...
 
 

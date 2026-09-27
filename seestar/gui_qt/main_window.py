@@ -1919,6 +1919,20 @@ class MainWindow(QMainWindow):
         self.calibration_enabled_check.setChecked(bool(self.settings_state.calibration_enabled))
         layout.addWidget(self.calibration_enabled_check)
 
+        # C16: fallback-only session orientation declaration (opt-in, unchecked
+        # by default).  It only supplies ``orientation="identity"`` when a master
+        # carries no exploitable orientation evidence (C15 header-wins rule).
+        self.calibration_orientation_check = QCheckBox(
+            self._tr("calibration_orientation_declaration")
+        )
+        self._bind_text(
+            self.calibration_orientation_check, "calibration_orientation_declaration"
+        )
+        self.calibration_orientation_check.setChecked(
+            bool(self.settings_state.calibration_orientation)
+        )
+        layout.addWidget(self.calibration_orientation_check)
+
         self.calibration_provider_label = QLabel()
         self._render_calibration_provider_status()
         layout.addWidget(self.calibration_provider_label)
@@ -5717,6 +5731,9 @@ class MainWindow(QMainWindow):
         if self._calibration_tab is not None:
             state.calibration_enabled = self.calibration_enabled_check.isChecked()
             state.calibration_master_folder = self.calibration_folder_edit.text().strip()
+            state.calibration_orientation = (
+                "identity" if self.calibration_orientation_check.isChecked() else ""
+            )
 
         # Final-combination business control drives the derived reproject flags
         # (exactly like Tk SettingsManager.update_from_ui).  There is no
@@ -5883,6 +5900,9 @@ class MainWindow(QMainWindow):
                 self.calibration_folder_edit.setText(
                     state.calibration_master_folder or ""
                 )
+                self.calibration_orientation_check.setChecked(
+                    bool(getattr(state, "calibration_orientation", ""))
+                )
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
@@ -6016,6 +6036,9 @@ class MainWindow(QMainWindow):
             calibration_enabled=bool(getattr(state, "calibration_enabled", False)),
             calibration_master_folder=getattr(
                 state, "calibration_master_folder", ""
+            ) or "",
+            calibration_orientation=getattr(
+                state, "calibration_orientation", ""
             ) or "",
         )
 

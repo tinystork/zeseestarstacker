@@ -36,12 +36,13 @@ class CalibrationIntegrator:
     historical path.
     """
 
-    def __init__(self, masters_folder: str, *, provider=None, plan_map=None) -> None:
+    def __init__(self, masters_folder: str, *, provider=None, plan_map=None, sensor_orientation=None) -> None:
         self._provider = provider or ZeCalibratorProvider()
         self._masters_folder = masters_folder
         self._plan_map = dict(plan_map) if plan_map else None
         self._plan_cache: dict = {}  # acquisition signature -> resolved plan object
         self._flat_dir = None  # scratch dir for the flattened recursive scan
+        self._sensor_orientation = sensor_orientation  # neutral fallback declaration
         self._session = None
         self._session_result = None
 
@@ -77,7 +78,9 @@ class CalibrationIntegrator:
             if candidates:
                 self._flat_dir = tempfile.mkdtemp(prefix="zsss_masters_flat_")
                 admit_root = flatten_masters(candidates, self._flat_dir)
-        result = self._provider.open_session(admit_root)
+        result = self._provider.open_session(
+            admit_root, sensor_orientation=self._sensor_orientation
+        )
         self._session_result = result
         self._session = getattr(result, "session", None)
         return self._session is not None
@@ -181,6 +184,7 @@ class CalibrationIntegrator:
             "calibration_library_fingerprint": self.fingerprint or "",
             "calibration_contract_versions": {},
             "calibration_plan_map": plan_map,
+            "calibration_orientation_declaration": self._sensor_orientation,
         }
 
     def _resolve_direct(self, file_path: str):

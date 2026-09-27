@@ -46,6 +46,7 @@ def attach_run_settings(
     reference_origin_hint: str | None = None,
     calibration_enabled: bool = False,
     calibration_master_folder: str | None = None,
+    calibration_orientation: str | None = None,
 ) -> RunRequest:
     """Return a new ``RunRequest`` carrying the Qt-collected seam settings.
 
@@ -63,6 +64,9 @@ def attach_run_settings(
     merged["calibration_enabled"] = bool(calibration_enabled)
     merged["calibration_master_folder"] = (
         str(calibration_master_folder) if calibration_master_folder else ""
+    )
+    merged["calibration_orientation"] = (
+        str(calibration_orientation) if calibration_orientation else ""
     )
     return RunRequest(
         backend_kwargs=MappingProxyType(merged),

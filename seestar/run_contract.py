@@ -749,6 +749,9 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
     _f("calibration_plan_map", Section.CALIBRATION, KIND_DICT,
        presence=PRESENCE_OPTIONAL, restore=False,
        doc="light signature -> plan_id + composition (applied roles, level, additive_state, flat applied)."),
+    _f("calibration_orientation_declaration", Section.CALIBRATION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, restore=False,
+       doc="fallback-only session orientation declaration ('identity' when the user asserted no rotation; absent otherwise)."),
 )
 
 _FIELD_BY_NAME: Dict[str, FieldDef] = {f.name: f for f in FIELD_DEFS}

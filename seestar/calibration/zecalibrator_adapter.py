@@ -270,7 +270,7 @@ def _map_composition(plan) -> CalibrationComposition | None:
     return CalibrationComposition.from_dict(to_dict())
 
 
-def _map_session_result(api, res) -> SessionResult:
+def _map_session_result(api, res, sensor_orientation=None) -> SessionResult:
     if res.operation_status == "CANCELLED":
         return SessionResult(
             state=CalibrationState.CANCELLED,
@@ -298,6 +298,7 @@ def _map_session_result(api, res) -> SessionResult:
         rejected=rejected,
         counts_by_role=dict(res.counts_by_role or {}),
         warnings=tuple(res.warnings or ()),
+        sensor_orientation=sensor_orientation,
     )
 
 
@@ -423,7 +424,7 @@ class ZeCalibratorProvider:
     def probe(self) -> ProviderInfo:
         return probe()
 
-    def open_session(self, root: str, *, cancel=None) -> SessionResult:
+    def open_session(self, root: str, *, cancel=None, sensor_orientation=None) -> SessionResult:
         try:
             api = _import_api()
         except Exception as exc:
@@ -438,8 +439,11 @@ class ZeCalibratorProvider:
             )
 
         token = _to_token(api, cancel)
+        declaration = None
+        if sensor_orientation is not None:
+            declaration = api.SessionDeclaration(orientation=sensor_orientation)
         try:
-            res = api.open_session_library(root, cancel=token)
+            res = api.open_session_library(root, cancel=token, declaration=declaration)
         except Exception as exc:
             if _is_cancelled(api, exc):
                 return SessionResult(
@@ -447,7 +451,7 @@ class ZeCalibratorProvider:
                     error=CalibrationError(ErrorKind.CANCELLED, "cancelled"),
                 )
             return SessionResult(state=CalibrationState.FAILED, error=_failed(exc))
-        return _map_session_result(api, res)
+        return _map_session_result(api, res, sensor_orientation=sensor_orientation)
 
 
 __all__ = [

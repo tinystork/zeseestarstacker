@@ -5000,6 +5000,9 @@ class SeestarQueuedStacker:
         # DQ mask (``mask != 0`` == invalid) for C6 — never silently dropped.
         self._calibration_enabled = False
         self._calibration_master_folder = ""
+        # C16: neutral fallback-only session declaration ("identity" when the
+        # user checked the orientation checkbox; "" otherwise -> no declaration).
+        self._calibration_orientation = ""
         self._calibration_integrator = None
         self._calibration_masks: dict = {}
         # C6 audit counter: number of pixels invalidated by the calibration DQ
@@ -11096,7 +11099,10 @@ class SeestarQueuedStacker:
             from seestar.calibration.streaming import CalibrationIntegrator
         except Exception:
             return
-        integrator = CalibrationIntegrator(self._calibration_master_folder)
+        integrator = CalibrationIntegrator(
+            self._calibration_master_folder,
+            sensor_orientation=(self._calibration_orientation or None),
+        )
         try:
             opened = integrator.open()
         except Exception:
@@ -25151,7 +25157,22 @@ class SeestarQueuedStacker:
         # acquisition signature and the per-frame lookup never decodes all
         # frames.  No-op when no calibration session is open (disabled path).
         if getattr(self, "_calibration_integrator", None) is not None:
-            self._build_calibration_freeze(list(self.all_input_filepaths))
+            lights = list(self.all_input_filepaths)
+            if not lights:
+                # The common folder-scan path populates the queue, not
+                # ``all_input_filepaths`` (which is only set for the mosaic/CSV
+                # branches).  Derive the light paths from the queue, filtering
+                # the batch-break sentinel.
+                lights = [
+                    p for p in list(getattr(self.queue, "queue", ()) or ())
+                    if isinstance(p, str) and p.lower().endswith((".fit", ".fits"))
+                ]
+            self._build_calibration_freeze(lights)
+            # C16: invalidate the cached canonical run config so the next
+            # manifest write recollects the populated calibration plan map
+            # (the bootstrap write may have cached an empty plan_map).
+            self._run_config_canonical = None
+            self._run_config_canonical_fingerprint = None
 
         # =====================================================================
         # Phase B1 — FREEZE POINT: B_resolved is frozen HERE, once, before any

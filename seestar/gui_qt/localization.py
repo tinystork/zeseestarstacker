@@ -46,6 +46,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "Use ZeCalibrator calibration",
         "fr": "Utiliser la calibration ZeCalibrator",
     },
+    "calibration_orientation_declaration": {
+        "en": "Masters use the same sensor orientation as the lights (no rotation)",
+        "fr": "Les masters utilisent la même orientation capteur que les images (aucune rotation)",
+    },
     "calibration_master_counts": {
         "en": "Masters: {dark} dark · {bias} bias · {flat} flat",
         "fr": "Masters : {dark} dark · {bias} offset · {flat} flat",

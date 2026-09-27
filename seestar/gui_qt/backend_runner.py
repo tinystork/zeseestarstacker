@@ -372,6 +372,10 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
             stacker._calibration_master_folder = str(
                 seam_kwargs["calibration_master_folder"] or ""
             )
+        if "calibration_orientation" in seam_kwargs:
+            stacker._calibration_orientation = str(
+                seam_kwargs["calibration_orientation"] or ""
+            )
 
     @staticmethod
     def _make_progress_callback(

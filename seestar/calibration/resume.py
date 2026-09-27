@@ -25,6 +25,7 @@ CALIBRATION_FREEZE_FIELDS: Tuple[str, ...] = (
     "calibration_library_fingerprint",
     "calibration_contract_versions",
     "calibration_plan_map",
+    "calibration_orientation_declaration",
 )
 
 
@@ -85,6 +86,9 @@ def render_calibration_provenance(
     fingerprint = freeze.get("calibration_library_fingerprint") or ""
     lines.append(f"provider: {provider} {product} (API {api})")
     lines.append(f"library fingerprint: {fingerprint or '<none>'}")
+    orientation_decl = freeze.get("calibration_orientation_declaration")
+    if orientation_decl:
+        lines.append(f"orientation declaration: {orientation_decl}")
 
     by_role: dict = {}
     for adm in admissions or ():

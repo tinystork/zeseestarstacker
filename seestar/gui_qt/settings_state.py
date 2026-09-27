@@ -317,6 +317,9 @@ class QtSettingsState:
     # provider must never break ZSSS).
     calibration_enabled: bool = False
     calibration_master_folder: str = ""
+    # C16: fallback-only session orientation declaration ("identity" when the
+    # user asserted "no rotation"; "" otherwise -> no declaration).
+    calibration_orientation: str = ""
 
     # --- UI language (M9; persisted via the M8 settings JSON round-trip) ---
     language: str = "en"
