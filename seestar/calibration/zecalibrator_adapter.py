@@ -1,0 +1,379 @@
+"""Optional ZeCalibrator API v1 integration adapter (public-import-only contract).
+
+This module is the *only* place in Zsss that talks to ZeCalibrator, and it does
+so strictly through the public, stable API surface ``zecalibrator.api.v1``.  It
+never imports ZeCalibrator internals or private modules (``zecalibrator.api.v1._*``
+is forbidden), never searches a sibling checkout, and never mutates the module
+search path.
+
+ZeCalibrator is optional: absence, incompatibility or a broken installation must
+never break importing Zsss nor change the historical (non-calibrated) path.  The
+public API module is therefore imported *lazily* (only inside ``probe()`` /
+``open_session()``); there is no top-level import of ``zecalibrator``.
+
+Capability negotiation (frozen contract): the provider is accepted only when
+``get_api_info().api_version`` has major ``"1"`` **and** the capability IDs
+``{session_library, auto_route, calibrate_frame, cancel}`` are all present.
+Never a product-version comparison, never a minor equality, never ``>=``.
+"""
+
+from __future__ import annotations
+
+import importlib
+from typing import Any
+
+from seestar.core.calibration_port import (
+    CalibrationError,
+    CalibrationPlan,
+    CalibrationResult,
+    CalibrationSession,
+    CalibrationState,
+    CancellationHandle,
+    ErrorKind,
+    LightSource,
+    MasterAdmission,
+    ProviderInfo,
+    ProviderState,
+    RejectionDiagnostic,
+    RouteResolution,
+    SessionResult,
+)
+
+# Referenced only as a string; never imported at module level.
+_API_MODULE = "zecalibrator.api.v1"
+
+PROVIDER_ID = "zecalibrator"
+
+# The only supported ZeCalibrator public API major (exact match, never >=).
+REQUIRED_API_MAJOR = "1"
+
+# Hard requirement: the session-library + auto-route + unitary calibration +
+# cooperative-cancellation capabilities.  Absence of any one makes the provider
+# unusable (reported with the missing capability names).
+REQUIRED_CAPABILITIES = frozenset(
+    {"session_library", "auto_route", "calibrate_frame", "cancel"}
+)
+
+# The light import contract source (raw 2-D sensor/CFA light, decoded by the
+# provider).  Acquisition/geometry facts come from the FITS header; this only
+# supplies the raw-domain evidence the strict decoder requires.
+_LIGHT_CONTRACT_SOURCE = "zsss_light_contract"
+
+
+def _import_api():
+    """Import the public ZeCalibrator API lazily (first call only)."""
+    return importlib.import_module(_API_MODULE)
+
+
+def _is_zecalibrator_module_absent(exc: BaseException) -> bool:
+    """True when ``exc`` means the public ZeCalibrator module itself is absent.
+
+    A :class:`ModuleNotFoundError` naming the ``zecalibrator`` / ``zecalibrator.api``
+    / ``zecalibrator.api.v1`` chain means "not installed"; one naming any *other*
+    module means the public module was found but one of its internal imports
+    failed ("installed but broken").
+    """
+    name = getattr(exc, "name", None)
+    if not isinstance(name, str) or not name:
+        return False
+    return name == "zecalibrator" or name.startswith("zecalibrator.")
+
+
+def _parse_major(version: Any) -> str | None:
+    """Return the leading major component of an API version string ("1.1" -> "1")."""
+    if version is None:
+        return None
+    try:
+        return str(version).split(".")[0]
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
+
+
+def _unavailable(exc: BaseException) -> CalibrationError:
+    return CalibrationError(
+        ErrorKind.UNAVAILABLE, f"{type(exc).__name__}: {exc}"
+    )
+
+
+def _failed(exc: BaseException) -> CalibrationError:
+    return CalibrationError(ErrorKind.FAILED, f"{type(exc).__name__}: {exc}")
+
+
+def probe() -> ProviderInfo:
+    """Lazily discover and negotiate the installed ZeCalibrator public API v1.
+
+    Compatibility is decided exclusively on the public ``api_version`` major
+    (exact ``"1"``) plus the declared capabilities — never on Git branch or
+    product version.  States: ``NOT_INSTALLED`` (public module absent),
+    ``UNHEALTHY`` (present but broken import/probe), ``INCOMPATIBLE`` (wrong
+    major or missing required capability), ``AVAILABLE`` otherwise.
+    """
+    try:
+        api = _import_api()
+    except ModuleNotFoundError as exc:
+        if _is_zecalibrator_module_absent(exc):
+            return ProviderInfo(
+                state=ProviderState.NOT_INSTALLED,
+                message=f"{type(exc).__name__}: {exc}",
+            )
+        return ProviderInfo(
+            state=ProviderState.UNHEALTHY,
+            message=f"import failed: {type(exc).__name__}: {exc}",
+        )
+    except Exception as exc:
+        return ProviderInfo(
+            state=ProviderState.UNHEALTHY,
+            message=f"import failed: {type(exc).__name__}: {exc}",
+        )
+
+    try:
+        info = api.get_api_info()
+    except Exception as exc:
+        return ProviderInfo(
+            state=ProviderState.UNHEALTHY,
+            message=f"get_api_info failed: {type(exc).__name__}: {exc}",
+        )
+
+    api_version = getattr(info, "api_version", None)
+    major = _parse_major(api_version)
+    capabilities = tuple(getattr(info, "capabilities", ()) or ())
+
+    if major != REQUIRED_API_MAJOR:
+        return ProviderInfo(
+            state=ProviderState.INCOMPATIBLE,
+            provider_id=PROVIDER_ID,
+            api_version=api_version,
+            api_major=major,
+            capabilities=capabilities,
+            message=(
+                f"incompatible API major {major!r} (expected {REQUIRED_API_MAJOR!r})"
+            ),
+        )
+
+    missing = sorted(REQUIRED_CAPABILITIES - set(capabilities))
+    if missing:
+        return ProviderInfo(
+            state=ProviderState.INCOMPATIBLE,
+            provider_id=PROVIDER_ID,
+            api_version=api_version,
+            api_major=major,
+            capabilities=capabilities,
+            message=f"missing capabilities: {missing}",
+        )
+
+    return ProviderInfo(
+        state=ProviderState.AVAILABLE,
+        provider_id=PROVIDER_ID,
+        api_version=api_version,
+        api_major=major,
+        capabilities=capabilities,
+    )
+
+
+def _to_token(api, cancel: CancellationHandle | None):
+    """Map a neutral cancellation handle onto a provider ``CancellationToken``.
+
+    The neutral handle is duck-typed (``is_cancelled() -> bool``); a fresh
+    provider token is pre-cancelled when the handle is already cancelled, so the
+    provider honours cancellation at its cooperative checkpoints.
+    """
+    token = api.CancellationToken()
+    if cancel is not None:
+        is_cancelled = getattr(cancel, "is_cancelled", None)
+        if callable(is_cancelled) and is_cancelled():
+            token.cancel()
+    return token
+
+
+def _is_cancelled(api, exc: BaseException) -> bool:
+    op_cancelled = getattr(api, "OperationCancelled", None)
+    return op_cancelled is not None and isinstance(exc, op_cancelled)
+
+
+def _light_source(api, source: LightSource):
+    declaration = api.ImportDeclaration(
+        source=_LIGHT_CONTRACT_SOURCE,
+        identity=source.logical_id or source.path,
+        version="1",
+        domain="raw",
+        units="ADU",
+    )
+    return api.FitsFrameSource(path=source.path, declaration=declaration)
+
+
+def _map_session_result(api, res) -> SessionResult:
+    if res.operation_status == "CANCELLED":
+        return SessionResult(
+            state=CalibrationState.CANCELLED,
+            warnings=tuple(getattr(res, "warnings", ()) or ()),
+        )
+    admissions = tuple(
+        MasterAdmission(
+            role=a.role,
+            path=a.path,
+            content_sha256=a.content_sha256,
+            size_bytes=a.size_bytes,
+        )
+        for a in (res.admissions or ())
+    )
+    rejected = tuple(
+        RejectionDiagnostic(path=r.path, reason_code=r.reason_code, detail=r.detail)
+        for r in (res.rejected or ())
+    )
+    session = _ZeCalibratorSession(api, res.handle) if res.handle is not None else None
+    return SessionResult(
+        state=CalibrationState.COMPLETED,
+        session=session,
+        fingerprint=res.fingerprint or "",
+        admissions=admissions,
+        rejected=rejected,
+        counts_by_role=dict(res.counts_by_role or {}),
+        warnings=tuple(res.warnings or ()),
+    )
+
+
+class _ZeCalibratorSession:
+    """Concrete :class:`CalibrationSession` over a ZeCalibrator ``SessionLibrary``.
+
+    Mono-thread by contract: one instance per worker, never shared.  The provider
+    plan objects are held opaquely and unwrapped only here (plan provenance C1).
+    """
+
+    def __init__(self, api, handle) -> None:
+        self._api = api
+        self._handle = handle
+
+    @property
+    def fingerprint(self) -> str:
+        return self._handle.fingerprint
+
+    def resolve_light(self, source: LightSource, *, cancel=None) -> RouteResolution:
+        token = _to_token(self._api, cancel)
+        try:
+            rr = self._handle.resolve_light(_light_source(self._api, source), cancel=token)
+        except Exception as exc:
+            if _is_cancelled(self._api, exc):
+                return RouteResolution(
+                    state=CalibrationState.CANCELLED,
+                    error=CalibrationError(ErrorKind.CANCELLED, "cancelled"),
+                )
+            return RouteResolution(state=CalibrationState.FAILED, error=_failed(exc))
+
+        if rr.operation_status == "CANCELLED":
+            return RouteResolution(state=CalibrationState.CANCELLED)
+        if rr.operation_status == "FAILED":
+            return RouteResolution(
+                state=CalibrationState.FAILED,
+                error=CalibrationError(ErrorKind.FAILED, rr.details or "resolve failed"),
+            )
+        plan = (
+            CalibrationPlan(plan_id=rr.plan.plan_id, provider_plan=rr.plan)
+            if rr.plan is not None
+            else None
+        )
+        return RouteResolution(
+            state=CalibrationState.COMPLETED,
+            outcome=rr.outcome,
+            plan=plan,
+            reasons=tuple(getattr(r, "code", str(r)) for r in (rr.reasons or ())),
+            warnings=tuple(getattr(r, "code", str(r)) for r in (rr.unverified or ())),
+        )
+
+    def calibrate(self, source: LightSource, plan: CalibrationPlan, *, cancel=None) -> CalibrationResult:
+        if not isinstance(plan, CalibrationPlan):
+            return CalibrationResult(
+                state=CalibrationState.FAILED,
+                error=CalibrationError(
+                    ErrorKind.FAILED,
+                    "plan must be a CalibrationPlan issued by resolve_light",
+                ),
+            )
+        token = _to_token(self._api, cancel)
+        try:
+            cr = self._handle.calibrate(
+                _light_source(self._api, source), plan._provider_plan, cancel=token
+            )
+        except Exception as exc:
+            if _is_cancelled(self._api, exc):
+                return CalibrationResult(
+                    state=CalibrationState.CANCELLED,
+                    error=CalibrationError(ErrorKind.CANCELLED, "cancelled"),
+                )
+            return CalibrationResult(state=CalibrationState.FAILED, error=_failed(exc))
+
+        if cr.status == "CANCELLED":
+            return CalibrationResult(
+                state=CalibrationState.CANCELLED,
+                warnings=tuple(getattr(cr, "warnings", ()) or ()),
+            )
+        if cr.status == "FAILED":
+            return CalibrationResult(
+                state=CalibrationState.FAILED,
+                warnings=tuple(getattr(cr, "warnings", ()) or ()),
+                error=CalibrationError(
+                    ErrorKind.FAILED, getattr(cr, "reason_code", None) or "calibration failed"
+                ),
+            )
+        provenance = {}
+        prov = getattr(cr, "provenance", None)
+        to_dict = getattr(prov, "to_dict", None)
+        if callable(to_dict):
+            provenance = dict(to_dict())
+        return CalibrationResult(
+            state=CalibrationState.COMPLETED,
+            data=getattr(cr, "data", None),
+            mask=getattr(cr, "mask", None),
+            provenance=provenance,
+            warnings=tuple(getattr(cr, "warnings", ()) or ()),
+        )
+
+    def close(self) -> None:
+        self._handle.close()
+
+
+class ZeCalibratorProvider:
+    """Concrete :class:`CalibrationProvider` over ``zecalibrator.api.v1``.
+
+    ``probe`` never raises; ``open_session`` never raises for expected
+    operational failures (absence/incompatibility/errors map to neutral states).
+    """
+
+    name = PROVIDER_ID
+
+    def probe(self) -> ProviderInfo:
+        return probe()
+
+    def open_session(self, root: str, *, cancel=None) -> SessionResult:
+        try:
+            api = _import_api()
+        except Exception as exc:
+            return SessionResult(state=CalibrationState.UNAVAILABLE, error=_unavailable(exc))
+
+        # Refuse to build a session unless the provider negotiates as AVAILABLE.
+        info = probe()
+        if not info.available:
+            return SessionResult(
+                state=CalibrationState.UNAVAILABLE,
+                error=CalibrationError(ErrorKind.UNAVAILABLE, info.message or "provider unavailable"),
+            )
+
+        token = _to_token(api, cancel)
+        try:
+            res = api.open_session_library(root, cancel=token)
+        except Exception as exc:
+            if _is_cancelled(api, exc):
+                return SessionResult(
+                    state=CalibrationState.CANCELLED,
+                    error=CalibrationError(ErrorKind.CANCELLED, "cancelled"),
+                )
+            return SessionResult(state=CalibrationState.FAILED, error=_failed(exc))
+        return _map_session_result(api, res)
+
+
+__all__ = [
+    "PROVIDER_ID",
+    "REQUIRED_API_MAJOR",
+    "REQUIRED_CAPABILITIES",
+    "ZeCalibratorProvider",
+    "probe",
+]
