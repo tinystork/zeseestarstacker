@@ -6013,6 +6013,10 @@ class MainWindow(QMainWindow):
             request,
             use_gpu=bool(state.use_gpu),
             reference_origin_hint=self._reference_origin_hint,
+            calibration_enabled=bool(getattr(state, "calibration_enabled", False)),
+            calibration_master_folder=getattr(
+                state, "calibration_master_folder", ""
+            ) or "",
         )
 
     # ------------------------------------------- progress/log time + copy

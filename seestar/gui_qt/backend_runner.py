@@ -365,6 +365,14 @@ class SeestarQueuedStackerBackend(BaseRunBackend):
 
         stacker.reference_origin_hint = seam_kwargs.get("reference_origin_hint")
 
+        # C5: calibration intent + master folder are engine-instance seam fields.
+        if "calibration_enabled" in seam_kwargs:
+            stacker._calibration_enabled = bool(seam_kwargs["calibration_enabled"])
+        if "calibration_master_folder" in seam_kwargs:
+            stacker._calibration_master_folder = str(
+                seam_kwargs["calibration_master_folder"] or ""
+            )
+
     @staticmethod
     def _make_progress_callback(
         progress_callback: ProgressCallback,

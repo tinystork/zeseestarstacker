@@ -248,6 +248,34 @@ def load_and_validate_fits(filepath, normalize_to_float32=True, attempt_fix_nonf
             return None, header_for_fallback, None
         return None, header_for_fallback
 
+def normalize_physical_to_working(physical):
+    """Normalize physical float32 data to the ZSSS working domain ``[0, 1]``.
+
+    This is the **single normalization seam** (C5): it replicates, bit-for-bit,
+    the min-max normalisation that ``load_and_validate_fits`` applies (float64
+    stats, float32 arithmetic, clipped to ``[0, 1]``) so a *calibrated physical*
+    frame lands in exactly the same working domain as the historical loader
+    would have produced for the same raw physical input (control-path parity).
+
+    Args:
+        physical (np.ndarray): Physical float32 array (raw ADU domain, never
+            0..1-normalised).
+
+    Returns:
+        np.ndarray: float32 working array in ``[0, 1]``.
+    """
+    data = np.asarray(physical, dtype=np.float32)
+    stats = data.astype(np.float64)
+    min_val = float(np.nanmin(stats))
+    max_val = float(np.nanmax(stats))
+    if np.isfinite(min_val) and np.isfinite(max_val) and (max_val > min_val):
+        normalized = (data - min_val) / (max_val - min_val)
+        return np.clip(normalized, 0.0, 1.0).astype(np.float32)
+    if np.any(np.isfinite(data)):
+        return np.full_like(data, 0.5, dtype=np.float32)
+    return np.zeros_like(data, dtype=np.float32)
+
+
 def debayer_image(img, bayer_pattern="GRBG"):
     """
     Convertit une image brute Bayer (normalisée 0-1 float32) en image RGB (0-1 float32).

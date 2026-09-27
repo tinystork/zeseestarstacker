@@ -2505,6 +2505,7 @@ try:
     from ..core.image_processing import (
         debayer_image,
         load_and_validate_fits,
+        normalize_physical_to_working,
         save_fits_image,
         save_preview_image,
     )
@@ -4992,6 +4993,15 @@ class SeestarQueuedStacker:
         self.processing_active = False
         self.stop_processing = False
         self.processing_error = None
+        # C5: streaming calibration state.  ``_calibration_enabled`` /
+        # ``_calibration_master_folder`` are engine-instance seam fields (set by
+        # the Qt backend adapter); the integrator is opened lazily at Start and
+        # closed on stop.  ``_calibration_masks`` carries each frame's provider
+        # DQ mask (``mask != 0`` == invalid) for C6 — never silently dropped.
+        self._calibration_enabled = False
+        self._calibration_master_folder = ""
+        self._calibration_integrator = None
+        self._calibration_masks: dict = {}
         # ZSSS-LIFECYCLE-01: structured startup refusal (reset per start attempt)
         # and fail-open lifecycle callback (installed by the Qt adapter so the
         # engine can record durable lifecycle events without ever touching Qt).
@@ -11066,6 +11076,79 @@ class SeestarQueuedStacker:
                 exc_info=True,
             )
 
+    def _open_calibration_session(self) -> None:
+        """Open the calibration integrator at Start (C5).
+
+        Lazily imports the integrator; a provider that is absent/unavailable or
+        a masters folder with zero usable masters is an *information*, never a
+        fatal error (the run continues on the historical path).
+        """
+        self._calibration_integrator = None
+        if not self._calibration_enabled or not self._calibration_master_folder:
+            return
+        try:
+            from seestar.calibration.streaming import CalibrationIntegrator
+        except Exception:
+            return
+        integrator = CalibrationIntegrator(self._calibration_master_folder)
+        try:
+            opened = integrator.open()
+        except Exception:
+            opened = False
+        if opened:
+            self._calibration_integrator = integrator
+            logger.debug(
+                "[C5] calibration session open (fingerprint=%s)",
+                integrator.fingerprint,
+            )
+        else:
+            integrator.close()
+            self._calibration_integrator = None
+            if self.update_progress:
+                self.update_progress(
+                    "Calibration unavailable (no usable masters); continuing "
+                    "with the historical path.",
+                    "INFO",
+                )
+
+    def _close_calibration_session(self) -> None:
+        if self._calibration_integrator is not None:
+            try:
+                self._calibration_integrator.close()
+            finally:
+                self._calibration_integrator = None
+
+    def _calibrate_frame_to_working(self, file_path):
+        """Calibrate one frame (C5) -> ``(working_float32, header, mask)`` or None.
+
+        Reads the physical frame + header, resolves the light's plan, calibrates
+        (ZeCalibrator reads the file itself) and normalises to the working
+        domain through the single normalisation seam.  Returns ``None`` when the
+        light has no plan or calibration fails — the caller falls back to the
+        historical path (never a hard failure).
+        """
+        integrator = self._calibration_integrator
+        if integrator is None:
+            return None
+        phys = load_and_validate_fits(
+            file_path, normalize_to_float32=False, attempt_fix_nonfinite=False
+        )
+        if not phys or phys[0] is None:
+            return None
+        physical, header_from_load = phys[0], phys[1]
+        header = header_from_load.copy() if header_from_load else fits.Header()
+        plan = integrator.resolve(file_path)
+        if plan is None:
+            return None
+        cal = integrator.calibrate(file_path, plan)
+        if cal is None:
+            return None
+        calibrated_physical, mask = cal
+        if calibrated_physical is None:
+            return None
+        working = normalize_physical_to_working(calibrated_physical)
+        return working, header, mask
+
     def _process_file(
         self,
         file_path,
@@ -11126,39 +11209,57 @@ class SeestarQueuedStacker:
         self._p1_carrier_slot().support_carrier = None
 
         try:
-            logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
-            if _p1_active:
-                # Opt-in loader invalidity report (truthful ORIGINAL non-finite
-                # before repair).  The returned science is bit-identical to the
-                # default path; only the extra spatial mask is added.
-                loaded_data_tuple = load_and_validate_fits(
-                    file_path, report_invalidity=True
-                )
-            else:
-                loaded_data_tuple = load_and_validate_fits(file_path)
-            if loaded_data_tuple and loaded_data_tuple[0] is not None:
+            # C5 seam: calibrate (physical) BEFORE the historical normalize.
+            # When calibration is off (default) or the light has no plan, the
+            # historical loader runs unchanged (zero change by default).
+            calibration_mask = None
+            calibration_applied = False
+            if self._calibration_integrator is not None:
+                cal_tuple = self._calibrate_frame_to_working(file_path)
+                if cal_tuple is not None:
+                    img_data_array_loaded, header_final_pour_retour, calibration_mask = (
+                        cal_tuple
+                    )
+                    calibration_applied = True
+                    # C6: carry the provider DQ mask (never silently dropped).
+                    self._calibration_masks[file_name] = calibration_mask
+                    logger.debug(
+                        f"     - [C5] Frame calibrée. Range: [{np.nanmin(img_data_array_loaded):.4g}, {np.nanmax(img_data_array_loaded):.4g}], Shape: {img_data_array_loaded.shape}, Dtype: {img_data_array_loaded.dtype}"
+                    )
+            if not calibration_applied:
+                logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
                 if _p1_active:
-                    img_data_array_loaded, header_from_load, _p1_invalid_raw = (
-                        loaded_data_tuple
+                    # Opt-in loader invalidity report (truthful ORIGINAL non-finite
+                    # before repair).  The returned science is bit-identical to the
+                    # default path; only the extra spatial mask is added.
+                    loaded_data_tuple = load_and_validate_fits(
+                        file_path, report_invalidity=True
                     )
                 else:
-                    img_data_array_loaded, header_from_load = loaded_data_tuple
-                header_final_pour_retour = (
-                    header_from_load.copy() if header_from_load else fits.Header()
-                )
-            else:
-                header_temp_fallback = None
-                if loaded_data_tuple and loaded_data_tuple[1] is not None:
-                    header_temp_fallback = loaded_data_tuple[1].copy()
+                    loaded_data_tuple = load_and_validate_fits(file_path)
+                if loaded_data_tuple and loaded_data_tuple[0] is not None:
+                    if _p1_active:
+                        img_data_array_loaded, header_from_load, _p1_invalid_raw = (
+                            loaded_data_tuple
+                        )
+                    else:
+                        img_data_array_loaded, header_from_load = loaded_data_tuple
+                    header_final_pour_retour = (
+                        header_from_load.copy() if header_from_load else fits.Header()
+                    )
                 else:
-                    try:
-                        header_temp_fallback = fits.getheader(file_path)
-                    except:
-                        header_temp_fallback = fits.Header()
-                header_final_pour_retour = header_temp_fallback
-                raise ValueError(
-                    "Échec chargement/validation FITS (données non retournées)."
-                )
+                    header_temp_fallback = None
+                    if loaded_data_tuple and loaded_data_tuple[1] is not None:
+                        header_temp_fallback = loaded_data_tuple[1].copy()
+                    else:
+                        try:
+                            header_temp_fallback = fits.getheader(file_path)
+                        except:
+                            header_temp_fallback = fits.Header()
+                    header_final_pour_retour = header_temp_fallback
+                    raise ValueError(
+                        "Échec chargement/validation FITS (données non retournées)."
+                    )
             header_final_pour_retour["_SRCFILE"] = (
                 file_name,
                 "Original source filename",
@@ -23721,6 +23822,9 @@ class SeestarQueuedStacker:
 
         self.stop_processing = False
         self.user_requested_stop = False
+        # C5: open the calibration integrator once per run (if enabled).  A
+        # closed/unavailable session is informational, never fatal.
+        self._open_calibration_session()
         # ZSSS-LIFECYCLE-01: reset any stale refusal from a previous start
         # attempt so a new attempt starts with a clean carrier.
         self.startup_refusal = None
@@ -26641,6 +26745,8 @@ class SeestarQueuedStacker:
         if getattr(self, "quality_executor", None):
             self.quality_executor.shutdown(wait=True, cancel_futures=True)
             self.quality_executor = None
+        # C5: close the calibration session (idempotent).
+        self._close_calibration_session()
 
     ################################################################################################################################################
 
