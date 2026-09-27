@@ -46,6 +46,12 @@ from enum import Enum
 from typing import Any, Mapping, Protocol
 
 
+# State/enum semantics (RW-6 S2):
+#   CalibrationState — outcome of ONE operation (open / resolve / calibrate).
+#   ProviderState    — discovery/negotiation result (is the provider usable at all?).
+#   ErrorKind        — category of a CalibrationError (why an operation is not COMPLETED).
+
+
 class CalibrationState(str, Enum):
     """Outcome state of a calibration operation (internal, not the provider's).
 
@@ -167,6 +173,55 @@ class RejectionDiagnostic:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CalibrationComposition:
+    """Neutral, frozen, JSON-safe effective composition of a resolved route.
+
+    Filled by the adapter at resolve time (preflight) from the provider's plan
+    composition, so the freeze can record what a plan will actually apply
+    (applied roles, availability-relative level, additive state, flat applied,
+    and the skip/no-candidate/rejected audit) **before** any calibration runs.
+    Provider-agnostic: no ZSSS vocabulary (no ``group``/``stack``).
+    """
+
+    applied_roles: tuple[str, ...] = ()
+    skipped_roles: tuple = ()
+    level: str | None = None
+    additive_state: str | None = None
+    flat_applied: bool | None = None
+    no_candidate_roles: tuple[str, ...] = ()
+    rejected_masters: tuple = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "applied_roles", tuple(self.applied_roles))
+        object.__setattr__(self, "skipped_roles", tuple(self.skipped_roles))
+        object.__setattr__(self, "no_candidate_roles", tuple(self.no_candidate_roles))
+        object.__setattr__(self, "rejected_masters", tuple(self.rejected_masters))
+
+    def to_dict(self) -> dict:
+        return {
+            "applied_roles": list(self.applied_roles),
+            "skipped_roles": [dict(s) for s in self.skipped_roles],
+            "level": self.level,
+            "additive_state": self.additive_state,
+            "flat_applied": self.flat_applied,
+            "no_candidate_roles": list(self.no_candidate_roles),
+            "rejected_masters": [dict(r) for r in self.rejected_masters],
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, object]) -> "CalibrationComposition":
+        return cls(
+            applied_roles=tuple(d.get("applied_roles", ()) or ()),
+            skipped_roles=tuple(d.get("skipped_roles", ()) or ()),
+            level=d.get("level"),
+            additive_state=d.get("additive_state"),
+            flat_applied=d.get("flat_applied"),
+            no_candidate_roles=tuple(d.get("no_candidate_roles", ()) or ()),
+            rejected_masters=tuple(d.get("rejected_masters", ()) or ()),
+        )
+
+
 @dataclass
 class SessionResult:
     """Transport-neutral ``open_session`` outcome envelope.
@@ -175,6 +230,11 @@ class SessionResult:
     when the operation was cancelled, ``FAILED`` on an operational error, and
     ``COMPLETED`` on success (``session`` may still be ``None`` when zero masters
     were admissible — that is an informative result, not an error).
+
+    ``context_preparations`` exposes the §18 audit counter (see also
+    :attr:`CalibrationSession.context_preparation_count`): one preparation per
+    distinct calibrated plan, so a consumer can verify the masters are not
+    reloaded per light.
     """
 
     state: CalibrationState = CalibrationState.UNAVAILABLE
@@ -186,6 +246,13 @@ class SessionResult:
     warnings: tuple[str, ...] = ()
     error: CalibrationError | None = None
 
+    @property
+    def context_preparations(self) -> int:
+        """Number of master-context preparations so far (S-a / §18 audit)."""
+        if self.session is None:
+            return 0
+        return getattr(self.session, "context_preparation_count", 0)
+
 
 @dataclass
 class RouteResolution:
@@ -194,6 +261,7 @@ class RouteResolution:
     state: CalibrationState = CalibrationState.UNAVAILABLE
     outcome: str | None = None  # MATCHED / NO_MATCH / AMBIGUOUS (when COMPLETED)
     plan: CalibrationPlan | None = None
+    composition: CalibrationComposition | None = None
     reasons: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     error: CalibrationError | None = None
@@ -232,6 +300,7 @@ class CalibrationSession(Protocol):
     """
 
     fingerprint: str
+    context_preparation_count: int  # master-context preparations so far (S-a/§18)
 
     def resolve_light(
         self, source: LightSource, *, cancel: CancellationHandle | None = None
@@ -266,6 +335,7 @@ class CalibrationProvider(Protocol):
 
 
 __all__ = [
+    "CalibrationComposition",
     "CalibrationError",
     "CalibrationPlan",
     "CalibrationProvider",

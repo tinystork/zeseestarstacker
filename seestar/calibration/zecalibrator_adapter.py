@@ -23,6 +23,7 @@ import importlib
 from typing import Any
 
 from seestar.core.calibration_port import (
+    CalibrationComposition,
     CalibrationError,
     CalibrationPlan,
     CalibrationResult,
@@ -170,19 +171,52 @@ def probe() -> ProviderInfo:
     )
 
 
-def _to_token(api, cancel: CancellationHandle | None):
-    """Map a neutral cancellation handle onto a provider ``CancellationToken``.
+class _LiveToken:
+    """Provider-compatible cancellation token delegating to a neutral handle.
 
-    The neutral handle is duck-typed (``is_cancelled() -> bool``); a fresh
-    provider token is pre-cancelled when the handle is already cancelled, so the
-    provider honours cancellation at its cooperative checkpoints.
+    RW-4: the mapping is **live** — ``is_cancelled()`` and ``raise_if_cancelled()``
+    poll the neutral handle's CURRENT state at each call, so a cancellation that
+    happens mid-operation is honoured by the provider's cooperative checkpoints
+    (no dedicated thread, no lock, no deadlock). ``cancel`` is a no-op: the
+    neutral handle owns the cancellation state.
     """
-    token = api.CancellationToken()
-    if cancel is not None:
-        is_cancelled = getattr(cancel, "is_cancelled", None)
-        if callable(is_cancelled) and is_cancelled():
-            token.cancel()
-    return token
+
+    __slots__ = ("_api", "_handle")
+
+    def __init__(self, api, handle) -> None:
+        self._api = api
+        self._handle = handle
+
+    def _handle_is_cancelled(self) -> bool:
+        is_cancelled = getattr(self._handle, "is_cancelled", None)
+        return bool(callable(is_cancelled) and is_cancelled())
+
+    def is_cancelled(self) -> bool:
+        return self._handle_is_cancelled()
+
+    def raise_if_cancelled(self) -> None:
+        if self._handle_is_cancelled():
+            op_cancelled = getattr(self._api, "OperationCancelled", None)
+            if op_cancelled is not None:
+                raise op_cancelled()
+
+    def cancel(self) -> None:
+        # The neutral handle owns the cancellation state; nothing to propagate.
+        return None
+
+
+def _to_token(api, cancel: CancellationHandle | None):
+    """Map a neutral cancellation handle onto a provider cancellation token.
+
+    RW-4: the mapping is LIVE. When a neutral handle is supplied, a
+    :class:`_LiveToken` is returned whose ``is_cancelled`` / ``raise_if_cancelled``
+    delegate to the handle's CURRENT state at every checkpoint (an in-flight
+    cancellation is therefore honoured). When ``cancel`` is None, a fresh provider
+    token is returned (never cancelled).
+    """
+    if cancel is None:
+        return api.CancellationToken()
+    return _LiveToken(api, cancel)
 
 
 def _is_cancelled(api, exc: BaseException) -> bool:
@@ -199,6 +233,22 @@ def _light_source(api, source: LightSource):
         units="ADU",
     )
     return api.FitsFrameSource(path=source.path, declaration=declaration)
+
+
+def _map_composition(plan) -> CalibrationComposition | None:
+    """Map a provider plan's composition to a neutral :class:`CalibrationComposition`.
+
+    RW-5: the effective composition (applied roles, level, additive state, flat
+    applied, audit) is needed at preflight for the run freeze — not only after a
+    calibration. Absent/None composition maps to None.
+    """
+    provider_composition = getattr(plan, "composition", None)
+    if provider_composition is None:
+        return None
+    to_dict = getattr(provider_composition, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    return CalibrationComposition.from_dict(to_dict())
 
 
 def _map_session_result(api, res) -> SessionResult:
@@ -247,6 +297,15 @@ class _ZeCalibratorSession:
     def fingerprint(self) -> str:
         return self._handle.fingerprint
 
+    @property
+    def context_preparation_count(self) -> int:
+        """Number of master-context preparations so far (S-a / §18 audit).
+
+        Delegates to the provider handle's live counter: one preparation per
+        distinct calibrated plan; reusing one plan across lights never re-prepares.
+        """
+        return getattr(self._handle, "context_preparation_count", 0)
+
     def resolve_light(self, source: LightSource, *, cancel=None) -> RouteResolution:
         token = _to_token(self._api, cancel)
         try:
@@ -271,10 +330,12 @@ class _ZeCalibratorSession:
             if rr.plan is not None
             else None
         )
+        composition = _map_composition(rr.plan) if rr.plan is not None else None
         return RouteResolution(
             state=CalibrationState.COMPLETED,
             outcome=rr.outcome,
             plan=plan,
+            composition=composition,
             reasons=tuple(getattr(r, "code", str(r)) for r in (rr.reasons or ())),
             warnings=tuple(getattr(r, "code", str(r)) for r in (rr.unverified or ())),
         )

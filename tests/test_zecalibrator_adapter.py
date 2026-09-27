@@ -12,9 +12,11 @@ package tree.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import types
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -109,6 +111,8 @@ class _FakeFitsFrameSource:
 
 
 class _FakeAdmission:
+    __module__ = "zecalibrator.api.v1"
+
     def __init__(self, role, path, content_sha256, size_bytes):
         self.role = role
         self.path = path
@@ -117,6 +121,8 @@ class _FakeAdmission:
 
 
 class _FakeRejection:
+    __module__ = "zecalibrator.api.v1"
+
     def __init__(self, path, reason_code, detail=""):
         self.path = path
         self.reason_code = reason_code
@@ -124,8 +130,35 @@ class _FakeRejection:
 
 
 class _FakePlan:
+    __module__ = "zecalibrator.api.v1"
+
     def __init__(self, plan_id):
         self.plan_id = plan_id
+        self.composition = _FakeComposition()
+
+
+class _FakeComposition:
+    __module__ = "zecalibrator.api.v1"
+
+    def __init__(self):
+        self.applied_roles = ["dark"]
+        self.skipped_roles = []
+        self.level = "COMPLETE"
+        self.additive_state = "dark_incl_bias"
+        self.flat_applied = False
+        self.no_candidate_roles = []
+        self.rejected_masters = []
+
+    def to_dict(self):
+        return {
+            "applied_roles": self.applied_roles,
+            "skipped_roles": self.skipped_roles,
+            "level": self.level,
+            "additive_state": self.additive_state,
+            "flat_applied": self.flat_applied,
+            "no_candidate_roles": self.no_candidate_roles,
+            "rejected_masters": self.rejected_masters,
+        }
 
 
 class _FakeRouteResolution:
@@ -139,11 +172,15 @@ class _FakeRouteResolution:
 
 
 class _FakeProvenance:
+    __module__ = "zecalibrator.api.v1"
+
     def to_dict(self):
         return {"backend": "cpu", "operation_id": "fake"}
 
 
 class _FakeCalibrationResult:
+    __module__ = "zecalibrator.api.v1"
+
     def __init__(self, status="COMPLETED", data=None, mask=None, reason_code=None):
         self.status = status
         self.data = data
@@ -154,6 +191,8 @@ class _FakeCalibrationResult:
 
 
 class _FakeSessionLibrary:
+    __module__ = "zecalibrator.api.v1"
+
     def __init__(self, fingerprint="fp-1", calibrate_raises=None):
         self.fingerprint = fingerprint
         self._calibrate_raises = calibrate_raises
@@ -425,3 +464,124 @@ def test_adapter_source_references_only_public_module():
     assert adapter._API_MODULE == "zecalibrator.api.v1"
     assert "zecalibrator.api.v1._" not in adapter._API_MODULE
     assert "zecalibrator.gui" not in adapter._API_MODULE
+
+
+# ---------------------------------------------------------------------------
+# RW-4 — in-flight cancellation is propagated (live token mapping)
+# ---------------------------------------------------------------------------
+def test_inflight_cancellation_propagates_RW4(monkeypatch):
+    # A neutral handle that flips to cancelled after N polls (mid-operation).
+    class _FlipHandle:
+        def __init__(self, flip_after):
+            self.calls = 0
+            self.flip_after = flip_after
+            self.cancelled = False
+
+        def is_cancelled(self):
+            self.calls += 1
+            if self.calls > self.flip_after:
+                self.cancelled = True
+            return self.cancelled
+
+    handle = _FlipHandle(flip_after=2)
+
+    v1 = _make_v1(api_version="1.1")
+
+    def open_session_library(root, *, cancel=None):
+        for _ in range(5):
+            cancel.raise_if_cancelled()  # provider cooperative checkpoint
+        return _FakeSessionLibraryResult(
+            operation_status="COMPLETED", handle=_FakeSessionLibrary(), fingerprint="fp-1",
+        )
+
+    v1.open_session_library = open_session_library
+    _install_zecalibrator(monkeypatch, v1)
+
+    result = adapter.ZeCalibratorProvider().open_session("/x", cancel=handle)
+    assert result.state is port.CalibrationState.CANCELLED
+    assert handle.cancelled is True  # the flip happened during the operation
+
+
+def test_never_cancelling_handle_completes_RW4(monkeypatch):
+    class _NeverCancel:
+        def is_cancelled(self):
+            return False
+
+    v1 = _make_v1(api_version="1.1")
+
+    def open_session_library(root, *, cancel=None):
+        for _ in range(5):
+            cancel.raise_if_cancelled()
+        return _FakeSessionLibraryResult(
+            operation_status="COMPLETED", handle=_FakeSessionLibrary(), fingerprint="fp-1",
+        )
+
+    v1.open_session_library = open_session_library
+    _install_zecalibrator(monkeypatch, v1)
+
+    result = adapter.ZeCalibratorProvider().open_session("/x", cancel=_NeverCancel())
+    assert result.state is port.CalibrationState.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# RW-5 — effective composition carried by RouteResolution (preflight, JSON-safe)
+# ---------------------------------------------------------------------------
+def test_route_resolution_carries_json_safe_composition_RW5(monkeypatch):
+    _install_zecalibrator(monkeypatch, _make_v1(api_version="1.1"))
+    session = adapter.ZeCalibratorProvider().open_session("/masters").session
+
+    rr = session.resolve_light(port.LightSource(path="light.fits"))
+    assert rr.state is port.CalibrationState.COMPLETED
+    comp = rr.composition
+    assert comp is not None
+    assert comp.level == "COMPLETE"
+    assert comp.additive_state == "dark_incl_bias"
+    assert comp.applied_roles == ("dark",)
+    assert comp.flat_applied is False
+
+    d = comp.to_dict()
+    assert d["applied_roles"] == ["dark"]
+    json.dumps(d)  # JSON-safe (no exception)
+
+
+# ---------------------------------------------------------------------------
+# RW-6 — no provider type leaks across the neutral boundary
+# ---------------------------------------------------------------------------
+def _assert_no_provider_type(value, path):
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return
+    if isinstance(value, Mapping):
+        for k, v in value.items():
+            _assert_no_provider_type(v, f"{path}.{k}")
+        return
+    if isinstance(value, (tuple, list)):
+        for i, v in enumerate(value):
+            _assert_no_provider_type(v, f"{path}[{i}]")
+        return
+    mod = type(value).__module__
+    assert not mod.startswith("zecalibrator"), (path, type(value).__name__, mod)
+    if hasattr(value, "__dataclass_fields__"):
+        for fname in value.__dataclass_fields__:
+            _assert_no_provider_type(getattr(value, fname), f"{path}.{fname}")
+
+
+def test_no_provider_type_leak_RW6(monkeypatch):
+    # The fake provider objects carry __module__ == "zecalibrator.api.v1" so this
+    # walk genuinely fails if the adapter ever passes one through as a field value.
+    _install_zecalibrator(monkeypatch, _make_v1(api_version="1.1"))
+    res = adapter.ZeCalibratorProvider().open_session("/masters")
+    session = res.session
+    rr = session.resolve_light(port.LightSource(path="light.fits"))
+    cr = session.calibrate(port.LightSource(path="light.fits"), rr.plan)
+
+    for obj, name in (
+        (res, "SessionResult"),
+        (rr, "RouteResolution"),
+        (cr, "CalibrationResult"),
+    ):
+        for fname in obj.__dataclass_fields__:
+            _assert_no_provider_type(getattr(obj, fname), f"{name}.{fname}")
+
+    # The ONLY opaque provider retention is CalibrationPlan._provider_plan
+    # (a private attribute of a non-dataclass, never a dataclass field).
+    assert not hasattr(port.CalibrationPlan, "__dataclass_fields__")
