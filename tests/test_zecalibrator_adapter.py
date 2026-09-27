@@ -585,3 +585,24 @@ def test_no_provider_type_leak_RW6(monkeypatch):
     # The ONLY opaque provider retention is CalibrationPlan._provider_plan
     # (a private attribute of a non-dataclass, never a dataclass field).
     assert not hasattr(port.CalibrationPlan, "__dataclass_fields__")
+
+
+# ---------------------------------------------------------------------------
+# C3 — pure visibility decision (the Calibration tab exists only when AVAILABLE)
+# ---------------------------------------------------------------------------
+def test_calibration_tab_should_exist_four_cases():
+    cases = [
+        (port.ProviderState.NOT_INSTALLED, False),  # absent provider
+        (port.ProviderState.AVAILABLE, True),       # compatible provider
+        (port.ProviderState.UNHEALTHY, False),      # broken import
+        (port.ProviderState.INCOMPATIBLE, False),   # incompatible major
+    ]
+    for state, expected in cases:
+        info = port.ProviderInfo(
+            state=state, provider_id="zecalibrator", api_version="1.1",
+        )
+        assert adapter.calibration_tab_should_exist(info) is expected, state
+
+
+def test_calibration_tab_should_exist_none_is_false():
+    assert adapter.calibration_tab_should_exist(None) is False

@@ -111,6 +111,7 @@ class ProviderInfo:
     provider_id: str | None = None
     api_version: str | None = None
     api_major: str | None = None
+    product_version: str | None = None
     capabilities: tuple[str, ...] = ()
     message: str | None = None  # reason when not AVAILABLE (never a traceback)
 

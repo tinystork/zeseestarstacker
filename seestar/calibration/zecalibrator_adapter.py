@@ -137,6 +137,7 @@ def probe() -> ProviderInfo:
 
     api_version = getattr(info, "api_version", None)
     major = _parse_major(api_version)
+    product_version = getattr(info, "product_version", None)
     capabilities = tuple(getattr(info, "capabilities", ()) or ())
 
     if major != REQUIRED_API_MAJOR:
@@ -145,6 +146,7 @@ def probe() -> ProviderInfo:
             provider_id=PROVIDER_ID,
             api_version=api_version,
             api_major=major,
+            product_version=product_version,
             capabilities=capabilities,
             message=(
                 f"incompatible API major {major!r} (expected {REQUIRED_API_MAJOR!r})"
@@ -158,6 +160,7 @@ def probe() -> ProviderInfo:
             provider_id=PROVIDER_ID,
             api_version=api_version,
             api_major=major,
+            product_version=product_version,
             capabilities=capabilities,
             message=f"missing capabilities: {missing}",
         )
@@ -167,8 +170,24 @@ def probe() -> ProviderInfo:
         provider_id=PROVIDER_ID,
         api_version=api_version,
         api_major=major,
+        product_version=product_version,
         capabilities=capabilities,
     )
+
+
+def calibration_tab_should_exist(info) -> bool:
+    """Pure decision: should the Calibration tab exist for a provider probe?
+
+    Only an ``AVAILABLE`` provider (imports cleanly, correct API major, all
+    required capabilities) yields a Calibration tab. Absent / broken /
+    incompatible / ``None`` → no tab, and ZSSS behaves exactly as before.
+
+    This is a pure function (no Qt, no zecalibrator import) so the visibility
+    decision is unit-testable with a fake :class:`ProviderInfo`.
+    """
+    if info is None:
+        return False
+    return getattr(info, "state", None) is ProviderState.AVAILABLE
 
 
 class _LiveToken:
@@ -436,5 +455,6 @@ __all__ = [
     "REQUIRED_API_MAJOR",
     "REQUIRED_CAPABILITIES",
     "ZeCalibratorProvider",
+    "calibration_tab_should_exist",
     "probe",
 ]

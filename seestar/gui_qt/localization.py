@@ -40,6 +40,24 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "tab_expert": {"en": "Expert", "fr": "Expert"},
     "tab_system": {"en": "System", "fr": "Système"},
     "tab_preview_controls": {"en": "Preview controls", "fr": "Contrôles d'aperçu"},
+    # Calibration tab (C3): conditional, provider-gated, zero science.
+    "tab_calibration": {"en": "Calibration", "fr": "Étalonnage"},
+    "calibration_enabled": {
+        "en": "Use ZeCalibrator calibration",
+        "fr": "Utiliser la calibration ZeCalibrator",
+    },
+    "calibration_master_counts": {
+        "en": "Masters: {dark} dark · {bias} bias · {flat} flat",
+        "fr": "Masters : {dark} dark · {bias} offset · {flat} flat",
+    },
+    "calibration_no_folder": {
+        "en": "Select a master folder to detect masters.",
+        "fr": "Choisissez un dossier de masters pour les détecter.",
+    },
+    "calibration_no_masters": {
+        "en": "No masters detected.",
+        "fr": "Aucun master détecté.",
+    },
     "progress_label": {"en": "Progression:", "fr": "Progression :"},
     "log_label": {"en": "Log:", "fr": "Journal :"},
     "copy_log": {"en": "Copy Log", "fr": "Copier le journal"},

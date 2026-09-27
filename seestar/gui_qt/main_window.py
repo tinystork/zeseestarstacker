@@ -89,6 +89,7 @@ from PySide6.QtWidgets import (
 from . import (
     analyzer_launch,
     boring_route,
+    calibration_service,
     gpu_bridge,
     initial_preview,
     localization,
@@ -1214,6 +1215,13 @@ class MainWindow(QMainWindow):
         self._system_tab = self._build_system_tab()
         self._preview_controls_tab = self._build_preview_controls_tab()
         self.tabs.addTab(self._stacking_tab, self._tr("tab_stacking"))
+        # Conditional Calibration tab (C3): exists only when the provider probes
+        # AVAILABLE. Absent / broken / incompatible -> no tab, unchanged UI.
+        self._calibration_tab = None
+        self._calibration_info = calibration_service.check_calibration_availability()
+        if calibration_service.calibration_tab_should_exist(self._calibration_info):
+            self._calibration_tab = self._build_calibration_tab()
+            self.tabs.addTab(self._calibration_tab, self._tr("tab_calibration"))
         self.tabs.addTab(self._settings_tab, self._tr("tab_expert"))
         self.tabs.addTab(self._system_tab, self._tr("tab_system"))
         self.tabs.addTab(self._preview_controls_tab, self._tr("tab_preview_controls"))
@@ -1893,6 +1901,115 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    # ------------------------------------------------------ Calibration tab (C3)
+    def _build_calibration_tab(self) -> QWidget:
+        """Build the conditional Calibration tab (C3, UX v1, zero science).
+
+        Displays the provider status (name, product version, API version), the
+        enable intent, a single master-folder selector, the admission-derived
+        master counts (dark / bias / flat) and a diagnostic area. It never
+        performs matching, master selection or any equation — it only displays
+        and records an intent (C5 wires the actual calibration).
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.calibration_enabled_check = QCheckBox(self._tr("calibration_enabled"))
+        self._bind_text(self.calibration_enabled_check, "calibration_enabled")
+        self.calibration_enabled_check.setChecked(bool(self.settings_state.calibration_enabled))
+        layout.addWidget(self.calibration_enabled_check)
+
+        self.calibration_provider_label = QLabel()
+        self._render_calibration_provider_status()
+        layout.addWidget(self.calibration_provider_label)
+
+        folder_row = QHBoxLayout()
+        self.calibration_folder_edit = QLineEdit(self.settings_state.calibration_master_folder)
+        self.calibration_folder_edit.setPlaceholderText(self._tr("calibration_no_folder"))
+        folder_row.addWidget(self.calibration_folder_edit, 1)
+        self.calibration_browse_button = QPushButton(self._tr("browse"))
+        self._bind_text(self.calibration_browse_button, "browse")
+        folder_row.addWidget(self.calibration_browse_button)
+        layout.addLayout(folder_row)
+
+        self.calibration_masters_label = QLabel()
+        self.calibration_diag_view = QTextEdit()
+        self.calibration_diag_view.setReadOnly(True)
+        layout.addWidget(self.calibration_masters_label)
+        layout.addWidget(self.calibration_diag_view, 1)
+
+        self._refresh_calibration_summary()
+        return tab
+
+    def _render_calibration_provider_status(self) -> None:
+        """Render the provider status line (name, product version, API version)."""
+        info = self._calibration_info
+        if info is None:
+            self.calibration_provider_label.setText("—")
+            return
+        provider_id = getattr(info, "provider_id", None) or "?"
+        api_version = getattr(info, "api_version", None) or "?"
+        product_version = getattr(info, "product_version", None) or "?"
+        self.calibration_provider_label.setText(
+            f"{provider_id} · API {api_version} · product {product_version}"
+        )
+
+    def _refresh_calibration_summary(self) -> None:
+        """Re-open a session on the selected folder and refresh counts/diagnostics.
+
+        Admission-only (role identification by the provider, never ZSSS-side
+        heuristics); no matching and no calibration is performed here.
+        """
+        folder = self.calibration_folder_edit.text().strip()
+        if not folder:
+            self.calibration_masters_label.setText(self._tr("calibration_no_folder"))
+            self.calibration_diag_view.clear()
+            return
+        try:
+            result = calibration_service.open_calibration_session(folder)
+        except Exception as exc:  # noqa: BLE001 - the UI must never raise here
+            self.calibration_masters_label.setText(self._tr("calibration_no_masters"))
+            self.calibration_diag_view.setPlainText(f"{type(exc).__name__}: {exc}")
+            return
+        if result.session is None:
+            self.calibration_masters_label.setText(self._tr("calibration_no_masters"))
+            self.calibration_diag_view.setPlainText(self._calibration_diag_text(result))
+            return
+        counts = result.counts_by_role or {}
+        self.calibration_masters_label.setText(
+            self._tr("calibration_master_counts").format(
+                dark=counts.get("dark", 0),
+                bias=counts.get("bias", 0),
+                flat=counts.get("flat", 0),
+            )
+        )
+        self.calibration_diag_view.setPlainText(self._calibration_diag_text(result))
+
+    def _calibration_diag_text(self, result) -> str:
+        """Render a neutral diagnostic summary (never a provider traceback)."""
+        lines = []
+        error = getattr(result, "error", None)
+        if error is not None:
+            lines.append(f"error: {getattr(error, 'message', error)}")
+        for w in (getattr(result, "warnings", ()) or ()):
+            lines.append(f"warning: {w}")
+        for r in (getattr(result, "rejected", ()) or ()):
+            lines.append(f"rejected: {getattr(r, 'path', r)} ({getattr(r, 'reason_code', '')})")
+        return "\n".join(lines)
+
+    def _browse_calibration_folder(self) -> None:
+        """Select the master folder via a directory dialog."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Master Folder", self.calibration_folder_edit.text().strip()
+        )
+        if folder:
+            self.calibration_folder_edit.setText(os.path.abspath(folder))
+            self._refresh_calibration_summary()
+
+    def _on_calibration_folder_edited(self, _text: str = None) -> None:
+        """Refresh the master summary when the folder path is edited."""
+        self._refresh_calibration_summary()
+
     def _build_settings_tab(self) -> QWidget:
         """Build the scrollable, grouped Settings surface (M10).
 
@@ -2307,6 +2424,20 @@ class MainWindow(QMainWindow):
                 enabler_widget.stateChanged.connect(
                     self._update_expert_enabler_states
                 )
+        # Calibration tab (C3): wired only when the tab exists (provider available).
+        if self._calibration_tab is not None:
+            self.calibration_enabled_check.toggled.connect(
+                self._sync_state_from_controls
+            )
+            self.calibration_folder_edit.textEdited.connect(
+                self._on_calibration_folder_edited
+            )
+            self.calibration_folder_edit.textEdited.connect(
+                self._sync_state_from_controls
+            )
+            self.calibration_browse_button.clicked.connect(
+                self._browse_calibration_folder
+            )
         self._update_expert_enabler_states()
         self._update_drizzle_gating()
         self._toggle_kappa_visibility()
@@ -5582,6 +5713,10 @@ class MainWindow(QMainWindow):
         # read for migration/diagnostics only and is intentionally NOT synced
         # from a removed UI control — AUTO is the CPU memory policy.
         state.local_solver_preference = self.solver_combo.currentText()
+        # Calibration (C3): sync only when the tab exists (provider available).
+        if self._calibration_tab is not None:
+            state.calibration_enabled = self.calibration_enabled_check.isChecked()
+            state.calibration_master_folder = self.calibration_folder_edit.text().strip()
 
         # Final-combination business control drives the derived reproject flags
         # (exactly like Tk SettingsManager.update_from_ui).  There is no
@@ -5698,6 +5833,10 @@ class MainWindow(QMainWindow):
         ]
         widgets.extend(self._settings_widgets.values())
         widgets.extend(w for _kind, w in self._mosaic_widgets.values())
+        if self._calibration_tab is not None:
+            widgets.extend(
+                [self.calibration_enabled_check, self.calibration_folder_edit]
+            )
         for widget in widgets:
             widget.blockSignals(True)
         try:
@@ -5736,6 +5875,14 @@ class MainWindow(QMainWindow):
             ms = state.mosaic_settings if isinstance(state.mosaic_settings, dict) else {}
             for key, (kind, widget) in self._mosaic_widgets.items():
                 self._set_settings_widget_value(kind, widget, ms.get(key))
+            # Calibration (C3): apply only when the tab exists (provider available).
+            if self._calibration_tab is not None:
+                self.calibration_enabled_check.setChecked(
+                    bool(state.calibration_enabled)
+                )
+                self.calibration_folder_edit.setText(
+                    state.calibration_master_folder or ""
+                )
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
