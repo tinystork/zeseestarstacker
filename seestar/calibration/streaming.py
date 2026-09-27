@@ -93,6 +93,46 @@ class CalibrationIntegrator:
             return None
         return getattr(result, "data", None), getattr(result, "mask", None)
 
+    def freeze_snapshot(self, lights=()) -> dict:
+        """Build the JSON-safe calibration freeze (7 fields) for the run contract.
+
+        Provider id / api / product version come from ``probe()``; the library
+        fingerprint from the open session; the plan_map is built by resolving
+        each light (signature -> plan_id + composition).  Returns ``{}`` when no
+        session is open (== "calibration disabled").  Never carries a provider
+        object.
+        """
+        if self._session is None:
+            return {}
+        info = self._provider.probe()
+        plan_map = {}
+        for path in lights or ():
+            plan, composition = self._resolve_full(path)
+            if plan is None or composition is None:
+                continue
+            plan_map[light_signature(path)] = {
+                "plan_id": plan.plan_id,
+                "composition": composition.to_dict(),
+            }
+        return {
+            "calibration_enabled": True,
+            "calibration_provider": getattr(info, "provider_id", None) or "",
+            "calibration_api_version": getattr(info, "api_version", None) or "",
+            "calibration_product_version": getattr(info, "product_version", None) or "",
+            "calibration_library_fingerprint": self.fingerprint or "",
+            "calibration_contract_versions": {},
+            "calibration_plan_map": plan_map,
+        }
+
+    def _resolve_full(self, file_path: str):
+        """Return ``(plan, composition)`` for a light, or ``(None, None)``."""
+        if self._session is None or not self.is_planned(file_path):
+            return None, None
+        rr = self._session.resolve_light(LightSource(path=file_path))
+        if getattr(rr, "state", None) is not CalibrationState.COMPLETED:
+            return None, None
+        return getattr(rr, "plan", None), getattr(rr, "composition", None)
+
     def close(self) -> None:
         if self._session is not None:
             self._session.close()

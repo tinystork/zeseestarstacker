@@ -5005,6 +5005,9 @@ class SeestarQueuedStacker:
         # C6 audit counter: number of pixels invalidated by the calibration DQ
         # (``mask != 0``) when combined into the support/valid mask.
         self._dq_invalidated_count = 0
+        # C7: the frozen calibration signature (7 fields) persisted into the run
+        # contract ``calibration`` section and compared at resume (hard refusal).
+        self._calibration_freeze: dict = {}
         # ZSSS-LIFECYCLE-01: structured startup refusal (reset per start attempt)
         # and fail-open lifecycle callback (installed by the Qt adapter so the
         # engine can record durable lifecycle events without ever touching Qt).
@@ -11104,6 +11107,9 @@ class SeestarQueuedStacker:
                 "[C5] calibration session open (fingerprint=%s)",
                 integrator.fingerprint,
             )
+            # C7: freeze the calibration signature (provider + fingerprint +
+            # plan map) so it can be persisted and compared at resume.
+            self._build_calibration_freeze()
         else:
             integrator.close()
             self._calibration_integrator = None
@@ -11120,6 +11126,44 @@ class SeestarQueuedStacker:
                 self._calibration_integrator.close()
             finally:
                 self._calibration_integrator = None
+
+    def _build_calibration_freeze(self, lights=()) -> dict:
+        """Build + cache the frozen calibration signature (7 fields).
+
+        Returns ``{}`` when calibration is disabled / no session (the absence
+        means "calibration disabled", never an invented value).  Never carries a
+        provider object — only ids, fingerprint and JSON-safe composition.
+        """
+        integrator = getattr(self, "_calibration_integrator", None)
+        if integrator is None:
+            self._calibration_freeze = {}
+        else:
+            try:
+                self._calibration_freeze = integrator.freeze_snapshot(lights)
+            except Exception:
+                self._calibration_freeze = {}
+        return self._calibration_freeze
+
+    def _check_calibration_resume(self, checkpoint_freeze):
+        """Hard-refusal resume check (C7 §26).
+
+        Returns ``(ok, refusal_reason)``.  ``ok`` is True when the frozen
+        signature matches (or both disabled / legacy); otherwise False with a
+        reason naming the FIRST diverging field.  Never recalibrates silently
+        and never falls back to the uncalibrated path.
+        """
+        from seestar.calibration.resume import (
+            calibration_refusal_reason,
+            compare_calibration_freeze,
+        )
+
+        ok, field = compare_calibration_freeze(
+            dict(checkpoint_freeze or {}),
+            dict(getattr(self, "_calibration_freeze", {}) or {}),
+        )
+        if ok:
+            return True, None
+        return False, calibration_refusal_reason(field)
 
     def _calibrate_frame_to_working(self, file_path):
         """Calibrate one frame (C5) -> ``(working_float32, header, mask)`` or None.
@@ -16971,6 +17015,11 @@ class SeestarQueuedStacker:
                 cfg.scientific[name] = value
             elif fd.section == run_contract.Section.EXECUTION:
                 cfg.execution[name] = value
+        # C7: persist the frozen calibration signature into the run contract
+        # ``calibration`` section (absent == "calibration disabled").
+        cal_freeze = dict(getattr(self, "_calibration_freeze", {}) or {})
+        if cal_freeze:
+            cfg.calibration.update(cal_freeze)
         self._run_config_canonical = cfg
         if fingerprint is not None:
             self._run_config_canonical_fingerprint = fingerprint
