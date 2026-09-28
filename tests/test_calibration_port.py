@@ -25,7 +25,12 @@ def _load_by_path(name: str, relpath: str):
     return mod
 
 
-port = _load_by_path("seestar.core.calibration_port", PORT_RELPATH)
+# Load the transport-neutral port under a NON-canonical module name.  Loading it
+# under ``seestar.core.calibration_port`` would shadow the real module in
+# ``sys.modules`` and create a SECOND ``ProviderState`` enum, breaking the
+# ``is`` identity check in the GUI tab probe (order-dependent test pollution).
+# The port is stdlib-only and never self-references, so the name is arbitrary.
+port = _load_by_path("seestar.core.calibration_port__under_test", PORT_RELPATH)
 
 
 # ---------------------------------------------------------------------------

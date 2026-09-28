@@ -26,7 +26,7 @@ def _load_by_path(name, relpath):
     return mod
 
 
-_PRE = set(sys.modules)
+_PRE = dict(sys.modules)
 for _n in ("seestar", "seestar.core", "seestar.calibration"):
     if _n not in sys.modules:
         _install_stub(_n)
@@ -40,9 +40,14 @@ adapter = _load_by_path(
 resume = _load_by_path(
     "seestar.calibration.resume", "seestar/calibration/resume.py"
 )
+# Hermetic teardown: remove modules added by this loader AND restore any module
+# the loader overwrote (so a second ``ProviderState`` enum never leaks into
+# ``sys.modules`` and breaks the GUI tab probe's ``is`` identity check).
 for _k in list(sys.modules):
     if _k not in _PRE:
         del sys.modules[_k]
+    elif sys.modules[_k] is not _PRE[_k]:
+        sys.modules[_k] = _PRE[_k]
 
 
 def _freeze(orientation):

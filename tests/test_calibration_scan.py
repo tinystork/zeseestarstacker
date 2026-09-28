@@ -28,7 +28,7 @@ def _load_by_path(name, relpath):
     return mod
 
 
-_PRE = set(sys.modules)
+_PRE = dict(sys.modules)
 for _n in ("seestar", "seestar.core", "seestar.calibration"):
     if _n not in sys.modules:
         _install_stub(_n)
@@ -43,9 +43,13 @@ scan = _load_by_path("seestar.calibration.scan", "seestar/calibration/scan.py")
 preflight = _load_by_path(
     "seestar.calibration.preflight", "seestar/calibration/preflight.py"
 )
+# Hermetic teardown: remove added modules AND restore overwritten ones (no
+# second ``ProviderState`` enum leaks into ``sys.modules``).
 for _k in list(sys.modules):
     if _k not in _PRE:
         del sys.modules[_k]
+    elif sys.modules[_k] is not _PRE[_k]:
+        sys.modules[_k] = _PRE[_k]
 
 
 # ---------------------------------------------------------------------------

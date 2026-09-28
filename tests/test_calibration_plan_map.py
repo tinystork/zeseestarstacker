@@ -20,7 +20,7 @@ from astropy.io import fits
 
 ROOT = Path(__file__).resolve().parents[1]
 
-_PREEXISTING = set(sys.modules.keys())
+_PREEXISTING = dict(sys.modules)
 
 
 def _install_package_stub(name: str) -> None:
@@ -58,6 +58,8 @@ resume = _load_by_path(
 for _key in list(sys.modules.keys()):
     if _key not in _PREEXISTING:
         del sys.modules[_key]
+    elif sys.modules[_key] is not _PREEXISTING[_key]:
+        sys.modules[_key] = _PREEXISTING[_key]
 
 
 # ---------------------------------------------------------------------------
