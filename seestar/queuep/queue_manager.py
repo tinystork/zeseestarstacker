@@ -11093,7 +11093,17 @@ class SeestarQueuedStacker:
         fatal error (the run continues on the historical path).
         """
         self._calibration_integrator = None
-        if not self._calibration_enabled or not self._calibration_master_folder:
+        if not self._calibration_enabled:
+            return
+        if not self._calibration_master_folder:
+            # C23: enabled but no master folder -> clear, actionable message
+            # (never a silent uncalibrated run).
+            if self.update_progress:
+                self.update_progress(
+                    "Calibration enabled but no master folder selected; "
+                    "continuing without calibration.",
+                    "INFO",
+                )
             return
         try:
             from seestar.calibration.streaming import CalibrationIntegrator
@@ -11320,6 +11330,15 @@ class SeestarQueuedStacker:
                     calibration_applied = True
                     # C6: carry the provider DQ mask (never silently dropped).
                     self._calibration_masks[file_name] = calibration_mask
+                    # C23: publish the content-validity evidence from the
+                    # provider DQ mask.  ``mask != 0`` is content invalidity
+                    # (non-finite, saturated, additive/flat-invalid) — the
+                    # same semantics as the historical loader non-finite
+                    # report — so the P1 support-aware normalization applies on
+                    # the calibrated path instead of silently degrading to
+                    # neutral (no_source_content_validity).
+                    if _p1_active and calibration_mask is not None:
+                        _p1_invalid_raw = np.asarray(calibration_mask) != 0
                     logger.debug(
                         f"     - [C5] Frame calibrée. Range: [{np.nanmin(img_data_array_loaded):.4g}, {np.nanmax(img_data_array_loaded):.4g}], Shape: {img_data_array_loaded.shape}, Dtype: {img_data_array_loaded.dtype}"
                     )

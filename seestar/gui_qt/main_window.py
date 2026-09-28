@@ -5946,6 +5946,11 @@ class MainWindow(QMainWindow):
                     f"to {self._settings_path}"
                 )
         state = QtSettingsState.from_dict(data)
+        # C23: the master folder is NOT re-read at startup, so never show a
+        # persisted value that was not loaded into a live session (honest empty
+        # state; the user must Browse to re-open the session).  The enable
+        # intent itself stays persisted.
+        state.calibration_master_folder = ""
         self._apply_state_to_controls(state)
         # Tk parity: a folder restored from settings auto-loads its first FITS
         # for an immediate preview (guarded against redundant reloads).
