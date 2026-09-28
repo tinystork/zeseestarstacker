@@ -11132,6 +11132,8 @@ class SeestarQueuedStacker:
                 self._calibration_integrator.close()
             finally:
                 self._calibration_integrator = None
+        # C22: release any per-frame DQ masks still retained (bounded memory).
+        self._calibration_masks.clear()
 
     def _build_calibration_freeze(self, lights=()) -> dict:
         """Build + cache the frozen calibration signature (7 fields).
@@ -11213,7 +11215,10 @@ class SeestarQueuedStacker:
         mask never degrades the existing support truthfulness (returns the mask
         unchanged).  Increments the C6 audit counter.
         """
-        dq = getattr(self, "_calibration_masks", {}).get(file_name)
+        # C22: consume the mask ONCE and free it immediately (pop, not get) so
+        # the per-frame DQ masks never accumulate session-wide (small-RAM
+        # configs: a 2822x4144 uint16 mask is ~23 MB/frame).
+        dq = getattr(self, "_calibration_masks", {}).pop(file_name, None)
         if dq is None:
             return valid_mask
         dq_arr = np.asarray(dq)

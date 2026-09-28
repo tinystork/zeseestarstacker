@@ -108,3 +108,22 @@ def test_malformed_dq_never_degrades_support():
     valid = np.ones((3, 3), dtype=bool)
     combined = s._combine_dq_into_valid_mask("f.fits", valid, None, False)
     assert np.array_equal(combined, valid)
+
+
+def test_dq_mask_consumed_once_and_freed_C22():
+    # C22: the per-frame DQ mask is popped (consumed) on combine so it never
+    # accumulates session-wide (small-RAM configs).
+    s = _stub()
+    s._calibration_masks["f.fits"] = np.zeros((2, 2), dtype=np.uint16)
+    s._calibration_masks["g.fits"] = np.zeros((2, 2), dtype=np.uint16)
+    s._combine_dq_into_valid_mask("f.fits", np.ones((2, 2), dtype=bool), None, True)
+    assert "f.fits" not in s._calibration_masks
+    assert "g.fits" in s._calibration_masks  # untouched frame still retained
+
+
+def test_close_calibration_session_clears_masks_C22():
+    s = _stub()
+    s._calibration_integrator = None
+    s._calibration_masks["f.fits"] = np.zeros((2, 2), dtype=np.uint16)
+    s._close_calibration_session()
+    assert s._calibration_masks == {}
