@@ -184,6 +184,8 @@ SEAM_ONLY_KWARGS = frozenset(
         # (never forwarded to ``start_processing``).
         "calibration_enabled",
         "calibration_master_folder",
+        # C16: orientation declaration is an engine-instance seam field too.
+        "calibration_orientation",
     }
 )
 
