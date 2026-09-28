@@ -156,13 +156,19 @@ class MasterAdmission:
     """One master admitted into the session library (neutral).
 
     ``role`` is ``bias`` / ``dark`` / ``flat`` / ``flat_dark``; content identity
-    is the whole-file SHA-256 + byte size of the master FITS.
+    is the whole-file SHA-256 + byte size of the master FITS.  ``needs_attention``
+    carries informational evidence gaps (e.g. flat quality evidence) — never an
+    admission filter, resolved as UNVERIFIED by the matcher.
     """
 
     role: str
     path: str
     content_sha256: str
     size_bytes: int
+    needs_attention: tuple = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "needs_attention", tuple(self.needs_attention))
 
 
 @dataclass(frozen=True)
@@ -192,12 +198,15 @@ class CalibrationComposition:
     flat_applied: bool | None = None
     no_candidate_roles: tuple[str, ...] = ()
     rejected_masters: tuple = ()
+    flat_form: str | None = None  # C27: effective flat form (normalize_only/...)
+    bound_masters: tuple = ()  # C27: ((role, content_sha256), ...) identities
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "applied_roles", tuple(self.applied_roles))
         object.__setattr__(self, "skipped_roles", tuple(self.skipped_roles))
         object.__setattr__(self, "no_candidate_roles", tuple(self.no_candidate_roles))
         object.__setattr__(self, "rejected_masters", tuple(self.rejected_masters))
+        object.__setattr__(self, "bound_masters", tuple(tuple(b) for b in self.bound_masters))
 
     def to_dict(self) -> dict:
         return {
@@ -208,6 +217,8 @@ class CalibrationComposition:
             "flat_applied": self.flat_applied,
             "no_candidate_roles": list(self.no_candidate_roles),
             "rejected_masters": [dict(r) for r in self.rejected_masters],
+            "flat_form": self.flat_form,
+            "bound_masters": [list(b) for b in self.bound_masters],
         }
 
     @classmethod
@@ -220,6 +231,8 @@ class CalibrationComposition:
             flat_applied=d.get("flat_applied"),
             no_candidate_roles=tuple(d.get("no_candidate_roles", ()) or ()),
             rejected_masters=tuple(d.get("rejected_masters", ()) or ()),
+            flat_form=d.get("flat_form"),
+            bound_masters=tuple(tuple(b) for b in (d.get("bound_masters", ()) or ())),
         )
 
 

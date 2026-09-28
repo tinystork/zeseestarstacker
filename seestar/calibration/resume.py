@@ -107,6 +107,8 @@ def render_calibration_provenance(
 
     plan_map = freeze.get("calibration_plan_map") or {}
     flat_applied = False
+    flat_forms: set = set()
+    bound_by_role: dict = {}
     additive_states: set = set()
     roles: set = set()
     levels: set = set()
@@ -116,6 +118,11 @@ def render_calibration_provenance(
         comp = entry.get("composition") or {}
         if comp.get("flat_applied"):
             flat_applied = True
+        flat_form = comp.get("flat_form")
+        if flat_form:
+            flat_forms.add(str(flat_form))
+        for role, sha in comp.get("bound_masters") or ():
+            bound_by_role.setdefault(str(role), set()).add(str(sha)[:8])
         additive = comp.get("additive_state")
         if additive:
             additive_states.add(str(additive))
@@ -126,6 +133,13 @@ def render_calibration_provenance(
             levels.add(str(lvl))
 
     lines.append(f"flat applied: {flat_applied}")
+    if flat_forms:
+        lines.append(f"flat form: {', '.join(sorted(flat_forms))}")
+    if bound_by_role:
+        bound = " ".join(
+            f"{role}:{','.join(sorted(shas))}" for role, shas in sorted(bound_by_role.items())
+        )
+        lines.append(f"masters bound: {bound}")
     lines.append(
         "additive applied: "
         + (", ".join(sorted(additive_states)) if additive_states else "none")

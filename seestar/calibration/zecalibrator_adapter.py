@@ -270,6 +270,30 @@ def _map_composition(plan) -> CalibrationComposition | None:
     return CalibrationComposition.from_dict(to_dict())
 
 
+def _map_flat_facts(plan) -> tuple:
+    """Map the flat form + bound master identities (role + content SHA-256) from
+    a provider plan (C27).  Returns ``(flat_form, bound_masters)``.
+
+    Provider-agnostic: only the neutral ``flat_form`` string and the
+    ``(role, content_sha256)`` pairs cross the boundary — never a provider object.
+    """
+    flat_form = None
+    bound_masters = ()
+    masters = getattr(plan, "masters", None)
+    if not masters:
+        return flat_form, bound_masters
+    flat_binding = masters.get("flat")
+    if flat_binding is not None:
+        role_descriptor = getattr(flat_binding, "role_descriptor", None)
+        if role_descriptor is not None:
+            flat_form = getattr(role_descriptor, "flat_form", None)
+    bound_masters = tuple(
+        (role, getattr(binding, "content_sha256", None))
+        for role, binding in masters.items()
+    )
+    return flat_form, bound_masters
+
+
 def _map_session_result(api, res, sensor_orientation=None) -> SessionResult:
     if res.operation_status == "CANCELLED":
         return SessionResult(
@@ -282,6 +306,7 @@ def _map_session_result(api, res, sensor_orientation=None) -> SessionResult:
             path=a.path,
             content_sha256=a.content_sha256,
             size_bytes=a.size_bytes,
+            needs_attention=tuple(getattr(a, "needs_attention", ()) or ()),
         )
         for a in (res.admissions or ())
     )
@@ -351,6 +376,19 @@ class _ZeCalibratorSession:
             else None
         )
         composition = _map_composition(rr.plan) if rr.plan is not None else None
+        if composition is not None:
+            flat_form, bound_masters = _map_flat_facts(rr.plan)
+            composition = CalibrationComposition(
+                applied_roles=composition.applied_roles,
+                skipped_roles=composition.skipped_roles,
+                level=composition.level,
+                additive_state=composition.additive_state,
+                flat_applied=composition.flat_applied,
+                no_candidate_roles=composition.no_candidate_roles,
+                rejected_masters=composition.rejected_masters,
+                flat_form=flat_form,
+                bound_masters=bound_masters,
+            )
         return RouteResolution(
             state=CalibrationState.COMPLETED,
             outcome=rr.outcome,
@@ -452,6 +490,28 @@ class ZeCalibratorProvider:
                 )
             return SessionResult(state=CalibrationState.FAILED, error=_failed(exc))
         return _map_session_result(api, res, sensor_orientation=sensor_orientation)
+
+    def route_key(self, path: str) -> str | None:
+        """Return the canonical route-class key for a light (C26 helper).
+
+        Header-only facts: decodes the light via the public ``inspect_frame`` and
+        feeds the resulting ``LightConstraints`` into the provider's canonical
+        ``light_route_key``.  ``None`` when the light cannot be decoded (absent
+        / conflicting facts).  ZSSS never recomputes its own key.
+        """
+        try:
+            api = _import_api()
+            src = _light_source(api, LightSource(path=path))
+            res = api.inspect_frame(src)
+        except Exception:
+            return None
+        if getattr(res, "operation_status", None) != "COMPLETED" or getattr(res, "inspection", None) is None:
+            return None
+        try:
+            lc = api.light_constraints_from_sensor_metadata(res.inspection.metadata)
+            return api.light_route_key(lc)
+        except Exception:
+            return None
 
 
 __all__ = [

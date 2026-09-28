@@ -249,10 +249,14 @@ def preflight_calibration(
     if session is None:
         return PreflightResult(available=False, error="no admissible masters (empty session)")
 
-    # Group lights by acquisition signature (header-only, no pixel decode).
+    # Group lights by the canonical route-class key (C26 light_route_key,
+    # header-only facts via the provider).  One representative resolved per
+    # class.  An unresolvable light (decode failure) is a DISTINCT class (never
+    # grouped with a known class).
     lights_by_acq: Dict[str, List[str]] = {}
     for path in lights:
-        lights_by_acq.setdefault(acquisition_signature(path), []).append(path)
+        key = provider.route_key(path) or f"unresolvable:{path}"
+        lights_by_acq.setdefault(key, []).append(path)
 
     # Resolve ONE representative per acquisition class (1 decode per class,
     # never one per frame).  ``resolved`` = [(acq_sig, representative_path, rr)].

@@ -203,6 +203,11 @@ def test_preflight_resolves_one_representative_per_class(tmp_path):
                 provider_id="fake", api_version="1.1", product_version="0.0.5",
             )
 
+        def route_key(self, path):
+            # Fake canonical key: header-derived (exposure discriminates the two
+            # classes).  Stands in for the C26 light_route_key helper.
+            return preflight.acquisition_signature(path)
+
         def open_session(self, root, *, cancel=None):
             return port.SessionResult(
                 state=port.CalibrationState.COMPLETED,

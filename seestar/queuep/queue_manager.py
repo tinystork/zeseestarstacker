@@ -11093,9 +11093,14 @@ class SeestarQueuedStacker:
         fatal error (the run continues on the historical path).
         """
         self._calibration_integrator = None
-        if not self._calibration_enabled:
+        # Robust to a bare engine instance (e.g. a minimal test stacker) that
+        # never set the C5 seam fields: calibration is OPTIONAL, so absence of
+        # the fields means "disabled".
+        enabled = getattr(self, "_calibration_enabled", False)
+        master_folder = getattr(self, "_calibration_master_folder", "")
+        if not enabled:
             return
-        if not self._calibration_master_folder:
+        if not master_folder:
             # C23: enabled but no master folder -> clear, actionable message
             # (never a silent uncalibrated run).
             if self.update_progress:
@@ -11110,8 +11115,8 @@ class SeestarQueuedStacker:
         except Exception:
             return
         integrator = CalibrationIntegrator(
-            self._calibration_master_folder,
-            sensor_orientation=(self._calibration_orientation or None),
+            master_folder,
+            sensor_orientation=(getattr(self, "_calibration_orientation", "") or None),
         )
         try:
             opened = integrator.open()
@@ -11143,7 +11148,9 @@ class SeestarQueuedStacker:
             finally:
                 self._calibration_integrator = None
         # C22: release any per-frame DQ masks still retained (bounded memory).
-        self._calibration_masks.clear()
+        masks = getattr(self, "_calibration_masks", None)
+        if masks is not None:
+            masks.clear()
 
     def _build_calibration_freeze(self, lights=()) -> dict:
         """Build + cache the frozen calibration signature (7 fields).

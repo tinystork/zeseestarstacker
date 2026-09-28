@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-from seestar.calibration.preflight import acquisition_signature
 from seestar.calibration.scan import (
     FITS_SUFFIXES,
     flatten_masters,
@@ -63,21 +62,24 @@ class CalibrationIntegrator:
         root = self._masters_folder
         admit_root = root
         self._flat_dir = None
-        has_top_level_fits = False
+        # C25: the scan must NOT stop when the root already contains a FITS —
+        # descend into the selected subfolders too (mixed case), bounded depth,
+        # output exclusions handled by ``scan_masters_recursive``.
+        top_level: set = set()
         if os.path.isdir(root):
             try:
-                has_top_level_fits = any(
-                    os.path.isfile(os.path.join(root, e))
-                    and e.lower().endswith(FITS_SUFFIXES)
+                top_level = {
+                    os.path.join(root, e)
                     for e in os.listdir(root)
-                )
+                    if os.path.isfile(os.path.join(root, e))
+                    and e.lower().endswith(FITS_SUFFIXES)
+                }
             except OSError:
-                has_top_level_fits = False
-        if not has_top_level_fits:
-            candidates = scan_masters_recursive(root)
-            if candidates:
-                self._flat_dir = tempfile.mkdtemp(prefix="zsss_masters_flat_")
-                admit_root = flatten_masters(candidates, self._flat_dir)
+                top_level = set()
+        candidates = scan_masters_recursive(root)
+        if candidates and set(candidates) != top_level:
+            self._flat_dir = tempfile.mkdtemp(prefix="zsss_masters_flat_")
+            admit_root = flatten_masters(candidates, self._flat_dir)
         result = self._provider.open_session(
             admit_root, sensor_orientation=self._sensor_orientation
         )
@@ -101,29 +103,33 @@ class CalibrationIntegrator:
         return getattr(self._session, "context_preparation_count", 0)
 
     def is_planned(self, file_path: str) -> bool:
-        """True when the light's acquisition class has a frozen plan.
+        """True when the light's route class has a frozen plan.
 
-        Keyed by the **acquisition signature** (header-only), not a content hash:
-        the plan is per-class, so a light is planned when its acquisition class
-        was resolved at preflight (or when there is no plan map at all).
+        Keyed by the **canonical route-class key** (C26 ``light_route_key``),
+        not a homemade signature: the plan is per-class, so a light is planned
+        when its route class was resolved at preflight (or when there is no plan
+        map at all).
         """
         if self._plan_map is None:
             return True
-        return acquisition_signature(file_path) in self._plan_map
+        key = self._provider.route_key(file_path)
+        return key is not None and key in self._plan_map
 
     # ---------------------------------------------------------------- per frame
     def resolve(self, file_path: str):
-        """Resolve a light's plan (cached by acquisition class — no re-decode).
+        """Resolve a light's plan (cached by route class — no re-decode).
 
-        The plan is looked up by the light's **acquisition signature** (header-
-        only read).  A class already resolved at preflight returns the cached
-        plan object with no ``resolve_light`` decode; a new class (not in the
-        frozen map) falls back to a direct resolve.  Returns ``None`` when not
-        MATCHED / not planned.
+        The plan is looked up by the light's **canonical route-class key** (C26).
+        A class already resolved at preflight returns the cached plan object with
+        no ``resolve_light`` decode; a new class (not in the frozen map) falls
+        back to a direct resolve.  Returns ``None`` when not MATCHED / not planned
+        / unresolvable.
         """
         if self._session is None:
             return None
-        acq_sig = acquisition_signature(file_path)
+        acq_sig = self._provider.route_key(file_path)
+        if acq_sig is None:
+            return None
         cached = self._plan_cache.get(acq_sig)
         if cached is not None:
             return cached
@@ -166,7 +172,9 @@ class CalibrationIntegrator:
         plan_map = {}
         representatives: dict = {}
         for path in lights or ():
-            representatives.setdefault(acquisition_signature(path), path)
+            key = self._provider.route_key(path)
+            if key is not None:
+                representatives.setdefault(key, path)
         for acq_sig, rep in representatives.items():
             plan, composition = self._resolve_direct(rep)
             if plan is None or composition is None:
