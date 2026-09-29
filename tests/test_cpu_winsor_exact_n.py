@@ -293,31 +293,36 @@ def test_tiled_tile_order_invariance():
 
 
 def test_spatial_path_never_stacks_complete_frames(monkeypatch):
-    """Structural guard: every np.stack request is spatially bounded."""
+    """F6 structural guard: tile materialization is single-allocation —
+    ``np.stack`` and ``np.where`` are FORBIDDEN inside ``_materialize_spatial_tile``
+    (the cube is preallocated and filled slice-by-slice, so a full-frame stack
+    can never be built)."""
     import seestar.core.cpu_winsor_exact_n as cw
 
     imgs = _dataset(20, (32, 30), color=False, seed=41)
-    original_stack = np.stack
-    requested_shapes = []
 
-    def guarded_stack(arrays, *args, **kwargs):
-        shapes = [np.shape(a) for a in arrays]
-        requested_shapes.append(shapes)
-        assert shapes
-        assert all(shape[0] < 32 or shape[1] < 30 for shape in shapes), shapes
-        return original_stack(arrays, *args, **kwargs)
-
-    monkeypatch.setattr(cw.np, "stack", guarded_stack)
-    out = stack_winsorized_sigma_cpu_tiled(
-        imgs, None, tile_shape=(8,), return_weights=True
+    # Reference computed BEFORE monkeypatching (cw.np IS the global numpy).
+    ref = np.stack([im[0:8, 0:30] for im in imgs], axis=0).astype(
+        np.float32, copy=False
     )
-    assert out[0].shape == (32, 30)
-    assert requested_shapes
-    assert all(len(shapes) == 20 for shapes in requested_shapes)
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "np.stack/np.where must not be used in tile materialization"
+        )
+
+    monkeypatch.setattr(cw.np, "stack", _forbidden)
+    monkeypatch.setattr(cw.np, "where", _forbidden)
+    cube = cw._materialize_spatial_tile(imgs, 0, 8, 0, 30)
+    assert cube.shape == (20, 8, 30)
+    assert cube.dtype == np.float32
+    assert np.array_equal(cube, ref)
 
 
 def test_spatial_tile_slices_memmaps_before_materialization(tmp_path, monkeypatch):
-    """Memmapped observations remain full-frame mappings until tile slicing."""
+    """Memmapped observations remain full-frame mappings until tile slicing;
+    ``_materialize_spatial_tile`` fills the single preallocated cube from
+    zero-copy tile VIEWS of the memmap (``np.stack`` / ``np.where`` forbidden)."""
     import seestar.core.cpu_winsor_exact_n as cw
 
     paths = []
@@ -330,25 +335,22 @@ def test_spatial_tile_slices_memmaps_before_materialization(tmp_path, monkeypatc
         images.append(np.memmap(path, mode="r", dtype=np.float32, shape=(24, 20, 1)))
         paths.append(path)
 
-    original_stack = np.stack
-    saw_shared_tile_views = []
-
-    def spy_stack(arrays, *args, **kwargs):
-        saw_shared_tile_views.append(
-            all(np.shares_memory(a, images[j]) for j, a in enumerate(arrays))
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "np.stack/np.where must not be used in tile materialization"
         )
-        assert all(np.shape(a) == (6, 20, 1) for a in arrays)
-        return original_stack(arrays, *args, **kwargs)
 
-    monkeypatch.setattr(cw.np, "stack", spy_stack)
-    result, wht, _ = stack_winsorized_sigma_cpu_tiled(
-        images, None, tile_shape=(6,), min_tile_out=96, return_weights=True
-    )
-    assert result.shape == (24, 20, 1)
-    assert wht.shape == (24, 20, 1)
-    assert np.array_equal(result, np.asarray(images[0]) + np.float32(2.0))
-    assert np.all(wht == np.float32(5.0))
-    assert saw_shared_tile_views and all(saw_shared_tile_views)
+    monkeypatch.setattr(cw.np, "stack", _forbidden)
+    monkeypatch.setattr(cw.np, "where", _forbidden)
+    cube = cw._materialize_spatial_tile(images, 0, 6, 0, 20)
+    assert cube.shape == (5, 6, 20, 1)
+    assert cube.dtype == np.float32
+    for j in range(5):
+        assert np.array_equal(cube[j], np.asarray(images[j])[0:6, 0:20])
+    # The memmaps themselves must not have been modified.
+    for i, p in enumerate(paths):
+        orig = np.memmap(p, mode="r", dtype=np.float32, shape=(24, 20, 1))
+        assert np.array_equal(np.asarray(orig), np.asarray(images[i]))
 
 
 def test_partial_final_band_and_rectangular_partials():

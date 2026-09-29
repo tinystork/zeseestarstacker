@@ -1160,26 +1160,50 @@ def _materialize_tile(images, masks, y0, y1, x0, x1):
     """Materialize one spatial tile as a host float32 array of shape
     ``(N, tile_h, tile_w)`` (mono) or ``(N, tile_h, tile_w, C)`` (RGB).
 
-    NEVER builds the full ``N x H x W x C`` host stack: each full-frame image
-    is sliced to the tile (a view, no copy), the validity mask (when given)
-    is applied to that tile slice only, and only the N tile slices are stacked.
+    F6 single-allocation: preallocates the FINAL float32 cube and fills each
+    slice directly from the (zero-copy) source view, applying the validity
+    mask IN THE DESTINATION slice (prefill NaN + ``np.copyto(..., where=m)``).
+    NO per-image ``np.where`` tile, NO ``np.stack``, NO temporary conversion
+    cube — so the host peak is ONE float32 cube regardless of the INPUT dtype
+    (uint16/float64 are cast straight into the float32 destination).
+
     ``masks`` is ``None`` (images already NaN-masked) or a per-image 2-D
-    validity map parallel to ``images``.  The returned array is always float32
-    (images are already float32 in this pipeline, so the cast is a no-op).
+    validity map parallel to ``images`` (True/nonzero == valid).  ``where``
+    treats any truthy mask as valid, so no bool tile temporary is needed for
+    non-bool masks.  Images and masks are never modified (read views only).
     """
-    if masks is None:
-        tile = np.stack([im[y0:y1, x0:x1] for im in images], axis=0)
+    n = len(images)
+    first = np.asarray(images[0])
+    th = y1 - y0
+    tw = x1 - x0
+    if first.ndim == 3:
+        c = int(first.shape[2])
+        cube = np.empty((n, th, tw, c), dtype=np.float32)
+        for i, im in enumerate(images):
+            src = np.asarray(im)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = masks[i][y0:y1, x0:x1]
+                if m.dtype != bool:
+                    # Non-bool validity map -> bool tile (truthiness; the
+                    # pipeline passes bool views, so no temporary in practice).
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m[..., None])
     else:
-        tile = np.stack(
-            [
-                _nan_mask_slice(im[y0:y1, x0:x1], m[y0:y1, x0:x1])
-                for im, m in zip(images, masks)
-            ],
-            axis=0,
-        )
-    if tile.dtype != np.float32:
-        tile = tile.astype(np.float32, copy=False)
-    return tile
+        cube = np.empty((n, th, tw), dtype=np.float32)
+        for i, im in enumerate(images):
+            src = np.asarray(im)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = masks[i][y0:y1, x0:x1]
+                if m.dtype != bool:
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m)
+    return cube
 
 
 def _winsor_schedule_kappas(kappa, kappa_decay, n_iters):

@@ -892,29 +892,32 @@ def _raw_images_masks(a):
 
 
 def test_tiled_never_materializes_full_host_cube(monkeypatch):
-    """Lot B core proof: on the TILED path, no ``np.stack`` ever produces a
-    full-frame ``(N, H, W[, C])`` host cube — the largest host stack is a
-    TILE.  (The OLD implementation stacked the full batch once; this test
-    would fail against it.)"""
+    """Lot B core proof: on the TILED path, no host allocation ever produces
+    a full-frame ``(N, H, W[, C])`` cube — the largest host cube is a TILE.
+    (The OLD implementation stacked the full batch once; the F6 refactor
+    preallocates a single float32 tile cube via ``np.empty`` and never uses
+    ``np.stack``.)"""
     n, H, W = 30, 40, 96
     a = _make_stack(n, (H, W), seed=910)
     w = _weights(n, seed=31)
     full_area = H * W
     tile_shape = 16  # row bands -> spatial area per tile = 16 * 96
-    stacked_shapes = []
-    real_stack = sgp.np.stack
+    cube_shapes = []
+    real_empty = sgp.np.empty
 
-    def spy(arrays, *args, **kwargs):
-        out = real_stack(arrays, *args, **kwargs)
-        stacked_shapes.append(out.shape)
+    def spy(shape, *args, **kwargs):
+        out = real_empty(shape, *args, **kwargs)
+        # Only count the tile-cube allocations (leading axis == N).
+        if isinstance(shape, tuple) and len(shape) >= 3 and shape[0] == n:
+            cube_shapes.append(tuple(shape))
         return out
 
-    monkeypatch.setattr(sgp.np, "stack", spy)
+    monkeypatch.setattr(sgp.np, "empty", spy)
     _gpu_tiled(a, w, tile_shape)
-    # Every host stack materialised by the driver must be a tile (or smaller
+    # Every host cube materialised by the driver must be a tile (or smaller
     # partial band), never the full frame.
-    assert stacked_shapes, "test design: the tiled driver must stack tiles"
-    for shape in stacked_shapes:
+    assert cube_shapes, "test design: the tiled driver must materialise tile cubes"
+    for shape in cube_shapes:
         spatial = int(np.prod(shape[1:])) if len(shape) > 1 else 0
         assert spatial <= tile_shape * W, shape
         assert spatial < full_area, shape  # strictly smaller than full frame

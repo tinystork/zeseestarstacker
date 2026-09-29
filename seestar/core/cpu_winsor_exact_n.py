@@ -314,12 +314,28 @@ def _winsorized_tile_finalize_np(
 def _materialize_spatial_tile(images, y0, y1, x0, x1):
     """Materialize exactly one ``N x tile_h x tile_w [x C]`` float32 cube.
 
-    ``np.asarray`` on an ndarray or memmap is a zero-copy view; spatial
-    slicing therefore happens before ``np.stack`` allocates the tile cube.
-    In particular, this helper never asks NumPy to stack complete frames.
+    F6 single-allocation: preallocates the FINAL float32 cube and fills each
+    slice directly from the (zero-copy) source view, so there is NO second
+    conversion cube even for uint16/float64 inputs (cast straight into the
+    float32 destination).  ``np.asarray`` on an ndarray or memmap is a
+    zero-copy view; spatial slicing therefore happens before the cube is
+    filled.  In particular, this helper never asks NumPy to stack complete
+    frames and never builds a temporary per-image tile.
     """
-    views = [np.asarray(image)[y0:y1, x0:x1, ...] for image in images]
-    return np.stack(views, axis=0).astype(np.float32, copy=False)
+    n = len(images)
+    first = np.asarray(images[0])
+    th = y1 - y0
+    tw = x1 - x0
+    if first.ndim == 3:
+        c = int(first.shape[2])
+        cube = np.empty((n, th, tw, c), dtype=np.float32)
+        for i, image in enumerate(images):
+            cube[i, ...] = np.asarray(image)[y0:y1, x0:x1]
+    else:
+        cube = np.empty((n, th, tw), dtype=np.float32)
+        for i, image in enumerate(images):
+            cube[i, ...] = np.asarray(image)[y0:y1, x0:x1]
+    return cube
 
 
 def _run_tiled_geometry(
