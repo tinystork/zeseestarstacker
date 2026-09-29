@@ -1143,6 +1143,45 @@ def _winsor_tile_slices(frame_shape, tile_shape):
     return slices
 
 
+def _nan_mask_slice(img, mask):
+    """NaN-out spatially invalid pixels of one tile slice (mask True/nonzero
+    == valid).
+
+    Pure-NumPy mirror of the queue-manager ``_nan_mask_image``, applied to a
+    SLICE (a tile) so the numeric core never depends on the GUI/provider layer
+    and never materialises a full-frame masked copy for the tiled reduction.
+    Invalid samples become ``NaN`` (missing), exactly as in the untiled twin.
+    """
+    m = mask[..., None] if img.ndim == 3 else mask
+    return np.where(m, img, np.nan)
+
+
+def _materialize_tile(images, masks, y0, y1, x0, x1):
+    """Materialize one spatial tile as a host float32 array of shape
+    ``(N, tile_h, tile_w)`` (mono) or ``(N, tile_h, tile_w, C)`` (RGB).
+
+    NEVER builds the full ``N x H x W x C`` host stack: each full-frame image
+    is sliced to the tile (a view, no copy), the validity mask (when given)
+    is applied to that tile slice only, and only the N tile slices are stacked.
+    ``masks`` is ``None`` (images already NaN-masked) or a per-image 2-D
+    validity map parallel to ``images``.  The returned array is always float32
+    (images are already float32 in this pipeline, so the cast is a no-op).
+    """
+    if masks is None:
+        tile = np.stack([im[y0:y1, x0:x1] for im in images], axis=0)
+    else:
+        tile = np.stack(
+            [
+                _nan_mask_slice(im[y0:y1, x0:x1], m[y0:y1, x0:x1])
+                for im, m in zip(images, masks)
+            ],
+            axis=0,
+        )
+    if tile.dtype != np.float32:
+        tile = tile.astype(np.float32, copy=False)
+    return tile
+
+
 def _winsor_schedule_kappas(kappa, kappa_decay, n_iters):
     """Kappa of every scheduled iteration, bitwise as in the reference.
 
@@ -1277,6 +1316,7 @@ def stack_winsorized_sigma_gpu_tiled(
     return_weights=False,
     tile_shape=None,
     _tile_order="rowmajor",
+    masks=None,
 ):
     """Exact-N_batch SPATIAL GPU tiling of the Winsorized reduction.
 
@@ -1288,6 +1328,17 @@ def stack_winsorized_sigma_gpu_tiled(
     ``N_batch x tile_h x tile_w x C`` instead of the full frame, while the
     full ``N_batch`` stack population is preserved for EVERY output pixel
     (the stack axis is never split; no hierarchical nonlinear reduction).
+
+    Host-memory boundedness (Lot B): the tiled driver NEVER builds the full
+    ``N x H x W x C`` host stack — each tile is materialised on demand from
+    the (already resident) aligned full-frame images via
+    :func:`_materialize_tile`, and re-materialised for the two passes without
+    retaining several cubes.  ``masks`` is an optional per-image 2-D validity
+    map (True/nonzero == valid) parallel to ``images``; when given, the mask
+    is applied to the TILE SLICE ONLY (no full-frame masked copy).  When
+    ``masks is None`` the images are assumed already NaN-masked (legacy
+    callers / tests).  Passing ``masks`` never modifies the shared aligned
+    images in place (only read views + fresh stacked tiles).
 
     ``tile_shape`` is the Phase F planner seam: ``None`` (or a geometry
     covering the whole frame in one tile) delegates to the untiled twin;
@@ -1309,17 +1360,19 @@ def stack_winsorized_sigma_gpu_tiled(
     n_batch = int(len(images))
     if n_batch == 0:  # pragma: no cover - degenerate, mirrors CPU failure
         raise ValueError("tiled winsorized sigma requires at least one image")
-    _p_wall_start("tiled_host_stack_pack")
-    host = np.stack([im for im in images], axis=0).astype(np.float32)
-    _p_wall_end()
-    frame = host.shape[1:]
+    first = np.asarray(images[0])
+    frame = first.shape
     H, W = int(frame[0]), int(frame[1])
-    color = host.ndim == 4
+    color = first.ndim == 3
     spatial = _winsor_tile_slices((H, W), tile_shape)
     if len(spatial) == 1:
         # Untiled / full-frame geometry: the untiled twin IS the reference
         # implementation of this reduction; delegate for guaranteed
         # bitwise identity (and its single-pass early-exit loop).
+        if masks is not None:
+            images = [
+                _nan_mask_slice(im, m) for im, m in zip(images, masks)
+            ]
         return stack_winsorized_sigma_gpu(
             images,
             weights,
@@ -1348,7 +1401,7 @@ def stack_winsorized_sigma_gpu_tiled(
     else:
         global_counts = [0] * int(max_iters)
         for t, (y0, y1, x0, x1) in enumerate(spatial):
-            arr_t = cp.asarray(host[:, y0:y1, x0:x1])
+            arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
             _p_event("tiled_p1_tile%d" % t)
             _, counts = _winsorized_tile_iterations_cp(
                 cp,
@@ -1380,7 +1433,7 @@ def stack_winsorized_sigma_gpu_tiled(
     n_valid_total = 0
     n_surv_total = 0
     for t, (y0, y1, x0, x1) in enumerate(spatial):
-        arr_t = cp.asarray(host[:, y0:y1, x0:x1])
+        arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
         _p_event("tiled_p2_tile%d" % t)
         valid_t = ~cp.isnan(arr_t)
         # Always run the tile helper: it applies the one-pass gross-outlier

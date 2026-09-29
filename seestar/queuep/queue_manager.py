@@ -3307,10 +3307,21 @@ class SeestarQueuedStacker:
         images,
         weights=None,
         reserve_bytes=WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+        masks=None,
         **kwargs,
     ):
         """Phase F (Track P4): planner-driven GPU dispatch of the winsorized
         reduction (FULL_GPU / TILED_GPU / CPU_FALLBACK).
+
+        ``masks`` is an optional per-image 2-D validity map (True/nonzero ==
+        valid) parallel to ``images``.  When provided, ``images`` are the RAW
+        aligned frames (never modified in place): the FULL_GPU and CPU paths
+        materialise NaN-masked copies lazily only when needed, while the
+        TILED_GPU path passes ``images`` + ``masks`` straight to the tiled
+        driver so each tile's mask is applied at tile materialisation time
+        (no full-frame masked copy).  When ``masks is None`` the images are
+        already NaN-masked (legacy callers / tests), so behaviour is exactly
+        as before.
 
         Replaces the coarse whole-stack ``_GPU_FOOTPRINT_FACTOR_WINSORIZED``
         guard used by the B7-era dispatch.  When the policy backend is cupy
@@ -3374,10 +3385,21 @@ class SeestarQueuedStacker:
         eligible = getattr(self, "effective_backend", "cpu") == "cupy"
         backend_requested = "cupy" if requested else "cpu"
 
+        def _masked_images():
+            """NaN-masked full-frame copies, materialised lazily ONLY for the
+            FULL_GPU and CPU paths (the TILED_GPU path masks per tile and
+            never calls this).  ``masks is None`` -> already masked."""
+            if masks is None:
+                return images
+            return [
+                _nan_mask_image(np.asarray(im), m)
+                for im, m in zip(images, masks)
+            ]
+
         def _record_cpu(reason, *, attempted=False, planner_mode="none",
                         gpu_memory_mode=None, decision=None, cp_module=None):
             """Record executed=cpu AFTER the CPU reducer completed."""
-            out = fn_cpu(images, weights, **kwargs)
+            out = fn_cpu(_masked_images(), weights, **kwargs)
             _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
@@ -3475,7 +3497,9 @@ class SeestarQueuedStacker:
             return _record_cpu(GPU_EXEC_REASON_PLANNER, planner_mode="fallback")
         if decision.kind == FULL_GPU:
             try:
-                out = stack_winsorized_sigma_gpu(images, weights, **kwargs)
+                out = stack_winsorized_sigma_gpu(
+                    _masked_images(), weights, **kwargs
+                )
             except Exception:
                 self.logger.warning(
                     "GPU winsorized reduction failed; falling back to CPU",
@@ -3521,6 +3545,7 @@ class SeestarQueuedStacker:
                     images,
                     weights,
                     tile_shape=decision.tile_shape,
+                    masks=masks,
                     **kwargs,
                 )
             except Exception:
@@ -15117,10 +15142,13 @@ class SeestarQueuedStacker:
                 # non-Winsorized ``_combine_hq_by_tiles`` callers — median /
                 # kappa-sigma / linear-fit-clip — remain unchanged, documented
                 # debt.)  max_hq_mem is intentionally NOT consulted here.
-                images_for_stack = [
-                    _nan_mask_image(img, mask)
-                    for img, mask in zip(image_data_list, coverage_maps_list)
-                ]
+                #
+                # Lot B: the aligned images are passed RAW together with their
+                # validity masks.  The GPU TILED path applies the mask per
+                # tile (no full-frame masked copy), while FULL_GPU and the CPU
+                # fallback materialise masked copies lazily inside
+                # _gpu_reduce_winsorized.  The shared aligned images are never
+                # modified in place.
 
                 def _cpu_winsorized_auto(imgs, w=None, **_kw):
                     # Automatic CPU memory policy closure: FULL_CPU -> untiled
@@ -15148,8 +15176,9 @@ class SeestarQueuedStacker:
                 # (stage E1).
                 winsor_res = self._gpu_reduce_winsorized(
                     _cpu_winsorized_auto,
-                    images_for_stack,
+                    image_data_list,
                     quality_weights,
+                    masks=coverage_maps_list,
                     kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                     winsor_limits=self.winsor_limits,
                     return_weights=True,
