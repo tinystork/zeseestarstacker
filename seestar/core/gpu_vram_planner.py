@@ -282,6 +282,7 @@ def plan_winsorized_gpu_execution(
     min_tile_out: int = WINSOR_MIN_TILE_OUT,
     force_tiled: bool = False,
     max_tile_outputs: Optional[int] = None,
+    host_tile_outputs_cap: Optional[int] = None,
 ) -> WinsorExecDecision:
     """Plan the GPU execution strategy for one frozen N_batch reduction.
 
@@ -320,6 +321,13 @@ def plan_winsorized_gpu_execution(
         geometry (strictly fewer than this value).  Used by the Lot C seam to
         guarantee a strictly-smaller tile after a TILED OOM, so a geometry that
         already failed is never replayed as-is.  ``None`` = uncapped.
+    host_tile_outputs_cap : Optional[int]
+        INCLUSIVE upper bound on per-tile spatial outputs from the conjoint
+        HOST-RAM plan (``seestar.core.host_ram_planner``): a tile is only
+        admissible when its host working set fits alongside the resident
+        inputs and full-frame outputs.  Combined with the VRAM cap so the
+        chosen geometry fits BOTH device memory and host RAM.  ``None`` =
+        uncapped on the host side.
 
     Returns a WinsorExecDecision.  Raises ValueError only for caller bugs
     (empty batch / non-positive frame); the wiring converts any exception
@@ -337,6 +345,8 @@ def plan_winsorized_gpu_execution(
         raise ValueError("memory-state bytes must be non-negative")
     if max_tile_outputs is not None and int(max_tile_outputs) <= 0:
         raise ValueError("max_tile_outputs must be positive")
+    if host_tile_outputs_cap is not None and int(host_tile_outputs_cap) <= 0:
+        raise ValueError("host_tile_outputs_cap must be positive")
 
     n = int(n_batch)
     H, W = int(frame_shape[0]), int(frame_shape[1])
@@ -383,8 +393,15 @@ def plan_winsorized_gpu_execution(
         )
 
     # 1) Whole-frame (untiled) decision.  Skipped when a spatial strategy is
-    # forced (``force_tiled``: a FULL OOM already proved untiled cannot fit).
-    if not force_tiled and demand_full + reserve <= budget:
+    # forced (``force_tiled``: a FULL OOM already proved untiled cannot fit)
+    # OR when the conjoint host-RAM cap cannot even fit the whole frame
+    # (``host_tile_outputs_cap < s_full``: the untiled twin would need a
+    # full-frame host working set that the host plan already refused).
+    host_caps_full = (
+        host_tile_outputs_cap is None
+        or int(host_tile_outputs_cap) >= s_full
+    )
+    if not force_tiled and host_caps_full and demand_full + reserve <= budget:
         return _full()
 
     # 2) Spatial tiling search: no scientifically valid tile -> CPU_FALLBACK.
@@ -396,6 +413,9 @@ def plan_winsorized_gpu_execution(
         )
     # Largest per-tile spatial output count whose modeled demand fits.
     s_cap = int((max_tile_base / factor) // (n * C * isz))
+    if host_tile_outputs_cap is not None:
+        # Conjoint host-RAM bound (inclusive): the tile must fit host RAM too.
+        s_cap = min(s_cap, int(host_tile_outputs_cap))
     if max_tile_outputs is not None:
         # Strictly-smaller retry bound (exclusive): the next geometry must
         # never re-attempt a tile that already OOM'd.

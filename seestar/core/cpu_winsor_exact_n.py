@@ -332,18 +332,30 @@ def _run_tiled_geometry(
     apply_rewinsor,
     max_iters,
     kappa_decay,
+    out_result=None,
+    out_sum_w=None,
 ):
     """Two-pass exact-N spatial reduction over ``spatial`` slices.
 
-    ``images`` contains the already-resident observations.  Only the current
-    spatial tile is stacked, independently in each pass.  Returns
+    ``images`` contains the already-resident observations (ndarray OR read-only
+    memmap — both are sliced per tile; the stack axis is never split).  Only
+    the current spatial tile is stacked, independently in each pass.  When
+    ``out_result`` / ``out_sum_w`` are given (disk-backed ``np.memmap``), the
+    SCI and WHT outputs are written PER TILE into them instead of allocating
+    two full-frame in-RAM arrays (low-RAM path).  Returns
     ``(result, sum_w, rejected_pct, z_eff)`` with exact placement.
     """
     H, W = int(frame_shape[0]), int(frame_shape[1])
     trailing_shape = tuple(frame_shape[2:])
     out_shape = (H, W) + trailing_shape
-    result = np.empty(out_shape, dtype=np.float32)
-    sum_w = np.empty(out_shape, dtype=np.float32)
+    if out_result is not None:
+        result = out_result
+    else:
+        result = np.empty(out_shape, dtype=np.float32)
+    if out_sum_w is not None:
+        sum_w = out_sum_w
+    else:
+        sum_w = np.empty(out_shape, dtype=np.float32)
 
     # ---- pass 1: schedule discovery (deterministic kappa schedule, no
     # early exit, LOCAL rejection counts summed globally)
@@ -411,6 +423,8 @@ def stack_winsorized_sigma_cpu_tiled(
     max_retries=4,
     _tile_order="rowmajor",
     _retry_callback: Optional[Callable[..., None]] = None,
+    out_result=None,
+    out_sum_w=None,
 ):
     """Exact-N SPATIAL CPU tiling of the Winsorized sigma reduction.
 
@@ -432,6 +446,9 @@ def stack_winsorized_sigma_cpu_tiled(
     allowed after the initial planned attempt (total attempts are therefore
     at most ``max_retries + 1``).  ``_retry_callback`` is an internal
     provenance seam called for every allocation recovery transition.
+    ``out_result`` / ``out_sum_w`` are optional disk-backed ``np.memmap``
+    targets: when given, the SCI and WHT outputs are written PER TILE into
+    them (low-RAM path) instead of allocating two full-frame in-RAM arrays.
     """
     n = int(len(images))
     if n == 0:  # pragma: no cover - degenerate, mirrors CPU failure
@@ -559,6 +576,8 @@ def stack_winsorized_sigma_cpu_tiled(
                 apply_rewinsor,
                 max_iters,
                 kappa_decay,
+                out_result=out_result,
+                out_sum_w=out_sum_w,
             )
             if attempts > 1 and _retry_callback is not None:
                 _retry_callback(

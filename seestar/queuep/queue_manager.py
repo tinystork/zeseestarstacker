@@ -317,6 +317,20 @@ from seestar.core.cpu_winsor_exact_n import (
     CpuWinsorMemoryRefused,
     stack_winsorized_sigma_cpu_tiled,
 )
+from seestar.core.host_ram_planner import (
+    HOST_IN_MEMORY,
+    HOST_MEMMAP_OUTPUTS,
+    HOST_REFUSE,
+    HOST_SPILL_AND_MEMMAP,
+    HOST_SPILL_INPUTS,
+    HostRamDecision,
+    plan_host_ram_execution,
+    winsorized_tile_from_cap,
+)
+from seestar.core.scratch_store import (
+    ScratchSpaceRefused,
+    ScratchStore,
+)
 
 try:
     from seestar.gui.settings import SettingsManager, TILE_HEIGHT
@@ -476,6 +490,8 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     # durable block per GPU attempt -- never per tile -- so the shipped run
     # log alone proves the retry sequence and the final CPU decision).
     "GPU_WINSOR_OOM_RETRY ",
+    # Lot D: conjoint host-RAM plan for the winsorized reduction.
+    "WINSOR_HOST_RAM_DECISION ",
 )
 
 
@@ -3394,6 +3410,143 @@ class SeestarQueuedStacker:
         )
         return out
 
+    # ------------------------------------------------------------------
+    # Lot D: conjoint host-RAM plan + low-RAM spill / memmap execution
+    # ------------------------------------------------------------------
+
+    def _winsorized_host_ram_plan(self, images, masks, n, frame_shape,
+                                  channels, min_tile_out=CPU_MIN_TILE_OUT):
+        """Resolve the conjoint host-RAM plan for ONE winsorized reduction.
+
+        Measures the live RAM (available + RSS) AT THIS MOMENT (never just at
+        startup), computes the named reserve (``recommended_reserve_bytes``),
+        the already-resident frames+masks and the full-frame SCI/WHT outputs,
+        then delegates to the pure :func:`plan_host_ram_execution` (no device,
+        no double counting).  Returns ``(decision, available, rss, reserve,
+        resident, output)`` and emits the ``WINSOR_HOST_RAM_DECISION``
+        provenance block.
+        """
+        available = self._cpu_available_ram_bytes_now()
+        if available is None:
+            available = 0
+        rss = self._cpu_process_rss_bytes()
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        isz = int(np.dtype(np.asarray(images[0]).dtype).itemsize)
+        resident = 0
+        for im in images:
+            resident += int(getattr(np.asarray(im), "nbytes", 0))
+        if masks:
+            for m in masks:
+                resident += int(getattr(np.asarray(m), "nbytes", 0))
+        output = 2 * H * W * int(channels) * isz
+        reserve = recommended_reserve_bytes(
+            int(available), H * W * int(channels) * isz, 1
+        )
+        decision = plan_host_ram_execution(
+            n=int(n),
+            frame_shape=(H, W),
+            channels=int(channels),
+            dtype_itemsize=isz,
+            available_ram_bytes=int(available),
+            reserve_bytes=int(reserve),
+            resident_input_bytes=resident,
+            output_bytes=output,
+            min_tile_out=int(min_tile_out),
+        )
+        self._emit_provenance_block(
+            "WINSOR_HOST_RAM_DECISION",
+            {
+                "strategy": decision.strategy,
+                "reason": decision.reason or "none",
+                "scientific_n": decision.n,
+                "available_ram_bytes": int(available),
+                "rss_bytes": int(rss) if rss is not None else None,
+                "reserve_bytes": decision.reserve_bytes,
+                "resident_input_bytes": decision.resident_input_bytes,
+                "output_bytes": decision.output_bytes,
+                "host_tile_outputs_cap": (
+                    decision.host_tile_outputs_cap
+                    if decision.host_tile_outputs_cap is not None else "full"
+                ),
+                "spill_input_bytes": decision.spill_input_bytes,
+                "output_memmap_bytes": decision.output_memmap_bytes,
+                "effective_budget_bytes": decision.effective_budget_bytes,
+            },
+        )
+        return decision, available, rss, reserve, resident, output
+
+    def _make_winsorized_scratch(self):
+        """A run-scoped scratch store under the output folder (never /tmp)."""
+        out = getattr(self, "output_folder", None)
+        if not out:
+            raise ScratchSpaceRefused(
+                "winsorized low-RAM spill requires an output folder"
+            )
+        return ScratchStore(out)
+
+    def _spill_winsorized_inputs(self, images, masks, store):
+        """Spill already-aligned/normalised frames (and masks) to scratch,
+        reopened as READ-ONLY memmap (values/dtype/geometry preserved exactly;
+        no full-frame copy).  The caller drops its in-RAM references after
+        this call returns."""
+        store.ensure_dir()
+        n_bytes = 0
+        for im in images:
+            n_bytes += int(np.asarray(im).nbytes)
+        if masks:
+            for m in masks:
+                n_bytes += int(np.asarray(m).nbytes)
+        store.check_space(n_bytes)
+        sp_images = [
+            store.spill_image(np.asarray(im), "img_%d" % i)
+            for i, im in enumerate(images)
+        ]
+        sp_masks = None
+        if masks:
+            sp_masks = [
+                store.spill_image(np.asarray(m), "mask_%d" % i)
+                for i, m in enumerate(masks)
+            ]
+        return sp_images, sp_masks
+
+    def _winsorized_memmap_outputs(self, frame_shape, channels, store):
+        """Allocate disk-backed SCI/WHT output memmaps (written per tile)."""
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        C = int(channels)
+        store.ensure_dir()
+        store.check_space(2 * H * W * C * 4)
+        out_shape = (H, W) if C == 1 else (H, W, C)
+        sci = store.new_memmap("sci", out_shape, np.float32)
+        wht = store.new_memmap("wht", out_shape, np.float32)
+        return sci, wht
+
+    def _register_winsorized_scratch(self, store):
+        """Register a low-RAM scratch store for run-scoped cleanup.
+
+        The store owns the spill memmaps and (for ``memmap_outputs``) the
+        disk-backed SCI/WHT.  It is cleaned up at the batch epilogue (after
+        the batch result is consumed) and at run finalization; a FAILED or
+        CANCELLED run also closes every registered handle first (Windows-safe:
+        no unlink of a live memmap).
+        """
+        stores = getattr(self, "_winsorized_scratch_stores", None)
+        if stores is None:
+            stores = []
+            self._winsorized_scratch_stores = stores
+        stores.append(store)
+
+    def _cleanup_winsorized_scratch(self):
+        """Close + remove every registered low-RAM scratch store (idempotent)."""
+        stores = getattr(self, "_winsorized_scratch_stores", None)
+        if not stores:
+            return
+        for store in stores:
+            try:
+                store.cleanup()
+            except Exception:
+                pass
+        self._winsorized_scratch_stores = []
+
     def _gpu_reduce_winsorized(
         self,
         fn_cpu,
@@ -3477,6 +3630,45 @@ class SeestarQueuedStacker:
         requested = bool(getattr(self, "request_gpu", False))
         eligible = getattr(self, "effective_backend", "cpu") == "cupy"
         backend_requested = "cupy" if requested else "cpu"
+
+        # ---- Lot D: conjoint host-RAM plan + low-RAM spill/memmap ----------
+        # Resolve the host strategy (in_memory / spill_inputs /
+        # memmap_outputs / spill_and_memmap / refuse) from LIVE RAM + RSS +
+        # named reserve, and (when the plan demands it) spill the already-
+        # aligned frames to run-scoped scratch memmap BEFORE any reduction.
+        # Fail-open: a host-plan failure must never abort a valid run.
+        host_plan = None
+        host_scratch = None
+        host_out_sci = None
+        host_out_wht = None
+        try:
+            if images is not None and len(images):
+                _frame0 = np.asarray(images[0]).shape
+                _channels0 = 3 if len(_frame0) >= 3 else 1
+                host_plan, _a, _r, _res, _resid, _out = (
+                    self._winsorized_host_ram_plan(
+                        images, masks, n_batch, _frame0[:2], _channels0
+                    )
+                )
+                if host_plan.spills_inputs:
+                    host_scratch = self._make_winsorized_scratch()
+                    self._register_winsorized_scratch(host_scratch)
+                    images, masks = self._spill_winsorized_inputs(
+                        images, masks, host_scratch
+                    )
+                if host_plan.memmaps_outputs:
+                    if host_scratch is None:
+                        host_scratch = self._make_winsorized_scratch()
+                        self._register_winsorized_scratch(host_scratch)
+                    host_out_sci, host_out_wht = self._winsorized_memmap_outputs(
+                        _frame0[:2], _channels0, host_scratch
+                    )
+        except Exception:
+            # Fail-open: no conjoint plan / spill -> legacy behaviour.
+            host_plan = None
+            host_scratch = None
+            host_out_sci = None
+            host_out_wht = None
 
         def _masked_images():
             """NaN-masked full-frame copies, materialised lazily ONLY for the
@@ -3568,6 +3760,17 @@ class SeestarQueuedStacker:
             return _record_cpu(GPU_EXEC_REASON_RUNTIME_MEMORY)
         try:
             frame = images[0].shape
+            host_cap = (
+                host_plan.host_tile_outputs_cap
+                if host_plan is not None
+                else None
+            )
+            # Disk-backed outputs can only be written per-tile, so a
+            # ``memmap_outputs`` host plan forces the spatial (TILED) path
+            # (the untiled twin materialises full-frame in-RAM SCI/WHT).
+            force_tiled_host = bool(
+                host_plan is not None and host_plan.memmaps_outputs
+            )
             decision = plan_winsorized_gpu_execution(
                 n_batch=n_batch,
                 frame_shape=frame[:2],
@@ -3579,6 +3782,8 @@ class SeestarQueuedStacker:
                 driver_free_bytes=int(free),
                 pool_free_bytes=int(pool_free),
                 reserve_bytes=int(reserve_bytes),
+                host_tile_outputs_cap=host_cap,
+                force_tiled=force_tiled_host,
             )
         except Exception as exc:
             self._log_gpu_fallback_once(
@@ -3601,6 +3806,11 @@ class SeestarQueuedStacker:
             # below is reachable only for the initial planner decision.
 
             def _replan(free_bytes, pool_free_bytes, force_tiled, max_tile_out):
+                host_cap = (
+                    host_plan.host_tile_outputs_cap
+                    if host_plan is not None
+                    else None
+                )
                 return plan_winsorized_gpu_execution(
                     n_batch=n_batch,
                     frame_shape=frame[:2],
@@ -3612,6 +3822,7 @@ class SeestarQueuedStacker:
                     reserve_bytes=int(reserve_bytes),
                     force_tiled=force_tiled,
                     max_tile_outputs=max_tile_out,
+                    host_tile_outputs_cap=host_cap,
                 )
 
             def _emit_attempt(rec):
@@ -3699,6 +3910,8 @@ class SeestarQueuedStacker:
                             weights,
                             tile_shape=tile,
                             masks=masks,
+                            out_result=host_out_sci,
+                            out_sum_w=host_out_wht,
                             **kwargs,
                         )
                 except Exception as exc:
@@ -3755,6 +3968,10 @@ class SeestarQueuedStacker:
                             f"N_batch={n_batch} conservé)",
                             "INFO",
                         )
+                    if host_scratch is not None:
+                        # Durability of disk-backed SCI/WHT before the caller
+                        # consumes them (memmap pages must hit the file).
+                        host_scratch.flush()
                     return out
 
                 if error_kind != "oom":
@@ -4060,6 +4277,37 @@ class SeestarQueuedStacker:
         if available is None:
             available = 0
         limits = tuple(kw.get("winsor_limits", self.winsor_limits))
+        # Lot D: conjoint host-RAM plan (spill inputs + memmap outputs).  The
+        # CPU path also resolves the host plan so the same low-RAM execution
+        # (disk-backed inputs/outputs) applies when GPU is unavailable or its
+        # retries are exhausted.  Fail-open: a plan failure degrades to the
+        # legacy in-RAM path.
+        host_plan = None
+        host_scratch = None
+        host_out_sci = None
+        host_out_wht = None
+        try:
+            host_plan, _a, _r, _res, _resid, _out = (
+                self._winsorized_host_ram_plan(
+                    imgs, None, n, (H, W), C
+                )
+            )
+            if host_plan.spills_inputs:
+                host_scratch = self._make_winsorized_scratch()
+                imgs, _ = self._spill_winsorized_inputs(
+                    imgs, None, host_scratch
+                )
+            if host_plan.memmaps_outputs:
+                if host_scratch is None:
+                    host_scratch = self._make_winsorized_scratch()
+                host_out_sci, host_out_wht = self._winsorized_memmap_outputs(
+                    (H, W), C, host_scratch
+                )
+        except Exception:
+            host_plan = None
+            host_scratch = None
+            host_out_sci = None
+            host_out_wht = None
         # Closure REWORK-1 (Nono false-cpu_budget_negative): the per-reduction
         # reserve NEVER includes the process-pool duplication overhead (448 MiB
         # per extra worker) — a high configured ``max_stack_workers`` must not
@@ -4084,6 +4332,44 @@ class SeestarQueuedStacker:
             cpu_winsor_decision_tokens(decision, available),
         )
         if decision.is_refusal:
+            # Lot D: a ``cpu_budget_negative`` (or minimum-tile) refusal becomes
+            # a SAFE execution when the conjoint host plan can admit a minimal
+            # tile with disk-backed outputs (spill inputs + memmap SCI/WHT).
+            # Only then do we downgrade; otherwise the refusal stays precise.
+            downgrade = (
+                host_plan is not None
+                and not host_plan.is_refusal
+                and host_plan.memmaps_outputs
+            )
+            if downgrade:
+                tile_shape = winsorized_tile_from_cap(
+                    (H, W), host_plan.host_tile_outputs_cap, CPU_MIN_TILE_OUT
+                )
+                if tile_shape is not None:
+                    budget = host_plan.effective_budget_bytes
+                    self._emit_provenance_block(
+                        "CPU_WINSOR_MEMORY_RETRY",
+                        cpu_winsor_retry_tokens(
+                            old_tile_shape=None,
+                            new_tile_shape=tile_shape,
+                            reason="host_memmap_downgrade",
+                            outcome="recovered",
+                        ),
+                    )
+                    try:
+                        return stack_winsorized_sigma_cpu_tiled(
+                            imgs,
+                            weights=w,
+                            tile_shape=tile_shape,
+                            max_mem_bytes=budget,
+                            min_tile_out=CPU_MIN_TILE_OUT,
+                            out_result=host_out_sci,
+                            out_sum_w=host_out_wht,
+                            **kw,
+                        )
+                    finally:
+                        if host_scratch is not None:
+                            host_scratch.flush()
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_REFUSAL",
                 cpu_winsor_refusal_tokens(
@@ -4097,6 +4383,8 @@ class SeestarQueuedStacker:
                     reason=decision.reason or REASON_NO_VALID_TILE,
                 ),
             )
+            if host_scratch is not None:
+                host_scratch.cleanup()
             raise CpuWinsorMemoryRefused(
                 decision.reason or REASON_NO_VALID_TILE,
                 details={
@@ -4107,27 +4395,53 @@ class SeestarQueuedStacker:
                 },
             )
         budget = decision.effective_budget_bytes
-        if decision.strategy == FULL_CPU:
+        if decision.strategy == FULL_CPU and not host_plan.memmaps_outputs:
+            if host_scratch is not None:
+                host_scratch.flush()
             return self._stack_winsorized_sigma(
                 imgs, w, max_mem_bytes=budget, **kw
             )
-        # SPATIAL_TILED_CPU -> stage-C exact-N spatial tiled driver.
+        # SPATIAL_TILED_CPU -> stage-C exact-N spatial tiled driver.  Also
+        # used when the host plan demands disk-backed outputs (memmap_outputs):
+        # the untiled wrapper materialises full-frame in-RAM SCI/WHT, so a
+        # memmap-output plan must write per-tile via the tiled driver.
         def _record_spatial_retry(**retry):
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_RETRY",
                 cpu_winsor_retry_tokens(**retry),
             )
 
+        tile_shape = decision.tile_shape
+        if decision.strategy == FULL_CPU and host_plan.memmaps_outputs:
+            # The working set fits untiled, but the full outputs must be
+            # disk-backed -> run the tiled driver with a tile derived from the
+            # host cap (still exact-N, bitwise identical reconstruction).
+            tile_shape = winsorized_tile_from_cap(
+                (H, W), host_plan.host_tile_outputs_cap, CPU_MIN_TILE_OUT
+            )
+            if tile_shape is None:
+                if host_scratch is not None:
+                    host_scratch.cleanup()
+                raise CpuWinsorMemoryRefused(
+                    REASON_NO_VALID_TILE,
+                    details={"n": decision.n, "host_cap": host_plan.host_tile_outputs_cap},
+                )
+
         try:
-            return stack_winsorized_sigma_cpu_tiled(
+            out = stack_winsorized_sigma_cpu_tiled(
                 imgs,
                 weights=w,
-                tile_shape=decision.tile_shape,
+                tile_shape=tile_shape,
                 max_mem_bytes=budget,
                 min_tile_out=CPU_MIN_TILE_OUT,
                 _retry_callback=_record_spatial_retry,
+                out_result=host_out_sci,
+                out_sum_w=host_out_wht,
                 **kw,
             )
+            if host_scratch is not None:
+                host_scratch.flush()
+            return out
         except CpuWinsorMemoryRefused as ref:
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_REFUSAL",
@@ -12663,6 +12977,10 @@ class SeestarQueuedStacker:
         if getattr(self, "batch_size", 1) == 1:
             getattr(self, "_indices_cache", {}).clear()
         gc.collect()
+        # Lot D: run-scoped low-RAM scratch (spilled inputs + disk-backed
+        # SCI/WHT) is consumed by the batch commit; release it now so no
+        # orphan scratch survives a success / no-commit / retry path.
+        self._cleanup_winsorized_scratch()
         logger.debug(
             f"DEBUG QM [_process_completed_batch]: Fin pour lot #{current_batch_num}."
         )
@@ -22480,6 +22798,10 @@ class SeestarQueuedStacker:
         _support_lifecycle_failopen(
             self, "memmap_cleanup_entered", drizzle_support_released=False
         )
+        # Lot D: run-scoped low-RAM winsorized scratch (spilled inputs +
+        # disk-backed SCI/WHT) is also released here, so a FAILED / CANCELLED /
+        # RESUMED run never leaves orphan scratch files under the output folder.
+        self._cleanup_winsorized_scratch()
         logger.debug("DEBUG QM [_close_memmaps]: Tentative de fermeture des memmaps...")
         closed_sum = False
         if (

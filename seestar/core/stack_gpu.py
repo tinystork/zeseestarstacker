@@ -1317,6 +1317,8 @@ def stack_winsorized_sigma_gpu_tiled(
     tile_shape=None,
     _tile_order="rowmajor",
     masks=None,
+    out_result=None,
+    out_sum_w=None,
 ):
     """Exact-N_batch SPATIAL GPU tiling of the Winsorized reduction.
 
@@ -1428,8 +1430,14 @@ def stack_winsorized_sigma_gpu_tiled(
     # ---- pass 2: exact replay of z_eff schedule iterations per tile and
     # exact-placement reconstruction + GLOBAL rejection accounting
     out_shape = (H, W) + ((int(frame[2]),) if color else ())
-    result = np.empty(out_shape, dtype=np.float32)
-    sum_w = np.empty(out_shape, dtype=np.float32)
+    if out_result is not None:
+        result = out_result
+    else:
+        result = np.empty(out_shape, dtype=np.float32)
+    if out_sum_w is not None:
+        sum_w = out_sum_w
+    else:
+        sum_w = np.empty(out_shape, dtype=np.float32)
     n_valid_total = 0
     n_surv_total = 0
     for t, (y0, y1, x0, x1) in enumerate(spatial):
