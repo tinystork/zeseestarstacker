@@ -1,17 +1,20 @@
-"""Lot D synthetic bounded probe (MX150, CuPy runtime).
+"""Lot D rework-1 synthetic bounded probe (MX150, CuPy runtime).
 
-Proves the conjoint host-RAM plan + low-RAM execution on the real MX150 with an
-INJECTED host RAM budget (no M74 data, no heavy run):
+Proves the CORRECTED conjoint host-RAM plan + low-RAM execution on the real
+MX150 with an INJECTED host RAM budget (no M74 data, no heavy run):
 
 1. host_plan_333mib: the pure host planner on the exact 333 MiB / N=3 RGB
-   2822x4144 scenario -> memmap_outputs (or spill_and_memmap), a small
-   admissible tile, N unchanged.
+   2822x4144 scenario WITH THE REAL base reserve
+   (``recommended_reserve_bytes(available, 0, 1)`` = 256 MiB — output
+   serialization NOT double-counted) -> memmap_outputs, small admissible tile,
+   N unchanged.
 2. host_plan_plenty: in_memory with the full-frame cap when RAM is ample.
 3. host_cap_combines_with_vram: the GPU VRAM planner honours the host tile cap
    (a tile must fit BOTH sides), yielding a tile <= the host cap.
 4. cpu_memmap_bitwise: the exact-N CPU tiled driver is bitwise-identical
    between in-RAM arrays and memmap inputs + memmap outputs (z_eff/pct too).
-5. spill_cleanup: spill + memmap outputs then cleanup leaves no orphan scratch.
+5. scratch_cleanup: memmap outputs then cleanup leaves no orphan scratch.
+6. output_float32: output cost is 4 bytes regardless of input dtype.
 
 Exits nonzero on any failure.
 """
@@ -29,9 +32,9 @@ import numpy as np  # noqa: E402
 from seestar.core.host_ram_planner import (  # noqa: E402
     HOST_IN_MEMORY,
     HOST_MEMMAP_OUTPUTS,
-    HOST_SPILL_AND_MEMMAP,
     plan_host_ram_execution,
 )
+from seestar.core.cpu_memory_planner import recommended_reserve_bytes  # noqa: E402
 from seestar.core.gpu_vram_planner import (  # noqa: E402
     TILED_GPU,
     plan_winsorized_gpu_execution,
@@ -58,12 +61,16 @@ def check(tag, fn):
 
 
 def probe_host_plan_333mib():
+    available = 333 * MiB
+    reserve = recommended_reserve_bytes(available, 0, 1)
+    assert reserve == 256 * MiB, reserve
     d = plan_host_ram_execution(
         n=_N, frame_shape=(_H, _W), channels=_C,
-        available_ram_bytes=333 * MiB, reserve_bytes=256 * MiB,
+        available_ram_bytes=available, reserve_bytes=reserve,
         resident_input_bytes=_RESIDENT, output_bytes=_OUTPUT,
+        freed_input_bytes=0,
     )
-    assert d.strategy in (HOST_MEMMAP_OUTPUTS, HOST_SPILL_AND_MEMMAP), d.strategy
+    assert d.strategy == HOST_MEMMAP_OUTPUTS, d.strategy
     assert d.memmaps_outputs
     cap = d.host_tile_outputs_cap
     assert cap is not None and cap >= 96 and cap < _S_FULL
@@ -81,11 +88,13 @@ def probe_host_plan_plenty():
 
 
 def probe_host_cap_combines_with_vram():
-    # Host cap forces a small tile; VRAM would otherwise allow the full frame.
+    available = 333 * MiB
+    reserve = recommended_reserve_bytes(available, 0, 1)
     d_host = plan_host_ram_execution(
         n=_N, frame_shape=(_H, _W), channels=_C,
-        available_ram_bytes=333 * MiB, reserve_bytes=256 * MiB,
+        available_ram_bytes=available, reserve_bytes=reserve,
         resident_input_bytes=_RESIDENT, output_bytes=_OUTPUT,
+        freed_input_bytes=0,
     )
     cap = d_host.host_tile_outputs_cap
     d_gpu = plan_winsorized_gpu_execution(
@@ -130,12 +139,11 @@ def probe_cpu_memmap_bitwise():
         store.cleanup()
 
 
-def probe_spill_cleanup():
+def probe_scratch_cleanup():
     d = tempfile.mkdtemp()
     store = ScratchStore(os.path.join(d, "run"))
-    arr = np.zeros((8, 8), np.float32)
-    store.spill_image(arr, "a")
     store.new_memmap("sci", (8, 8), np.float32)
+    store.new_memmap("wht", (8, 8), np.float32)
     owned = list(store._created)
     dir_ = store.dir
     store.cleanup()
@@ -144,13 +152,26 @@ def probe_spill_cleanup():
     assert not os.path.isdir(dir_)
 
 
+def probe_output_float32():
+    for isz in (2, 8):
+        d = plan_host_ram_execution(
+            n=_N, frame_shape=(_H, _W), channels=_C,
+            dtype_itemsize=isz,
+            available_ram_bytes=8 * 1024 ** 3, reserve_bytes=512 * MiB,
+            resident_input_bytes=_N * _S_FULL * _C * isz + _N * _S_FULL,
+            output_bytes=None,
+        )
+        assert d.output_bytes == _OUTPUT, (isz, d.output_bytes)
+
+
 if __name__ == "__main__":
-    print("device-independent host-RAM plan + low-RAM execution probe")
+    print("Lot D rework-1 host-RAM plan + low-RAM execution probe")
     check("host_plan_333mib", probe_host_plan_333mib)
     check("host_plan_plenty", probe_host_plan_plenty)
     check("host_cap_combines_with_vram", probe_host_cap_combines_with_vram)
     check("cpu_memmap_bitwise", probe_cpu_memmap_bitwise)
-    check("spill_cleanup", probe_spill_cleanup)
+    check("scratch_cleanup", probe_scratch_cleanup)
+    check("output_float32", probe_output_float32)
     if failures:
         print("\n%d FAILURE(S)" % len(failures))
         sys.exit(1)

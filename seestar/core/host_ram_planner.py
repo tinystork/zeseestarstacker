@@ -24,11 +24,14 @@ Design rules
   resident at decision time (part of the process baseline).  They are counted
   ONCE.  The incremental host working set is ``tile_cube + output + overhead``;
   the resident inputs are never subtracted twice from available RAM.
-* ``spill_inputs`` frees the resident inputs (they move to scratch disk and are
-  re-opened as memmap), so the effective budget for NEW allocations grows by
-  ``resident_input_bytes``.  ``memmap_outputs`` moves the SCI/WHT outputs to
-  disk, removing them from the RAM working set (the working set then only
-  needs the per-tile cube + overhead).  ``spill_and_memmap`` does both.
+* ``spill_inputs`` grows the budget for NEW allocations ONLY by
+  ``freed_input_bytes`` — the PROVEN-freed resident bytes from a real
+  ownership transfer (weakref/GC).  The planner NEVER assumes the full
+  ``resident_input_bytes`` are freed, because the batch may still hold
+  references to the original ndarrays.  ``memmap_outputs`` moves the SCI/WHT
+  outputs to disk, removing them from the RAM working set (the working set
+  then only needs the per-tile cube + overhead).  ``spill_and_memmap`` does
+  both.
 * Named reserve and overhead are explicit policy quantities, never an
   unexplained magic number.
 
@@ -184,6 +187,7 @@ def plan_host_ram_execution(
     reserve_bytes: int,
     resident_input_bytes: Optional[int] = None,
     output_bytes: Optional[int] = None,
+    freed_input_bytes: int = 0,
     overhead_bytes: int = HOST_TILE_OVERHEAD_BYTES,
     tile_working_factor: float = 1.0,
     tile_scratch_bytes: int = 0,
@@ -199,7 +203,15 @@ def plan_host_ram_execution(
     resident_input_bytes : frames+masks ALREADY resident (counted once).
         ``None`` -> ``n * H * W * C * itemsize + n * H * W`` (frames + masks).
     output_bytes : SCI+WHT full-frame float32 outputs.  ``None`` ->
-        ``2 * H * W * C * itemsize``.
+        ``2 * H * W * C * 4`` (ALWAYS float32, 4 bytes per element — the SCI
+        and WHT products are float32 regardless of the INPUT dtype; the input
+        ``dtype_itemsize`` never sizes the output).
+    freed_input_bytes : PROVEN-freed resident bytes made available to NEW
+        allocations by ``spill_inputs`` (a real ownership transfer).  The
+        planner NEVER assumes ``resident_input_bytes`` are freed: this value is
+        0 unless the caller can prove (weakref/GC) that the original ndarrays
+        became collectable before the reduction.  ``spill_inputs`` gains budget
+        ONLY by this amount.
     overhead_bytes : named per-tile overhead (reducer temporaries beyond the
         cube).  Conservative floor; the caller may pass a backend value.
     tile_working_factor : host working-set factor over the tile cube.  The GPU
@@ -241,21 +253,25 @@ def plan_host_ram_execution(
     output = (
         int(output_bytes)
         if output_bytes is not None
-        else 2 * s_full * C * isz
+        else 2 * s_full * C * 4
     )
+    freed = int(freed_input_bytes)
     overhead = int(overhead_bytes)
     factor = float(tile_working_factor)
     scratch = int(tile_scratch_bytes)
 
     # Effective budget for NEW allocations (the resident inputs are baseline,
     # already reflected in ``available``; they are never subtracted again).
-    # ``spill_inputs`` frees them, growing the budget by ``resident``.
+    # ``spill_inputs`` grows the budget ONLY by the PROVEN-freed bytes
+    # (``freed_input_bytes``) — never by the full ``resident``, because the
+    # batch may still hold references to the original ndarrays.
     budget_in_memory = available - reserve
-    budget_spilled = available - reserve + resident
+    budget_spilled = available - reserve + freed
 
     details = {
         "resident_input_bytes": resident,
         "output_bytes": output,
+        "freed_input_bytes": freed,
         "overhead_bytes": overhead,
         "tile_working_factor": factor,
         "tile_scratch_bytes": scratch,
@@ -293,8 +309,8 @@ def plan_host_ram_execution(
             return _mk(HOST_MEMMAP_OUTPUTS, None, cap_mo, 0, output,
                        budget_in_memory)
 
-        # 3) spill_inputs: inputs freed (budget grows by ``resident``),
-        # outputs still in RAM.
+        # 3) spill_inputs: inputs freed (budget grows ONLY by PROVEN-freed
+        # ``freed_input_bytes``), outputs still in RAM.
         if budget_spilled <= 0:
             cap_spill = None
         else:
@@ -304,7 +320,7 @@ def plan_host_ram_execution(
                 min_tile_out, s_full,
             )
         if cap_spill is not None:
-            return _mk(HOST_SPILL_INPUTS, None, cap_spill, resident, 0,
+            return _mk(HOST_SPILL_INPUTS, None, cap_spill, freed, 0,
                        budget_spilled)
 
         # 4) spill_and_memmap: both.
@@ -314,7 +330,7 @@ def plan_host_ram_execution(
             min_tile_out, s_full,
         ) if budget_spilled > 0 else None
         if cap_sm is not None:
-            return _mk(HOST_SPILL_AND_MEMMAP, None, cap_sm, resident, output,
+            return _mk(HOST_SPILL_AND_MEMMAP, None, cap_sm, freed, output,
                        budget_spilled)
 
         # 5) refuse: nothing admits the minimum tile.

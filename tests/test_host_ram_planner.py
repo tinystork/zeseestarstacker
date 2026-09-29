@@ -75,24 +75,61 @@ def test_in_memory_when_plenty_of_ram():
     assert d.spill_input_bytes == 0 and d.output_memmap_bytes == 0
 
 
-def test_333mib_memmapped_outputs_and_small_tile_admissible():
-    """The conjoint 333 MiB scenario: N=3 RGB 2822x4144, outputs memmapped, a
-    small-but-admissible tile, N unchanged."""
+def test_333mib_real_base_reserve_memmapped_outputs():
+    """F1: the EXACT 333 MiB scenario with the REAL named base reserve
+    (``recommended_reserve_bytes(available, 0, 1)`` — output serialization is
+    NOT double-counted because the host planner models SCI/WHT explicitly as
+    float32).  Strategy = memmap_outputs, small admissible tile, N unchanged."""
+    from seestar.core.cpu_memory_planner import recommended_reserve_bytes
+
+    available = 333 * MiB
+    reserve = recommended_reserve_bytes(available, 0, 1)
+    # Base reserve must NOT include the 2-frame output serialization.
+    assert reserve == 256 * MiB
     d = plan_host_ram_execution(
         n=_N, frame_shape=(_H, _W), channels=_C,
-        available_ram_bytes=333 * MiB, reserve_bytes=256 * MiB,
+        available_ram_bytes=available, reserve_bytes=reserve,
         resident_input_bytes=_RESIDENT, output_bytes=_OUTPUT,
+        freed_input_bytes=0,
     )
-    # outputs (2 full frames) cannot fit in RAM alongside a tile -> memmap.
-    assert d.strategy in (HOST_MEMMAP_OUTPUTS, HOST_SPILL_AND_MEMMAP)
+    # With the REAL base reserve, outputs cannot fit in RAM -> memmap_outputs
+    # (NOT spill_and_memmap: freed=0, spill gains nothing).
+    assert d.strategy == HOST_MEMMAP_OUTPUTS
     assert d.memmaps_outputs is True
     assert d.output_memmap_bytes == _OUTPUT
-    # A small tile is admissible (above the bitwise floor, below the frame).
     cap = d.host_tile_outputs_cap
-    assert cap is not None
-    assert cap >= 96
-    assert cap < _S_FULL
+    assert cap is not None and cap >= 96 and cap < _S_FULL
     assert d.n == _N  # N unchanged
+
+
+def test_333mib_full_reserve_would_double_count():
+    """F1/F5: ``recommended_reserve_bytes(available, frame, 1)`` embeds
+    ``2 x frame`` output serialization; using it AS the reserve AND separately
+    counting output would double-count.  The host planner therefore uses the
+    BASE reserve (frame_bytes=0)."""
+    from seestar.core.cpu_memory_planner import recommended_reserve_bytes
+
+    available = 333 * MiB
+    frame = _S_FULL * _C * 4
+    full = recommended_reserve_bytes(available, frame, 1)
+    base = recommended_reserve_bytes(available, 0, 1)
+    assert full == base + 2 * frame  # the output-serialization component
+    assert full > available  # exceeds available -> would force spill_and_memmap
+
+
+def test_output_cost_always_float32():
+    """F5: SCI/WHT are float32 regardless of INPUT dtype (uint16/float64 inputs
+    must not under/over-estimate the output cost)."""
+    for isz in (2, 8):
+        d = plan_host_ram_execution(
+            n=_N, frame_shape=(_H, _W), channels=_C,
+            dtype_itemsize=isz,
+            available_ram_bytes=8 * 1024 ** 3, reserve_bytes=512 * MiB,
+            resident_input_bytes=_N * _S_FULL * _C * isz + _N * _S_FULL,
+            output_bytes=None,  # default must be float32
+        )
+        # Output default = 2 * H * W * C * 4 (float32), independent of isz.
+        assert d.output_bytes == _OUTPUT
 
 
 def test_refuse_when_even_minimum_tile_cannot_fit():
@@ -120,18 +157,48 @@ def test_negative_available_is_budget_negative():
     assert d.reason == REASON_HOST_BUDGET_NEGATIVE
 
 
-def test_spill_inputs_when_resident_dominates():
-    # budget_in_memory == 0 (available == reserve): in_memory and
-    # memmap_outputs both fail, but the resident inputs are large enough that
-    # freeing them (spill) admits the outputs + a tile -> spill_inputs.
+def test_spill_requires_proven_freed_bytes():
+    # F2 honest model: with freed_input_bytes=0 (the wiring's default — it
+    # cannot prove the batch released its ndarray references), spill provides
+    # NO budget benefit, so it is NEVER selected even when resident dominates.
     d = plan_host_ram_execution(
         n=3, frame_shape=(2822, 4144), channels=3,
         available_ram_bytes=256 * MiB, reserve_bytes=256 * MiB,
         resident_input_bytes=_RESIDENT, output_bytes=_OUTPUT,
+        freed_input_bytes=0,
+    )
+    assert d.strategy not in (HOST_SPILL_INPUTS, HOST_SPILL_AND_MEMMAP)
+    assert d.spills_inputs is False
+    assert d.spill_input_bytes == 0
+
+
+def test_spill_selected_only_when_freed_proven():
+    # When the caller PROVES the resident inputs were freed (freed_input_bytes
+    # > 0), spill_inputs becomes viable: budget_spilled grows by exactly the
+    # proven amount, never by the full unproven resident.
+    freed = _RESIDENT  # caller proved the full resident is collectable
+    d = plan_host_ram_execution(
+        n=3, frame_shape=(2822, 4144), channels=3,
+        available_ram_bytes=256 * MiB, reserve_bytes=256 * MiB,
+        resident_input_bytes=_RESIDENT, output_bytes=_OUTPUT,
+        freed_input_bytes=freed,
     )
     assert d.strategy in (HOST_SPILL_INPUTS, HOST_SPILL_AND_MEMMAP)
     assert d.spills_inputs is True
-    assert d.spill_input_bytes == _RESIDENT
+    assert d.spill_input_bytes == freed
+
+
+def test_spill_budget_uses_freed_not_resident():
+    # The spilled budget must reflect the PROVEN freed bytes, not the resident
+    # total: budget_spilled == available - reserve + freed_input_bytes.
+    d = plan_host_ram_execution(
+        n=3, frame_shape=(2822, 4144), channels=3,
+        available_ram_bytes=256 * MiB, reserve_bytes=256 * MiB,
+        resident_input_bytes=_RESIDENT, output_bytes=_OUTPUT,
+        freed_input_bytes=100 * MiB,
+    )
+    assert d.details["budget_spilled"] == 100 * MiB
+    assert d.details["budget_in_memory"] == 0
 
 
 def test_invalid_inputs_raise():
