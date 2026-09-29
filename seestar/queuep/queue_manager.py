@@ -3401,6 +3401,14 @@ class SeestarQueuedStacker:
                 effective_vram_budget_bytes=getattr(
                     decision, "effective_budget_bytes", None
                 ),
+                path_class=getattr(decision, "path_class", None),
+                demand_full_bytes=getattr(
+                    decision, "demand_full_bytes", None
+                ),
+                demand_tile_bytes=getattr(
+                    decision, "demand_tile_bytes", None
+                ),
+                reserve_bytes=getattr(decision, "reserve_bytes", None),
             )
             return out
 
@@ -3495,6 +3503,10 @@ class SeestarQueuedStacker:
                 n_tiles=None,
                 estimated_peak_vram_bytes=decision.demand_full_bytes,
                 effective_vram_budget_bytes=decision.effective_budget_bytes,
+                path_class=decision.path_class,
+                demand_full_bytes=decision.demand_full_bytes,
+                demand_tile_bytes=decision.demand_tile_bytes,
+                reserve_bytes=decision.reserve_bytes,
             )
             return out
         if decision.kind == TILED_GPU:
@@ -3539,6 +3551,10 @@ class SeestarQueuedStacker:
                 n_tiles=decision.n_tiles,
                 estimated_peak_vram_bytes=decision.demand_tile_bytes,
                 effective_vram_budget_bytes=decision.effective_budget_bytes,
+                path_class=decision.path_class,
+                demand_full_bytes=decision.demand_full_bytes,
+                demand_tile_bytes=decision.demand_tile_bytes,
+                reserve_bytes=decision.reserve_bytes,
             )
             return out
         # CPU_FALLBACK: durable once-per-reason diagnostics.
@@ -3717,7 +3733,7 @@ class SeestarQueuedStacker:
             tokens["gpu_effective_backend"] = str(
                 getattr(self, "effective_backend", "cpu") or "cpu"
             )
-            tokens["cpu_fallback_viable"] = "true"
+            tokens["cpu_fallback_viable"] = "re_evaluated_at_batch"
             tokens["pool_workers_capability"] = pool_capability
             tokens["pool_overhead_excluded"] = "true"
             self._emit_provenance_block("MEMORY_POLICY", tokens)
@@ -3807,7 +3823,11 @@ class SeestarQueuedStacker:
                 cpu_winsor_refusal_tokens(
                     scientific_n=decision.n,
                     effective_budget_bytes=decision.effective_budget_bytes,
-                    minimum_estimated_bytes=decision.estimated_peak_bytes,
+                    estimated_full_peak_bytes=decision.estimated_peak_bytes,
+                    estimated_tile_peak_bytes=decision.per_tile_peak_bytes,
+                    output_sci_wht_bytes=decision.details.get(
+                        "output_sci_wht_bytes"
+                    ),
                     reason=decision.reason or REASON_NO_VALID_TILE,
                 ),
             )
@@ -3816,7 +3836,8 @@ class SeestarQueuedStacker:
                 details={
                     "n": decision.n,
                     "effective_budget_bytes": decision.effective_budget_bytes,
-                    "minimum_estimated_bytes": decision.estimated_peak_bytes,
+                    "estimated_full_peak_bytes": decision.estimated_peak_bytes,
+                    "estimated_tile_peak_bytes": decision.per_tile_peak_bytes,
                 },
             )
         budget = decision.effective_budget_bytes
@@ -3847,7 +3868,11 @@ class SeestarQueuedStacker:
                 cpu_winsor_refusal_tokens(
                     scientific_n=decision.n,
                     effective_budget_bytes=budget,
-                    minimum_estimated_bytes=decision.estimated_peak_bytes,
+                    estimated_full_peak_bytes=decision.estimated_peak_bytes,
+                    estimated_tile_peak_bytes=decision.per_tile_peak_bytes,
+                    output_sci_wht_bytes=decision.details.get(
+                        "output_sci_wht_bytes"
+                    ),
                     reason=ref.reason or decision.reason or REASON_NO_VALID_TILE,
                 ),
             )
@@ -23037,6 +23062,10 @@ class SeestarQueuedStacker:
         n_tiles=None,
         estimated_peak_vram_bytes=None,
         effective_vram_budget_bytes=None,
+        path_class=None,
+        demand_full_bytes=None,
+        demand_tile_bytes=None,
+        reserve_bytes=None,
     ) -> None:
         """Append ONE per-reduction execution-truth record (dispatch seam).
 
@@ -23072,6 +23101,7 @@ class SeestarQueuedStacker:
                     "fallback": executed == "cpu",
                     "fallback_reason": fallback_reason or "none",
                     "planner_mode": planner_mode or "none",
+                    "path_class": path_class or "none",
                     "tile_shape": tuple(tile_shape) if tile_shape else None,
                     "n_tiles": int(n_tiles) if n_tiles else None,
                     "estimated_peak_vram_bytes": (
@@ -23082,6 +23112,21 @@ class SeestarQueuedStacker:
                     "effective_vram_budget_bytes": (
                         int(effective_vram_budget_bytes)
                         if effective_vram_budget_bytes
+                        else None
+                    ),
+                    "demand_full_bytes": (
+                        int(demand_full_bytes)
+                        if demand_full_bytes
+                        else None
+                    ),
+                    "demand_tile_bytes": (
+                        int(demand_tile_bytes)
+                        if demand_tile_bytes
+                        else None
+                    ),
+                    "reserve_bytes": (
+                        int(reserve_bytes)
+                        if reserve_bytes
                         else None
                     ),
                 }

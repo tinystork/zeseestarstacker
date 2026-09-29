@@ -372,7 +372,7 @@ def test_provenance_builders_are_json_safe_no_arrays():
         cmp.cpu_winsor_refusal_tokens(
             scientific_n=8,
             effective_budget_bytes=100,
-            minimum_estimated_bytes=999,
+            estimated_full_peak_bytes=999,
             reason="cpu_min_tile_exceeds_budget",
         ),
     ]

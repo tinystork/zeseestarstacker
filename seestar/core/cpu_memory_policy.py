@@ -293,13 +293,28 @@ def cpu_winsor_refusal_tokens(
     *,
     scientific_n: int,
     effective_budget_bytes: int,
-    minimum_estimated_bytes: int,
+    estimated_full_peak_bytes: int,
+    estimated_tile_peak_bytes: int = 0,
+    output_sci_wht_bytes: Optional[int] = None,
     reason: str,
 ) -> dict:
-    """CPU_WINSOR_MEMORY_REFUSAL record tokens (truthful refusal)."""
-    return {
+    """CPU_WINSOR_MEMORY_REFUSAL record tokens (truthful refusal).
+
+    Distinguishes the FULL-image modeled peak (``estimated_full_peak_bytes``)
+    from the minimum spatial-tile need (``estimated_tile_peak_bytes``, 0 for a
+    refusal) and the named output SCI/WHT serialization cost
+    (``output_sci_wht_bytes``).  The full-image estimate is NOT presented as a
+    "minimum": a tiled execution could in principle need far less than the
+    untiled full-image peak.
+    """
+    tokens = {
         "scientific_n": int(scientific_n),
         "effective_budget_bytes": int(effective_budget_bytes),
-        "minimum_estimated_bytes": int(minimum_estimated_bytes),
+        "estimated_full_peak_bytes": int(estimated_full_peak_bytes),
         "reason": reason,
     }
+    if int(estimated_tile_peak_bytes):
+        tokens["estimated_tile_peak_bytes"] = int(estimated_tile_peak_bytes)
+    if output_sci_wht_bytes is not None:
+        tokens["output_sci_wht_bytes"] = int(output_sci_wht_bytes)
+    return tokens

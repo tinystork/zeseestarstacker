@@ -139,6 +139,34 @@ def test_record_tiled_carries_tile_shape():
     assert ev["n_tiles"] == 2
 
 
+def test_record_carries_modeled_path_and_demand():
+    """Lot A: the execution-truth record carries the actually-modeled path
+    class and the distinct full/tile demand + reserve + budget for pre-
+    allocation decision observability (never conflated with executed)."""
+    s = _mk_stacker()
+    _record(s, executed="gpu", gpu_memory_mode="tiled", planner_mode="tiled",
+            tile_shape=(1745,), n_tiles=2, path_class="small_n_guard",
+            demand_full_bytes=3011206970, demand_tile_bytes=1861997200,
+            reserve_bytes=134217728, estimated_peak_vram_bytes=1861997200,
+            effective_vram_budget_bytes=1952448512)
+    (ev,) = s._gpu_execution_events
+    assert ev["path_class"] == "small_n_guard"
+    assert ev["demand_full_bytes"] == 3011206970
+    assert ev["demand_tile_bytes"] == 1861997200
+    assert ev["reserve_bytes"] == 134217728
+    assert ev["executed"] == "gpu"
+    assert ev["planner_mode"] == "tiled"
+
+
+def test_record_defaults_path_class_to_none():
+    """Non-planner records (classic reducers) carry path_class=none without
+    ever claiming a winsorized modeled path."""
+    s = _mk_stacker()
+    _record(s)
+    (ev,) = s._gpu_execution_events
+    assert ev["path_class"] == "none"
+
+
 # ---------------------------------------------------------------------------
 # aggregate GPU_EXECUTION_SUMMARY
 # ---------------------------------------------------------------------------

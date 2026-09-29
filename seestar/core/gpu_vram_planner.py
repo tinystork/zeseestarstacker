@@ -36,9 +36,14 @@ Design rules (mission Track P4):
     direction; validated on-device: the phase E N=32 1080p untiled OOM and
     the phase F boundary probe both sit just above the 9.5 x envelope,
     while every planner-selected geometry executed).
-  * fast path (phase C zero-rank regime, winsor identity: no per-iteration
-    sort temporaries): factor 3.0 x + 64 MiB (conservative; measured
-    phase C/E fast-path runs fit far below the slow path).
+  * zero-rank regime (winsor rank == 0 on every pixel) is NO LONGER
+    sort-free since the small-N robustness change (commit ac95ee6):
+    ``apply_rewinsor`` always sorts the survivor stack via
+    ``_winsorize_bounds_cp``, and for N >= 3 the one-pass gross-outlier
+    guard ``_gross_outlier_keep_cp`` sorts the full stack first.  The two
+    full-stack ``cp.sort`` contexts are SEQUENTIAL, so the peak is their
+    maximum (the ``apply_rewinsor`` bounds sort), modeled as the sum of the
+    kernel's NAMED per-tile allocations (see ``_zero_rank_peak_factor``).
 * Budget: ``driver_free + pool_free``; a decision (full or per-tile) is
   admissible iff its modeled demand + the EXPLICIT RESERVE fits the budget.
   Query failures never reach this module: the wiring converts them into
@@ -75,6 +80,27 @@ REASON_POOL_QUERY_FAILURE = "pool_query_failure"
 REASON_MEMINFO_FAILURE = "meminfo_failure"
 
 # ---------------------------------------------------------------------------
+# Modeled path classes (the ACTUAL kernel path the decision models).
+# ---------------------------------------------------------------------------
+# These are the three regimes the planner distinguishes from its inputs
+# (N_batch + winsor_limits), mirroring the kernel dispatch in stack_gpu.py:
+#
+# * ``winsor_slow``          -- winsor rank > 0 at the population bound: the
+#   iterative winsor loop runs (and, on a mixed batch, the gross-outlier guard
+#   runs for zero-rank columns too); the measured 9.5x + 200 MiB slow envelope
+#   covers the loop AND the guard (the guard's single sort is <= the loop's
+#   measured peak, and the two are sequential).
+# * ``small_n_guard``        -- zero-rank regime, N >= 3: the gross-outlier
+#   guard ``_gross_outlier_keep_cp`` sorts the full stack, and apply_rewinsor
+#   sorts again.  Sort-bearing (the OOM case).
+# * ``no_guard``             -- zero-rank regime, N < 3: the guard returns
+#   early (no column has >= 3 valid samples), but apply_rewinsor still sorts
+#   the survivor stack via ``_winsorize_bounds_cp``.  Sort-bearing.
+PATH_WINSOR_SLOW = "winsor_slow"
+PATH_SMALL_N_GUARD = "small_n_guard"
+PATH_NO_GUARD = "no_guard"
+
+# ---------------------------------------------------------------------------
 # Memory model constants (measured phase D/E, see module docstring)
 # ---------------------------------------------------------------------------
 
@@ -96,12 +122,35 @@ WINSOR_SLOW_SORT_FACTOR = 9.5
 # ~8.9 x stack fitted ~150--200 MiB at 1080p; 200 MiB is conservative).
 WINSOR_SLOW_SCRATCH_BYTES = 200 * 1024 * 1024
 
-# Phase C zero-rank fast path (winsorization is the identity: the
-# per-iteration sort block and the survivor-bound sort are skipped):
-# conservative working factor over the N x tile stack.
-WINSOR_FAST_SORT_FACTOR = 3.0
-
-WINSOR_FAST_SCRATCH_BYTES = 64 * 1024 * 1024
+# Zero-rank regime (winsor rank == 0 on every pixel) is NO LONGER sort-free
+# since the small-N robustness change (commit ac95ee6): apply_rewinsor always
+# sorts the survivor stack via _winsorize_bounds_cp, and for N >= 3 the
+# one-pass gross-outlier guard _gross_outlier_keep_cp sorts the full stack
+# first.  The two full-stack cp.sort contexts run SEQUENTIALLY (the guard
+# releases its sort_key/sorted_vals before apply_rewinsor), so the peak is the
+# larger of the two -- the apply_rewinsor bounds sort -- and the modeled factor
+# is the sum of that context's NAMED per-tile device allocations, expressed in
+# units of the N x tile float32 stack S = n * tile_pixels * C * itemsize:
+#
+#   5 full-stack float32 arrays (resident arr + masked copy + sort_key +
+#     sorted_vals + radix-sort workspace)                      5.00
+#   bool N-stack masks (valid + combined mask + guard_keep[N>=3]
+#     + bounds ~isnan)                                         (3 or 4)/itemsize
+#   int64 per-column counts (n_valid_col + n_valid)            16/(n*itemsize)
+#   bool per-column flags (zero_rank_cols + rank_cols)          2/(n*itemsize)
+#   ------------------------------------------------------------------------
+#   factor(N, isz) = 5 + (3|4)/isz + 18/(N*isz)
+#   float32 (isz=4):  N < 3  -> 5.75 + 4.5/N   (guard does not sort)
+#                     N >= 3 -> 6.00 + 4.5/N   (guard sorts; extra guard_keep)
+#
+# N=3 -> 7.5, comfortably above the observed N=3/RGB/2822x4144 guard-sort OOM
+# (~5.8 x the stack).  Every term maps to a named kernel allocation -- no
+# fitted constant, no GPU-name table.
+def _zero_rank_peak_factor(n, itemsize):
+    """Conservative peak factor (x the N-stack) of the sort-bearing zero-rank
+    path.  Pure function of ``n`` and ``itemsize`` (see the derivation above)."""
+    bool_masks = 4 if int(n) >= 3 else 3
+    return 5.0 + bool_masks / float(itemsize) + 18.0 / (int(n) * float(itemsize))
 
 # Explicit reserve applied by the wiring on top of the modeled demand
 # (other-device users / context overhead / model uncertainty).
@@ -126,6 +175,7 @@ class WinsorExecDecision:
     frame_shape: Tuple[int, int] = (0, 0)
     channels: int = 1
     fast_path: bool = False
+    path_class: str = PATH_WINSOR_SLOW
     demand_full_bytes: int = 0
     demand_tile_bytes: int = 0
     reserve_bytes: int = 0
@@ -140,7 +190,7 @@ class WinsorExecDecision:
 
 
 def _cpu_fallback(reason, n_batch, frame_shape, channels, fast_path,
-                  demand_full, reserve, effective_budget):
+                  path_class, demand_full, reserve, effective_budget):
     return WinsorExecDecision(
         kind=CPU_FALLBACK,
         reason=reason,
@@ -148,6 +198,7 @@ def _cpu_fallback(reason, n_batch, frame_shape, channels, fast_path,
         frame_shape=tuple(frame_shape),
         channels=channels,
         fast_path=fast_path,
+        path_class=path_class,
         demand_full_bytes=demand_full,
         demand_tile_bytes=0,
         reserve_bytes=reserve,
@@ -281,12 +332,18 @@ def plan_winsorized_gpu_execution(
     budget = int(driver_free_bytes) + int(pool_free_bytes)
 
     fast = bool(_winsor_zero_rank_regime(winsor_limits, n))
-    if fast:
-        factor = WINSOR_FAST_SORT_FACTOR
-        scratch = WINSOR_FAST_SCRATCH_BYTES
-    else:
+    if not fast:
+        path_class = PATH_WINSOR_SLOW
         factor = WINSOR_SLOW_SORT_FACTOR
         scratch = WINSOR_SLOW_SCRATCH_BYTES
+    elif n >= 3:
+        path_class = PATH_SMALL_N_GUARD
+        factor = _zero_rank_peak_factor(n, isz)
+        scratch = 0
+    else:
+        path_class = PATH_NO_GUARD
+        factor = _zero_rank_peak_factor(n, isz)
+        scratch = 0
 
     base_full = n * s_full * C * isz
     demand_full = int(base_full * factor) + scratch
@@ -299,13 +356,15 @@ def plan_winsorized_gpu_execution(
             frame_shape=(H, W),
             channels=C,
             fast_path=fast,
+            path_class=path_class,
             demand_full_bytes=demand_full,
             demand_tile_bytes=demand_full,
             reserve_bytes=reserve,
             effective_budget_bytes=effective_budget,
             tile_outputs=s_full,
             n_tiles=1,
-            details={"factor": factor, "scratch": scratch},
+            details={"factor": factor, "scratch": scratch,
+                     "path_class": path_class},
         )
 
     # 1) Whole-frame (untiled) decision.
@@ -316,14 +375,14 @@ def plan_winsorized_gpu_execution(
     max_tile_base = budget - reserve - scratch  # bytes for N x tile stack
     if max_tile_base <= 0:
         return _cpu_fallback(
-            REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast,
+            REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast, path_class,
             demand_full, reserve, effective_budget,
         )
     # Largest per-tile spatial output count whose modeled demand fits.
     s_cap = int((max_tile_base / factor) // (n * C * isz))
     if s_cap < min_tile_out:
         return _cpu_fallback(
-            REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast,
+            REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast, path_class,
             demand_full, reserve, effective_budget,
         )
     s_cap = min(s_cap, s_full)
@@ -338,7 +397,7 @@ def plan_winsorized_gpu_execution(
             geom = _choose_rect_geometry(H, W, s_cap, min_tile_out)
             if geom is None:
                 return _cpu_fallback(
-                    REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast,
+                    REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast, path_class,
                     demand_full, reserve, effective_budget,
                 )
             tile_shape = tuple(geom)
@@ -347,7 +406,7 @@ def plan_winsorized_gpu_execution(
         tile_h = _choose_narrow_band(H, W, s_cap, min_tile_out)
         if tile_h is None:
             return _cpu_fallback(
-                REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast,
+                REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast, path_class,
                 demand_full, reserve, effective_budget,
             )
         tile_shape = (tile_h,)
@@ -365,6 +424,7 @@ def plan_winsorized_gpu_execution(
         frame_shape=(H, W),
         channels=C,
         fast_path=fast,
+        path_class=path_class,
         demand_full_bytes=demand_full,
         demand_tile_bytes=demand_tile,
         reserve_bytes=reserve,
@@ -376,5 +436,6 @@ def plan_winsorized_gpu_execution(
             "scratch": scratch,
             "s_cap": s_cap,
             "per_tile_base_bytes": per_tile_base,
+            "path_class": path_class,
         },
     )
