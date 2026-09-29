@@ -280,6 +280,8 @@ def plan_winsorized_gpu_execution(
     pool_free_bytes: int = 0,
     reserve_bytes: int = WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
     min_tile_out: int = WINSOR_MIN_TILE_OUT,
+    force_tiled: bool = False,
+    max_tile_outputs: Optional[int] = None,
 ) -> WinsorExecDecision:
     """Plan the GPU execution strategy for one frozen N_batch reduction.
 
@@ -307,6 +309,17 @@ def plan_winsorized_gpu_execution(
         Explicit reserve folded into the modeled demand.
     min_tile_out : int
         Bitwise-regime floor of spatial outputs per tile (default 96).
+    force_tiled : bool
+        When True, skip the untiled FULL_GPU decision entirely and search only
+        for a spatial tile (used by the Lot C OOM-retry seam after a FULL OOM:
+        the whole-frame strategy is proven to fail, so only a spatial geometry
+        may be attempted).  Never changes the science: the frozen N is
+        untouched, and the returned tile still honours ``min_tile_out``.
+    max_tile_outputs : Optional[int]
+        Exclusive upper bound on the per-tile spatial output count of a TILED
+        geometry (strictly fewer than this value).  Used by the Lot C seam to
+        guarantee a strictly-smaller tile after a TILED OOM, so a geometry that
+        already failed is never replayed as-is.  ``None`` = uncapped.
 
     Returns a WinsorExecDecision.  Raises ValueError only for caller bugs
     (empty batch / non-positive frame); the wiring converts any exception
@@ -322,6 +335,8 @@ def plan_winsorized_gpu_execution(
         raise ValueError("min_tile_out must be positive")
     if int(driver_free_bytes) < 0 or int(pool_free_bytes) < 0:
         raise ValueError("memory-state bytes must be non-negative")
+    if max_tile_outputs is not None and int(max_tile_outputs) <= 0:
+        raise ValueError("max_tile_outputs must be positive")
 
     n = int(n_batch)
     H, W = int(frame_shape[0]), int(frame_shape[1])
@@ -367,8 +382,9 @@ def plan_winsorized_gpu_execution(
                      "path_class": path_class},
         )
 
-    # 1) Whole-frame (untiled) decision.
-    if demand_full + reserve <= budget:
+    # 1) Whole-frame (untiled) decision.  Skipped when a spatial strategy is
+    # forced (``force_tiled``: a FULL OOM already proved untiled cannot fit).
+    if not force_tiled and demand_full + reserve <= budget:
         return _full()
 
     # 2) Spatial tiling search: no scientifically valid tile -> CPU_FALLBACK.
@@ -380,6 +396,10 @@ def plan_winsorized_gpu_execution(
         )
     # Largest per-tile spatial output count whose modeled demand fits.
     s_cap = int((max_tile_base / factor) // (n * C * isz))
+    if max_tile_outputs is not None:
+        # Strictly-smaller retry bound (exclusive): the next geometry must
+        # never re-attempt a tile that already OOM'd.
+        s_cap = min(s_cap, int(max_tile_outputs) - 1)
     if s_cap < min_tile_out:
         return _cpu_fallback(
             REASON_VRAM_NO_VALID_TILE, n, (H, W), C, fast, path_class,

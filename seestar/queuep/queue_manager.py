@@ -472,6 +472,10 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     "CPU_WINSOR_MEMORY_DECISION ",
     "CPU_WINSOR_MEMORY_RETRY ",
     "CPU_WINSOR_MEMORY_REFUSAL ",
+    # Lot C (Track P7): per-attempt bounded GPU OOM retry provenance (one
+    # durable block per GPU attempt -- never per tile -- so the shipped run
+    # log alone proves the retry sequence and the final CPU decision).
+    "GPU_WINSOR_OOM_RETRY ",
 )
 
 
@@ -568,6 +572,24 @@ _GPU_FOOTPRINT_FACTOR_WINSORIZED = 6.0
 # 22024 ms vs warm 22093 ms on the N=32 1080p tiled witness).
 WINSOR_POOL_RELEASE_MIN_BYTES = 512 * 1024 * 1024  # 512 MiB
 
+# Lot C (Track P7): bounded GPU OOM recovery before CPU fallback.
+#
+# A RECOGNISED recoverable GPU out-of-memory (CuPy pool OOM or the CUDA
+# ``cudaErrorMemoryAllocation`` runtime error) triggers a bounded retry:
+#   FULL OOM  -> a spatial (TILED) GPU strategy, then strictly-smaller tiles;
+#   TILED OOM -> a strictly-smaller tile (never the same geometry twice).
+# Every retry preserves the frozen scientific N, honours WINSOR_MIN_TILE_OUT,
+# and is capped by this explicit maximum number of GPU attempts.  Only when
+# the cap is exhausted (or no smaller valid geometry remains) does the seam
+# fall back to the CPU memory-policy reducer, which re-reads the RAM
+# available AT THAT MOMENT.
+WINSOR_GPU_OOM_MAX_ATTEMPTS = 3
+
+# Result vocabulary for the per-attempt OOM-retry provenance.
+WINSOR_OOM_RESULT_OOM = "oom"
+WINSOR_OOM_RESULT_KERNEL_FAILURE = "kernel_failure"
+WINSOR_OOM_RESULT_SUCCESS = "success"
+
 
 def release_cupy_pool_retained_blocks(pool, min_release_bytes=WINSOR_POOL_RELEASE_MIN_BYTES):
     """Release the retained FREE blocks of a CuPy memory pool, once, at a
@@ -594,6 +616,73 @@ def release_cupy_pool_retained_blocks(pool, min_release_bytes=WINSOR_POOL_RELEAS
         return True, free_before
     except Exception:
         return False, 0
+
+
+def _winsorized_gpu_oom_kind(exc, cp):
+    """Classify a winsorized GPU reduction exception as OOM or not (Lot C).
+
+    Only RECOGNISED recoverable GPU out-of-memory errors return
+    ``"oom"``:
+
+    * the CuPy pool OOM ``cupy.cuda.memory.OutOfMemoryError`` (a
+      ``MemoryError`` subclass raised when the default pool cannot satisfy
+      an allocation), or
+    * the CUDA runtime ``CUDARuntimeError`` with status
+      ``cudaErrorMemoryAllocation`` (== 2).
+
+    Everything else -- a host-side ``MemoryError``, any other
+    ``CUDARuntimeError`` status, import/query/synchronize failures, or any
+    non-memory kernel bug -- returns ``"kernel"`` (never "oom"): those keep
+    the historical single-fallback behaviour and are never disguised as a
+    retryable OOM.
+
+    ``cp`` is the already-imported CuPy module (no fresh import here).
+    """
+    try:
+        if isinstance(exc, cp.cuda.memory.OutOfMemoryError):
+            return "oom"
+        runtime_err = getattr(cp.cuda, "runtime", None)
+        if runtime_err is not None and isinstance(
+            exc, runtime_err.CUDARuntimeError
+        ):
+            if int(getattr(exc, "status", -1)) == 2:  # cudaErrorMemoryAllocation
+                return "oom"
+    except Exception:
+        pass
+    return "kernel"
+
+
+def _winsorized_oom_cleanup(cp):
+    """Bounded recovery after a recoverable GPU OOM, WITHOUT retaining the
+    failed attempt's exception/traceback/large locals.
+
+    Returns ``(synced, released_bytes)`` and NEVER raises.  Semantics:
+
+    * ``synchronize``: drain the default stream IF the CUDA context is still
+      usable (best-effort, swallowed on failure) so the failed kernel's
+      transient allocations settle into the pool's free list;
+    * ``free_all_blocks``: return ONLY the pool's REUSABLE FREE blocks to the
+      driver.  Live device arrays (anything still referenced by the caller,
+      e.g. the resident aligned stack the seam holds) are NOT touched -- this
+      is explicitly not a promise that ``free_all_blocks`` frees live arrays.
+
+    The caller must ensure the exception object and its traceback went out of
+    scope before invoking this (see the dispatch loop): that is what releases
+    the failed attempt's own device buffers back into the free list.
+    """
+    synced = False
+    released = 0
+    try:
+        cp.cuda.Stream.null.synchronize()
+        synced = True
+    except Exception:
+        synced = False
+    try:
+        pool = cp.get_default_memory_pool()
+        _released, released = release_cupy_pool_retained_blocks(pool, 0)
+    except Exception:
+        released = 0
+    return synced, released
 
 
 # ----------------------------------------------------------------------
@@ -636,6 +725,7 @@ GPU_EXEC_REASON_CUPY_IMPORT = "cupy_import_failure"
 GPU_EXEC_REASON_RUNTIME_MEMORY = "runtime_memory_failure"    # memGetInfo / pool-query failure
 GPU_EXEC_REASON_GPU_KERNEL = "gpu_kernel_failure"            # CuPy kernel raised
 GPU_EXEC_REASON_PLANNER = "planner_failure"
+GPU_EXEC_REASON_GPU_OOM = "gpu_oom"                  # recognised GPU OOM, bounded retry exhausted
 
 # Ordered stable fallback-reason catalog (req. 4) -- every reason a
 # per-reduction record can carry when ``fallback`` is true.
@@ -647,6 +737,7 @@ GPU_EXEC_FALLBACK_REASONS = (
     GPU_EXEC_REASON_RUNTIME_MEMORY,
     GPU_EXEC_REASON_GPU_KERNEL,
     GPU_EXEC_REASON_PLANNER,
+    GPU_EXEC_REASON_GPU_OOM,
 )
 
 # Legacy log-level reason codes -> canonical catalog token (mapping used by
@@ -666,6 +757,8 @@ _GPU_EXEC_REASON_MAP = {
     "pool_query": GPU_EXEC_REASON_RUNTIME_MEMORY,
     "pool_query_failure": GPU_EXEC_REASON_RUNTIME_MEMORY,
     "gpu_kernel_failure": GPU_EXEC_REASON_GPU_KERNEL,
+    "gpu_oom": GPU_EXEC_REASON_GPU_OOM,
+    GPU_EXEC_REASON_GPU_OOM: GPU_EXEC_REASON_GPU_OOM,
 }
 
 
@@ -3495,93 +3588,241 @@ class SeestarQueuedStacker:
                 exc,
             )
             return _record_cpu(GPU_EXEC_REASON_PLANNER, planner_mode="fallback")
-        if decision.kind == FULL_GPU:
-            try:
-                out = stack_winsorized_sigma_gpu(
-                    _masked_images(), weights, **kwargs
+        if decision.kind == FULL_GPU or decision.kind == TILED_GPU:
+            # ---- Lot C (Track P7): bounded GPU OOM recovery ----------------
+            # A recognised recoverable GPU OOM (CuPy pool OOM or CUDA
+            # cudaErrorMemoryAllocation) is recovered, then retried with a
+            # strictly-smaller geometry (FULL -> TILED -> smaller tiles),
+            # capped at WINSOR_GPU_OOM_MAX_ATTEMPTS and never replaying a
+            # geometry that already failed.  A non-OOM kernel exception keeps
+            # the historical single CPU fallback.  N is never changed and
+            # WINSOR_MIN_TILE_OUT is always honoured.  This block ALWAYS
+            # returns (success / fallback), so the initial CPU_FALLBACK branch
+            # below is reachable only for the initial planner decision.
+
+            def _replan(free_bytes, pool_free_bytes, force_tiled, max_tile_out):
+                return plan_winsorized_gpu_execution(
+                    n_batch=n_batch,
+                    frame_shape=frame[:2],
+                    channels=3 if len(frame) >= 3 else 1,
+                    dtype_itemsize=int(np.dtype(images[0].dtype).itemsize),
+                    winsor_limits=kwargs.get("winsor_limits", (0.05, 0.05)),
+                    driver_free_bytes=int(free_bytes),
+                    pool_free_bytes=int(pool_free_bytes),
+                    reserve_bytes=int(reserve_bytes),
+                    force_tiled=force_tiled,
+                    max_tile_outputs=max_tile_out,
                 )
-            except Exception:
-                self.logger.warning(
-                    "GPU winsorized reduction failed; falling back to CPU",
-                    exc_info=True,
+
+            def _emit_attempt(rec):
+                self._emit_provenance_block("GPU_WINSOR_OOM_RETRY", rec)
+
+            mode = decision.kind
+            tile = decision.tile_shape
+            force_tiled = False
+            max_tile_out = None
+            for attempt_idx in range(1, WINSOR_GPU_OOM_MAX_ATTEMPTS + 1):
+                if attempt_idx > 1:
+                    # Re-plan from LIVE VRAM after the cleanup, forcing a
+                    # spatial strategy and (for a TILED OOM) a strictly
+                    # smaller tile than the one that just failed.
+                    try:
+                        free, _total = cp.cuda.runtime.memGetInfo()
+                        pool_free = cp.get_default_memory_pool().free_bytes()
+                    except Exception:
+                        # Live-VRAM query failed: stop retrying and fall back.
+                        _emit_attempt({
+                            "attempt": attempt_idx,
+                            "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                            "mode": "tiled" if mode == TILED_GPU else "full",
+                            "n_batch": n_batch,
+                            "result": "vram_query_failure",
+                            "next": "cpu_fallback",
+                        })
+                        self._log_gpu_fallback_once(
+                            REASON_MEMINFO_FAILURE,
+                            "Winsorized VRAM planner: live VRAM re-query "
+                            "failed after a GPU OOM; using CPU",
+                        )
+                        return _record_cpu(
+                            GPU_EXEC_REASON_RUNTIME_MEMORY,
+                            attempted=True,
+                            planner_mode="tiled" if mode == TILED_GPU
+                            else "full",
+                            decision=decision,
+                        )
+                    decision = _replan(
+                        free, pool_free, force_tiled, max_tile_out
+                    )
+                    if decision.kind == CPU_FALLBACK:
+                        # No smaller valid geometry remains -> CPU.
+                        _emit_attempt({
+                            "attempt": attempt_idx,
+                            "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                            "mode": "tiled",
+                            "n_batch": n_batch,
+                            "result": WINSOR_OOM_RESULT_OOM,
+                            "next": "cpu_fallback",
+                            "reason": decision.reason or REASON_VRAM_NO_VALID_TILE,
+                        })
+                        return _record_cpu(
+                            _gpu_execution_reason_token(
+                                decision.reason or REASON_VRAM_NO_VALID_TILE
+                            ) or GPU_EXEC_REASON_VRAM_NO_VALID_TILE,
+                            attempted=True,
+                            planner_mode="tiled",
+                            decision=decision,
+                        )
+                    mode = decision.kind
+                    tile = decision.tile_shape
+
+                vram_free = None
+                vram_pool_free = None
+                try:
+                    vram_free, _total = cp.cuda.runtime.memGetInfo()
+                except Exception:
+                    pass
+                try:
+                    vram_pool_free = cp.get_default_memory_pool().free_bytes()
+                except Exception:
+                    pass
+
+                error_kind = None
+                try:
+                    if mode == FULL_GPU:
+                        out = stack_winsorized_sigma_gpu(
+                            _masked_images(), weights, **kwargs
+                        )
+                    else:
+                        out = stack_winsorized_sigma_gpu_tiled(
+                            images,
+                            weights,
+                            tile_shape=tile,
+                            masks=masks,
+                            **kwargs,
+                        )
+                except Exception as exc:
+                    # Classify inside the boundary; the exception object and
+                    # its traceback are dropped when this except block exits.
+                    error_kind = _winsorized_gpu_oom_kind(exc, cp)
+
+                if error_kind is None:
+                    # SUCCESS: release the retained pool and record the truth.
+                    _emit_attempt({
+                        "attempt": attempt_idx,
+                        "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                        "mode": "full" if mode == FULL_GPU else "tiled",
+                        "tile_shape": _prov_token(tile),
+                        "n_batch": n_batch,
+                        "vram_free_bytes": vram_free,
+                        "vram_pool_free_bytes": vram_pool_free,
+                        "demand_full_bytes": decision.demand_full_bytes,
+                        "demand_tile_bytes": decision.demand_tile_bytes,
+                        "effective_budget_bytes": decision.effective_budget_bytes,
+                        "result": WINSOR_OOM_RESULT_SUCCESS,
+                        "next": "none",
+                    })
+                    self._release_pool_after_winsorized_reduction(cp)
+                    _record_gpu_execution_safely(self,
+                        operation=operation,
+                        scientific_N_batch=n_batch,
+                        workload_shape=workload_shape,
+                        backend_requested=backend_requested,
+                        eligible=True,
+                        attempted=True,
+                        executed="gpu",
+                        gpu_memory_mode="full" if mode == FULL_GPU
+                        else "tiled",
+                        fallback_reason="none",
+                        planner_mode="full" if mode == FULL_GPU else "tiled",
+                        tile_shape=tile,
+                        n_tiles=decision.n_tiles,
+                        estimated_peak_vram_bytes=(
+                            decision.demand_full_bytes
+                            if mode == FULL_GPU
+                            else decision.demand_tile_bytes
+                        ),
+                        effective_vram_budget_bytes=decision.effective_budget_bytes,
+                        path_class=decision.path_class,
+                        demand_full_bytes=decision.demand_full_bytes,
+                        demand_tile_bytes=decision.demand_tile_bytes,
+                        reserve_bytes=decision.reserve_bytes,
+                    )
+                    if mode == TILED_GPU:
+                        self.update_progress(
+                            f"GPU winsorized : exécution tuilée spatiale "
+                            f"(tile_shape={tile}, {decision.n_tiles} tuiles, "
+                            f"N_batch={n_batch} conservé)",
+                            "INFO",
+                        )
+                    return out
+
+                if error_kind != "oom":
+                    # Non-OOM kernel exception: historical single CPU
+                    # fallback (NEVER disguised as a retryable OOM).
+                    _emit_attempt({
+                        "attempt": attempt_idx,
+                        "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                        "mode": "full" if mode == FULL_GPU else "tiled",
+                        "tile_shape": _prov_token(tile),
+                        "n_batch": n_batch,
+                        "result": WINSOR_OOM_RESULT_KERNEL_FAILURE,
+                        "next": "cpu_fallback",
+                    })
+                    self.logger.warning(
+                        "GPU winsorized reduction failed; falling back to CPU",
+                        exc_info=True,
+                    )
+                    return _record_cpu(
+                        GPU_EXEC_REASON_GPU_KERNEL,
+                        attempted=True,
+                        planner_mode="full" if mode == FULL_GPU else "tiled",
+                        decision=decision,
+                    )
+
+                # Recoverable OOM: run the cleanup AFTER the failed attempt's
+                # frame/traceback are gone (so its device buffers return to
+                # the pool free list), then derive the next geometry.
+                gc.collect()
+                synced, released = _winsorized_oom_cleanup(cp)
+                if mode == FULL_GPU:
+                    force_tiled = True
+                    max_tile_out = None
+                    next_action = "tiled"
+                else:
+                    force_tiled = True
+                    max_tile_out = decision.tile_outputs
+                    next_action = "smaller_tile"
+                _emit_attempt({
+                    "attempt": attempt_idx,
+                    "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                    "mode": "full" if mode == FULL_GPU else "tiled",
+                    "tile_shape": _prov_token(tile),
+                    "n_batch": n_batch,
+                    "vram_free_bytes": vram_free,
+                    "vram_pool_free_bytes": vram_pool_free,
+                    "demand_full_bytes": decision.demand_full_bytes,
+                    "demand_tile_bytes": decision.demand_tile_bytes,
+                    "effective_budget_bytes": decision.effective_budget_bytes,
+                    "result": WINSOR_OOM_RESULT_OOM,
+                    "cleanup_synced": synced,
+                    "cleanup_released_bytes": released,
+                    "next": next_action,
+                })
+            else:
+                # Attempts exhausted without success -> CPU fallback.
+                self._log_gpu_fallback_once(
+                    GPU_EXEC_REASON_GPU_OOM,
+                    "GPU winsorized reduction: out of memory after %d "
+                    "attempt(s) (bounded retry exhausted); using CPU",
+                    WINSOR_GPU_OOM_MAX_ATTEMPTS,
                 )
                 return _record_cpu(
-                    GPU_EXEC_REASON_GPU_KERNEL,
+                    GPU_EXEC_REASON_GPU_OOM,
                     attempted=True,
-                    planner_mode="full",
+                    planner_mode="tiled" if mode == TILED_GPU else "full",
                     decision=decision,
                 )
-            self._release_pool_after_winsorized_reduction(cp)
-            _record_gpu_execution_safely(self,
-                operation=operation,
-                scientific_N_batch=n_batch,
-                workload_shape=workload_shape,
-                backend_requested=backend_requested,
-                eligible=True,
-                attempted=True,
-                executed="gpu",
-                gpu_memory_mode="full",
-                fallback_reason="none",
-                planner_mode="full",
-                tile_shape=None,
-                n_tiles=None,
-                estimated_peak_vram_bytes=decision.demand_full_bytes,
-                effective_vram_budget_bytes=decision.effective_budget_bytes,
-                path_class=decision.path_class,
-                demand_full_bytes=decision.demand_full_bytes,
-                demand_tile_bytes=decision.demand_tile_bytes,
-                reserve_bytes=decision.reserve_bytes,
-            )
-            return out
-        if decision.kind == TILED_GPU:
-            self.update_progress(
-                f"GPU winsorized : exécution tuilée spatiale "
-                f"(tile_shape={decision.tile_shape}, {decision.n_tiles} tuiles, "
-                f"N_batch={decision.n_batch} conservé)",
-                "INFO",
-            )
-            try:
-                out = stack_winsorized_sigma_gpu_tiled(
-                    images,
-                    weights,
-                    tile_shape=decision.tile_shape,
-                    masks=masks,
-                    **kwargs,
-                )
-            except Exception:
-                self.logger.warning(
-                    "GPU winsorized tiled reduction failed; falling back to "
-                    "CPU",
-                    exc_info=True,
-                )
-                return _record_cpu(
-                    GPU_EXEC_REASON_GPU_KERNEL,
-                    attempted=True,
-                    planner_mode="tiled",
-                    decision=decision,
-                )
-            self._release_pool_after_winsorized_reduction(cp)
-            _record_gpu_execution_safely(self,
-                operation=operation,
-                scientific_N_batch=n_batch,
-                workload_shape=workload_shape,
-                backend_requested=backend_requested,
-                eligible=True,
-                attempted=True,
-                executed="gpu",
-                gpu_memory_mode="tiled",
-                fallback_reason="none",
-                planner_mode="tiled",
-                tile_shape=decision.tile_shape,
-                n_tiles=decision.n_tiles,
-                estimated_peak_vram_bytes=decision.demand_tile_bytes,
-                effective_vram_budget_bytes=decision.effective_budget_bytes,
-                path_class=decision.path_class,
-                demand_full_bytes=decision.demand_full_bytes,
-                demand_tile_bytes=decision.demand_tile_bytes,
-                reserve_bytes=decision.reserve_bytes,
-            )
-            return out
         # CPU_FALLBACK: durable once-per-reason diagnostics.
         reason = decision.reason or REASON_PLANNER_FAILURE
         if reason == REASON_VRAM_NO_VALID_TILE:
