@@ -497,6 +497,7 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     # durable so the shipped run log alone proves what actually calibrated
     # (requested/applied/skipped/failed + roles/DQ), not just the frozen plan.
     "CALIBRATION_PROVENANCE ",
+    "CALIBRATION_PROVENANCE_WRITE_FAILURE ",
 )
 
 
@@ -5672,6 +5673,14 @@ class SeestarQueuedStacker:
         # C-provenance: bounded runtime counters captured at session close
         # (requested / applied / skipped / failed + reasons + roles + DQ).
         self._calibration_provenance: dict = {}
+        # Whether THIS run requested calibration (enabled=True), independent of
+        # whether a session actually opened — drives whether a durable proof
+        # artifact is written at close.
+        self._calibration_enabled_requested = False
+        # Idempotence guard: once the final provenance was emitted/written, a
+        # second close (worker finally + explicit stop) must not re-emit nor
+        # overwrite a good snapshot with a minimal one.
+        self._calibration_provenance_finalized = False
         # Real, stable reason the calibration session could not open (probe
         # INCOMPATIBLE / import failure / no usable masters) — surfaced
         # actionably, never as a bare traceback.
@@ -11759,17 +11768,24 @@ class SeestarQueuedStacker:
         (INCOMPATIBLE / NOT_INSTALLED / UNHEALTHY / no usable masters) is
         surfaced actionably — never a bare traceback, never a secret.
         """
+        # F3: reset per-run provenance/reason state on every Start attempt.
         self._calibration_integrator = None
+        self._calibration_provenance = {}
+        self._calibration_unavailable_reason = None
+        self._calibration_provenance_finalized = False
         # Robust to a bare engine instance (e.g. a minimal test stacker) that
         # never set the C5 seam fields: calibration is OPTIONAL, so absence of
         # the fields means "disabled".
         enabled = getattr(self, "_calibration_enabled", False)
         master_folder = getattr(self, "_calibration_master_folder", "")
+        self._calibration_enabled_requested = bool(enabled)
         if not enabled:
             return
         if not master_folder:
             # C23: enabled but no master folder -> clear, actionable message
-            # (never a silent uncalibrated run).
+            # (never a silent uncalibrated run).  Recorded so the final proof
+            # artifact explains WHY no session opened.
+            self._calibration_unavailable_reason = "no_master_folder"
             if self.update_progress:
                 self.update_progress(
                     "Calibration enabled but no master folder selected; "
@@ -11794,7 +11810,7 @@ class SeestarQueuedStacker:
         )
         # Expose the provider negotiation result actionably: a C26 version-skew
         # (missing ``light_route_key``) reports INCOMPATIBLE with a message, not
-        # the misleading "no usable masters".
+        # the misleading "no usable masters".  ``probe_info`` never raises (F4).
         info = integrator.probe_info()
         if not getattr(info, "available", False):
             self._calibration_unavailable_reason = (
@@ -11837,7 +11853,39 @@ class SeestarQueuedStacker:
                     "INFO",
                 )
 
+    def _minimal_calibration_provenance(self) -> dict:
+        """Bounded minimal snapshot for a run that requested calibration but
+        whose session never opened (INCOMPATIBLE / no folder / import / open
+        failure).  ``session_open=false`` + a stable ``open_reason`` + coherent
+        zero counters — the exact user-facing case to explain durably.
+        """
+        return {
+            "calibration_enabled_requested": True,
+            "calibration_requested": 0,
+            "calibration_session_open": False,
+            "calibration_library_fingerprint": "",
+            "calibration_classes_planned": 0,
+            "calibration_plan_reason": None,
+            "calibration_open_reason": self._calibration_unavailable_reason,
+            "calibration_close_reason": None,
+            "calibration_frames_applied": 0,
+            "calibration_frames_skipped": 0,
+            "calibration_frames_failed": 0,
+            "calibration_skip_reasons": {},
+            "calibration_failure_reasons": {},
+            "calibration_resolve_reasons": {},
+            "calibration_effective_roles": [],
+            "calibration_dq_present": False,
+        }
+
     def _close_calibration_session(self) -> None:
+        # F3: emit/write a durable proof whenever calibration was REQUESTED —
+        # even when no session ever opened (that is the user-facing case to
+        # explain).  Calibration disabled => no artifact (absence == disabled).
+        # Idempotent: worker finally + explicit stop both call this; finalize once.
+        if getattr(self, "_calibration_provenance_finalized", False):
+            return
+        close_failed = None
         if self._calibration_integrator is not None:
             try:
                 # C-provenance: snapshot the bounded runtime counters (requested /
@@ -11850,14 +11898,35 @@ class SeestarQueuedStacker:
             except Exception:
                 self._calibration_provenance = {}
             finally:
-                self._calibration_integrator.close()
+                integ = self._calibration_integrator
+                try:
+                    integ.close()
+                except Exception as exc:
+                    # Robustness: a raising close must not break the worker
+                    # finally nor lose the artifact; aggregate a bounded reason.
+                    close_failed = f"close_failed:{type(exc).__name__}"
+                else:
+                    # The integrator's close() is fail-open and records a bounded
+                    # close_reason when the provider's session.close() raised.
+                    cr = getattr(integ, "close_reason", "")
+                    if cr:
+                        close_failed = cr
                 self._calibration_integrator = None
-            # Durable final proof (success / failure / cancellation): emit a
-            # throttle-exempt run-log block AND persist a versioned JSON-safe
-            # artifact in the output folder.  Never part of the immutable
-            # scientific freeze / resume digest.
+        elif getattr(self, "_calibration_enabled_requested", False):
+            # Calibration requested but never opened -> minimal bounded snapshot.
+            self._calibration_provenance = self._minimal_calibration_provenance()
+        if close_failed:
+            prov = dict(self._calibration_provenance or {})
+            prov["calibration_close_reason"] = close_failed
+            self._calibration_provenance = prov
+        # Durable final proof (success / failure / cancellation / never-opened):
+        # emit a throttle-exempt run-log block AND persist a versioned JSON-safe
+        # artifact in the output folder.  Never part of the immutable scientific
+        # freeze / resume digest.
+        if getattr(self, "_calibration_provenance", None):
             self._emit_calibration_provenance()
             self._write_calibration_provenance_artifact()
+        self._calibration_provenance_finalized = True
         # C22: release any per-frame DQ masks still retained (bounded memory).
         masks = getattr(self, "_calibration_masks", None)
         if masks is not None:
@@ -11869,8 +11938,11 @@ class SeestarQueuedStacker:
         self._emit_provenance_block(
             "CALIBRATION_PROVENANCE",
             {
+                "enabled_requested": prov.get("calibration_enabled_requested"),
                 "requested": prov.get("calibration_requested"),
                 "session_open": prov.get("calibration_session_open"),
+                "open_reason": prov.get("calibration_open_reason"),
+                "close_reason": prov.get("calibration_close_reason"),
                 "classes_planned": prov.get("calibration_classes_planned"),
                 "applied": prov.get("calibration_frames_applied"),
                 "skipped": prov.get("calibration_frames_skipped"),
@@ -11884,11 +11956,12 @@ class SeestarQueuedStacker:
         """Persist a versioned, JSON-safe, bounded final provenance artifact.
 
         Written atomically into the output folder alongside ``run_config.cfg``
-        (temp + ``os.replace``); a failure to write is fail-open (provenance is
-        observational, never science).  Distinct fields
-        requested / session_open / classes_planned / applied / skipped / failed /
-        roles / DQ / reasons — never the dynamic counters in the scientific
-        freeze, so resume digests stay untouched.
+        (temp + ``os.replace``).  A failure to write is fail-open for science
+        BUT is never silent: it emits a bounded durable
+        ``CALIBRATION_PROVENANCE_WRITE_FAILURE`` block and cleans the temp file.
+        Distinct fields requested / session_open / classes_planned / applied /
+        skipped / failed / roles / DQ / reasons — never the dynamic counters in
+        the scientific freeze, so resume digests stay untouched.
         """
         prov = getattr(self, "_calibration_provenance", None) or {}
         out_dir = getattr(self, "output_folder", None)
@@ -11905,11 +11978,16 @@ class SeestarQueuedStacker:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, path)
-        except Exception:
+        except Exception as exc:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
+            # Robustness: never silent — a bounded durable failure event.
+            self._emit_provenance_block(
+                "CALIBRATION_PROVENANCE_WRITE_FAILURE",
+                {"reason": f"{type(exc).__name__}"},
+            )
 
     def _build_calibration_freeze(self, lights=()) -> dict:
         """Build + cache the frozen calibration signature (7 fields).

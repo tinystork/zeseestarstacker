@@ -344,3 +344,182 @@ def test_e2e_backend_runner_seam_propagates_and_counts(tmp_path, monkeypatch):
     assert artifact["calibration_frames_applied"] == 1
     assert artifact["calibration_session_open"] is True
     assert artifact["calibration_classes_planned"] >= 0
+
+
+def _engine_stackers(tmp_path, *, enabled=True, folder="", orientation=""):
+    """Bare engine with the C5 seam fields set + a message capture sink."""
+    s = object.__new__(SeestarQueuedStacker)
+    s.output_folder = str(tmp_path)
+    s._calibration_masks = {}
+    s._calibration_provenance = {}
+    s._calibration_enabled = enabled
+    s._calibration_master_folder = folder
+    s._calibration_orientation = orientation
+    s._calibration_integrator = None
+    s._calibration_unavailable_reason = None
+    messages = []
+    s.update_progress = lambda m, level=None: messages.append(m)
+    return s, messages
+
+
+def test_f1_freeze_caches_roles_then_frame_applies(tmp_path):
+    """F1: freeze_snapshot(light) must record effective roles at cache time, so
+    the later cached resolve() + _calibrate_frame_to_working still reports
+    dark+flat in the final artifact."""
+    s = _stacker(tmp_path)
+    light = _make_fits(tmp_path)
+    # Preflight: freeze the plan (caches plan + records roles).
+    freeze = s._calibration_integrator.freeze_snapshot([light])
+    assert freeze["calibration_plan_map"]
+    assert "dark" in s._calibration_integrator.provenance_snapshot()["calibration_effective_roles"]
+
+    # Real frame path hits the cache (no re-decode).
+    out = s._calibrate_frame_to_working(light)
+    assert out is not None
+
+    s._close_calibration_session()
+    artifact = _read_artifact(tmp_path)
+    assert artifact["calibration_frames_applied"] == 1
+    assert "dark" in artifact["calibration_effective_roles"]
+    assert "flat" in artifact["calibration_effective_roles"]
+
+
+def test_f3_incompatible_provider_writes_minimal_artifact(tmp_path):
+    """F3: calibration requested but provider INCOMPATIBLE must still write a
+    durable minimal artifact at close (session_open=false + open_reason)."""
+    s, messages = _engine_stackers(tmp_path, folder=str(tmp_path))
+
+    import seestar.calibration.streaming as streaming_mod
+
+    class _Incompat(_FakeProvider):
+        def probe(self):
+            return ProviderInfo(
+                state=ProviderState.INCOMPATIBLE,
+                message="missing public API symbol(s): ['light_route_key']",
+            )
+
+    integ = CalibrationIntegrator(str(tmp_path), provider=_Incompat())
+    orig = streaming_mod.CalibrationIntegrator
+    streaming_mod.CalibrationIntegrator = lambda *a, **k: integ
+    try:
+        s._open_calibration_session()
+    finally:
+        streaming_mod.CalibrationIntegrator = orig
+
+    assert s._calibration_integrator is None
+    s._close_calibration_session()
+
+    artifact = _read_artifact(tmp_path)
+    assert artifact["calibration_enabled_requested"] is True
+    assert artifact["calibration_session_open"] is False
+    assert artifact["calibration_frames_applied"] == 0
+    assert "light_route_key" in artifact["calibration_open_reason"]
+    # A durable log block was also emitted.
+    assert any("CALIBRATION_PROVENANCE" in m for m in messages)
+
+
+def test_f3_missing_folder_writes_minimal_artifact(tmp_path):
+    """F3: enabled but no master folder -> minimal artifact (no session)."""
+    s, _ = _engine_stackers(tmp_path, folder="")
+    s._open_calibration_session()
+    s._close_calibration_session()
+    artifact = _read_artifact(tmp_path)
+    assert artifact["calibration_session_open"] is False
+    assert artifact["calibration_open_reason"] == "no_master_folder"
+    assert artifact["calibration_frames_applied"] == 0
+
+
+def test_f3_disabled_writes_no_artifact(tmp_path):
+    """Calibration disabled -> no artifact (absence == disabled)."""
+    s, _ = _engine_stackers(tmp_path, enabled=False)
+    s._open_calibration_session()
+    s._close_calibration_session()
+    assert not os.path.exists(os.path.join(str(tmp_path), "calibration_provenance.json"))
+
+
+def test_close_exception_still_writes_artifact(tmp_path):
+    """Robustness: a raising session.close() must not break the finalize path nor
+    lose the durable proof; a bounded close_failed reason is aggregated."""
+    class _CloseRaises(_FakeSession):
+        def close(self):
+            raise RuntimeError("close boom")
+
+    class _Provider(_FakeProvider):
+        def open_session(self, root, *, cancel=None, sensor_orientation=None):
+            return SessionResult(
+                state=CalibrationState.COMPLETED,
+                session=_CloseRaises(),
+                fingerprint="f" * 64,
+            )
+
+    s = _stacker(tmp_path)
+    # Replace the integrator's session with the raising one via a fresh integrator.
+    integ = CalibrationIntegrator(str(tmp_path), provider=_Provider())
+    assert integ.open() is True
+    s._calibration_integrator = integ
+    light = _make_fits(tmp_path)
+    assert s._calibrate_frame_to_working(light) is not None
+
+    s._close_calibration_session()
+    artifact = _read_artifact(tmp_path)
+    assert artifact["calibration_frames_applied"] == 1
+    assert artifact["calibration_close_reason"] == "close_failed:RuntimeError"
+
+
+def test_write_failure_emits_durable_event(tmp_path):
+    """Robustness: a failed artifact write is fail-open for science but emits a
+    bounded durable CALIBRATION_PROVENANCE_WRITE_FAILURE block (never silent)."""
+    s, messages = _engine_stackers(tmp_path, folder=str(tmp_path))
+    # enabled + a fake integrator so _close has a snapshot to write.
+    import seestar.calibration.streaming as streaming_mod
+
+    integ = CalibrationIntegrator(str(tmp_path), provider=_FakeProvider())
+    assert integ.open() is True
+    s._calibration_integrator = integ
+
+    # Force the artifact write to fail: output_folder points into a file path.
+    blocker = os.path.join(str(tmp_path), "blocked")
+    with open(blocker, "w") as fh:
+        fh.write("x")
+    s.output_folder = blocker  # os.path.join(blocker, filename) will fail
+
+    s._close_calibration_session()
+    assert any("CALIBRATION_PROVENANCE_WRITE_FAILURE" in m for m in messages)
+
+
+def test_close_is_idempotent(tmp_path):
+    """Robustness: worker finally + explicit stop both call close; the second is a no-op."""
+    s = _stacker(tmp_path)
+    light = _make_fits(tmp_path)
+    assert s._calibrate_frame_to_working(light) is not None
+    s._close_calibration_session()
+    first = _read_artifact(tmp_path)
+    s._close_calibration_session()  # must not raise nor overwrite
+    second = _read_artifact(tmp_path)
+    assert first == second
+
+
+def test_calibrate_cancelled_records_failure_reason(tmp_path):
+    """Lifecycle: a CANCELLED calibration maps to a stable failure reason."""
+    class _CancelSession(_FakeSession):
+        def calibrate(self, source, plan, *, cancel=None):
+            return CalibrationResult(state=CalibrationState.CANCELLED)
+
+    class _Provider(_FakeProvider):
+        def open_session(self, root, *, cancel=None, sensor_orientation=None):
+            return SessionResult(
+                state=CalibrationState.COMPLETED,
+                session=_CancelSession(),
+                fingerprint="f" * 64,
+            )
+
+    s = _stacker(tmp_path)
+    integ = CalibrationIntegrator(str(tmp_path), provider=_Provider())
+    assert integ.open() is True
+    s._calibration_integrator = integ
+    light = _make_fits(tmp_path)
+    out = s._calibrate_frame_to_working(light)
+    assert out is None
+    prov = integ.provenance_snapshot()
+    assert prov["calibration_frames_failed"] == 1
+    assert prov["calibration_failure_reasons"] == {"cancelled": 1}

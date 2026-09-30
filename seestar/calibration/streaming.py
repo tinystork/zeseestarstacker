@@ -23,7 +23,63 @@ from seestar.calibration.scan import (
     scan_masters_recursive,
 )
 from seestar.calibration.zecalibrator_adapter import ZeCalibratorProvider
-from seestar.core.calibration_port import CalibrationState, LightSource, RouteKeyResult
+from seestar.core.calibration_port import (
+    CalibrationState,
+    LightSource,
+    ProviderInfo,
+    ProviderState,
+    RouteKeyResult,
+)
+
+# Bounding constants for the runtime provenance (JSON/log safe, never
+# arbitrary provider text or tracebacks):
+_MAX_REASON_KEYS = 48          # max distinct keys per reason->count aggregate
+_MAX_CODE_LEN = 48            # max normalized provider reason-code length
+_MAX_CODES_PER_RESOLUTION = 24  # max provider codes captured per resolution
+_MAX_MSG_LEN = 200            # max bounded message length (open/probe reasons)
+
+
+def _bound_message(value) -> str:
+    """Collapse whitespace and bound a message (never a path/secret/traceback)."""
+    s = " ".join(str(value or "").split())
+    return s[:_MAX_MSG_LEN]
+
+
+def _normalize_code(value) -> str:
+    """Tokenize + bound an arbitrary provider reason code (JSON/log safe)."""
+    s = str(value or "").strip()
+    s = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in s.upper())
+    if not s:
+        return "unknown"
+    return s[:_MAX_CODE_LEN]
+
+
+def _add_bounded(store: dict, key: str) -> None:
+    """Increment a reason->count aggregate, keeping its key count bounded."""
+    key = str(key) or "unknown"
+    if key in store:
+        store[key] += 1
+    elif len(store) < _MAX_REASON_KEYS:
+        store[key] = 1
+    else:
+        store["_overflow"] = store.get("_overflow", 0) + 1
+
+
+def _bounded_codes(rr) -> tuple:
+    """Extract bounded, normalized provider reason codes from a RouteResolution.
+
+    ``RouteResolution.reasons`` is already a tuple of code strings (the adapter
+    maps each provider rejection to its stable ``code``); this just normalizes
+    and bounds them (dedup, order-preserving, capped).
+    """
+    codes: list = []
+    for r in getattr(rr, "reasons", ()) or ():
+        token = _normalize_code(r)
+        if token and token not in codes:
+            codes.append(token)
+        if len(codes) >= _MAX_CODES_PER_RESOLUTION:
+            break
+    return tuple(codes)
 
 
 def _route_key_with_reason(provider, path) -> RouteKeyResult:
@@ -41,33 +97,37 @@ def _route_key_with_reason(provider, path) -> RouteKeyResult:
 
 
 def _route_resolution_outcome(rr) -> tuple:
-    """Return ``(plan, composition, reason_token)`` for a ``RouteResolution``.
+    """Return ``(plan, composition, outcome_token, codes)`` for a resolution.
 
-    ``reason_token`` is a stable, bounded ZSSS token on failure (``failed`` /
-    ``cancelled`` / ``unavailable`` / ``no_match`` / ``ambiguous`` / ``no_plan``)
-    and ``None`` on success.  Never a provider object, never a traceback.
+    ``outcome_token`` is a stable, bounded ZSSS token on failure (``failed`` /
+    ``cancelled`` / ``unavailable`` / ``no_match`` / ``ambiguous`` /
+    ``no_plan`` / ``no_session``) and ``None`` on success.  ``codes`` is the
+    bounded, normalized tuple of **real provider reason codes** (e.g.
+    ``("EXPOSURE_MISMATCH",)``) carried by ``RouteResolution.reasons`` — never
+    dropped, never a provider object, never a traceback.
     """
     if rr is None:
-        return None, None, "no_session"
+        return None, None, "no_session", ()
     state = getattr(rr, "state", None)
     if state is CalibrationState.CANCELLED:
-        return None, None, "cancelled"
+        return None, None, "cancelled", ()
     if state is CalibrationState.FAILED:
-        return None, None, "failed"
+        return None, None, "failed", _bounded_codes(rr)
     if state is CalibrationState.UNAVAILABLE:
-        return None, None, "unavailable"
+        return None, None, "unavailable", ()
     if state is not CalibrationState.COMPLETED:
-        return None, None, "failed"
+        return None, None, "failed", _bounded_codes(rr)
     plan = getattr(rr, "plan", None)
     composition = getattr(rr, "composition", None)
     if plan is None or composition is None:
         outcome = str(getattr(rr, "outcome", None) or "").upper()
+        codes = _bounded_codes(rr)
         if outcome == "NO_MATCH":
-            return None, None, "no_match"
+            return None, None, "no_match", codes
         if outcome == "AMBIGUOUS":
-            return None, None, "ambiguous"
-        return None, None, "no_plan"
-    return plan, composition, None
+            return None, None, "ambiguous", codes
+        return None, None, "no_plan", codes
+    return plan, composition, None, ()
 
 
 def _calibration_result_reason(result) -> str:
@@ -144,6 +204,7 @@ class CalibrationIntegrator:
         self._dq_present = False
         self._plan_reason = None  # why plan_map is empty when session opened
         self._open_reason = None  # real reason when the session could not open
+        self._close_reason = None  # bounded reason when session.close() raised
         self._resolve_reasons: dict = {}  # real resolve reason -> count (bounded)
 
     # ------------------------------------------------------------------ open
@@ -207,9 +268,25 @@ class CalibrationIntegrator:
         """Real, stable reason the session did not open (``""`` when open)."""
         return self._open_reason or ""
 
+    @property
+    def close_reason(self) -> str:
+        """Bounded reason when ``session.close()`` raised (``""`` otherwise)."""
+        return self._close_reason or ""
+
     def probe_info(self):
-        """Return the provider's probe result (never raises)."""
-        return self._provider.probe()
+        """Return the provider's probe result (never raises).
+
+        F4: a provider whose ``probe()`` raises (broken install) maps to a
+        bounded ``ProviderInfo(UNHEALTHY, message=type)`` — never a traceback,
+        never a crash at Start.
+        """
+        try:
+            return self._provider.probe()
+        except Exception as exc:  # noqa: BLE001 — fail-open probe (F4)
+            return ProviderInfo(
+                state=ProviderState.UNHEALTHY,
+                message=f"probe raised {type(exc).__name__}",
+            )
 
     @property
     def context_preparations(self) -> int:
@@ -248,14 +325,24 @@ class CalibrationIntegrator:
     def record_skipped(self, reason: str) -> None:
         """Count one frame that fell back to the historical path, with a reason."""
         self._skipped += 1
-        key = str(reason) or "unknown"
-        self._skip_reasons[key] = self._skip_reasons.get(key, 0) + 1
+        _add_bounded(self._skip_reasons, reason)
 
     def record_failed(self, reason: str) -> None:
         """Count one calibration failure (never silently a skip), with a reason."""
         self._failed += 1
-        key = str(reason) or "unknown"
-        self._failure_reasons[key] = self._failure_reasons.get(key, 0) + 1
+        _add_bounded(self._failure_reasons, reason)
+
+    def _record_resolve(self, outcome: str, codes=()) -> None:
+        """Record a resolution failure: stable outcome **and** real provider codes.
+
+        Both land in the same bounded ``_resolve_reasons`` aggregate, kept
+        distinguishable by key: bare stable outcome tokens (``no_match`` /
+        ``ambiguous`` / ``failed`` / …) versus ``code:<NORMALIZED_CODE>`` for the
+        real provider reason codes — never a traceback, never a provider object.
+        """
+        _add_bounded(self._resolve_reasons, outcome)
+        for code in codes or ():
+            _add_bounded(self._resolve_reasons, f"code:{_normalize_code(code)}")
 
     def provenance_snapshot(self) -> dict:
         """Return the JSON-safe, bounded runtime provenance.
@@ -266,12 +353,14 @@ class CalibrationIntegrator:
           * ``frames applied/skipped/failed`` — pixels actually calibrated
         """
         return {
+            "calibration_enabled_requested": True,
             "calibration_requested": self._requested,
             "calibration_session_open": self._session is not None,
             "calibration_library_fingerprint": self.fingerprint or "",
             "calibration_classes_planned": len(self._plan_cache),
             "calibration_plan_reason": self._plan_reason,
             "calibration_open_reason": self._open_reason,
+            "calibration_close_reason": self._close_reason,
             "calibration_frames_applied": self._applied,
             "calibration_frames_skipped": self._skipped,
             "calibration_frames_failed": self._failed,
@@ -290,15 +379,18 @@ class CalibrationIntegrator:
         A class already resolved at preflight returns the cached plan object with
         no ``resolve_light`` decode; a new class (not in the frozen map) falls
         back to a direct resolve.  Returns ``None`` when not MATCHED / not planned
-        / unresolvable.  A failed/skipped resolve records its **real** reason into
-        the bounded ``calibration_skip_reasons`` aggregate (never a generic token).
+        / unresolvable.  A failed/skipped resolve records its **real** reason
+        (stable outcome + provider codes) into the bounded
+        ``calibration_skip_reasons`` / ``calibration_resolve_reasons`` aggregates.
         """
         if self._session is None:
             return None
         key_result = _route_key_with_reason(self._provider, file_path)
         acq_sig = key_result.key
         if acq_sig is None:
-            self.record_skipped(f"route_key:{key_result.reason or 'unavailable'}")
+            reason = f"route_key:{key_result.reason or 'unavailable'}"
+            self.record_skipped(reason)
+            _add_bounded(self._resolve_reasons, reason)
             return None
         cached = self._plan_cache.get(acq_sig)
         if cached is not None:
@@ -306,9 +398,10 @@ class CalibrationIntegrator:
         if not self.is_planned(file_path):
             self.record_skipped("not_planned")
             return None
-        plan, composition, reason = self._resolve_direct(file_path)
+        plan, composition, outcome, codes = self._resolve_direct(file_path)
         if plan is None:
-            self.record_skipped(f"resolve:{reason}")
+            self.record_skipped(f"resolve:{outcome}")
+            self._record_resolve(outcome, codes)
             return None
         self._plan_cache[acq_sig] = plan
         if composition is not None:
@@ -351,36 +444,51 @@ class CalibrationIntegrator:
         by the **acquisition signature** (header-only): lights are grouped by
         acquisition class and ONE representative per class is resolved (1 decode
         per class, never one per frame).  The resolved plan objects are cached
-        in ``self._plan_cache`` for the streaming loop.  Returns ``{}`` when no
-        session is open (== "calibration disabled").  Never carries a provider
-        object.
+        in ``self._plan_cache`` for the streaming loop, and the **effective
+        roles** are recorded at cache time so a later cached ``resolve()`` never
+        loses them.  Returns ``{}`` when no session is open (== "calibration
+        disabled").  Never carries a provider object.
         """
         if self._session is None:
             return {}
-        info = self._provider.probe()
+        info = self.probe_info()
+        # Reset THIS freeze's resolve-reason aggregate: freeze_snapshot is
+        # re-run (bootstrap -> plan-binding -> resume), and a stale aggregate
+        # would double-count across reconstructions.
+        self._resolve_reasons = {}
         plan_map = {}
         representatives: dict = {}
         for path in lights or ():
             key_result = _route_key_with_reason(self._provider, path)
             if key_result.key is not None:
                 representatives.setdefault(key_result.key, path)
-        for acq_sig, rep in representatives.items():
-            plan, composition, reason = self._resolve_direct(rep)
-            if plan is None or composition is None:
-                # Preserve the **real** resolve reason (never a fabricated text)
-                # as a bounded reason->count aggregate.
-                self._resolve_reasons[reason] = (
-                    self._resolve_reasons.get(reason, 0) + 1
+            else:
+                # A light that cannot be route-classed is a real freeze cause.
+                _add_bounded(
+                    self._resolve_reasons,
+                    f"route_key:{key_result.reason or 'unavailable'}",
                 )
+        for acq_sig, rep in representatives.items():
+            plan, composition, outcome, codes = self._resolve_direct(rep)
+            if plan is None or composition is None:
+                # Preserve the real resolve reason (stable outcome + provider
+                # codes) as a bounded reason->count aggregate.
+                self._record_resolve(outcome, codes)
                 continue
             self._plan_cache[acq_sig] = plan
+            # F1: record effective roles NOW (at cache time) so the cached
+            # resolve() path (which never re-reads the composition) still
+            # reports dark/flat in calibration_effective_roles.
+            for role in getattr(composition, "applied_roles", ()) or ():
+                if role:
+                    self._effective_roles.add(str(role))
             plan_map[acq_sig] = {
                 "plan_id": plan.plan_id,
                 "composition": composition.to_dict(),
             }
         # Durable reason when the session opened but NO plan could be resolved
         # (never a silent empty plan map): a bounded aggregate of the real
-        # resolve reasons, not a fabricated sentence.
+        # causes (route_key failures + resolve outcomes + provider codes).
         if not plan_map:
             self._plan_reason = (
                 _format_reason_aggregate(self._resolve_reasons)
@@ -400,23 +508,35 @@ class CalibrationIntegrator:
         }
 
     def _resolve_direct(self, file_path: str):
-        """Directly resolve a light (decode) -> ``(plan, composition, reason)``.
+        """Directly resolve a light (decode) -> ``(plan, composition, outcome, codes)``.
 
-        ``reason`` is a stable, ZSSS-owned token when the resolution did not
-        yield a plan (``failed`` / ``cancelled`` / ``unavailable`` / ``no_match`` /
-        ``ambiguous`` / ``no_plan``); ``None`` on success.  Never a provider object
+        ``outcome`` is a stable, ZSSS-owned token on failure (``failed`` /
+        ``cancelled`` / ``unavailable`` / ``no_match`` / ``ambiguous`` /
+        ``no_plan`` / ``no_session``); ``None`` on success.  ``codes`` is the
+        bounded tuple of real provider reason codes.  Never a provider object
         and never a traceback.
         """
         if self._session is None:
-            return None, None, "no_session"
+            return None, None, "no_session", ()
         rr = self._session.resolve_light(LightSource(path=file_path))
         return _route_resolution_outcome(rr)
 
     def close(self) -> None:
+        """Close the session idempotently; a raising provider close is captured.
+
+        Robustness: a ``session.close()`` that raises must neither break the
+        caller's finally nor lose the durable proof.  The failure is recorded as
+        a bounded ``close_failed:<type>`` reason in ``_close_reason`` so the
+        final artifact can still be emitted/written.
+        """
         if self._session is not None:
-            self._session.close()
-            self._session = None
-            self._session_result = None
+            try:
+                self._session.close()
+            except Exception as exc:  # noqa: BLE001 — bounded close failure
+                self._close_reason = f"close_failed:{type(exc).__name__}"
+            finally:
+                self._session = None
+                self._session_result = None
         if getattr(self, "_flat_dir", None):
             import shutil
 

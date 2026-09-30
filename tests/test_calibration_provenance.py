@@ -68,6 +68,18 @@ class _FakeSession:
                 outcome="NO_MATCH",
                 reasons=("EXPOSURE_MISMATCH",),
             )
+        if self._resolve == "multi_no_match":
+            return RouteResolution(
+                state=CalibrationState.COMPLETED,
+                outcome="NO_MATCH",
+                reasons=("EXPOSURE_MISMATCH", "TEMPERATURE_MISMATCH"),
+            )
+        if self._resolve == "ambiguous":
+            return RouteResolution(
+                state=CalibrationState.COMPLETED,
+                outcome="AMBIGUOUS",
+                reasons=("AMBIGUOUS",),
+            )
         if self._resolve == "failed":
             return RouteResolution(state=CalibrationState.FAILED)
         return RouteResolution(
@@ -179,3 +191,87 @@ def test_freeze_plan_reason_recorded_when_no_plan_resolved():
     assert freeze["calibration_plan_map"] == {}
     assert integ.provenance_snapshot()["calibration_plan_reason"] is not None
     integ.close()
+
+
+def test_freeze_route_key_failure_is_aggregated():
+    # F2: a light that cannot be route-classed is a real freeze cause; the
+    # plan_reason must reflect it (never a bare "no representatives resolved").
+    integ = _integrator(key=None)
+    assert integ.open() is True
+    integ.freeze_snapshot(["/l.fits"])
+    prov = integ.provenance_snapshot()
+    assert "route_key:unavailable" in prov["calibration_resolve_reasons"]
+    assert prov["calibration_plan_reason"] == "route_key:unavailable:1"
+    integ.close()
+
+
+def test_freeze_resets_resolve_reasons_to_avoid_double_count():
+    # F2: repeated freeze reconstruction must not double-count the aggregate.
+    integ = _integrator(key=None)
+    assert integ.open() is True
+    integ.freeze_snapshot(["/l.fits"])
+    integ.freeze_snapshot(["/l.fits"])
+    prov = integ.provenance_snapshot()
+    assert prov["calibration_resolve_reasons"] == {"route_key:unavailable": 1}
+    integ.close()
+
+
+def test_freeze_caches_effective_roles_for_cached_resolve():
+    # F1: roles must be recorded at freeze/cache time; a cached resolve() then
+    # returns the plan without re-reading the composition but the roles persist.
+    integ = _integrator()
+    assert integ.open() is True
+    freeze = integ.freeze_snapshot(["/l.fits"])
+    assert freeze["calibration_plan_map"]  # one class planned
+    prov = integ.provenance_snapshot()
+    assert "dark" in prov["calibration_effective_roles"]
+    assert "flat" in prov["calibration_effective_roles"]
+    # resolve() now hits the cache and must NOT lose the roles.
+    plan = integ.resolve("/l.fits")
+    assert plan is not None
+    assert "dark" in integ.provenance_snapshot()["calibration_effective_roles"]
+    integ.close()
+
+
+def test_resolve_preserves_provider_reason_codes():
+    # F2: NO_MATCH with multiple provider codes must keep the stable outcome AND
+    # the real codes in the bounded resolve-reasons aggregate.
+    class _MultiProvider(_FakeProvider):
+        pass
+
+    integ = CalibrationIntegrator("/masters", provider=_MultiProvider(resolve="multi_no_match"))
+    assert integ.open() is True
+    plan = integ.resolve("/l.fits")
+    assert plan is None
+    prov = integ.provenance_snapshot()
+    assert prov["calibration_skip_reasons"] == {"resolve:no_match": 1}
+    rr = prov["calibration_resolve_reasons"]
+    assert rr["no_match"] == 1
+    assert "code:EXPOSURE_MISMATCH" in rr
+    assert "code:TEMPERATURE_MISMATCH" in rr
+    integ.close()
+
+
+def test_resolve_ambiguous_records_stable_outcome():
+    # F2: AMBIGUOUS must map to a stable token (never a traceback/code leak).
+    integ = _integrator(resolve="ambiguous")
+    assert integ.open() is True
+    plan = integ.resolve("/l.fits")
+    assert plan is None
+    prov = integ.provenance_snapshot()
+    assert prov["calibration_skip_reasons"] == {"resolve:ambiguous": 1}
+    assert prov["calibration_resolve_reasons"]["ambiguous"] == 1
+    integ.close()
+
+
+def test_probe_exception_returns_unhealthy():
+    # F4: a raising provider.probe() must map to UNHEALTHY (never raise).
+    class _RaisingProvider(_FakeProvider):
+        def probe(self):
+            raise RuntimeError("boom")
+
+    integ = CalibrationIntegrator("/masters", provider=_RaisingProvider())
+    info = integ.probe_info()
+    assert info.state == ProviderState.UNHEALTHY
+    assert info.available is False
+    assert "RuntimeError" in info.message
