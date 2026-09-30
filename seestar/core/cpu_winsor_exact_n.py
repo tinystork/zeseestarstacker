@@ -311,7 +311,7 @@ def _winsorized_tile_finalize_np(
     return np.asarray(result, dtype=np.float32), np.asarray(sum_w, dtype=np.float32)
 
 
-def _materialize_spatial_tile(images, y0, y1, x0, x1):
+def _materialize_spatial_tile(images, y0, y1, x0, x1, masks=None):
     """Materialize exactly one ``N x tile_h x tile_w [x C]`` float32 cube.
 
     F6 single-allocation: preallocates the FINAL float32 cube and fills each
@@ -321,6 +321,11 @@ def _materialize_spatial_tile(images, y0, y1, x0, x1):
     zero-copy view; spatial slicing therefore happens before the cube is
     filled.  In particular, this helper never asks NumPy to stack complete
     frames and never builds a temporary per-image tile.
+
+    ``masks`` is an optional per-image 2-D validity map (True/nonzero ==
+    valid) parallel to ``images``: when given, the mask is applied to the TILE
+    SLICE ONLY (no full-frame masked copy — Lot C), mirroring the GPU tiled
+    driver.  ``masks=None`` means the images are already NaN-masked.
     """
     n = len(images)
     first = np.asarray(images[0])
@@ -330,16 +335,33 @@ def _materialize_spatial_tile(images, y0, y1, x0, x1):
         c = int(first.shape[2])
         cube = np.empty((n, th, tw, c), dtype=np.float32)
         for i, image in enumerate(images):
-            cube[i, ...] = np.asarray(image)[y0:y1, x0:x1]
+            src = np.asarray(image)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = np.asarray(masks[i])[y0:y1, x0:x1]
+                if m.dtype != bool:
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m[..., None])
     else:
         cube = np.empty((n, th, tw), dtype=np.float32)
         for i, image in enumerate(images):
-            cube[i, ...] = np.asarray(image)[y0:y1, x0:x1]
+            src = np.asarray(image)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = np.asarray(masks[i])[y0:y1, x0:x1]
+                if m.dtype != bool:
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m)
     return cube
 
 
 def _run_tiled_geometry(
     images,
+    masks,
     frame_shape,
     spatial,
     weights,
@@ -354,12 +376,14 @@ def _run_tiled_geometry(
     """Two-pass exact-N spatial reduction over ``spatial`` slices.
 
     ``images`` contains the already-resident observations (ndarray OR read-only
-    memmap — both are sliced per tile; the stack axis is never split).  Only
-    the current spatial tile is stacked, independently in each pass.  When
-    ``out_result`` / ``out_sum_w`` are given (disk-backed ``np.memmap``), the
-    SCI and WHT outputs are written PER TILE into them instead of allocating
-    two full-frame in-RAM arrays (low-RAM path).  Returns
-    ``(result, sum_w, rejected_pct, z_eff)`` with exact placement.
+    memmap — both are sliced per tile; the stack axis is never split).
+    ``masks`` (optional) is a per-image validity map applied to the TILE SLICE
+    ONLY (no full-frame masked copy — Lot C).  Only the current spatial tile
+    is stacked, independently in each pass.  When ``out_result`` / ``out_sum_w``
+    are given (disk-backed ``np.memmap``), the SCI and WHT outputs are written
+    PER TILE into them instead of allocating two full-frame in-RAM arrays
+    (low-RAM path).  Returns ``(result, sum_w, rejected_pct, z_eff)`` with
+    exact placement.
     """
     H, W = int(frame_shape[0]), int(frame_shape[1])
     trailing_shape = tuple(frame_shape[2:])
@@ -380,7 +404,7 @@ def _run_tiled_geometry(
     else:
         global_counts = [0] * int(max_iters)
         for (y0, y1, x0, x1) in spatial:
-            arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
+            arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1, masks=masks)
             _, counts = _winsorized_tile_iterations_np(
                 arr_t, kappa, winsor_limits, int(max_iters), kappa_decay,
                 collect_counts=True,
@@ -398,7 +422,7 @@ def _run_tiled_geometry(
     n_valid_total = 0
     n_surv_total = 0
     for (y0, y1, x0, x1) in spatial:
-        arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
+        arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1, masks=masks)
         valid_t = ~np.isnan(arr_t)
         # Always run the tile helper: it applies the one-pass gross-outlier
         # guard to zero-rank columns AND replays ``z_eff`` Winsor iterations
@@ -436,11 +460,12 @@ def stack_winsorized_sigma_cpu_tiled(
     tile_shape=None,
     max_mem_bytes=None,
     min_tile_out=CPU_MIN_TILE_OUT,
-    max_retries=4,
+    max_retries=3,
     _tile_order="rowmajor",
     _retry_callback: Optional[Callable[..., None]] = None,
     out_result=None,
     out_sum_w=None,
+    masks=None,
 ):
     """Exact-N SPATIAL CPU tiling of the Winsorized sigma reduction.
 
@@ -504,8 +529,23 @@ def stack_winsorized_sigma_cpu_tiled(
                 )
         from seestar.core.stack_methods import _stack_winsorized_sigma_iter
 
+        # Lot C: the untiled twin is only reachable when the whole frame fits
+        # (its per-frame masked copy is the untiled working set itself).  When
+        # masks are supplied, materialise the masked full-frame copies once
+        # here so the reference iterator sees NaN-masked observations.
+        if masks is not None:
+            masked = [
+                np.where(
+                    np.asarray(m)[..., None] if np.asarray(im).ndim == 3 else np.asarray(m),
+                    np.asarray(im),
+                    np.nan,
+                )
+                for im, m in zip(images, masks)
+            ]
+        else:
+            masked = images
         return _stack_winsorized_sigma_iter(
-            images,
+            masked,
             weights,
             kappa=kappa,
             winsor_limits=winsor_limits,
@@ -584,6 +624,7 @@ def stack_winsorized_sigma_cpu_tiled(
                 spatial_cand = list(reversed(spatial_cand))
             result, sum_w, rejected_pct, z_eff = _run_tiled_geometry(
                 images,
+                masks,
                 frame,
                 spatial_cand,
                 weights,

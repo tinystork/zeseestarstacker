@@ -237,23 +237,37 @@ def cpu_memory_policy_tokens(preflight: CpuMemoryPolicyPreflight) -> dict:
 def cpu_winsor_decision_tokens(
     decision: CpuMemoryDecision,
     available_ram_runtime_bytes: int,
+    rss_bytes: Optional[int] = None,
 ) -> dict:
     """CPU_WINSOR_MEMORY_DECISION record tokens for one CPU execution."""
     if decision.strategy == FULL_CPU:
         strategy = "full"
+        next_action = "execute_full"
     elif decision.strategy == SPATIAL_TILED_CPU:
         strategy = "spatial_tiled"
+        next_action = "execute_spatial_tiled"
     else:
         strategy = "refused"
+        next_action = "refusal"
     tokens = {
         "scientific_n": decision.n,
         "frame_shape": "x".join(str(d) for d in decision.frame_shape),
         "available_ram_runtime_bytes": int(available_ram_runtime_bytes),
         "effective_budget_bytes": decision.effective_budget_bytes,
+        "reserve_bytes": decision.reserve_bytes,
         "estimated_peak_bytes": decision.estimated_peak_bytes,
         "strategy": strategy,
         "mode": decision.mode,
+        "next": next_action,
     }
+    if rss_bytes is not None:
+        tokens["rss_bytes"] = int(rss_bytes)
+    resident = decision.details.get("resident_input_bytes")
+    if resident is not None:
+        tokens["resident_input_bytes"] = int(resident)
+    output = decision.details.get("output_sci_wht_bytes")
+    if output is not None:
+        tokens["output_bytes"] = int(output)
     if decision.tile_shape is not None:
         tokens["tile_shape"] = ",".join(str(d) for d in decision.tile_shape)
         tokens["tile_count"] = decision.n_tiles
@@ -267,9 +281,16 @@ def cpu_winsor_retry_tokens(
     reason: str = "allocation_failure",
     attempt: Optional[int] = None,
     outcome: Optional[str] = None,
+    next_action: Optional[str] = None,
+    available_ram_bytes: Optional[int] = None,
+    rss_bytes: Optional[int] = None,
 ) -> dict:
     """CPU_WINSOR_MEMORY_RETRY record tokens (only on a bounded allocation
-    retry; spatial tile shapes only)."""
+    retry; spatial tile shapes only).  ``next_action`` records the explicit
+    next step (``smaller_tile`` while another attempt follows, ``refusal``
+    once the bounded sequence is exhausted, ``none`` on recovery).
+    ``available_ram_bytes`` / ``rss_bytes`` are MEASURED live at retry time
+    (estimated demand is separate — estimated != measured)."""
     def _shape_token(shape):
         if shape is None:
             return None
@@ -286,6 +307,12 @@ def cpu_winsor_retry_tokens(
         tokens["attempt"] = int(attempt)
     if outcome is not None:
         tokens["outcome"] = str(outcome)
+    if next_action is not None:
+        tokens["next"] = str(next_action)
+    if available_ram_bytes is not None:
+        tokens["available_ram_bytes"] = int(available_ram_bytes)
+    if rss_bytes is not None:
+        tokens["rss_bytes"] = int(rss_bytes)
     return tokens
 
 
@@ -297,6 +324,7 @@ def cpu_winsor_refusal_tokens(
     estimated_tile_peak_bytes: int = 0,
     output_sci_wht_bytes: Optional[int] = None,
     reason: str,
+    next_action: str = "refusal",
 ) -> dict:
     """CPU_WINSOR_MEMORY_REFUSAL record tokens (truthful refusal).
 
@@ -305,13 +333,15 @@ def cpu_winsor_refusal_tokens(
     refusal) and the named output SCI/WHT serialization cost
     (``output_sci_wht_bytes``).  The full-image estimate is NOT presented as a
     "minimum": a tiled execution could in principle need far less than the
-    untiled full-image peak.
+    untiled full-image peak.  ``next_action`` records the explicit next step
+    (``refusal`` terminal, or ``fallback`` when a lower tier handles it).
     """
     tokens = {
         "scientific_n": int(scientific_n),
         "effective_budget_bytes": int(effective_budget_bytes),
         "estimated_full_peak_bytes": int(estimated_full_peak_bytes),
         "reason": reason,
+        "next": str(next_action),
     }
     if int(estimated_tile_peak_bytes):
         tokens["estimated_tile_peak_bytes"] = int(estimated_tile_peak_bytes)

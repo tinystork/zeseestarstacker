@@ -3753,12 +3753,16 @@ class SeestarQueuedStacker:
                         gpu_memory_mode=None, decision=None, cp_module=None):
             """Record executed=cpu AFTER the CPU reducer completed."""
             # Transport the already-resolved host plan + memmap outputs into
-            # the CPU fallback (no double plan, no orphan store).
+            # the CPU fallback (no double plan, no orphan store).  Pass RAW
+            # images + masks (Lot C): the CPU policy re-reads live RAM and
+            # resolves the geometry FIRST, then applies masks per-tile (tiled)
+            # or full-frame only after a FULL decision — never a blind
+            # full-frame masked copy before the memory decision.
             self._winsorized_host_ctx = (
                 host_plan, host_scratch, host_out_sci, host_out_wht
             )
             try:
-                out = fn_cpu(_masked_images(), weights, **kwargs)
+                out = fn_cpu(images, weights, masks=masks, **kwargs)
             finally:
                 self._winsorized_host_ctx = None
             _record_gpu_execution_safely(self,
@@ -4362,21 +4366,23 @@ class SeestarQueuedStacker:
             return rec
         return self._capture_cpu_memory_policy_preflight()
 
-    def _run_cpu_winsor_policy(self, imgs, w=None, **kw):
+    def _run_cpu_winsor_policy(self, imgs, w=None, masks=None, **kw):
         """Automatic CPU memory policy resolution + dispatch (stage E1).
 
         Called at EVERY CPU winsorized execution — the plain CPU path AND the
         GPU ``CPU_FALLBACK`` closure (no hidden legacy memory defaults, no
-        scientific-N subdivision).  Re-reads the RAM available NOW, recomputes
-        the named reserve, resolves ``effective_budget = min(policy_ceiling,
-        available_ram_now - reserve)`` through the pure policy module, emits
-        the per-execution provenance, then dispatches:
+        scientific-N subdivision).  Re-reads the RAM available + RSS NOW,
+        recomputes the named reserve, resolves ``effective_budget =
+        min(policy_ceiling, available_ram_now - reserve)`` through the pure
+        policy module, emits the per-execution provenance, then dispatches:
 
         * ``FULL_CPU`` -> queue wrapper ``_stack_winsorized_sigma`` (untiled)
-          with the explicit resolved budget;
+          with the explicit resolved budget (masks applied full-frame only here,
+          AFTER the decision — never a blind full-frame copy before it);
         * ``SPATIAL_TILED_CPU`` -> stage-C exact-N spatial tiled driver with
           the planner ``tile_shape`` and the explicit budget (bounded spatial
-          retry / minimum-tile refusal preserved inside the driver);
+          retry / minimum-tile refusal preserved inside the driver); masks are
+          applied PER TILE (no full-frame masked copy);
         * ``CPU_MEMORY_REFUSAL`` -> raises ``CpuWinsorMemoryRefused`` so stage
           D converts it into a truthful terminal FAILED (never an empty
           success, never a reduced N, never the subgroup path).
@@ -4397,6 +4403,7 @@ class SeestarQueuedStacker:
         available = self._cpu_available_ram_bytes_now()
         if available is None:
             available = 0
+        rss = self._cpu_process_rss_bytes()
         limits = tuple(kw.get("winsor_limits", self.winsor_limits))
         # Lot D: conjoint host-RAM plan.  When the GPU dispatch already resolved
         # the plan (CPU_FALLBACK), REUSE that context (no double plan, no orphan
@@ -4475,7 +4482,7 @@ class SeestarQueuedStacker:
         )
         self._emit_provenance_block(
             "CPU_WINSOR_MEMORY_DECISION",
-            cpu_winsor_decision_tokens(decision, available),
+            cpu_winsor_decision_tokens(decision, available, rss_bytes=rss),
         )
         if decision.is_refusal:
             # Lot D: a ``cpu_budget_negative`` (or minimum-tile) refusal becomes
@@ -4511,6 +4518,7 @@ class SeestarQueuedStacker:
                             min_tile_out=CPU_MIN_TILE_OUT,
                             out_result=host_out_sci,
                             out_sum_w=host_out_wht,
+                            masks=masks,
                             **kw,
                         )
                     finally:
@@ -4544,14 +4552,40 @@ class SeestarQueuedStacker:
         if decision.strategy == FULL_CPU and not host_plan.memmaps_outputs:
             if host_scratch is not None:
                 host_scratch.flush()
+            # Lot C: masks are applied full-frame ONLY here, AFTER the FULL
+            # decision (the untiled wrapper needs NaN-masked observations) —
+            # never a blind full-frame copy before the RAM decision.
+            if masks is not None:
+                masked_imgs = [
+                    _nan_mask_image(np.asarray(im), m)
+                    for im, m in zip(imgs, masks)
+                ]
+            else:
+                masked_imgs = imgs
             return self._stack_winsorized_sigma(
-                imgs, w, max_mem_bytes=budget, **kw
+                masked_imgs, w, max_mem_bytes=budget, **kw
             )
         # SPATIAL_TILED_CPU -> stage-C exact-N spatial tiled driver.  Also
         # used when the host plan demands disk-backed outputs (memmap_outputs):
         # the untiled wrapper materialises full-frame in-RAM SCI/WHT, so a
         # memmap-output plan must write per-tile via the tiled driver.
         def _record_spatial_retry(**retry):
+            # Lot C: attach the explicit next action + live measured state at
+            # retry time (available/RSS), keeping estimated vs measured
+            # separated and bounded.
+            outcome = retry.get("outcome")
+            if outcome == "retrying":
+                retry["next_action"] = "smaller_tile"
+            elif outcome == "exhausted":
+                retry["next_action"] = "refusal"
+            elif outcome == "recovered":
+                retry["next_action"] = "none"
+            avail = self._cpu_available_ram_bytes_now()
+            rss = self._cpu_process_rss_bytes()
+            if avail is not None:
+                retry["available_ram_bytes"] = int(avail)
+            if rss is not None:
+                retry["rss_bytes"] = int(rss)
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_RETRY",
                 cpu_winsor_retry_tokens(**retry),
@@ -4583,6 +4617,7 @@ class SeestarQueuedStacker:
                 _retry_callback=_record_spatial_retry,
                 out_result=host_out_sci,
                 out_sum_w=host_out_wht,
+                masks=masks,
                 **kw,
             )
             if host_scratch is not None:
@@ -16049,7 +16084,7 @@ class SeestarQueuedStacker:
                 # _gpu_reduce_winsorized.  The shared aligned images are never
                 # modified in place.
 
-                def _cpu_winsorized_auto(imgs, w=None, **_kw):
+                def _cpu_winsorized_auto(imgs, w=None, masks=None, **_kw):
                     # Automatic CPU memory policy closure: FULL_CPU -> untiled
                     # wrapper with the explicit resolved budget;
                     # SPATIAL_TILED_CPU -> stage-C exact-N tiled driver;
@@ -16057,7 +16092,7 @@ class SeestarQueuedStacker:
                     # truthful terminal FAILED).  Also the CPU_FALLBACK target
                     # of the GPU dispatch seam below (same policy, no hidden
                     # legacy memory defaults, no scientific-N subdivision).
-                    return self._run_cpu_winsor_policy(imgs, w, **_kw)
+                    return self._run_cpu_winsor_policy(imgs, w, masks=masks, **_kw)
 
                 # B7 + phase F (Track P4): when the policy backend is
                 # cupy, the adaptive VRAM execution planner

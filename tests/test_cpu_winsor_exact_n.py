@@ -382,6 +382,59 @@ def test_untiled_geometry_delegates_to_reference():
     assert ref[2] == tiled[2]
 
 
+def test_tiled_mask_applied_per_tile_matches_full_frame_mask():
+    """Lot C: the tiled driver applies a validity mask PER TILE (no full-frame
+    masked copy) and is bitwise-identical to the untiled reference run over
+    full-frame masked copies — the mask is a per-pixel NaN substitution, so
+    slice-then-mask == mask-then-slice."""
+    n, H, W = 20, 24, 20
+    rng = np.random.default_rng(23)
+    imgs = [
+        rng.normal(100.0, 10.0, size=(H, W)).astype(np.float32)
+        for _ in range(n)
+    ]
+    # A validity mask with some invalid pixels (False -> NaN in the reducer).
+    masks = [rng.random((H, W)) > 0.15 for _ in range(n)]
+
+    def _nan_mask(img, m):
+        return np.where(m, img, np.nan)
+
+    masked_imgs = [_nan_mask(im, m) for im, m in zip(imgs, masks)]
+    ref = _full_ref(masked_imgs, None, (0.05, 0.05), True)
+
+    tiled = stack_winsorized_sigma_cpu_tiled(
+        imgs, None, tile_shape=(8,), return_weights=True, masks=masks
+    )
+    assert np.array_equal(ref[0], tiled[0])
+    assert np.array_equal(ref[1], tiled[1])
+    assert ref[2] == tiled[2]
+
+
+def test_tiled_rgb_mask_applied_per_tile_matches_full_frame_mask():
+    """Lot C: RGB per-tile mask application is bitwise-identical to the
+    full-frame masked reference (mask broadcast over channels)."""
+    n, H, W = 19, 16, 12
+    rng = np.random.default_rng(29)
+    imgs = [
+        rng.normal(100.0, 10.0, size=(H, W, 3)).astype(np.float32)
+        for _ in range(n)
+    ]
+    masks = [rng.random((H, W)) > 0.2 for _ in range(n)]
+
+    def _nan_mask_rgb(img, m):
+        return np.where(m[..., None], img, np.nan)
+
+    masked_imgs = [_nan_mask_rgb(im, m) for im, m in zip(imgs, masks)]
+    ref = _full_ref(masked_imgs, None, (0.05, 0.05), True)
+
+    tiled = stack_winsorized_sigma_cpu_tiled(
+        imgs, None, tile_shape=(8,), return_weights=True, masks=masks
+    )
+    assert np.array_equal(ref[0], tiled[0])
+    assert np.array_equal(ref[1], tiled[1])
+    assert ref[2] == tiled[2]
+
+
 def test_rank_regime_consistency_with_planner():
     for n in (10, 20, 36, 50):
         assert winsor_zero_rank_regime((0.05, 0.05), n) == (

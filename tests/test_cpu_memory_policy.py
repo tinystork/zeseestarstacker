@@ -250,6 +250,55 @@ def test_ram_sweep_refusal_when_effective_budget_cannot_host_min_tile():
     )
 
 
+def test_m74_case_never_chooses_blind_full_allocation():
+    """Lot C: the M74 witness (N=3 RGB 2822x4144, ~1.50 GiB available) must
+    NEVER choose a blind full-frame allocation — it picks a spatial tile whose
+    modeled demand fits the reserve, or refuses cleanly (no ~1.12 GiB blind
+    attempt)."""
+    d = cmp.resolve_cpu_winsor_decision(
+        mode=MODE_AUTO,
+        n=3,
+        frame_shape=(2822, 4144),
+        channels=3,
+        dtype_itemsize=4,
+        winsor_limits=(0.05, 0.05),
+        available_ram_bytes=int(1.50 * GIB),
+    )
+    # Either a genuine spatial tile compatible with the reserve, or a clean
+    # refusal — never FULL_CPU (the full-frame peak ~4.8 GiB cannot fit).
+    assert d.strategy in (SPATIAL_TILED_CPU, CPU_MEMORY_REFUSAL)
+    assert d.n == 3
+    if d.strategy == SPATIAL_TILED_CPU:
+        assert d.tile_shape is not None
+        # A full-width band strictly shorter than the full frame (>= 2 tiles).
+        assert d.tile_shape[0] < 2822
+        assert d.n_tiles >= 2
+        assert d.per_tile_peak_bytes <= d.effective_budget_bytes
+    else:
+        assert d.reason in (
+            "cpu_budget_negative",
+            "cpu_min_tile_exceeds_budget",
+            "cpu_no_valid_tile",
+        )
+
+
+def test_m74_case_low_ram_refuses_cleanly():
+    """Lot C: with only ~360 MiB available (the post-GPU-OOM state), the plan
+    refuses cleanly (a negative budget is never silently treated as a huge
+    blind attempt)."""
+    d = cmp.resolve_cpu_winsor_decision(
+        mode=MODE_AUTO,
+        n=3,
+        frame_shape=(2822, 4144),
+        channels=3,
+        dtype_itemsize=4,
+        winsor_limits=(0.05, 0.05),
+        available_ram_bytes=360 * MIB,
+    )
+    assert d.strategy in (SPATIAL_TILED_CPU, CPU_MEMORY_REFUSAL)
+    assert d.n == 3
+
+
 # ---------------------------------------------------------------------------
 # 2. Pure module: AUTO vs OVERRIDE + runtime re-evaluation formula.
 # ---------------------------------------------------------------------------
@@ -572,11 +621,11 @@ def test_real_spatial_retry_recovers_and_batch_commits(
     original_run = cw._run_tiled_geometry
     calls = []
 
-    def fail_initial_then_run(images, frame_shape, spatial, *args, **kwargs):
+    def fail_initial_then_run(images, masks, frame_shape, spatial, *args, **kwargs):
         calls.append((len(images), spatial[0]))
         if len(calls) == 1:
             raise MemoryError("deterministic initial tile allocation failure")
-        return original_run(images, frame_shape, spatial, *args, **kwargs)
+        return original_run(images, masks, frame_shape, spatial, *args, **kwargs)
 
     monkeypatch.setattr(cw, "_run_tiled_geometry", fail_initial_then_run)
     lines = _lines(o)
@@ -616,7 +665,7 @@ def test_real_spatial_retry_exhaustion_is_unconsumed(
 
     calls = []
 
-    def always_oom(images, frame_shape, spatial, *args, **kwargs):
+    def always_oom(images, masks, frame_shape, spatial, *args, **kwargs):
         calls.append((len(images), spatial[0]))
         raise MemoryError("deterministic allocation exhaustion")
 
@@ -626,15 +675,16 @@ def test_real_spatial_retry_exhaustion_is_unconsumed(
     with pytest.raises(BatchReductionError):
         o._process_completed_batch(items, 1, 1, None)
 
-    assert len(calls) == 5  # initial + default max_retries=4
+    assert len(calls) == 4  # initial + default max_retries=3
     assert all(n == 20 for n, _ in calls)
     assert o.stacked_batches_count == 0
     assert o.images_in_cumulative_stack == 0
     assert all(os.path.exists(path) for path in paths)
     assert not (source_dir / "stacked").exists()
     retry_lines = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_RETRY ")]
-    assert len(retry_lines) == 5
+    assert len(retry_lines) == 4
     assert "outcome=exhausted" in retry_lines[-1]
+    assert "next=refusal" in retry_lines[-1]
     assert any(l.startswith("CPU_WINSOR_MEMORY_REFUSAL ") for l in lines)
 
 
