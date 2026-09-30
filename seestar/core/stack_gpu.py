@@ -876,6 +876,10 @@ def stack_winsorized_sigma_gpu(
     ``(result, sum_w, rejected_pct)`` — all arrays NumPy float32
     (``cp.asnumpy`` before return), rejected_pct a Python float.
     """
+    # Reset the thread-local context before any setup call can fail; otherwise
+    # an early failure could inherit the phase/tile from a previous reduction
+    # executed on the same worker thread.
+    _set_stage("full_setup")
     cp = _get_cupy()
     _set_stage("full")
     _ensure_probe()
@@ -1409,6 +1413,8 @@ def stack_winsorized_sigma_gpu_tiled(
     placement only, no blend/feather/halo) and ``rejected_pct`` is the
     global sum/sum formula.
     """
+    # Same stale-context guard as the untiled twin, before CuPy/probe setup.
+    _set_stage("tiled_setup")
     cp = _get_cupy()
     _ensure_probe()
     _p_event("tiled_fn_start")

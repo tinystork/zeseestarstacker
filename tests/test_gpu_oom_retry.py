@@ -33,6 +33,7 @@ import logging
 import numpy as np
 import pytest
 
+import seestar.core.stack_gpu as stack_gpu_module
 import seestar.queuep.queue_manager as queue_manager_module
 from seestar.queuep.queue_manager import (
     GPU_EXEC_REASON_GPU_KERNEL,
@@ -64,6 +65,25 @@ except Exception:  # pragma: no cover - non-GPU hosts
 
 GIB = 1024 ** 3
 MIB = 1024 ** 2
+
+
+def test_stage_context_resets_before_gpu_setup(monkeypatch):
+    """An early setup failure belongs to the current call, never to the last
+    tiled/full reduction that happened on the same thread."""
+    stack_gpu_module._set_stage("tiled_pass2", 99)
+
+    def setup_boom():
+        raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(stack_gpu_module, "_get_cupy", setup_boom)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        stack_gpu_module.stack_winsorized_sigma_gpu([])
+    assert stack_gpu_module.winsor_gpu_last_stage() == ("full_setup", None)
+
+    stack_gpu_module._set_stage("full", None)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        stack_gpu_module.stack_winsorized_sigma_gpu_tiled([], tile_shape=(1,))
+    assert stack_gpu_module.winsor_gpu_last_stage() == ("tiled_setup", None)
 
 
 # ---------------------------------------------------------------------------
