@@ -292,13 +292,23 @@ def cpu_winsor_retry_tokens(
     next_action: Optional[str] = None,
     available_ram_bytes: Optional[int] = None,
     rss_bytes: Optional[int] = None,
+    error_type: Optional[str] = None,
+    measured_available_at_attempt_start_bytes: Optional[int] = None,
+    measured_rss_at_attempt_start_bytes: Optional[int] = None,
+    measured_available_pre_cleanup_bytes: Optional[int] = None,
+    measured_rss_pre_cleanup_bytes: Optional[int] = None,
+    measured_available_post_cleanup_bytes: Optional[int] = None,
+    measured_rss_post_cleanup_bytes: Optional[int] = None,
 ) -> dict:
     """CPU_WINSOR_MEMORY_RETRY record tokens (only on a bounded allocation
     retry; spatial tile shapes only).  ``next_action`` records the explicit
     next step (``smaller_tile`` while another attempt follows, ``refusal``
     once the bounded sequence is exhausted, ``none`` on recovery).
     ``available_ram_bytes`` / ``rss_bytes`` are MEASURED live at retry time
-    (estimated demand is separate — estimated != measured)."""
+    (estimated demand is separate — estimated != measured).  The
+    ``measured_*`` namespaces carry the scalar at-attempt-start /
+    pre-cleanup / post-cleanup RAM + RSS samples (Lot C rework-2); only
+    bounded scalars, never a traceback/exception/array."""
     def _shape_token(shape):
         if shape is None:
             return None
@@ -321,6 +331,32 @@ def cpu_winsor_retry_tokens(
         tokens["available_ram_bytes"] = int(available_ram_bytes)
     if rss_bytes is not None:
         tokens["rss_bytes"] = int(rss_bytes)
+    if error_type is not None:
+        tokens["error_type"] = str(error_type)
+    if measured_available_at_attempt_start_bytes is not None:
+        tokens["measured_available_at_attempt_start"] = int(
+            measured_available_at_attempt_start_bytes
+        )
+    if measured_rss_at_attempt_start_bytes is not None:
+        tokens["measured_rss_at_attempt_start"] = int(
+            measured_rss_at_attempt_start_bytes
+        )
+    if measured_available_pre_cleanup_bytes is not None:
+        tokens["measured_available_pre_cleanup"] = int(
+            measured_available_pre_cleanup_bytes
+        )
+    if measured_rss_pre_cleanup_bytes is not None:
+        tokens["measured_rss_pre_cleanup"] = int(
+            measured_rss_pre_cleanup_bytes
+        )
+    if measured_available_post_cleanup_bytes is not None:
+        tokens["measured_available_post_cleanup"] = int(
+            measured_available_post_cleanup_bytes
+        )
+    if measured_rss_post_cleanup_bytes is not None:
+        tokens["measured_rss_post_cleanup"] = int(
+            measured_rss_post_cleanup_bytes
+        )
     return tokens
 
 

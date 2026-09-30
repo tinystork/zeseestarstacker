@@ -4462,56 +4462,65 @@ class SeestarQueuedStacker:
         dtype_isize = int(np.asarray(frame).dtype.itemsize)
         apply_rewinsor = bool(kw.get("apply_rewinsor", True))
 
-        # Lot C rework-1: resolve the conjoint host-RAM plan LIVE (never a
-        # stale pre-GPU plan — the GPU fallback discards any partial scratch
-        # and forces re-planning).  Host refusal / scratch failure is a
-        # CONTROLLED refusal.  (spill is never selected: freed_input_bytes=0.)
-        host_plan, _a, _r, _res, _resid, _out = (
-            self._winsorized_host_ram_plan(imgs, masks, n, (H, W), C)
-        )
-        if host_plan.is_refusal:
-            self._emit_provenance_block(
-                "WINSOR_HOST_RAM_REFUSAL",
-                {
-                    "reason": host_plan.reason or "host_refusal",
-                    "scientific_n": host_plan.n,
-                    "available_ram_bytes": host_plan.available_ram_bytes,
-                    "reserve_bytes": host_plan.reserve_bytes,
-                    "effective_budget_bytes": host_plan.effective_budget_bytes,
-                },
+        # Lot C rework-2: resolve the conjoint host-RAM plan LIVE per attempt
+        # (a post-OOM RAM drop can flip in_memory -> memmap/refusal).  Host
+        # refusal / scratch failure is a CONTROLLED terminal refusal.
+        def _resolve_host_live():
+            host_plan, _a, _r, _res, _resid, _out = (
+                self._winsorized_host_ram_plan(imgs, masks, n, (H, W), C)
             )
-            raise CpuWinsorMemoryRefused(
-                host_plan.reason or "host_refusal",
-                details={
-                    "n": host_plan.n,
-                    "available_ram_bytes": host_plan.available_ram_bytes,
-                    "reserve_bytes": host_plan.reserve_bytes,
-                    "effective_budget_bytes": host_plan.effective_budget_bytes,
-                },
-            )
-        host_scratch = None
-        host_out_sci = None
-        host_out_wht = None
-        if host_plan.memmaps_outputs:
-            try:
-                host_scratch = self._make_winsorized_scratch()
-                self._register_winsorized_scratch(host_scratch)
-                host_out_sci, host_out_wht = self._winsorized_memmap_outputs(
-                    (H, W), C, host_scratch
-                )
-            except Exception as exc:
-                self._cleanup_winsorized_scratch()
+            if host_plan.is_refusal:
                 self._emit_provenance_block(
                     "WINSOR_HOST_RAM_REFUSAL",
-                    {"reason": "scratch_failure", "error": str(exc)},
+                    {
+                        "reason": host_plan.reason or "host_refusal",
+                        "scientific_n": host_plan.n,
+                        "available_ram_bytes": host_plan.available_ram_bytes,
+                        "reserve_bytes": host_plan.reserve_bytes,
+                        "effective_budget_bytes":
+                            host_plan.effective_budget_bytes,
+                    },
                 )
                 raise CpuWinsorMemoryRefused(
-                    "scratch_failure", details={"error": str(exc)}
-                ) from exc
+                    host_plan.reason or "host_refusal",
+                    details={
+                        "n": host_plan.n,
+                        "available_ram_bytes": host_plan.available_ram_bytes,
+                        "reserve_bytes": host_plan.reserve_bytes,
+                        "effective_budget_bytes":
+                            host_plan.effective_budget_bytes,
+                    },
+                )
+            host_scratch = None
+            host_out_sci = None
+            host_out_wht = None
+            if host_plan.memmaps_outputs:
+                try:
+                    host_scratch = self._make_winsorized_scratch()
+                    self._register_winsorized_scratch(host_scratch)
+                    host_out_sci, host_out_wht = (
+                        self._winsorized_memmap_outputs(
+                            (H, W), C, host_scratch
+                        )
+                    )
+                except Exception as exc:
+                    self._cleanup_winsorized_scratch()
+                    self._emit_provenance_block(
+                        "WINSOR_HOST_RAM_REFUSAL",
+                        {"reason": "scratch_failure", "error": str(exc)},
+                    )
+                    raise CpuWinsorMemoryRefused(
+                        "scratch_failure", details={"error": str(exc)}
+                    ) from exc
+            return host_plan, host_scratch, host_out_sci, host_out_wht
 
         max_attempts = 3
         force_spatial = False
         max_tile_outputs = None
+        host_plan = None
+        host_scratch = None
+        host_out_sci = None
+        host_out_wht = None
 
         def _emit_refusal(decision, budget, reason):
             self._emit_provenance_block(
@@ -4529,7 +4538,7 @@ class SeestarQueuedStacker:
                 ),
             )
             if host_scratch is not None:
-                host_scratch.cleanup()
+                self._discard_winsorized_scratch(host_scratch)
             raise CpuWinsorMemoryRefused(
                 reason or REASON_NO_VALID_TILE,
                 details={
@@ -4541,6 +4550,11 @@ class SeestarQueuedStacker:
             )
 
         for attempt in range(1, max_attempts + 1):
+            # Fresh LIVE host plan per attempt (never reuse a partially-written
+            # scratch from a prior failed attempt).
+            host_plan, host_scratch, host_out_sci, host_out_wht = (
+                _resolve_host_live()
+            )
             available = self._cpu_available_ram_bytes_now()
             if available is None:
                 available = 0
@@ -4610,6 +4624,9 @@ class SeestarQueuedStacker:
                 )
 
             budget = decision.effective_budget_bytes
+            masked_imgs = None
+            out = None
+            error_type = None
             try:
                 if decision.strategy == FULL_CPU and not host_plan.memmaps_outputs:
                     # Lot C: masks applied full-frame ONLY here, AFTER the
@@ -4634,7 +4651,7 @@ class SeestarQueuedStacker:
                         )
                         if tile_shape is None:
                             if host_scratch is not None:
-                                host_scratch.cleanup()
+                                self._discard_winsorized_scratch(host_scratch)
                             raise CpuWinsorMemoryRefused(
                                 REASON_NO_VALID_TILE,
                                 details={
@@ -4662,34 +4679,61 @@ class SeestarQueuedStacker:
                 # Terminal planner refusal (a MemoryError subclass): never
                 # treat it as a retryable allocation OOM.
                 _emit_refusal(decision, budget, ref.reason)
-            except MemoryError:
-                # Recoverable allocation failure: contract + live-replan.
-                gc.collect()
-                if decision.strategy == FULL_CPU:
-                    force_spatial = True
-                    max_tile_outputs = max(CPU_MIN_TILE_OUT, s_full // 2)
-                else:
-                    force_spatial = True
-                    max_tile_outputs = max(
-                        CPU_MIN_TILE_OUT, decision.tile_outputs // 2
-                    )
-                if attempt >= max_attempts:
-                    _emit_refusal(
-                        decision, budget, REASON_MIN_TILE_EXCEEDS_BUDGET
-                    )
-                self._emit_provenance_block(
-                    "CPU_WINSOR_MEMORY_RETRY",
-                    cpu_winsor_retry_tokens(
-                        old_tile_shape=decision.tile_shape,
-                        new_tile_shape=None,
-                        reason="allocation_failure",
-                        attempt=attempt,
-                        outcome="retrying",
-                        next_action="smaller_tile",
-                        available_ram_bytes=int(available),
-                        rss_bytes=int(rss) if rss is not None else None,
-                    ),
+            except MemoryError as exc:
+                # Bounded scalar only — the exception/traceback is dropped here
+                # (never retained into the event or the next attempt).
+                error_type = type(exc).__name__
+
+            # ---- exited the except: drop refs, then measure pre-cleanup ----
+            # (masked_imgs / out may still reference the failed FULL-frame
+            # masked copies + reducer output: release them BEFORE gc so the
+            # post-cleanup sample is honest).
+            masked_imgs = None
+            out = None
+            pre_avail = self._cpu_available_ram_bytes_now()
+            pre_rss = self._cpu_process_rss_bytes()
+            if host_scratch is not None:
+                # Discard any partially-written memmap from the failed attempt
+                # AND remove it from the registry (never a stale/partial store).
+                self._discard_winsorized_scratch(host_scratch)
+                host_scratch = None
+                host_out_sci = None
+                host_out_wht = None
+            gc.collect()
+            post_avail = self._cpu_available_ram_bytes_now()
+            post_rss = self._cpu_process_rss_bytes()
+
+            # Recoverable allocation failure: contract + live-replan.
+            if decision.strategy == FULL_CPU:
+                force_spatial = True
+                max_tile_outputs = max(CPU_MIN_TILE_OUT, s_full // 2)
+            else:
+                force_spatial = True
+                max_tile_outputs = max(
+                    CPU_MIN_TILE_OUT, decision.tile_outputs // 2
                 )
+            if attempt >= max_attempts:
+                _emit_refusal(
+                    decision, budget, REASON_MIN_TILE_EXCEEDS_BUDGET
+                )
+            self._emit_provenance_block(
+                "CPU_WINSOR_MEMORY_RETRY",
+                cpu_winsor_retry_tokens(
+                    old_tile_shape=decision.tile_shape,
+                    new_tile_shape=None,
+                    reason="allocation_failure",
+                    attempt=attempt,
+                    outcome="retrying",
+                    next_action="smaller_tile",
+                    error_type=error_type,
+                    measured_available_at_attempt_start_bytes=available,
+                    measured_rss_at_attempt_start_bytes=rss,
+                    measured_available_pre_cleanup_bytes=pre_avail,
+                    measured_rss_pre_cleanup_bytes=pre_rss,
+                    measured_available_post_cleanup_bytes=post_avail,
+                    measured_rss_post_cleanup_bytes=post_rss,
+                ),
+            )
         # Unreachable in practice: the loop returns on success or raises.
         raise CpuWinsorMemoryRefused(
             REASON_MIN_TILE_EXCEEDS_BUDGET,

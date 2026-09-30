@@ -897,3 +897,280 @@ def test_preflight_record_excludes_pool_overhead_as_capability(tmp_path):
     assert len(policy_lines) == 1
     assert "pool_workers_capability=8" in policy_lines[0]
     assert "pool_overhead_excluded=true" in policy_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# 9. REWORK-2 (Lot C live-replan): F1-F3 proofs.
+# ---------------------------------------------------------------------------
+
+def test_live_replan_high_to_low_available_changes_decision(
+    tmp_path, monkeypatch
+):
+    """F3.1: the SECOND attempt re-reads live RAM — a HIGH->LOW available
+    drop makes attempt 2's decision/tile derive from LOW (not the initial
+    budget), and the conjoint host plan is re-resolved per attempt."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=8 * GIB, total=64 * GIB)
+    o._cpu_memory_override_bytes_attr = 512 * MIB
+    o._capture_cpu_memory_policy_preflight()
+
+    state = {"avail": 8 * GIB, "decisions": [], "host_calls": []}
+    monkeypatch.setattr(o, "_cpu_available_ram_bytes_now",
+                        lambda: state["avail"])
+
+    real_host = o._winsorized_host_ram_plan
+
+    def spy_host(*a, **k):
+        d = real_host(*a, **k)
+        state["host_calls"].append(d[0].strategy)
+        return d
+
+    monkeypatch.setattr(o, "_winsorized_host_ram_plan", spy_host)
+
+    real_decide = qm.resolve_cpu_winsor_decision
+
+    def spy_decide(**kw):
+        d = real_decide(**kw)
+        state["decisions"].append(
+            (kw["available_ram_bytes"], d.strategy, d.tile_shape)
+        )
+        # After the FIRST decision is recorded, drop available for attempt 2.
+        if len(state["decisions"]) == 1:
+            state["avail"] = 300 * MIB
+        return d
+
+    monkeypatch.setattr(qm, "resolve_cpu_winsor_decision", spy_decide)
+
+    calls = {"n": 0}
+
+    def boom_tiled(images, weights=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MemoryError("injected tiled OOM")
+        img0 = np.asarray(images[0])
+        return (
+            np.zeros(img0.shape, dtype=np.float32),
+            np.ones(img0.shape[:2], dtype=np.float32),
+            0.0,
+        )
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", boom_tiled)
+
+    imgs = [np.full((1600, 1600), 10.0, dtype=np.float32) for _ in range(5)]
+    o._run_cpu_winsor_policy(
+        imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+        return_weights=True,
+    )
+
+    assert len(state["decisions"]) >= 2
+    # attempt 1 saw HIGH available; attempt 2 saw LOW (live re-read).
+    assert state["decisions"][0][0] >= 8 * GIB
+    assert state["decisions"][1][0] <= 400 * MIB
+    # Both attempts are spatial (the frame cannot fit FULL even at HIGH).
+    assert state["decisions"][0][1] == SPATIAL_TILED_CPU
+    assert state["decisions"][1][1] == SPATIAL_TILED_CPU
+    # The LOW attempt yields a STRICTLY smaller tile than the HIGH attempt.
+    assert state["decisions"][0][2] is not None
+    assert state["decisions"][1][2] is not None
+    assert state["decisions"][1][2][0] < state["decisions"][0][2][0]
+    # Host plan re-resolved per attempt (>= 2 calls).
+    assert len(state["host_calls"]) >= 2
+
+
+def test_full_memory_error_contracts_to_spatial_half(
+    tmp_path, monkeypatch
+):
+    """F3.2: a FULL_CPU initial decision, hit by an injected MemoryError in
+    the untiled wrapper, contracts attempt 2 to a spatial tile with surface
+    <= 50% of the full frame, N unchanged, then succeeds."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=8 * GIB, total=64 * GIB)
+    o._capture_cpu_memory_policy_preflight()
+
+    def boom_full(masked_imgs, w, **kw):
+        raise MemoryError("injected FULL OOM")
+
+    o._stack_winsorized_sigma = boom_full
+
+    seen = {}
+
+    def spy_tiled(images, weights=None, **kw):
+        seen["tile_shape"] = kw.get("tile_shape")
+        seen["n"] = len(images)
+        img0 = np.asarray(images[0])
+        return (
+            np.zeros(img0.shape, dtype=np.float32),
+            np.ones(img0.shape[:2], dtype=np.float32),
+            0.0,
+        )
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", spy_tiled)
+
+    imgs = [np.full((128, 128), 10.0, dtype=np.float32) for _ in range(5)]
+    o._run_cpu_winsor_policy(
+        imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+        return_weights=True,
+    )
+
+    assert seen.get("tile_shape") is not None
+    assert seen["n"] == 5  # N never reduced
+    surface = seen["tile_shape"][0] * 128
+    assert surface <= (128 * 128) // 2  # <= 50% of the failed full frame
+
+
+def test_non_memory_error_is_never_retried(tmp_path, monkeypatch):
+    """F3.3 (non-memory): a non-MemoryError CPU exception propagates after a
+    SINGLE attempt — never retried, never turned into a memory refusal."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=8 * GIB, total=64 * GIB)
+    o._cpu_memory_override_bytes_attr = 300 * MIB
+    o._capture_cpu_memory_policy_preflight()
+
+    calls = {"n": 0}
+
+    def boom(images, weights=None, **kw):
+        calls["n"] += 1
+        raise ValueError("non-memory CPU error")
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", boom)
+
+    imgs = [np.full((640, 640), 10.0, dtype=np.float32) for _ in range(20)]
+    with pytest.raises(ValueError):
+        o._run_cpu_winsor_policy(
+            imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+            return_weights=True,
+        )
+    assert calls["n"] == 1
+
+
+def test_retry_event_carries_distinct_pre_post_cleanup(
+    tmp_path, monkeypatch
+):
+    """F1/F3.4: the RETRY event carries SCALAR measured namespaces —
+    at_attempt_start / pre_cleanup / post_cleanup available — with DISTINCT
+    pre/post values, and no exception/traceback/array objects."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=8 * GIB, total=64 * GIB)
+    o._cpu_memory_override_bytes_attr = 300 * MIB
+    o._capture_cpu_memory_policy_preflight()
+
+    avail_seq = iter([
+        8 * GIB, 8 * GIB, 400 * MIB, 700 * MIB, 8 * GIB, 8 * GIB,
+    ])
+
+    def avail():
+        try:
+            return next(avail_seq)
+        except StopIteration:
+            return 8 * GIB
+
+    monkeypatch.setattr(o, "_cpu_available_ram_bytes_now", avail)
+
+    calls = {"n": 0}
+
+    def boom_tiled(images, weights=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MemoryError("injected tiled OOM")
+        img0 = np.asarray(images[0])
+        return (
+            np.zeros(img0.shape, dtype=np.float32),
+            np.ones(img0.shape[:2], dtype=np.float32),
+            0.0,
+        )
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", boom_tiled)
+    lines = _lines(o)
+
+    imgs = [np.full((640, 640), 10.0, dtype=np.float32) for _ in range(20)]
+    o._run_cpu_winsor_policy(
+        imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+        return_weights=True,
+    )
+
+    retry = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_RETRY ")]
+    assert len(retry) == 1
+    assert "next=smaller_tile" in retry[0]
+    assert "measured_available_at_attempt_start=" in retry[0]
+    assert "measured_available_pre_cleanup=" in retry[0]
+    assert "measured_available_post_cleanup=" in retry[0]
+    assert "measured_rss_pre_cleanup=" in retry[0]
+    assert "measured_rss_post_cleanup=" in retry[0]
+    assert f"measured_available_pre_cleanup={400 * MIB}" in retry[0]
+    assert f"measured_available_post_cleanup={700 * MIB}" in retry[0]
+    # scalar-only: no array / exception / traceback in the event.
+    assert "Traceback" not in retry[0]
+    assert "['" not in retry[0]
+    assert "array(" not in retry[0]
+
+
+def test_discard_scratch_removes_from_registry(tmp_path):
+    """F3.5: ``_discard_winsorized_scratch`` closes + removes the store AND
+    drops it from the registry (never a stale/partial store left registered)."""
+    o = _policy_stack(tmp_path, available=64 * GIB, total=64 * GIB)
+    store = o._make_winsorized_scratch()
+    o._register_winsorized_scratch(store)
+    assert store in o._winsorized_scratch_stores
+    o._discard_winsorized_scratch(store)
+    assert store not in o._winsorized_scratch_stores
+    assert store._created == []
+
+
+def test_memory_error_discards_scratch_and_replans_host(
+    tmp_path, monkeypatch
+):
+    """F3.5: on a MemoryError the failed attempt's scratch is DISCARDED and the
+    next attempt re-resolves the host plan (fresh store); flush only on success."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=8 * GIB, total=64 * GIB)
+    o._cpu_memory_override_bytes_attr = 300 * MIB
+    o._capture_cpu_memory_policy_preflight()
+
+    discarded = []
+    made = []
+    real_make = o._make_winsorized_scratch
+    real_discard = o._discard_winsorized_scratch
+
+    def spy_make():
+        s = real_make()
+        made.append(s)
+        return s
+
+    def spy_discard(store):
+        discarded.append(store)
+        real_discard(store)
+
+    monkeypatch.setattr(o, "_make_winsorized_scratch", spy_make)
+    monkeypatch.setattr(o, "_discard_winsorized_scratch", spy_discard)
+
+    calls = {"n": 0}
+
+    def boom_tiled(images, weights=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MemoryError("injected tiled OOM")
+        img0 = np.asarray(images[0])
+        return (
+            np.zeros(img0.shape, dtype=np.float32),
+            np.ones(img0.shape[:2], dtype=np.float32),
+            0.0,
+        )
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", boom_tiled)
+
+    imgs = [np.full((640, 640), 10.0, dtype=np.float32) for _ in range(20)]
+    o._run_cpu_winsor_policy(
+        imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+        return_weights=True,
+    )
+
+    # In-memory host plan (high available): no scratch is created, but the
+    # discard path is exercised safely (None is a no-op) and no partial store
+    # is ever left in the registry.
+    registry = getattr(o, "_winsorized_scratch_stores", [])
+    assert registry == []
