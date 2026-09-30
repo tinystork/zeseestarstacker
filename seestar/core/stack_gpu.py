@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import math as _math
 import os as _os
+import threading as _threading
 import time as _time
 
 import numpy as np
@@ -94,6 +95,33 @@ __all__ = [
     "stack_winsorized_sigma_gpu",
     "stack_winsorized_sigma_gpu_tiled",
 ]
+
+# ---------------------------------------------------------------------------
+# Lot B telemetry: always-on, bounded stage tracker (phase + tile index).
+#
+# Two scalars only (a short phase string and an int-or-None tile index), held
+# in a thread-local so concurrent reductions never cross-contaminate.  The OOM
+# recovery seam reads ``winsor_gpu_last_stage()`` after a failure to report the
+# responsible phase/tile WITHOUT retaining any array or traceback.  This is a
+# pure diagnostic: it never touches data, control flow or results.
+# ---------------------------------------------------------------------------
+
+_stage_tls = _threading.local()
+
+
+def _set_stage(phase, tile_index=None):
+    """Record the current reduction phase + tile index (bounded scalars)."""
+    _stage_tls.phase = phase
+    _stage_tls.tile_index = tile_index
+
+
+def winsor_gpu_last_stage():
+    """Return ``(phase, tile_index)`` of the last recorded stage, or
+    ``(None, None)`` when none was recorded yet.  Scalars only."""
+    return (
+        getattr(_stage_tls, "phase", None),
+        getattr(_stage_tls, "tile_index", None),
+    )
 
 _cupy_module = None
 
@@ -849,6 +877,7 @@ def stack_winsorized_sigma_gpu(
     (``cp.asnumpy`` before return), rejected_pct a Python float.
     """
     cp = _get_cupy()
+    _set_stage("full")
     _ensure_probe()
     _p_event("gpu_fn_start")
     if _PROBE is None:
@@ -1427,6 +1456,7 @@ def stack_winsorized_sigma_gpu_tiled(
     else:
         global_counts = [0] * int(max_iters)
         for t, (y0, y1, x0, x1) in enumerate(spatial):
+            _set_stage("tiled_pass1", t)
             arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
             _p_event("tiled_p1_tile%d" % t)
             _mask_t, counts = _winsorized_tile_iterations_cp(
@@ -1471,6 +1501,7 @@ def stack_winsorized_sigma_gpu_tiled(
     n_valid_total = 0
     n_surv_total = 0
     for t, (y0, y1, x0, x1) in enumerate(spatial):
+        _set_stage("tiled_pass2", t)
         arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
         _p_event("tiled_p2_tile%d" % t)
         valid_t = ~cp.isnan(arr_t)

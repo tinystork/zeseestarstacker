@@ -282,6 +282,7 @@ from seestar.core.stack_gpu import (
     stack_median_gpu,
     stack_winsorized_sigma_gpu,
     stack_winsorized_sigma_gpu_tiled,
+    winsor_gpu_last_stage,
 )
 from seestar.core.gpu_vram_planner import (
     CPU_FALLBACK,
@@ -673,6 +674,50 @@ def _winsorized_gpu_oom_kind(exc, cp):
     except Exception:
         pass
     return "kernel"
+
+
+def _winsorized_exc_scalars(exc):
+    """Return ``(error_type, bounded_message)`` scalars for a caught exception.
+
+    The message is whitespace-collapsed and truncated so an event/log never
+    carries an unbounded provider text, a traceback or an array.  The caller
+    must drop the exception object as soon as these two scalars are captured.
+    """
+    etype = type(exc).__name__
+    try:
+        msg = " ".join(str(exc).split())
+    except Exception:
+        msg = ""
+    return etype, msg[:200]
+
+
+def _winsorized_vram_sample(cp):
+    """Sample driver free/total + pool used/total/free as bounded scalars.
+
+    Returns a dict keyed by stable short names with ``None`` values on query
+    failure.  Never raises; never carries a device object / traceback / array.
+    """
+    s = {
+        "driver_free": None,
+        "driver_total": None,
+        "pool_used": None,
+        "pool_total": None,
+        "pool_free": None,
+    }
+    try:
+        free, total = cp.cuda.runtime.memGetInfo()
+        s["driver_free"] = int(free)
+        s["driver_total"] = int(total)
+    except Exception:
+        pass
+    try:
+        pool = cp.get_default_memory_pool()
+        s["pool_used"] = int(pool.used_bytes())
+        s["pool_total"] = int(pool.total_bytes())
+        s["pool_free"] = int(pool.free_bytes())
+    except Exception:
+        pass
+    return s
 
 
 def _winsorized_oom_cleanup(cp):
@@ -3920,24 +3965,13 @@ class SeestarQueuedStacker:
                     mode = decision.kind
                     tile = decision.tile_shape
 
-                vram_free = None
-                vram_pool_free = None
-                vram_total = None
-                vram_pool_used = None
-                vram_pool_total = None
-                try:
-                    vram_free, vram_total = cp.cuda.runtime.memGetInfo()
-                except Exception:
-                    pass
-                try:
-                    _pool = cp.get_default_memory_pool()
-                    vram_pool_free = _pool.free_bytes()
-                    vram_pool_used = _pool.used_bytes()
-                    vram_pool_total = _pool.total_bytes()
-                except Exception:
-                    pass
+                vram_at_start = _winsorized_vram_sample(cp)
 
                 error_kind = None
+                error_type = None
+                error_message = None
+                oom_phase = None
+                oom_tile_index = None
                 try:
                     if mode == FULL_GPU:
                         out = stack_winsorized_sigma_gpu(
@@ -3954,9 +3988,11 @@ class SeestarQueuedStacker:
                             **kwargs,
                         )
                 except Exception as exc:
-                    # Classify inside the boundary; the exception object and
-                    # its traceback are dropped when this except block exits.
+                    # Capture ONLY bounded scalars inside the boundary; the
+                    # exception object + traceback are dropped on exit.
                     error_kind = _winsorized_gpu_oom_kind(exc, cp)
+                    error_type, error_message = _winsorized_exc_scalars(exc)
+                    oom_phase, oom_tile_index = winsor_gpu_last_stage()
 
                 if error_kind is None:
                     # SUCCESS: release the retained pool and record the truth.
@@ -3966,8 +4002,11 @@ class SeestarQueuedStacker:
                         "mode": "full" if mode == FULL_GPU else "tiled",
                         "tile_shape": _prov_token(tile),
                         "n_batch": n_batch,
-                        "vram_free_bytes": vram_free,
-                        "vram_pool_free_bytes": vram_pool_free,
+                        "measured_driver_free_at_attempt_start_bytes": vram_at_start["driver_free"],
+                        "measured_driver_total_at_attempt_start_bytes": vram_at_start["driver_total"],
+                        "measured_pool_used_at_attempt_start_bytes": vram_at_start["pool_used"],
+                        "measured_pool_total_at_attempt_start_bytes": vram_at_start["pool_total"],
+                        "measured_pool_free_at_attempt_start_bytes": vram_at_start["pool_free"],
                         "demand_full_bytes": decision.demand_full_bytes,
                         "demand_tile_bytes": decision.demand_tile_bytes,
                         "effective_budget_bytes": decision.effective_budget_bytes,
@@ -4015,19 +4054,25 @@ class SeestarQueuedStacker:
 
                 if error_kind != "oom":
                     # Non-OOM kernel exception: historical single CPU
-                    # fallback (NEVER disguised as a retryable OOM).
+                    # fallback (NEVER disguised as a retryable OOM).  The
+                    # event/log carry only the bounded scalar error_type +
+                    # message — never a traceback or the exception object.
                     _emit_attempt({
                         "attempt": attempt_idx,
                         "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
                         "mode": "full" if mode == FULL_GPU else "tiled",
                         "tile_shape": _prov_token(tile),
                         "n_batch": n_batch,
+                        "error_type": error_type,
+                        "error_message": error_message,
                         "result": WINSOR_OOM_RESULT_KERNEL_FAILURE,
                         "next": "cpu_fallback",
                     })
                     self.logger.warning(
-                        "GPU winsorized reduction failed; falling back to CPU",
-                        exc_info=True,
+                        "GPU winsorized reduction failed (%s: %s); "
+                        "falling back to CPU",
+                        error_type,
+                        error_message,
                     )
                     return _record_cpu(
                         GPU_EXEC_REASON_GPU_KERNEL,
@@ -4036,19 +4081,14 @@ class SeestarQueuedStacker:
                         decision=decision,
                     )
 
-                # Recoverable OOM: run the cleanup AFTER the failed attempt's
-                # frame/traceback are gone (so its device buffers return to
-                # the pool free list), then derive the next geometry.
+                # Recoverable OOM: sample PRE-CLEANUP state first (the failed
+                # attempt's frame/traceback have just been dropped, but its
+                # device buffers are still live in the pool), then run the
+                # cleanup, then sample POST-CLEANUP state.
+                vram_pre_cleanup = _winsorized_vram_sample(cp)
                 gc.collect()
                 synced, released = _winsorized_oom_cleanup(cp)
-                # Measured post-cleanup driver state (bounded, scalar-only) —
-                # clearly separated from the modeled ``estimated_demand_bytes``.
-                vram_free_after = None
-                vram_total_after = None
-                try:
-                    vram_free_after, vram_total_after = cp.cuda.runtime.memGetInfo()
-                except Exception:
-                    pass
+                vram_post_cleanup = _winsorized_vram_sample(cp)
                 if mode == FULL_GPU:
                     # FULL OOM -> strictly spatial next attempt: surface < H*W
                     # AND >= 2 effective tiles.  Halve the full-frame surface
@@ -4075,13 +4115,25 @@ class SeestarQueuedStacker:
                     "tile_shape": _prov_token(tile),
                     "n_batch": n_batch,
                     "tile_count": decision.n_tiles,
-                    "measured_driver_free_before_bytes": vram_free,
-                    "measured_driver_total_before_bytes": vram_total,
-                    "measured_pool_used_before_bytes": vram_pool_used,
-                    "measured_pool_total_before_bytes": vram_pool_total,
-                    "measured_pool_free_before_bytes": vram_pool_free,
-                    "measured_driver_free_after_bytes": vram_free_after,
-                    "measured_driver_total_after_bytes": vram_total_after,
+                    "oom_phase": oom_phase,
+                    "oom_tile_index": oom_tile_index,
+                    "error_type": error_type,
+                    "error_message": error_message,
+                    "measured_driver_free_at_attempt_start_bytes": vram_at_start["driver_free"],
+                    "measured_driver_total_at_attempt_start_bytes": vram_at_start["driver_total"],
+                    "measured_pool_used_at_attempt_start_bytes": vram_at_start["pool_used"],
+                    "measured_pool_total_at_attempt_start_bytes": vram_at_start["pool_total"],
+                    "measured_pool_free_at_attempt_start_bytes": vram_at_start["pool_free"],
+                    "measured_driver_free_pre_cleanup_bytes": vram_pre_cleanup["driver_free"],
+                    "measured_driver_total_pre_cleanup_bytes": vram_pre_cleanup["driver_total"],
+                    "measured_pool_used_pre_cleanup_bytes": vram_pre_cleanup["pool_used"],
+                    "measured_pool_total_pre_cleanup_bytes": vram_pre_cleanup["pool_total"],
+                    "measured_pool_free_pre_cleanup_bytes": vram_pre_cleanup["pool_free"],
+                    "measured_driver_free_post_cleanup_bytes": vram_post_cleanup["driver_free"],
+                    "measured_driver_total_post_cleanup_bytes": vram_post_cleanup["driver_total"],
+                    "measured_pool_used_post_cleanup_bytes": vram_post_cleanup["pool_used"],
+                    "measured_pool_total_post_cleanup_bytes": vram_post_cleanup["pool_total"],
+                    "measured_pool_free_post_cleanup_bytes": vram_post_cleanup["pool_free"],
                     "estimated_demand_bytes": (
                         decision.demand_tile_bytes
                         if mode == TILED_GPU

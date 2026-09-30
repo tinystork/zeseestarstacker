@@ -730,10 +730,112 @@ def test_oom_attempt_separates_estimated_from_measured(monkeypatch):
     rec = oom_blocks[0]
     # Estimated demand is distinct from every measured field.
     assert "estimated_demand_bytes" in rec
-    assert "measured_driver_free_before_bytes" in rec
-    assert "measured_driver_free_after_bytes" in rec
-    assert "measured_pool_used_before_bytes" in rec
+    # at-attempt-start / pre-cleanup / post-cleanup namespaces all present.
+    assert "measured_driver_free_at_attempt_start_bytes" in rec
+    assert "measured_driver_free_pre_cleanup_bytes" in rec
+    assert "measured_driver_free_post_cleanup_bytes" in rec
+    assert "measured_pool_used_pre_cleanup_bytes" in rec
+    assert "measured_pool_used_post_cleanup_bytes" in rec
+    # OOM phase/tile context (scalars).
+    assert "oom_phase" in rec
+    assert "oom_tile_index" in rec
+    assert "error_type" in rec
+    assert "error_message" in rec
     # Every retained value is a bounded scalar/token, never an array/traceback.
+    import numbers
+    for k, v in rec.items():
+        assert v is None or isinstance(v, (numbers.Number, str, bool, tuple))
+
+
+@pytestmark_wiring
+def test_oom_measurements_distinguish_start_pre_and_post_cleanup(monkeypatch):
+    """The three measured VRAM namespaces are SAMPLED AT DIFFERENT TIMES:
+    at-attempt-start (before the GPU call), pre-cleanup (after the OOM, before
+    gc/cleanup) and post-cleanup.  A sequenced fake pool makes the three
+    distinct, proving the sampling is not a single value relabelled."""
+    import cupy as _cp
+
+    # Sequenced fake pool: used_bytes returns 111, then 222, then 333 across
+    # the three sample points of one OOM attempt.
+    state = {"n": 0}
+
+    class _SeqPool:
+        def used_bytes(self):
+            state["n"] += 1
+            return [111, 222, 333][(state["n"] - 1) % 3]
+
+        def total_bytes(self):
+            return 999
+
+        def free_bytes(self):
+            return 1
+
+        def free_all_blocks(self):
+            return None
+
+    monkeypatch.setattr(_cp, "get_default_memory_pool", lambda: _SeqPool())
+    monkeypatch.setattr(
+        _cp.cuda.runtime, "memGetInfo", lambda: (2 * GIB, 4 * GIB)
+    )
+
+    def boom(*a, **k):
+        raise _oom()
+
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu", boom
+    )
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu_tiled", boom
+    )
+    stack = _winsor_stack(request_gpu=True, shape=(300, 400))
+    blocks = _capture_provenance(monkeypatch, stack)
+    stack._stack_batch(_winsor_batch(shape=(300, 400)), 1, 1)
+    oom_blocks = [
+        b[1] for b in blocks
+        if b[0] == "GPU_WINSOR_OOM_RETRY"
+        and b[1].get("result") == WINSOR_OOM_RESULT_OOM
+    ]
+    assert oom_blocks
+    rec = oom_blocks[0]
+    # Distinct values at the three sample points prove they are genuinely
+    # sampled at different times (not one value relabelled).
+    assert rec["measured_pool_used_at_attempt_start_bytes"] == 111
+    assert rec["measured_pool_used_pre_cleanup_bytes"] == 222
+    assert rec["measured_pool_used_post_cleanup_bytes"] == 333
+
+
+@pytestmark_wiring
+def test_kernel_failure_carries_bounded_type_message_without_traceback(monkeypatch):
+    """Non-OOM kernel exception: the event/log carry only bounded scalar
+    error_type + error_message (never a traceback/exception object)."""
+    import cupy as _cp
+
+    def boom(*a, **k):
+        raise ValueError("simulated kernel bug: bad shape alignment")
+
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu", boom
+    )
+    monkeypatch.setattr(
+        queue_manager_module,
+        "stack_winsorized_sigma_gpu_tiled",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("tiled must not run")),
+    )
+    _patch_mem(monkeypatch, free_bytes=2 * GIB)
+    stack = _winsor_stack(request_gpu=True)
+    blocks = _capture_provenance(monkeypatch, stack)
+    stack._stack_batch(_winsor_batch(), 1, 1)
+    kernel_blocks = [
+        b[1] for b in blocks
+        if b[0] == "GPU_WINSOR_OOM_RETRY"
+        and b[1].get("result") == WINSOR_OOM_RESULT_KERNEL_FAILURE
+    ]
+    assert kernel_blocks
+    rec = kernel_blocks[0]
+    assert rec["error_type"] == "ValueError"
+    assert "bad shape alignment" in rec["error_message"]
+    assert rec["next"] == "cpu_fallback"
+    # No traceback / exception object / array leaked into the event.
     import numbers
     for k, v in rec.items():
         assert v is None or isinstance(v, (numbers.Number, str, bool, tuple))
