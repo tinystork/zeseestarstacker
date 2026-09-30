@@ -4549,6 +4549,17 @@ class SeestarQueuedStacker:
                 },
             )
 
+        def _tile_surface(ts):
+            """Spatial surface (outputs) of a tile shape: ``(th,)`` -> th*W,
+            ``(th, tw)`` -> th*tw, ``None`` -> full frame H*W."""
+            if ts is None:
+                return s_full
+            if isinstance(ts, (tuple, list)):
+                th = int(ts[0])
+                tw = int(ts[1]) if len(ts) >= 2 else W
+                return th * tw
+            return int(ts) * W
+
         for attempt in range(1, max_attempts + 1):
             # Fresh LIVE host plan per attempt (never reuse a partially-written
             # scratch from a prior failed attempt).
@@ -4579,56 +4590,79 @@ class SeestarQueuedStacker:
             tokens["attempt"] = attempt
             self._emit_provenance_block("CPU_WINSOR_MEMORY_DECISION", tokens)
 
+            # Resolve THIS attempt's execution geometry + budget.  A refusal
+            # may still become a SAFE disk-backed execution via the conjoint
+            # host plan (``memmaps_outputs``): that downgrade is a CANDIDATE
+            # of the current attempt (mono-attempt tiled driver, same
+            # MemoryError handling) — never an opaque sub-loop, never a static
+            # internal retry, never a stale host plan.
+            exec_is_full = False
+            exec_tile_shape = None
             if decision.is_refusal:
-                # Lot D: a ``cpu_budget_negative`` (or minimum-tile) refusal
-                # becomes a SAFE execution when the conjoint host plan can
-                # admit a minimal tile with disk-backed outputs.
                 downgrade = (
                     host_plan is not None
                     and not host_plan.is_refusal
                     and host_plan.memmaps_outputs
                 )
-                if downgrade:
-                    tile_shape = winsorized_tile_from_cap(
+                if not downgrade:
+                    _emit_refusal(
+                        decision, decision.effective_budget_bytes,
+                        decision.reason,
+                    )
+                # The downgrade tile derives from the host cap, CLAMPED by the
+                # live contraction knob (``max_tile_outputs``) so a downgrade
+                # MemoryError contracts to a strictly smaller surface on the
+                # next attempt (<= 50%), exactly like the normal spatial path.
+                cap = host_plan.host_tile_outputs_cap
+                if max_tile_outputs is not None:
+                    cap = min(int(cap), int(max_tile_outputs))
+                exec_tile_shape = winsorized_tile_from_cap(
+                    (H, W), cap, CPU_MIN_TILE_OUT
+                )
+                if exec_tile_shape is None:
+                    _emit_refusal(
+                        decision, decision.effective_budget_bytes,
+                        REASON_NO_VALID_TILE,
+                    )
+                exec_budget = host_plan.effective_budget_bytes
+                # Explicit transition: refusal -> disk-backed spatial execution.
+                self._emit_provenance_block(
+                    "CPU_WINSOR_MEMORY_RETRY",
+                    cpu_winsor_retry_tokens(
+                        old_tile_shape=None,
+                        new_tile_shape=exec_tile_shape,
+                        reason="host_memmap_downgrade",
+                        attempt=attempt,
+                        outcome="fallback",
+                        next_action="fallback",
+                    ),
+                )
+            elif decision.strategy == FULL_CPU and not host_plan.memmaps_outputs:
+                exec_is_full = True
+                exec_budget = decision.effective_budget_bytes
+            else:
+                exec_tile_shape = decision.tile_shape
+                if decision.strategy == FULL_CPU and host_plan.memmaps_outputs:
+                    exec_tile_shape = winsorized_tile_from_cap(
                         (H, W), host_plan.host_tile_outputs_cap,
                         CPU_MIN_TILE_OUT,
                     )
-                    if tile_shape is not None:
-                        budget = host_plan.effective_budget_bytes
-                        self._emit_provenance_block(
-                            "CPU_WINSOR_MEMORY_RETRY",
-                            cpu_winsor_retry_tokens(
-                                old_tile_shape=None,
-                                new_tile_shape=tile_shape,
-                                reason="host_memmap_downgrade",
-                                outcome="recovered",
-                            ),
+                    if exec_tile_shape is None:
+                        _emit_refusal(
+                            decision, decision.effective_budget_bytes,
+                            REASON_NO_VALID_TILE,
                         )
-                        try:
-                            return stack_winsorized_sigma_cpu_tiled(
-                                imgs,
-                                weights=w,
-                                tile_shape=tile_shape,
-                                max_mem_bytes=budget,
-                                min_tile_out=CPU_MIN_TILE_OUT,
-                                out_result=host_out_sci,
-                                out_sum_w=host_out_wht,
-                                masks=masks,
-                                **kw,
-                            )
-                        finally:
-                            if host_scratch is not None:
-                                host_scratch.flush()
-                _emit_refusal(
-                    decision, decision.effective_budget_bytes, decision.reason
-                )
+                exec_budget = decision.effective_budget_bytes
+            exec_surface = _tile_surface(
+                None if exec_is_full else exec_tile_shape
+            )
 
-            budget = decision.effective_budget_bytes
+            budget = exec_budget
             masked_imgs = None
             out = None
             error_type = None
             try:
-                if decision.strategy == FULL_CPU and not host_plan.memmaps_outputs:
+                if exec_is_full:
                     # Lot C: masks applied full-frame ONLY here, AFTER the
                     # FULL decision (the untiled wrapper needs NaN-masked
                     # observations) — never a blind full-frame copy before it.
@@ -4643,26 +4677,10 @@ class SeestarQueuedStacker:
                         masked_imgs, w, max_mem_bytes=budget, **kw
                     )
                 else:
-                    tile_shape = decision.tile_shape
-                    if decision.strategy == FULL_CPU and host_plan.memmaps_outputs:
-                        tile_shape = winsorized_tile_from_cap(
-                            (H, W), host_plan.host_tile_outputs_cap,
-                            CPU_MIN_TILE_OUT,
-                        )
-                        if tile_shape is None:
-                            if host_scratch is not None:
-                                self._discard_winsorized_scratch(host_scratch)
-                            raise CpuWinsorMemoryRefused(
-                                REASON_NO_VALID_TILE,
-                                details={
-                                    "n": decision.n,
-                                    "host_cap": host_plan.host_tile_outputs_cap,
-                                },
-                            )
                     out = stack_winsorized_sigma_cpu_tiled(
                         imgs,
                         weights=w,
-                        tile_shape=tile_shape,
+                        tile_shape=exec_tile_shape,
                         max_mem_bytes=budget,
                         min_tile_out=CPU_MIN_TILE_OUT,
                         max_retries=0,
@@ -4683,15 +4701,24 @@ class SeestarQueuedStacker:
                 # Bounded scalar only — the exception/traceback is dropped here
                 # (never retained into the event or the next attempt).
                 error_type = type(exc).__name__
+            except Exception:
+                # Non-memory CPU error: never retried, BUT the failed attempt's
+                # partial scratch/memmap is discarded + removed from the
+                # registry before propagation (run fails cleanly, no partial
+                # store registered, no flush).
+                if host_scratch is not None:
+                    self._discard_winsorized_scratch(host_scratch)
+                    host_scratch = None
+                    host_out_sci = None
+                    host_out_wht = None
+                raise
 
-            # ---- exited the except: drop refs, then measure pre-cleanup ----
-            # (masked_imgs / out may still reference the failed FULL-frame
-            # masked copies + reducer output: release them BEFORE gc so the
-            # post-cleanup sample is honest).
-            masked_imgs = None
-            out = None
+            # ---- exited the except: measure pre-cleanup FIRST (BEFORE
+            # dropping refs / discarding scratch / gc), then post-cleanup ----
             pre_avail = self._cpu_available_ram_bytes_now()
             pre_rss = self._cpu_process_rss_bytes()
+            masked_imgs = None
+            out = None
             if host_scratch is not None:
                 # Discard any partially-written memmap from the failed attempt
                 # AND remove it from the registry (never a stale/partial store).
@@ -4704,13 +4731,12 @@ class SeestarQueuedStacker:
             post_rss = self._cpu_process_rss_bytes()
 
             # Recoverable allocation failure: contract + live-replan.
-            if decision.strategy == FULL_CPU:
-                force_spatial = True
+            force_spatial = True
+            if exec_is_full:
                 max_tile_outputs = max(CPU_MIN_TILE_OUT, s_full // 2)
             else:
-                force_spatial = True
                 max_tile_outputs = max(
-                    CPU_MIN_TILE_OUT, decision.tile_outputs // 2
+                    CPU_MIN_TILE_OUT, exec_surface // 2
                 )
             if attempt >= max_attempts:
                 _emit_refusal(
@@ -4719,7 +4745,7 @@ class SeestarQueuedStacker:
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_RETRY",
                 cpu_winsor_retry_tokens(
-                    old_tile_shape=decision.tile_shape,
+                    old_tile_shape=exec_tile_shape,
                     new_tile_shape=None,
                     reason="allocation_failure",
                     attempt=attempt,

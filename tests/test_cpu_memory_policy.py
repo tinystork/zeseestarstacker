@@ -63,6 +63,7 @@ from seestar.core.cpu_memory_planner import (
     recommended_reserve_bytes,
 )
 from seestar.core.cpu_winsor_exact_n import CpuWinsorMemoryRefused
+from seestar.core.scratch_store import ScratchStore
 from seestar.queuep.queue_manager import (
     BatchReductionError,
     SeestarQueuedStacker,
@@ -1120,57 +1121,261 @@ def test_discard_scratch_removes_from_registry(tmp_path):
     assert store._created == []
 
 
-def test_memory_error_discards_scratch_and_replans_host(
-    tmp_path, monkeypatch
-):
-    """F3.5: on a MemoryError the failed attempt's scratch is DISCARDED and the
-    next attempt re-resolves the host plan (fresh store); flush only on success."""
+# ---------------------------------------------------------------------------
+# 10. REWORK-3 (Lot C FINAL): host_memmap_downgrade folded into the live loop.
+# ---------------------------------------------------------------------------
+
+def _memmap_downgrade_stack(tmp_path, monkeypatch, available=260 * MIB):
+    """A bare stacker whose host plan selects ``memmaps_outputs`` and whose
+    CPU decision refuses (``cpu_budget_negative``) — the exact downgrade
+    seam.  Spies record host-plan strategies, driver invocations, store
+    lifecycle (made / discarded / flushed)."""
     import seestar.queuep.queue_manager as qm
 
-    o = _policy_stack(tmp_path, available=8 * GIB, total=64 * GIB)
-    o._cpu_memory_override_bytes_attr = 300 * MIB
+    o = _policy_stack(tmp_path, available=available, total=8 * GIB)
     o._capture_cpu_memory_policy_preflight()
 
-    discarded = []
-    made = []
+    rec = {"host": [], "driver": [], "made": [], "discarded": [],
+           "flushed": []}
+
+    real_host = o._winsorized_host_ram_plan
+
+    def spy_host(*a, **k):
+        d = real_host(*a, **k)
+        rec["host"].append(d[0].strategy)
+        return d
+
+    monkeypatch.setattr(o, "_winsorized_host_ram_plan", spy_host)
+
     real_make = o._make_winsorized_scratch
-    real_discard = o._discard_winsorized_scratch
 
     def spy_make():
         s = real_make()
-        made.append(s)
+        rec["made"].append(s)
         return s
 
+    monkeypatch.setattr(o, "_make_winsorized_scratch", spy_make)
+
+    real_discard = o._discard_winsorized_scratch
+
     def spy_discard(store):
-        discarded.append(store)
+        rec["discarded"].append(store)
         real_discard(store)
 
-    monkeypatch.setattr(o, "_make_winsorized_scratch", spy_make)
     monkeypatch.setattr(o, "_discard_winsorized_scratch", spy_discard)
+
+    real_flush = ScratchStore.flush
+
+    def spy_flush(store):
+        rec["flushed"].append(store)
+        real_flush(store)
+
+    monkeypatch.setattr(ScratchStore, "flush", spy_flush)
+
+    def driver(images, weights=None, **kw):
+        rec["driver"].append({
+            "max_retries": kw.get("max_retries"),
+            "re_raise": kw.get("_re_raise_memory_error"),
+            "out_result": kw.get("out_result"),
+            "out_sum_w": kw.get("out_sum_w"),
+            "tile_shape": kw.get("tile_shape"),
+        })
+        return driver_outcome(rec, kw)
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", driver)
+    return o, rec
+
+
+def test_downgrade_memmap_real_scratch_lifecycle(tmp_path, monkeypatch):
+    """Rework-3 F3.5 real: with a ``memmaps_outputs`` host plan, attempt 1
+    writes a PARTIAL marker into the SCI memmap then raises MemoryError;
+    store1 is discarded (cleanup + registry removal), the host plan is
+    re-resolved, store2 is fresh, attempt 2 succeeds and only store2 is
+    flushed/survives (no partial store1 left)."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=260 * MIB, total=8 * GIB)
+    o._capture_cpu_memory_policy_preflight()
+
+    rec = {"host": [], "driver": [], "made": [], "discarded": [],
+           "flushed": []}
+
+    real_host = o._winsorized_host_ram_plan
+
+    def spy_host(*a, **k):
+        d = real_host(*a, **k)
+        rec["host"].append(d[0].strategy)
+        return d
+
+    monkeypatch.setattr(o, "_winsorized_host_ram_plan", spy_host)
+
+    real_make = o._make_winsorized_scratch
+
+    def spy_make():
+        s = real_make()
+        rec["made"].append(s)
+        return s
+
+    monkeypatch.setattr(o, "_make_winsorized_scratch", spy_make)
+
+    real_discard = o._discard_winsorized_scratch
+
+    def spy_discard(store):
+        rec["discarded"].append(store)
+        real_discard(store)
+
+    monkeypatch.setattr(o, "_discard_winsorized_scratch", spy_discard)
+
+    real_flush = ScratchStore.flush
+
+    def spy_flush(store):
+        rec["flushed"].append(store)
+        real_flush(store)
+
+    monkeypatch.setattr(ScratchStore, "flush", spy_flush)
 
     calls = {"n": 0}
 
-    def boom_tiled(images, weights=None, **kw):
+    def driver(images, weights=None, **kw):
         calls["n"] += 1
+        out_result = kw.get("out_result")
         if calls["n"] == 1:
-            raise MemoryError("injected tiled OOM")
-        img0 = np.asarray(images[0])
+            # Partial write into the disk-backed SCI memmap, then OOM.
+            assert out_result is not None
+            out_result[0, 0] = 12345.0
+            out_result.flush()
+            raise MemoryError("injected downgrade OOM")
+        # Success on attempt 2.
         return (
-            np.zeros(img0.shape, dtype=np.float32),
-            np.ones(img0.shape[:2], dtype=np.float32),
+            np.zeros((1024, 1024), dtype=np.float32),
+            np.ones((1024, 1024), dtype=np.float32),
             0.0,
         )
 
-    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", boom_tiled)
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", driver)
 
-    imgs = [np.full((640, 640), 10.0, dtype=np.float32) for _ in range(20)]
+    imgs = [np.full((1024, 1024), 10.0, dtype=np.float32) for _ in range(3)]
     o._run_cpu_winsor_policy(
         imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
         return_weights=True,
     )
 
-    # In-memory host plan (high available): no scratch is created, but the
-    # discard path is exercised safely (None is a no-op) and no partial store
-    # is ever left in the registry.
+    # Downgrade path was taken: host plan is memmap_outputs, CPU refused.
+    assert calls["n"] == 2
+    assert all(s == "memmap_outputs" for s in rec["host"])
+    # Host plan re-resolved (>= 2 calls: attempt 1 + attempt 2).
+    assert len(rec["host"]) >= 2
+    # store1 (attempt 1) was discarded: cleanup + registry removal.
+    assert len(rec["discarded"]) >= 1
+    assert rec["discarded"][0] is rec["made"][0]
+    # store2 (attempt 2) is fresh and NOT discarded.
+    assert len(rec["made"]) >= 2
+    assert rec["made"][1] not in rec["discarded"]
+    # Only store2 is flushed (attempt 2 success); store1 partial never flushed.
+    assert rec["flushed"] and all(
+        f is not rec["made"][0] for f in rec["flushed"]
+    )
+    # Registry holds only the surviving store (no partial store1).
     registry = getattr(o, "_winsorized_scratch_stores", [])
-    assert registry == []
+    assert rec["made"][0] not in registry
+
+
+def test_downgrade_memory_error_exactly_three_attempts(tmp_path, monkeypatch):
+    """Rework-3 F3.3/6: a downgrade MemoryError never reactivates static
+    internal retries — the driver is mono-attempt (max_retries=0,
+    _re_raise_memory_error=True) and the loop is capped at exactly 3 attempts
+    total, ending in REFUSAL next=refusal."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=260 * MIB, total=8 * GIB)
+    o._capture_cpu_memory_policy_preflight()
+
+    calls = {"n": 0}
+    seen = []
+
+    def driver(images, weights=None, **kw):
+        calls["n"] += 1
+        seen.append({
+            "max_retries": kw.get("max_retries"),
+            "re_raise": kw.get("_re_raise_memory_error"),
+        })
+        raise MemoryError("injected downgrade OOM")
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", driver)
+    lines = _lines(o)
+
+    imgs = [np.full((1024, 1024), 10.0, dtype=np.float32) for _ in range(3)]
+    with pytest.raises(CpuWinsorMemoryRefused):
+        o._run_cpu_winsor_policy(
+            imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+            return_weights=True,
+        )
+
+    # Exactly 3 attempts total; every driver invocation is mono-attempt.
+    assert calls["n"] == 3
+    assert all(s["max_retries"] == 0 for s in seen)
+    assert all(s["re_raise"] is True for s in seen)
+    # Terminal event is REFUSAL next=refusal.
+    ref = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_REFUSAL ")]
+    assert any("next=refusal" in l for l in ref)
+
+
+def test_downgrade_non_memory_discards_scratch_no_flush(tmp_path, monkeypatch):
+    """Rework-3 F3.3 (non-memory, memmap): a non-MemoryError propagates after
+    ONE attempt, but the partial scratch is discarded + removed from the
+    registry BEFORE propagation, and nothing is flushed."""
+    import seestar.queuep.queue_manager as qm
+
+    o = _policy_stack(tmp_path, available=260 * MIB, total=8 * GIB)
+    o._capture_cpu_memory_policy_preflight()
+
+    rec = {"made": [], "discarded": [], "flushed": []}
+    real_make = o._make_winsorized_scratch
+
+    def spy_make():
+        s = real_make()
+        rec["made"].append(s)
+        return s
+
+    monkeypatch.setattr(o, "_make_winsorized_scratch", spy_make)
+
+    real_discard = o._discard_winsorized_scratch
+
+    def spy_discard(store):
+        rec["discarded"].append(store)
+        real_discard(store)
+
+    monkeypatch.setattr(o, "_discard_winsorized_scratch", spy_discard)
+
+    real_flush = ScratchStore.flush
+
+    def spy_flush(store):
+        rec["flushed"].append(store)
+        real_flush(store)
+
+    monkeypatch.setattr(ScratchStore, "flush", spy_flush)
+
+    calls = {"n": 0}
+
+    def driver(images, weights=None, **kw):
+        calls["n"] += 1
+        raise ValueError("non-memory downgrade error")
+
+    monkeypatch.setattr(qm, "stack_winsorized_sigma_cpu_tiled", driver)
+
+    imgs = [np.full((1024, 1024), 10.0, dtype=np.float32) for _ in range(3)]
+    with pytest.raises(ValueError):
+        o._run_cpu_winsor_policy(
+            imgs, None, kappa=3.0, winsor_limits=(0.05, 0.05),
+            return_weights=True,
+        )
+
+    # One attempt only (non-memory is never retried).
+    assert calls["n"] == 1
+    # The partial scratch was discarded + removed from registry.
+    assert len(rec["discarded"]) >= 1
+    assert rec["discarded"][0] is rec["made"][0]
+    # Nothing was flushed.
+    assert rec["flushed"] == []
+    registry = getattr(o, "_winsorized_scratch_stores", [])
+    assert rec["made"][0] not in registry
