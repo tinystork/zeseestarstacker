@@ -310,6 +310,17 @@ class QtSettingsState:
     # --- Final background matching (may be None when unset) ---
     match_background_for_final: Any = None
 
+    # --- Calibration (C3: optional ZeCalibrator integration, UI-only) ---
+    # Persisted: ONLY the enabled intent and the last-chosen master folder.
+    # Provider availability is NEVER persisted — it is re-discovered at each
+    # launch via the adapter probe (an "enabled" flag surviving a disappeared
+    # provider must never break ZSSS).
+    calibration_enabled: bool = False
+    calibration_master_folder: str = ""
+    # C16: fallback-only session orientation declaration ("identity" when the
+    # user asserted "no rotation"; "" otherwise -> no declaration).
+    calibration_orientation: str = ""
+
     # --- UI language (M9; persisted via the M8 settings JSON round-trip) ---
     language: str = "en"
 

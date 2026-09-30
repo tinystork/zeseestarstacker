@@ -40,13 +40,15 @@ from seestar.core.gpu_vram_planner import (
     REASON_POOL_QUERY_FAILURE,
     REASON_VRAM_NO_VALID_TILE,
     TILED_GPU,
-    WINSOR_FAST_SCRATCH_BYTES,
-    WINSOR_FAST_SORT_FACTOR,
     WINSOR_MIN_TILE_OUT,
     WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
     WINSOR_SLOW_SCRATCH_BYTES,
     WINSOR_SLOW_SORT_FACTOR,
     WinsorExecDecision,
+    _zero_rank_peak_factor,
+    PATH_NO_GUARD,
+    PATH_SMALL_N_GUARD,
+    PATH_WINSOR_SLOW,
     plan_winsorized_gpu_execution,
 )
 
@@ -100,9 +102,9 @@ def _slow_full_demand(n, frame, channels=1, isz=4):
     return int(base * WINSOR_SLOW_SORT_FACTOR) + WINSOR_SLOW_SCRATCH_BYTES
 
 
-def _fast_full_demand(n, frame, channels=1, isz=4):
+def _zero_rank_full_demand(n, frame, channels=1, isz=4):
     base = n * _frame_area(frame) * channels * isz
-    return int(base * WINSOR_FAST_SORT_FACTOR) + WINSOR_FAST_SCRATCH_BYTES
+    return int(base * _zero_rank_peak_factor(n, isz))
 
 
 # ---------------------------------------------------------------------------
@@ -330,18 +332,29 @@ def test_rect_split_when_single_row_does_not_fit():
 # ---------------------------------------------------------------------------
 
 
-def test_zero_rank_regime_uses_fast_memory_model():
-    """Default (0.05, 0.05) limits: N=19 is the zero-rank fast path (identity
-    winsorization, no per-iteration sorts) while N=20 is the slow path; the
-    4K witness fits UNTILED at 2 GiB only in the fast regime."""
+def test_zero_rank_regime_uses_sort_bearing_model():
+    """Default (0.05, 0.05) limits: N=19 is the zero-rank regime (identity
+    winsorization) while N=20 is the slow path.  Since the small-N robustness
+    change the zero-rank regime is SORT-BEARING (the gross-outlier guard sorts
+    for N >= 3, and apply_rewinsor sorts for every N), so its modeled demand is
+    no longer the old 3.0x "no sort" fast factor -- it uses the named
+    zero-rank sort envelope (_zero_rank_peak_factor), and N=19 4K is TILED
+    (not FULL) at 2 GiB."""
     d19 = plan(19, F_4K, free=2 * GIB)
     d20 = plan(20, F_4K, free=2 * GIB)
     assert d19.fast_path is True
     assert d20.fast_path is False
-    assert d19.kind == FULL_GPU
+    assert d19.path_class == PATH_SMALL_N_GUARD
+    assert d20.path_class == PATH_WINSOR_SLOW
+    assert d19.kind == TILED_GPU
     assert d20.kind == TILED_GPU
-    assert d19.demand_full_bytes == _fast_full_demand(19, F_4K)
+    assert d19.demand_full_bytes == _zero_rank_full_demand(19, F_4K)
     assert d20.demand_full_bytes == _slow_full_demand(20, F_4K)
+    # The zero-rank sort envelope is strictly heavier than the old 3.0x fast
+    # factor and strictly lighter than the 9.5x slow factor (no fitted
+    # coefficient, no GPU-name table).
+    assert 3.0 < _zero_rank_peak_factor(19, 4) < 9.5
+    assert d19.n_batch == 19  # N preserved under tiling
 
 
 @pytest.mark.parametrize(
@@ -359,9 +372,9 @@ def test_zero_rank_regime_uses_fast_memory_model():
 def test_fast_path_flag_matches_zero_rank_regime(limits, n, expected):
     d = plan(n, F_480, free=24 * GIB, limits=limits)
     assert d.fast_path is expected
-    # Fast regime even at 24 GiB must use the fast model constant.
+    # Fast regime even at 24 GiB must use the zero-rank sort model constant.
     if expected:
-        assert d.demand_full_bytes == _fast_full_demand(n, F_480)
+        assert d.demand_full_bytes == _zero_rank_full_demand(n, F_480)
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +389,7 @@ def test_n_batch_never_reduced():
         (20, F_1080P, 2 * GIB),  # FULL
         (32, F_1080P, 2 * GIB),  # TILED
         (4_000_000, F_1080P, 2 * GIB),  # FALLBACK
-        (19, F_4K, 2 * GIB),  # FULL fast path
+        (19, F_4K, 2 * GIB),  # TILED zero-rank (sort-bearing model)
         (50, F_1080P, 2 * GIB, 3),  # RGB TILED
     ]
     for c in cases:
@@ -474,6 +487,164 @@ def test_decision_dataclass_shape():
     fb = plan(4_000_000, F_1080P, free=2 * GIB)
     assert fb.is_gpu is False
     assert fb.kind == CPU_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# A. small-N sort-bearing model: path classes + exact-run witness (Lot A)
+# ---------------------------------------------------------------------------
+
+# The exact failing run from the plan: N=3, RGB 2822x4144, 1990 MiB free on a
+# 2048 MiB card, 128 MiB reserve.  Under the old 3.0x "no sort" fast model this
+# chose FULL_GPU and OOM'd in _gross_outlier_keep_cp -> cp.sort; the corrected
+# model must choose a safe TILED geometry (never FULL).
+RUN_FRAME = (2822, 4144)
+RUN_N = 3
+RUN_CHANNELS = 3
+RUN_FREE_MIB = 1990
+RUN_CARD_MIB = 2048
+RUN_RESERVE_MIB = 128
+
+
+def _run_decision(free_mib=RUN_FREE_MIB):
+    return plan(
+        RUN_N,
+        RUN_FRAME,
+        channels=RUN_CHANNELS,
+        free=free_mib * MIB,
+        reserve=RUN_RESERVE_MIB * MIB,
+    )
+
+
+def test_exact_run_chooses_tiled_never_full():
+    """The exact N=3/RGB/2822x4144/2 GiB run must choose TILED_GPU (the old
+    model chose FULL_GPU and OOM'd in the small-N guard sort), never FULL."""
+    d = _run_decision()
+    assert d.kind == TILED_GPU
+    assert d.kind != FULL_GPU
+    assert d.path_class == PATH_SMALL_N_GUARD
+    assert d.fast_path is True  # zero-rank regime (identity winsorization)
+    assert d.n_batch == RUN_N  # N preserved exactly under spatial tiling
+    assert d.tile_shape is not None
+    # Tile is purely spatial: keeps the full N population, respects the
+    # bitwise-regime floor.
+    th, tw = (
+        (d.tile_shape[0], RUN_FRAME[1])
+        if len(d.tile_shape) == 1
+        else d.tile_shape
+    )
+    assert th <= RUN_FRAME[0] and tw <= RUN_FRAME[1]
+    assert d.tile_outputs >= WINSOR_MIN_TILE_OUT
+    assert d.demand_full_bytes + d.reserve_bytes > RUN_FREE_MIB * MIB
+    assert d.demand_tile_bytes + d.reserve_bytes <= RUN_FREE_MIB * MIB
+
+
+def test_exact_run_demand_matches_named_factor():
+    """The modeled full demand of the exact run equals the named zero-rank
+    sort envelope (no fitted coefficient, no GPU-name table)."""
+    d = _run_decision()
+    assert d.demand_full_bytes == _zero_rank_full_demand(
+        RUN_N, RUN_FRAME, channels=RUN_CHANNELS
+    )
+    assert d.demand_full_bytes == int(
+        RUN_N * RUN_FRAME[0] * RUN_FRAME[1] * RUN_CHANNELS * 4
+        * _zero_rank_peak_factor(RUN_N, 4)
+    )
+
+
+def test_exact_run_budget_and_reserve_telemetry():
+    """Decision carries the effective VRAM budget (free + pool - reserve) and
+    the explicit reserve for pre-allocation logging."""
+    d = _run_decision()
+    assert d.reserve_bytes == RUN_RESERVE_MIB * MIB
+    assert d.effective_budget_bytes == (RUN_FREE_MIB - RUN_RESERVE_MIB) * MIB
+
+
+def test_small_n_guard_factor_conservative_direction():
+    """The zero-rank sort factor is strictly heavier than the old 3.0x fast
+    factor and strictly lighter than the 9.5x slow factor, for the small-N
+    range the guard covers (3 <= N <= 19 at default limits)."""
+    for n in (3, 4, 5, 10, 19):
+        f = _zero_rank_peak_factor(n, 4)
+        assert 3.0 < f < 9.5, (n, f)
+
+
+@pytest.mark.parametrize(
+    "n,expected_class",
+    [
+        (1, PATH_NO_GUARD),
+        (2, PATH_NO_GUARD),
+        (3, PATH_SMALL_N_GUARD),
+        (5, PATH_SMALL_N_GUARD),
+        (19, PATH_SMALL_N_GUARD),
+        (20, PATH_WINSOR_SLOW),
+    ],
+)
+def test_path_class_by_population(n, expected_class):
+    """Planner distinguishes the ACTUAL modeled path: N<3 has no guard sort
+    (no column can reach 3 valid samples), N>=3 zero-rank runs the guard, and
+    rank>0 (mixed included) is the slow winsor path."""
+    d = plan(n, F_480, free=24 * GIB)
+    assert d.path_class == expected_class
+    assert d.fast_path is (expected_class != PATH_WINSOR_SLOW)
+
+
+def test_no_guard_is_still_sort_bearing():
+    """N<3 has no gross-outlier guard sort, but apply_rewinsor still sorts via
+    _winsorize_bounds_cp, so it must NOT fall back to the old 3.0x no-sort
+    factor -- it uses the zero-rank sort envelope."""
+    d2 = plan(2, F_480, free=24 * GIB)
+    assert d2.path_class == PATH_NO_GUARD
+    assert d2.demand_full_bytes == _zero_rank_full_demand(2, F_480)
+    assert _zero_rank_peak_factor(2, 4) > 3.0
+
+
+def test_rgb_small_n_needs_more_budget_than_mono():
+    """Channel-aware scaling holds in the small-N sort path: RGB N=3 demands
+    strictly more VRAM than mono N=3, and at a budget where mono fits FULL the
+    RGB workload is forced to tile (never more than mono admits)."""
+    mono = plan(3, F_1080P, channels=1, free=2 * GIB)
+    rgb = plan(3, F_1080P, channels=3, free=2 * GIB)
+    assert rgb.demand_full_bytes == 3 * mono.demand_full_bytes
+    # A budget that admits mono FULL but not RGB FULL -> RGB must tile/fallback.
+    mono2 = plan(3, F_1080P, channels=1, free=400 * MIB)
+    rgb2 = plan(3, F_1080P, channels=3, free=400 * MIB)
+    assert mono2.kind == FULL_GPU
+    assert rgb2.kind in (TILED_GPU, CPU_FALLBACK)
+
+
+def test_small_n_full_at_generous_budget():
+    """At a generous budget the zero-rank sort path admits FULL_GPU (the model
+    does not over-tile): a tiny frame fits untiled even with the sort envelope."""
+    d = plan(3, F_480, free=24 * GIB)
+    assert d.kind == FULL_GPU
+    assert d.path_class == PATH_SMALL_N_GUARD
+
+
+def test_small_n_fallback_when_no_valid_tile():
+    """A huge N_batch whose minimum valid tile still exceeds budget ->
+    CPU_FALLBACK(vram_no_valid_tile), N preserved."""
+    d = plan(4_000_000, F_1080P, free=2 * GIB)
+    assert d.kind == CPU_FALLBACK
+    assert d.reason == REASON_VRAM_NO_VALID_TILE
+    assert d.n_batch == 4_000_000
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+def test_small_n_n_never_reduced(n):
+    """Every small-N decision mirrors its input N_batch (stack axis never
+    split; tiles are purely spatial)."""
+    for free in (512 * MIB, 1 * GIB, 2 * GIB, 24 * GIB):
+        d = plan(n, RUN_FRAME, channels=RUN_CHANNELS, free=free)
+        assert d.n_batch == n
+        assert d.channels == RUN_CHANNELS
+        if d.kind == TILED_GPU:
+            th, tw = (
+                (d.tile_shape[0], RUN_FRAME[1])
+                if len(d.tile_shape) == 1
+                else d.tile_shape
+            )
+            assert th <= RUN_FRAME[0] and tw <= RUN_FRAME[1]
+            assert d.tile_outputs >= WINSOR_MIN_TILE_OUT
 
 
 # ===========================================================================

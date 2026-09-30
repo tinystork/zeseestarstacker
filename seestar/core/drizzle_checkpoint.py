@@ -802,11 +802,20 @@ def build_drizzle_canonical_config(qm, product_version: str = "") -> run_contrac
         )
         if force_reason:
             execution["save_as_float32_reason"] = force_reason
+    # C19: persist the frozen calibration signature into the Drizzle run config
+    # ``calibration`` section (absent == "calibration disabled"), mirroring the
+    # Classic path (_canonical_run_config).  OFF runs keep an empty freeze, so
+    # no section is emitted (unchanged default).
+    calibration = {}
+    cal_freeze = dict(getattr(qm, "_calibration_freeze", {}) or {})
+    if cal_freeze:
+        calibration.update(cal_freeze)
     return run_contract.RunConfig.from_sections(
         product_version=product_version,
         scientific=scientific,
         execution=execution,
         provenance=provenance,
+        calibration=calibration,
     )
 
 

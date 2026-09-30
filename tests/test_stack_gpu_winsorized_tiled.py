@@ -861,3 +861,127 @@ def test_tiled_small_n_normalized_scaled_parity():
         assert cpu[2] == pytest.approx(20.0)
         tiled = _gpu_tiled(a, None, 2)
         _assert_bitwise_equal("small_n_scaled_%.4g ts=2" % scale, cpu, full, tiled)
+
+
+# ---------------------------------------------------------------------------
+# 10. Lot B: host-bounded materialization — no full N-frame host cube, and the
+# masks interface is bitwise-identical to the masked-input path
+# ---------------------------------------------------------------------------
+
+
+def _raw_images_masks(a):
+    """Split a NaN-masked stack into raw images (NaN -> 0) + 2-D validity
+    maps (True where the original had a finite sample), so that applying the
+    mask reproduces the original NaN mask exactly.
+
+    Matches the pipeline's HW-bool mask contract: the validity map is 2-D and
+    applies to the whole pixel.  Only FULL-pixel NaN is representable —
+    per-channel NaN (RGB) is not a valid mask case.
+    """
+    n = a.shape[0]
+    masks, raw = [], []
+    for i in range(n):
+        im = a[i]
+        if im.ndim == 3:  # RGB: pixel valid iff no channel is NaN
+            valid = ~np.isnan(im).any(axis=-1)
+        else:
+            valid = ~np.isnan(im)
+        masks.append(valid)
+        raw.append(np.where(np.isnan(im), np.float32(0.0), im))
+    return raw, masks
+
+
+def test_tiled_never_materializes_full_host_cube(monkeypatch):
+    """Lot B core proof: on the TILED path, no host allocation ever produces
+    a full-frame ``(N, H, W[, C])`` cube — the largest host cube is a TILE.
+    (The OLD implementation stacked the full batch once; the F6 refactor
+    preallocates a single float32 tile cube via ``np.empty`` and never uses
+    ``np.stack``.)"""
+    n, H, W = 30, 40, 96
+    a = _make_stack(n, (H, W), seed=910)
+    w = _weights(n, seed=31)
+    full_area = H * W
+    tile_shape = 16  # row bands -> spatial area per tile = 16 * 96
+    cube_shapes = []
+    real_empty = sgp.np.empty
+
+    def spy(shape, *args, **kwargs):
+        out = real_empty(shape, *args, **kwargs)
+        # Only count the tile-cube allocations (leading axis == N).
+        if isinstance(shape, tuple) and len(shape) >= 3 and shape[0] == n:
+            cube_shapes.append(tuple(shape))
+        return out
+
+    monkeypatch.setattr(sgp.np, "empty", spy)
+    _gpu_tiled(a, w, tile_shape)
+    # Every host cube materialised by the driver must be a tile (or smaller
+    # partial band), never the full frame.
+    assert cube_shapes, "test design: the tiled driver must materialise tile cubes"
+    for shape in cube_shapes:
+        spatial = int(np.prod(shape[1:])) if len(shape) > 1 else 0
+        assert spatial <= tile_shape * W, shape
+        assert spatial < full_area, shape  # strictly smaller than full frame
+
+
+def test_tiled_masks_interface_bitwise_equal_to_masked_input():
+    """The raw-images + masks interface yields BITWISE the same result,
+    weights and rejected_pct as passing already-NaN-masked images."""
+    n, H, W = 24, 40, 96
+    a = _make_stack(n, (H, W), seed=911)
+    w = _weights(n, seed=32)
+    raw, masks = _raw_images_masks(a)
+    masked = _images(a)  # NaN-masked reference input
+    for ts in (16, 7, (8, 16)):
+        ref = stack_winsorized_sigma_gpu_tiled(
+            masked, w, return_weights=True, tile_shape=ts
+        )
+        got = stack_winsorized_sigma_gpu_tiled(
+            raw, w, return_weights=True, tile_shape=ts, masks=masks
+        )
+        assert np.array_equal(got[0], ref[0], equal_nan=True), ts
+        assert np.array_equal(got[1], ref[1]), ts
+        assert got[2] == ref[2], ts
+
+
+def test_tiled_masks_interface_rgb_and_small_n_outlier():
+    """RGB + N=5 small-N outlier: masks path == masked path == untiled twin."""
+    n = 5
+    H, W = 4, 48  # RGB, W=48 -> per-tile 48*3 = 144 >= MIN_TILE_OUT
+    a = np.full((n, H, W, 3), 0.04, dtype=np.float32)
+    a[0, :, :, :] = 0.0401
+    a[1, :, :, :] = 0.0399
+    a[2, :, :, :] = 0.0402
+    a[4, :, :, :] = 0.9978
+    raw, masks = _raw_images_masks(a)
+    full = stack_winsorized_sigma_gpu(_images(a), None, return_weights=True)
+    assert full[2] == pytest.approx(20.0)
+    for ts in (1, 2):
+        ref = stack_winsorized_sigma_gpu_tiled(
+            _images(a), None, return_weights=True, tile_shape=ts
+        )
+        got = stack_winsorized_sigma_gpu_tiled(
+            raw, None, return_weights=True, tile_shape=ts, masks=masks
+        )
+        assert np.array_equal(got[0], ref[0], equal_nan=True), ts
+        assert np.array_equal(got[1], ref[1]), ts
+        assert np.array_equal(got[0], full[0], equal_nan=True), ts
+        assert got[2] == full[2]
+
+
+def test_tiled_masks_interface_n20_slow_path_and_global_z():
+    """N=20 slow path + the two-region global-z witness: the masks interface
+    keeps the coordinated global stop schedule bitwise-identical."""
+    a = _two_region_stack()
+    n = a.shape[0]
+    raw, masks = _raw_images_masks(a)
+    full = _gpu_full(a, None)
+    for ts in (48, 16, 7, 1):
+        ref = stack_winsorized_sigma_gpu_tiled(
+            _images(a), None, return_weights=True, tile_shape=ts
+        )
+        got = stack_winsorized_sigma_gpu_tiled(
+            raw, None, return_weights=True, tile_shape=ts, masks=masks
+        )
+        assert np.array_equal(got[0], ref[0], equal_nan=True), ts
+        assert np.array_equal(got[1], ref[1]), ts
+        assert got[2] == ref[2] == full[2], ts

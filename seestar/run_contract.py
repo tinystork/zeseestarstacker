@@ -22,16 +22,17 @@ Design goals
   migration all read from this one table — there are no parallel hard-coded
   field lists.
 
-* **Schema v2.** A deterministic JSON object:
+* **Schema v3.** A deterministic JSON object:
 
   .. code-block:: json
 
       {
-        "schema_version": 2,
+        "schema_version": 3,
         "product_version": "<string>",
         "scientific_config": { ... },
         "execution_config": { ... },
-        "provenance": { ... }
+        "provenance": { ... },
+        "calibration": { ... }        // OPTIONAL: absent == "calibration disabled"
       }
 
   ``.cfg`` extension, UTF-8, atomic write to an explicit caller path only.
@@ -104,6 +105,7 @@ __all__ = [
     "ReadReport",
     "parse_legacy_cfg",
     "migrate_legacy",
+    "migrate_v2_to_v3",
     "LegacyMigrationResult",
     "classic_fingerprint_names",
     "fingerprint_field_defs",
@@ -111,7 +113,7 @@ __all__ = [
 ]
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Section:
@@ -120,11 +122,17 @@ class Section:
     SCIENTIFIC = "scientific_config"
     EXECUTION = "execution_config"
     PROVENANCE = "provenance"
+    # Calibration freeze (D6).  OPTIONAL: absent == "calibration disabled" /
+    # legacy run (never an invented value).  Present only when calibration was
+    # actually enabled and frozen at Start.
+    CALIBRATION = "calibration"
     # Pseudo-section for the top-level ``product_version`` field (not nested
     # inside any of the three config sections).
     TOP = "__top__"
 
-    ALL = (SCIENTIFIC, EXECUTION, PROVENANCE)
+    ALL = (SCIENTIFIC, EXECUTION, PROVENANCE, CALIBRATION)
+    # The three always-present sections; ``calibration`` is optional.
+    REQUIRED = (SCIENTIFIC, EXECUTION, PROVENANCE)
 
 
 class FingerprintDomain:
@@ -720,6 +728,30 @@ FIELD_DEFS: Tuple[FieldDef, ...] = (
        doc="Scientific algorithm contract version."),
     _f("drizzle_lib_version", Section.PROVENANCE, KIND_STR,
        presence=PRESENCE_CHECKPOINT, doc="drizzle library version at write time."),
+
+    # --- calibration freeze (D6): OPTIONAL — absent == "calibration disabled" / legacy run.
+    # These are runtime-frozen values (never settings-sourced, never backend-
+    # mapped, never part of the scientific fingerprint): the preflight computes
+    # them at Start and freezes them into the run contract.  JSON-safe only.
+    _f("calibration_enabled", Section.CALIBRATION, KIND_BOOL,
+       presence=PRESENCE_OPTIONAL, restore=False,
+       doc="Calibration was enabled and frozen for this run (absent => disabled)."),
+    _f("calibration_provider", Section.CALIBRATION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, restore=False),
+    _f("calibration_api_version", Section.CALIBRATION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, restore=False),
+    _f("calibration_product_version", Section.CALIBRATION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, restore=False),
+    _f("calibration_library_fingerprint", Section.CALIBRATION, KIND_STR,
+       presence=PRESENCE_OPTIONAL, restore=False),
+    _f("calibration_contract_versions", Section.CALIBRATION, KIND_DICT,
+       presence=PRESENCE_OPTIONAL, restore=False),
+    _f("calibration_plan_map", Section.CALIBRATION, KIND_DICT,
+       presence=PRESENCE_OPTIONAL, restore=False,
+       doc="light signature -> plan_id + composition (applied roles, level, additive_state, flat applied)."),
+    _f("calibration_orientation_declaration", Section.CALIBRATION, KIND_STR_OR_NONE,
+       presence=PRESENCE_OPTIONAL, restore=False,
+       doc="fallback-only session orientation declaration ('identity' when the user asserted no rotation; absent otherwise)."),
 )
 
 _FIELD_BY_NAME: Dict[str, FieldDef] = {f.name: f for f in FIELD_DEFS}
@@ -993,6 +1025,7 @@ class RunConfig:
     scientific: Dict[str, Any] = field(default_factory=dict)
     execution: Dict[str, Any] = field(default_factory=dict)
     provenance: Dict[str, Any] = field(default_factory=dict)
+    calibration: Dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ build
     @classmethod
@@ -1003,6 +1036,7 @@ class RunConfig:
         scientific: Optional[Mapping[str, Any]] = None,
         execution: Optional[Mapping[str, Any]] = None,
         provenance: Optional[Mapping[str, Any]] = None,
+        calibration: Optional[Mapping[str, Any]] = None,
     ) -> "RunConfig":
         """Build from canonical-name section mappings (values already coerced).
 
@@ -1016,12 +1050,18 @@ class RunConfig:
             cfg.execution.update(_filter_section(Section.EXECUTION, execution))
         if provenance:
             cfg.provenance.update(_filter_section(Section.PROVENANCE, provenance))
+        if calibration:
+            cfg.calibration.update(_filter_section(Section.CALIBRATION, calibration))
         _finalize_derived(cfg)
         return cfg
 
     # -------------------------------------------------------------- serialise
     def to_canonical_dict(self) -> Dict[str, Any]:
-        """Return the deterministic schema-v2 object (no secrets, no I/O)."""
+        """Return the deterministic schema-v3 object (no secrets, no I/O).
+
+        The optional ``calibration`` section is emitted only when non-empty;
+        its absence means "calibration disabled / legacy run" (never invented).
+        """
         out: Dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "product_version": str(self.product_version),
@@ -1029,6 +1069,9 @@ class RunConfig:
         out[Section.SCIENTIFIC] = _sorted_section(self.scientific)
         out[Section.EXECUTION] = _sorted_section(self.execution)
         out[Section.PROVENANCE] = _sorted_section(self.provenance)
+        cal = _sorted_section(self.calibration)
+        if cal:
+            out[Section.CALIBRATION] = cal
         return out
 
     def to_canonical_bytes(self) -> bytes:
@@ -1066,6 +1109,8 @@ class RunConfig:
             return self.execution
         if section == Section.PROVENANCE:
             return self.provenance
+        if section == Section.CALIBRATION:
+            return self.calibration
         raise KeyError(section)
 
 
@@ -1559,7 +1604,7 @@ _MAX_UNKNOWN_REPORT = 100
 
 @dataclass
 class ReadReport:
-    """Result of reading a schema-v2 ``.cfg``.
+    """Result of reading a schema-v3 ``.cfg``.
 
     ``config`` is the validated :class:`RunConfig`.  ``unknown_keys`` reports
     (bounded, name only, never promoted) keys found in the document that do not
@@ -1594,16 +1639,37 @@ def _scan_unsafe(value: Any, path: str = "") -> None:
             _scan_unsafe(v, f"{path}[{i}]")
 
 
+def migrate_v2_to_v3(data: Mapping[str, Any]) -> Dict[str, Any]:
+    """Migrate a canonical schema-v2 config dict to schema-v3 (bounded).
+
+    Bumps ``schema_version`` 2 -> 3 and returns a shallow copy.  The calibration
+    section is deliberately NOT added: a legacy v2 run means "calibration
+    disabled" (absence is the explicit signal, never an invented value).  Any
+    other ``schema_version`` is rejected (bounded migration, fail closed).
+    """
+    if not isinstance(data, Mapping):
+        raise ValidationError("config is not a JSON object")
+    sv = data.get("schema_version")
+    if sv != 2:
+        raise ValidationError(
+            f"migrate_v2_to_v3 expects schema_version 2, got {sv!r}"
+        )
+    out = dict(data)
+    out["schema_version"] = SCHEMA_VERSION
+    return out
+
+
 def read_cfg(path: str) -> ReadReport:
-    """Read and validate a schema-v2 ``.cfg`` (read-only, never writes).
+    """Read and validate a schema-v3 ``.cfg`` (read-only, never writes).
 
     Fails closed on: unreadable/non-UTF-8 bytes, non-JSON content (including
     ``NaN``/``Infinity``), a non-object top level, ``schema_version`` other than
-    2, a non-string ``product_version``, missing/malformed config sections, any
-    secret/credential-like key (at any depth, value never reported), and any
-    field value that fails coercion.  Unknown keys are reported (bounded) and
-    never promoted.  Returns the validated :class:`RunConfig` plus a bounded
-    report.
+    2 (auto-migrated to 3) / 3, a non-string ``product_version``, missing/malformed
+    config sections, any secret/credential-like key (at any depth, value never
+    reported), and any field value that fails coercion.  Unknown keys are reported
+    (bounded) and never promoted.  A legacy v2 document migrates to v3 with the
+    calibration section ABSENT (== "calibration disabled").  Returns the validated
+    :class:`RunConfig` plus a bounded report.
     """
     try:
         with open(os.fspath(path), "rb") as fh:
@@ -1625,7 +1691,11 @@ def read_cfg(path: str) -> ReadReport:
     # Secret/credential-like keys anywhere fail closed (name only).
     _scan_unsafe(data)
 
-    if data.get("schema_version") != SCHEMA_VERSION:
+    # Auto-migrate a legacy v2 document to v3 (bounded, in-memory): a v2 run
+    # carries no calibration section, which means "calibration disabled".
+    if data.get("schema_version") == 2:
+        data = migrate_v2_to_v3(data)
+    elif data.get("schema_version") != SCHEMA_VERSION:
         raise ValidationError(
             f"unsupported schema_version {data.get('schema_version')!r} "
             f"(expected {SCHEMA_VERSION})"
@@ -1645,19 +1715,29 @@ def read_cfg(path: str) -> ReadReport:
             unknown.append(str(key))
 
     sections: Dict[str, Dict[str, Any]] = {}
-    for section in Section.ALL:
+    for section in Section.REQUIRED:
         raw_section = data.get(section)
         if not isinstance(raw_section, dict):
             raise ValidationError(f"missing or malformed section {section!r}")
         sections[section] = raw_section
+    # The calibration section is OPTIONAL: absent == "calibration disabled".
+    raw_cal = data.get(Section.CALIBRATION)
+    if raw_cal is None:
+        sections[Section.CALIBRATION] = {}
+    elif isinstance(raw_cal, dict):
+        sections[Section.CALIBRATION] = raw_cal
+    else:
+        raise ValidationError(f"malformed section {Section.CALIBRATION!r}")
 
     sci: Dict[str, Any] = {}
     exe: Dict[str, Any] = {}
     prov: Dict[str, Any] = {}
+    cal: Dict[str, Any] = {}
     targets = {
         Section.SCIENTIFIC: sci,
         Section.EXECUTION: exe,
         Section.PROVENANCE: prov,
+        Section.CALIBRATION: cal,
     }
     for section in Section.ALL:
         target = targets[section]
@@ -1686,6 +1766,7 @@ def read_cfg(path: str) -> ReadReport:
         scientific=sci,
         execution=exe,
         provenance=prov,
+        calibration=cal,
     )
     return ReadReport(
         config=cfg,

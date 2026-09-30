@@ -44,19 +44,30 @@ def attach_run_settings(
     *,
     use_gpu: bool = False,
     reference_origin_hint: str | None = None,
+    calibration_enabled: bool = False,
+    calibration_master_folder: str | None = None,
+    calibration_orientation: str | None = None,
 ) -> RunRequest:
     """Return a new ``RunRequest`` carrying the Qt-collected seam settings.
 
     The canonical ``request`` is never mutated: a fresh, still-immutable
-    snapshot is built with ``use_gpu`` appended to ``backend_kwargs``.  The
-    default (``False``) matches the Qt/Tk default, so a bare surface (no
-    persisted settings, untouched controls) degrades to today's behaviour.
+    snapshot is built with the seam fields appended to ``backend_kwargs``.  The
+    defaults (``False`` / ``None``) match the Qt/Tk defaults, so a bare surface
+    degrades to today's behaviour.  C5 adds the calibration intent + master
+    folder (engine-instance seam fields, split out by ``split_backend_kwargs``).
     8.4.0 stage E2: ``max_hq_mem_gb`` is intentionally absent — the legacy
     value never reaches the run budget.
     """
     merged = dict(request.backend_kwargs)
     merged["use_gpu"] = bool(use_gpu)
     merged["reference_origin_hint"] = reference_origin_hint
+    merged["calibration_enabled"] = bool(calibration_enabled)
+    merged["calibration_master_folder"] = (
+        str(calibration_master_folder) if calibration_master_folder else ""
+    )
+    merged["calibration_orientation"] = (
+        str(calibration_orientation) if calibration_orientation else ""
+    )
     return RunRequest(
         backend_kwargs=MappingProxyType(merged),
         align_on_disk=request.align_on_disk,

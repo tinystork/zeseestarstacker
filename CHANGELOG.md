@@ -2,6 +2,30 @@
 
 All notable changes to ZeSeestarStacker are documented in this file.
 
+## [8.6.1] — Phoenix consedit
+
+- Calibration provenance/application hardening: durable runtime provenance
+  recorded with real failure reasons, provider roles and codes preserved,
+  a durable never-opened proof, and bounded provider diagnostics.
+- Convergent GPU out-of-memory retry: halve the working surface and re-run the
+  strict-spatial FULL pass before falling back, with honest start/pre/
+  post-cleanup OOM telemetry and a reset stage context per attempt.
+- Adaptive exact-N CPU fallback with scratch safety: per-attempt host
+  re-planning after GPU cleanup with a live RAM re-read, per-tile masks,
+  FULL→spatial contraction and a 3-attempt bound, with the host-memmap
+  downgrade bypass closed and folded into the live loop.
+
+## [8.6.0] — Phoenix consedit
+
+- Optional ZeCalibrator integration with a dedicated Calibration tab.
+- Streaming in-memory calibration with partial dark/bias calibration and DQ
+  propagation into the stacking support mask.
+- Calibration applied on both the Classic and Drizzle stacking paths.
+- Calibration freeze/resume provenance (provider, library fingerprint, plan map,
+  orientation declaration) persisted and compared at resume, on both paths.
+- Conditional provider discovery: the ZeCalibrator provider is only enabled when
+  its session library is present and compatible.
+
 ## [8.5.4] — Phoenix consedit
 
 - Lower the conservative CFA isolated-spike ratio from 20 to 18 so the

@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import math as _math
 import os as _os
+import threading as _threading
 import time as _time
 
 import numpy as np
@@ -94,6 +95,33 @@ __all__ = [
     "stack_winsorized_sigma_gpu",
     "stack_winsorized_sigma_gpu_tiled",
 ]
+
+# ---------------------------------------------------------------------------
+# Lot B telemetry: always-on, bounded stage tracker (phase + tile index).
+#
+# Two scalars only (a short phase string and an int-or-None tile index), held
+# in a thread-local so concurrent reductions never cross-contaminate.  The OOM
+# recovery seam reads ``winsor_gpu_last_stage()`` after a failure to report the
+# responsible phase/tile WITHOUT retaining any array or traceback.  This is a
+# pure diagnostic: it never touches data, control flow or results.
+# ---------------------------------------------------------------------------
+
+_stage_tls = _threading.local()
+
+
+def _set_stage(phase, tile_index=None):
+    """Record the current reduction phase + tile index (bounded scalars)."""
+    _stage_tls.phase = phase
+    _stage_tls.tile_index = tile_index
+
+
+def winsor_gpu_last_stage():
+    """Return ``(phase, tile_index)`` of the last recorded stage, or
+    ``(None, None)`` when none was recorded yet.  Scalars only."""
+    return (
+        getattr(_stage_tls, "phase", None),
+        getattr(_stage_tls, "tile_index", None),
+    )
 
 _cupy_module = None
 
@@ -848,7 +876,12 @@ def stack_winsorized_sigma_gpu(
     ``(result, sum_w, rejected_pct)`` — all arrays NumPy float32
     (``cp.asnumpy`` before return), rejected_pct a Python float.
     """
+    # Reset the thread-local context before any setup call can fail; otherwise
+    # an early failure could inherit the phase/tile from a previous reduction
+    # executed on the same worker thread.
+    _set_stage("full_setup")
     cp = _get_cupy()
+    _set_stage("full")
     _ensure_probe()
     _p_event("gpu_fn_start")
     if _PROBE is None:
@@ -1143,6 +1176,69 @@ def _winsor_tile_slices(frame_shape, tile_shape):
     return slices
 
 
+def _nan_mask_slice(img, mask):
+    """NaN-out spatially invalid pixels of one tile slice (mask True/nonzero
+    == valid).
+
+    Pure-NumPy mirror of the queue-manager ``_nan_mask_image``, applied to a
+    SLICE (a tile) so the numeric core never depends on the GUI/provider layer
+    and never materialises a full-frame masked copy for the tiled reduction.
+    Invalid samples become ``NaN`` (missing), exactly as in the untiled twin.
+    """
+    m = mask[..., None] if img.ndim == 3 else mask
+    return np.where(m, img, np.nan)
+
+
+def _materialize_tile(images, masks, y0, y1, x0, x1):
+    """Materialize one spatial tile as a host float32 array of shape
+    ``(N, tile_h, tile_w)`` (mono) or ``(N, tile_h, tile_w, C)`` (RGB).
+
+    F6 single-allocation: preallocates the FINAL float32 cube and fills each
+    slice directly from the (zero-copy) source view, applying the validity
+    mask IN THE DESTINATION slice (prefill NaN + ``np.copyto(..., where=m)``).
+    NO per-image ``np.where`` tile, NO ``np.stack``, NO temporary conversion
+    cube — so the host peak is ONE float32 cube regardless of the INPUT dtype
+    (uint16/float64 are cast straight into the float32 destination).
+
+    ``masks`` is ``None`` (images already NaN-masked) or a per-image 2-D
+    validity map parallel to ``images`` (True/nonzero == valid).  ``where``
+    treats any truthy mask as valid, so no bool tile temporary is needed for
+    non-bool masks.  Images and masks are never modified (read views only).
+    """
+    n = len(images)
+    first = np.asarray(images[0])
+    th = y1 - y0
+    tw = x1 - x0
+    if first.ndim == 3:
+        c = int(first.shape[2])
+        cube = np.empty((n, th, tw, c), dtype=np.float32)
+        for i, im in enumerate(images):
+            src = np.asarray(im)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = masks[i][y0:y1, x0:x1]
+                if m.dtype != bool:
+                    # Non-bool validity map -> bool tile (truthiness; the
+                    # pipeline passes bool views, so no temporary in practice).
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m[..., None])
+    else:
+        cube = np.empty((n, th, tw), dtype=np.float32)
+        for i, im in enumerate(images):
+            src = np.asarray(im)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = masks[i][y0:y1, x0:x1]
+                if m.dtype != bool:
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m)
+    return cube
+
+
 def _winsor_schedule_kappas(kappa, kappa_decay, n_iters):
     """Kappa of every scheduled iteration, bitwise as in the reference.
 
@@ -1277,6 +1373,9 @@ def stack_winsorized_sigma_gpu_tiled(
     return_weights=False,
     tile_shape=None,
     _tile_order="rowmajor",
+    masks=None,
+    out_result=None,
+    out_sum_w=None,
 ):
     """Exact-N_batch SPATIAL GPU tiling of the Winsorized reduction.
 
@@ -1288,6 +1387,17 @@ def stack_winsorized_sigma_gpu_tiled(
     ``N_batch x tile_h x tile_w x C`` instead of the full frame, while the
     full ``N_batch`` stack population is preserved for EVERY output pixel
     (the stack axis is never split; no hierarchical nonlinear reduction).
+
+    Host-memory boundedness (Lot B): the tiled driver NEVER builds the full
+    ``N x H x W x C`` host stack — each tile is materialised on demand from
+    the (already resident) aligned full-frame images via
+    :func:`_materialize_tile`, and re-materialised for the two passes without
+    retaining several cubes.  ``masks`` is an optional per-image 2-D validity
+    map (True/nonzero == valid) parallel to ``images``; when given, the mask
+    is applied to the TILE SLICE ONLY (no full-frame masked copy).  When
+    ``masks is None`` the images are assumed already NaN-masked (legacy
+    callers / tests).  Passing ``masks`` never modifies the shared aligned
+    images in place (only read views + fresh stacked tiles).
 
     ``tile_shape`` is the Phase F planner seam: ``None`` (or a geometry
     covering the whole frame in one tile) delegates to the untiled twin;
@@ -1303,23 +1413,27 @@ def stack_winsorized_sigma_gpu_tiled(
     placement only, no blend/feather/halo) and ``rejected_pct`` is the
     global sum/sum formula.
     """
+    # Same stale-context guard as the untiled twin, before CuPy/probe setup.
+    _set_stage("tiled_setup")
     cp = _get_cupy()
     _ensure_probe()
     _p_event("tiled_fn_start")
     n_batch = int(len(images))
     if n_batch == 0:  # pragma: no cover - degenerate, mirrors CPU failure
         raise ValueError("tiled winsorized sigma requires at least one image")
-    _p_wall_start("tiled_host_stack_pack")
-    host = np.stack([im for im in images], axis=0).astype(np.float32)
-    _p_wall_end()
-    frame = host.shape[1:]
+    first = np.asarray(images[0])
+    frame = first.shape
     H, W = int(frame[0]), int(frame[1])
-    color = host.ndim == 4
+    color = first.ndim == 3
     spatial = _winsor_tile_slices((H, W), tile_shape)
     if len(spatial) == 1:
         # Untiled / full-frame geometry: the untiled twin IS the reference
         # implementation of this reduction; delegate for guaranteed
         # bitwise identity (and its single-pass early-exit loop).
+        if masks is not None:
+            images = [
+                _nan_mask_slice(im, m) for im, m in zip(images, masks)
+            ]
         return stack_winsorized_sigma_gpu(
             images,
             weights,
@@ -1348,9 +1462,10 @@ def stack_winsorized_sigma_gpu_tiled(
     else:
         global_counts = [0] * int(max_iters)
         for t, (y0, y1, x0, x1) in enumerate(spatial):
-            arr_t = cp.asarray(host[:, y0:y1, x0:x1])
+            _set_stage("tiled_pass1", t)
+            arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
             _p_event("tiled_p1_tile%d" % t)
-            _, counts = _winsorized_tile_iterations_cp(
+            _mask_t, counts = _winsorized_tile_iterations_cp(
                 cp,
                 arr_t,
                 kappa,
@@ -1362,6 +1477,12 @@ def stack_winsorized_sigma_gpu_tiled(
             )
             for i, c in enumerate(counts):
                 global_counts[i] += c
+            # Release this tile's device references before the next tile's
+            # allocation (Lot B req 5): the pass-1 mask and tile cube are
+            # already consumed (only the counts are needed downstream), so
+            # dropping them returns their blocks to the pool free list — a
+            # pure reference drop, never a synchronisation or science change.
+            del arr_t, _mask_t
         z_eff = int(max_iters)
         for i, c in enumerate(global_counts):
             if c == 0:
@@ -1375,12 +1496,19 @@ def stack_winsorized_sigma_gpu_tiled(
     # ---- pass 2: exact replay of z_eff schedule iterations per tile and
     # exact-placement reconstruction + GLOBAL rejection accounting
     out_shape = (H, W) + ((int(frame[2]),) if color else ())
-    result = np.empty(out_shape, dtype=np.float32)
-    sum_w = np.empty(out_shape, dtype=np.float32)
+    if out_result is not None:
+        result = out_result
+    else:
+        result = np.empty(out_shape, dtype=np.float32)
+    if out_sum_w is not None:
+        sum_w = out_sum_w
+    else:
+        sum_w = np.empty(out_shape, dtype=np.float32)
     n_valid_total = 0
     n_surv_total = 0
     for t, (y0, y1, x0, x1) in enumerate(spatial):
-        arr_t = cp.asarray(host[:, y0:y1, x0:x1])
+        _set_stage("tiled_pass2", t)
+        arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
         _p_event("tiled_p2_tile%d" % t)
         valid_t = ~cp.isnan(arr_t)
         # Always run the tile helper: it applies the one-pass gross-outlier
@@ -1413,6 +1541,12 @@ def stack_winsorized_sigma_gpu_tiled(
         result[y0:y1, x0:x1] = cp.asnumpy(res_t.astype(cp.float32))
         sum_w[y0:y1, x0:x1] = cp.asnumpy(sumw_t.astype(cp.float32))
         _p_event("tiled_tile_placed")
+        # Release this tile's device references before the next tile's
+        # allocation (Lot B req 5): arr_t / valid_t / mask_t / res_t / sumw_t
+        # are fully consumed once placed into the host output, so dropping
+        # them returns their blocks to the pool free list for the next tile —
+        # a pure reference drop, never a synchronisation or science change.
+        del arr_t, valid_t, mask_t, res_t, sumw_t
 
     if n_valid_total == 0:
         rejected_pct = 0.0

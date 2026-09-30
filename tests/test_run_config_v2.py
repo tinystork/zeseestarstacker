@@ -83,17 +83,17 @@ def test_package_import_is_cheap():
         import seestar.run_contract as pkg_rc  # noqa: F401
     finally:
         sys.path.pop(0)
-    assert pkg_rc.SCHEMA_VERSION == 2
+    assert pkg_rc.SCHEMA_VERSION == 3
 
 
-def test_schema_v2_shape():
+def test_schema_v3_shape():
     cfg = _config(
         product_version="8.2.0",
         scientific={"stacking_mode": "kappa-sigma", "kappa": 2.5},
         execution={"input_folder": "/tmp/in"},
     )
     d = cfg.to_canonical_dict()
-    assert d["schema_version"] == 2
+    assert d["schema_version"] == 3
     assert d["product_version"] == "8.2.0"
     assert set(d) == {"schema_version", "product_version",
                       "scientific_config", "execution_config", "provenance"}
@@ -111,7 +111,8 @@ def test_field_defs_capture_required_attributes():
     for fd in rc.FIELD_DEFS:
         assert fd.name
         assert fd.section in (rc.Section.SCIENTIFIC, rc.Section.EXECUTION,
-                              rc.Section.PROVENANCE, rc.Section.TOP)
+                              rc.Section.PROVENANCE, rc.Section.CALIBRATION,
+                              rc.Section.TOP)
         assert fd.kind
         # presence is one of the documented values
         assert fd.presence in (rc.PRESENCE_ALWAYS, rc.PRESENCE_CHECKPOINT,
@@ -185,7 +186,7 @@ def test_deterministic_bytes_and_digests():
     assert a.classic_fingerprint() == b.classic_fingerprint()
     # Bytes are UTF-8, compact JSON, deterministic key order.
     parsed = json.loads(a.to_canonical_bytes().decode("utf-8"))
-    assert parsed["schema_version"] == 2
+    assert parsed["schema_version"] == 3
     assert list(parsed.keys()) == sorted(parsed.keys())
 
 
@@ -439,7 +440,7 @@ def test_write_cfg_atomic_roundtrip(tmp_path):
     # deterministic JSON, no partial temp files left behind
     assert not list(tmp_path.glob(".runcfg-*.tmp"))
     reloaded = rc.parse_legacy_cfg(str(target))
-    assert reloaded["schema_version"] == 2
+    assert reloaded["schema_version"] == 3
     assert reloaded["product_version"] == "8.2.0"
 
 
@@ -517,9 +518,11 @@ def test_read_cfg_roundtrip_bytes_and_digest(tmp_path):
 
 
 def test_read_cfg_wrong_schema_rejected(tmp_path):
+    # A schema that is neither 2 (legacy, auto-migrated) nor 3 (canonical) is
+    # rejected.
     target = tmp_path / "bad.cfg"
     target.write_text(json.dumps({
-        "schema_version": 3,
+        "schema_version": 99,
         "product_version": "8.2.0",
         "scientific_config": {}, "execution_config": {}, "provenance": {},
     }), encoding="utf-8")

@@ -175,7 +175,18 @@ def _copy_dict_or_none(value: Any) -> Any:
 #   ``build_backend_kwargs`` (so the Tk flow is byte-identical) — the Qt shell
 #   attaches them to its ``RunRequest`` at the call site.
 SEAM_ONLY_KWARGS = frozenset(
-    {"stack_final_combine", "use_gpu", "max_hq_mem_gb", "reference_origin_hint"}
+    {
+        "stack_final_combine",
+        "use_gpu",
+        "max_hq_mem_gb",
+        "reference_origin_hint",
+        # C5: calibration intent + master folder are engine-instance seam fields
+        # (never forwarded to ``start_processing``).
+        "calibration_enabled",
+        "calibration_master_folder",
+        # C16: orientation declaration is an engine-instance seam field too.
+        "calibration_orientation",
+    }
 )
 
 

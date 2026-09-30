@@ -282,6 +282,7 @@ from seestar.core.stack_gpu import (
     stack_median_gpu,
     stack_winsorized_sigma_gpu,
     stack_winsorized_sigma_gpu_tiled,
+    winsor_gpu_last_stage,
 )
 from seestar.core.gpu_vram_planner import (
     CPU_FALLBACK,
@@ -291,6 +292,7 @@ from seestar.core.gpu_vram_planner import (
     REASON_POOL_QUERY_FAILURE,
     REASON_VRAM_NO_VALID_TILE,
     TILED_GPU,
+    WINSOR_MIN_TILE_OUT,
     WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
     plan_winsorized_gpu_execution,
 )
@@ -300,6 +302,8 @@ from seestar.core.cpu_memory_planner import (
     FULL_CPU,
     MODE_AUTO,
     MODE_OVERRIDE,
+    REASON_BUDGET_NEGATIVE,
+    REASON_MIN_TILE_EXCEEDS_BUDGET,
     REASON_NO_VALID_TILE,
     SPATIAL_TILED_CPU,
     recommended_reserve_bytes,
@@ -316,6 +320,20 @@ from seestar.core.cpu_memory_policy import (
 from seestar.core.cpu_winsor_exact_n import (
     CpuWinsorMemoryRefused,
     stack_winsorized_sigma_cpu_tiled,
+)
+from seestar.core.host_ram_planner import (
+    HOST_IN_MEMORY,
+    HOST_MEMMAP_OUTPUTS,
+    HOST_REFUSE,
+    HOST_SPILL_AND_MEMMAP,
+    HOST_SPILL_INPUTS,
+    HostRamDecision,
+    plan_host_ram_execution,
+    winsorized_tile_from_cap,
+)
+from seestar.core.scratch_store import (
+    ScratchSpaceRefused,
+    ScratchStore,
 )
 
 try:
@@ -472,6 +490,18 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     "CPU_WINSOR_MEMORY_DECISION ",
     "CPU_WINSOR_MEMORY_RETRY ",
     "CPU_WINSOR_MEMORY_REFUSAL ",
+    # Lot C (Track P7): per-attempt bounded GPU OOM retry provenance (one
+    # durable block per GPU attempt -- never per tile -- so the shipped run
+    # log alone proves the retry sequence and the final CPU decision).
+    "GPU_WINSOR_OOM_RETRY ",
+    # Lot D: conjoint host-RAM plan for the winsorized reduction.
+    "WINSOR_HOST_RAM_DECISION ",
+    "WINSOR_HOST_RAM_REFUSAL ",
+    # Lot A calibration: the run-completion runtime-counter aggregate must be
+    # durable so the shipped run log alone proves what actually calibrated
+    # (requested/applied/skipped/failed + roles/DQ), not just the frozen plan.
+    "CALIBRATION_PROVENANCE ",
+    "CALIBRATION_PROVENANCE_WRITE_FAILURE ",
 )
 
 
@@ -568,6 +598,24 @@ _GPU_FOOTPRINT_FACTOR_WINSORIZED = 6.0
 # 22024 ms vs warm 22093 ms on the N=32 1080p tiled witness).
 WINSOR_POOL_RELEASE_MIN_BYTES = 512 * 1024 * 1024  # 512 MiB
 
+# Lot C (Track P7): bounded GPU OOM recovery before CPU fallback.
+#
+# A RECOGNISED recoverable GPU out-of-memory (CuPy pool OOM or the CUDA
+# ``cudaErrorMemoryAllocation`` runtime error) triggers a bounded retry:
+#   FULL OOM  -> a spatial (TILED) GPU strategy, then strictly-smaller tiles;
+#   TILED OOM -> a strictly-smaller tile (never the same geometry twice).
+# Every retry preserves the frozen scientific N, honours WINSOR_MIN_TILE_OUT,
+# and is capped by this explicit maximum number of GPU attempts.  Only when
+# the cap is exhausted (or no smaller valid geometry remains) does the seam
+# fall back to the CPU memory-policy reducer, which re-reads the RAM
+# available AT THAT MOMENT.
+WINSOR_GPU_OOM_MAX_ATTEMPTS = 3
+
+# Result vocabulary for the per-attempt OOM-retry provenance.
+WINSOR_OOM_RESULT_OOM = "oom"
+WINSOR_OOM_RESULT_KERNEL_FAILURE = "kernel_failure"
+WINSOR_OOM_RESULT_SUCCESS = "success"
+
 
 def release_cupy_pool_retained_blocks(pool, min_release_bytes=WINSOR_POOL_RELEASE_MIN_BYTES):
     """Release the retained FREE blocks of a CuPy memory pool, once, at a
@@ -594,6 +642,117 @@ def release_cupy_pool_retained_blocks(pool, min_release_bytes=WINSOR_POOL_RELEAS
         return True, free_before
     except Exception:
         return False, 0
+
+
+def _winsorized_gpu_oom_kind(exc, cp):
+    """Classify a winsorized GPU reduction exception as OOM or not (Lot C).
+
+    Only RECOGNISED recoverable GPU out-of-memory errors return
+    ``"oom"``:
+
+    * the CuPy pool OOM ``cupy.cuda.memory.OutOfMemoryError`` (a
+      ``MemoryError`` subclass raised when the default pool cannot satisfy
+      an allocation), or
+    * the CUDA runtime ``CUDARuntimeError`` with status
+      ``cudaErrorMemoryAllocation`` (== 2).
+
+    Everything else -- a host-side ``MemoryError``, any other
+    ``CUDARuntimeError`` status, import/query/synchronize failures, or any
+    non-memory kernel bug -- returns ``"kernel"`` (never "oom"): those keep
+    the historical single-fallback behaviour and are never disguised as a
+    retryable OOM.
+
+    ``cp`` is the already-imported CuPy module (no fresh import here).
+    """
+    try:
+        if isinstance(exc, cp.cuda.memory.OutOfMemoryError):
+            return "oom"
+        runtime_err = getattr(cp.cuda, "runtime", None)
+        if runtime_err is not None and isinstance(
+            exc, runtime_err.CUDARuntimeError
+        ):
+            if int(getattr(exc, "status", -1)) == 2:  # cudaErrorMemoryAllocation
+                return "oom"
+    except Exception:
+        pass
+    return "kernel"
+
+
+def _winsorized_exc_scalars(exc):
+    """Return ``(error_type, bounded_message)`` scalars for a caught exception.
+
+    The message is whitespace-collapsed and truncated so an event/log never
+    carries an unbounded provider text, a traceback or an array.  The caller
+    must drop the exception object as soon as these two scalars are captured.
+    """
+    etype = type(exc).__name__
+    try:
+        msg = " ".join(str(exc).split())
+    except Exception:
+        msg = ""
+    return etype, msg[:200]
+
+
+def _winsorized_vram_sample(cp):
+    """Sample driver free/total + pool used/total/free as bounded scalars.
+
+    Returns a dict keyed by stable short names with ``None`` values on query
+    failure.  Never raises; never carries a device object / traceback / array.
+    """
+    s = {
+        "driver_free": None,
+        "driver_total": None,
+        "pool_used": None,
+        "pool_total": None,
+        "pool_free": None,
+    }
+    try:
+        free, total = cp.cuda.runtime.memGetInfo()
+        s["driver_free"] = int(free)
+        s["driver_total"] = int(total)
+    except Exception:
+        pass
+    try:
+        pool = cp.get_default_memory_pool()
+        s["pool_used"] = int(pool.used_bytes())
+        s["pool_total"] = int(pool.total_bytes())
+        s["pool_free"] = int(pool.free_bytes())
+    except Exception:
+        pass
+    return s
+
+
+def _winsorized_oom_cleanup(cp):
+    """Bounded recovery after a recoverable GPU OOM, WITHOUT retaining the
+    failed attempt's exception/traceback/large locals.
+
+    Returns ``(synced, released_bytes)`` and NEVER raises.  Semantics:
+
+    * ``synchronize``: drain the default stream IF the CUDA context is still
+      usable (best-effort, swallowed on failure) so the failed kernel's
+      transient allocations settle into the pool's free list;
+    * ``free_all_blocks``: return ONLY the pool's REUSABLE FREE blocks to the
+      driver.  Live device arrays (anything still referenced by the caller,
+      e.g. the resident aligned stack the seam holds) are NOT touched -- this
+      is explicitly not a promise that ``free_all_blocks`` frees live arrays.
+
+    The caller must ensure the exception object and its traceback went out of
+    scope before invoking this (see the dispatch loop): that is what releases
+    the failed attempt's own device buffers back into the free list.
+    """
+    synced = False
+    released = 0
+    try:
+        cp.cuda.Stream.null.synchronize()
+        synced = True
+    except Exception:
+        synced = False
+    try:
+        pool = cp.get_default_memory_pool()
+        _released, released = release_cupy_pool_retained_blocks(pool, 0)
+    except Exception:
+        released = 0
+    return synced, released
 
 
 # ----------------------------------------------------------------------
@@ -636,6 +795,7 @@ GPU_EXEC_REASON_CUPY_IMPORT = "cupy_import_failure"
 GPU_EXEC_REASON_RUNTIME_MEMORY = "runtime_memory_failure"    # memGetInfo / pool-query failure
 GPU_EXEC_REASON_GPU_KERNEL = "gpu_kernel_failure"            # CuPy kernel raised
 GPU_EXEC_REASON_PLANNER = "planner_failure"
+GPU_EXEC_REASON_GPU_OOM = "gpu_oom"                  # recognised GPU OOM, bounded retry exhausted
 
 # Ordered stable fallback-reason catalog (req. 4) -- every reason a
 # per-reduction record can carry when ``fallback`` is true.
@@ -647,6 +807,7 @@ GPU_EXEC_FALLBACK_REASONS = (
     GPU_EXEC_REASON_RUNTIME_MEMORY,
     GPU_EXEC_REASON_GPU_KERNEL,
     GPU_EXEC_REASON_PLANNER,
+    GPU_EXEC_REASON_GPU_OOM,
 )
 
 # Legacy log-level reason codes -> canonical catalog token (mapping used by
@@ -666,6 +827,8 @@ _GPU_EXEC_REASON_MAP = {
     "pool_query": GPU_EXEC_REASON_RUNTIME_MEMORY,
     "pool_query_failure": GPU_EXEC_REASON_RUNTIME_MEMORY,
     "gpu_kernel_failure": GPU_EXEC_REASON_GPU_KERNEL,
+    "gpu_oom": GPU_EXEC_REASON_GPU_OOM,
+    GPU_EXEC_REASON_GPU_OOM: GPU_EXEC_REASON_GPU_OOM,
 }
 
 
@@ -1384,6 +1547,8 @@ _RESUME_MANIFEST_VERSION = 2
 _RESUME_MANIFEST_VERSION_MIN = 1
 _RESUME_MANIFEST_FILENAME = "resume_manifest.json"
 _RUN_CONFIG_FILENAME = "run_config.cfg"
+_CALIBRATION_PROVENANCE_FILENAME = "calibration_provenance.json"
+_CALIBRATION_REASON_MAX_CHARS = 200
 _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
@@ -2505,6 +2670,7 @@ try:
     from ..core.image_processing import (
         debayer_image,
         load_and_validate_fits,
+        normalize_physical_to_working,
         save_fits_image,
         save_preview_image,
     )
@@ -3300,16 +3466,198 @@ class SeestarQueuedStacker:
         )
         return out
 
+    # ------------------------------------------------------------------
+    # Lot D: conjoint host-RAM plan + low-RAM spill / memmap execution
+    # ------------------------------------------------------------------
+
+    def _winsorized_host_ram_plan(self, images, masks, n, frame_shape,
+                                  channels, min_tile_out=CPU_MIN_TILE_OUT):
+        """Resolve the conjoint host-RAM plan for ONE winsorized reduction.
+
+        Measures the live RAM (available + RSS) AT THIS MOMENT (never just at
+        startup), computes the BASE named reserve
+        (``recommended_reserve_bytes(available, 0, 1)`` — frame_bytes=0 so the
+        2-frame output-serialization component is NOT included, because the
+        host planner accounts the SCI/WHT output EXPLICITLY below; no double
+        counting), the already-resident frames+masks (actual nbytes, any input
+        dtype) and the full-frame SCI/WHT outputs (ALWAYS float32, 4 bytes per
+        element), then delegates to the pure
+        :func:`plan_host_ram_execution`.
+
+        ``freed_input_bytes=0``: the wiring performs NO ownership transfer of
+        the batch's original ndarray references, so it PROVES no freed bytes
+        and therefore passes zero (honest — the planner never assumes the
+        resident inputs were freed).
+
+        Returns ``(decision, available, rss, reserve, resident, output)`` and
+        emits the ``WINSOR_HOST_RAM_DECISION`` provenance block.
+        """
+        available = self._cpu_available_ram_bytes_now()
+        if available is None:
+            available = 0
+        rss = self._cpu_process_rss_bytes()
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        resident = 0
+        for im in images:
+            resident += int(getattr(np.asarray(im), "nbytes", 0))
+        if masks:
+            for m in masks:
+                resident += int(getattr(np.asarray(m), "nbytes", 0))
+        # SCI + WHT are ALWAYS float32 (4 bytes), regardless of input dtype.
+        output = 2 * H * W * int(channels) * 4
+        # Base reserve: fixed min + 2% proportional + pool overhead, WITHOUT
+        # the 2-frame output-serialization component (output is accounted
+        # explicitly as ``output`` above -> no double counting).
+        reserve = recommended_reserve_bytes(int(available), 0, 1)
+        decision = plan_host_ram_execution(
+            n=int(n),
+            frame_shape=(H, W),
+            channels=int(channels),
+            dtype_itemsize=4,
+            available_ram_bytes=int(available),
+            reserve_bytes=int(reserve),
+            resident_input_bytes=resident,
+            output_bytes=output,
+            freed_input_bytes=0,
+            min_tile_out=int(min_tile_out),
+        )
+        try:
+            self._emit_provenance_block(
+                "WINSOR_HOST_RAM_DECISION",
+                {
+                    "strategy": decision.strategy,
+                    "reason": decision.reason or "none",
+                    "scientific_n": decision.n,
+                    "available_ram_bytes": int(available),
+                    "rss_bytes": int(rss) if rss is not None else None,
+                    "reserve_bytes": decision.reserve_bytes,
+                    "resident_input_bytes": decision.resident_input_bytes,
+                    "output_bytes": decision.output_bytes,
+                    "freed_input_bytes": 0,
+                    "host_tile_outputs_cap": (
+                        decision.host_tile_outputs_cap
+                        if decision.host_tile_outputs_cap is not None else "full"
+                    ),
+                    "spill_input_bytes": decision.spill_input_bytes,
+                    "output_memmap_bytes": decision.output_memmap_bytes,
+                    "effective_budget_bytes": decision.effective_budget_bytes,
+                },
+            )
+        except Exception:
+            # Telemetry-only failure is non-critical; the plan itself is valid.
+            pass
+        return decision, available, rss, reserve, resident, output
+
+    def _make_winsorized_scratch(self):
+        """A run-scoped scratch store under the output folder (never /tmp)."""
+        out = getattr(self, "output_folder", None)
+        if not out:
+            raise ScratchSpaceRefused(
+                "winsorized low-RAM spill requires an output folder"
+            )
+        return ScratchStore(out)
+
+    def _winsorized_memmap_outputs(self, frame_shape, channels, store):
+        """Allocate disk-backed SCI/WHT output memmaps (written per tile)."""
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        C = int(channels)
+        store.ensure_dir()
+        store.check_space(2 * H * W * C * 4)
+        out_shape = (H, W) if C == 1 else (H, W, C)
+        sci = store.new_memmap("sci", out_shape, np.float32)
+        wht = store.new_memmap("wht", out_shape, np.float32)
+        return sci, wht
+
+    def _register_winsorized_scratch(self, store):
+        """Register a low-RAM scratch store for run-scoped cleanup.
+
+        The store owns the spill memmaps and (for ``memmap_outputs``) the
+        disk-backed SCI/WHT.  It is cleaned up at the batch epilogue (after
+        the batch result is consumed) and at run finalization; a FAILED or
+        CANCELLED run also closes every registered handle first (Windows-safe:
+        no unlink of a live memmap).
+        """
+        stores = getattr(self, "_winsorized_scratch_stores", None)
+        if stores is None:
+            stores = []
+            self._winsorized_scratch_stores = stores
+        stores.append(store)
+
+    def _cleanup_winsorized_scratch(self):
+        """Close + remove every registered low-RAM scratch store (idempotent)."""
+        stores = getattr(self, "_winsorized_scratch_stores", None)
+        if not stores:
+            return
+        for store in stores:
+            try:
+                store.cleanup()
+            except Exception:
+                pass
+        self._winsorized_scratch_stores = []
+
+    def _discard_winsorized_scratch(self, store):
+        """Close + remove ONE low-RAM scratch store (partial-write recovery).
+
+        Removes it from the registered list and cleans it in place.  Used after
+        a GPU OOM/kernel failure to discard a PARTIALLY-WRITTEN pre-GPU
+        SCI/WHT memmap so it is never presented as success (Lot C rework-1).
+        Never raises.
+        """
+        if store is None:
+            return
+        try:
+            store.cleanup()
+        except Exception:
+            pass
+        stores = getattr(self, "_winsorized_scratch_stores", None)
+        if stores is not None:
+            try:
+                stores.remove(store)
+            except ValueError:
+                pass
+
+    def _release_gpu_pool_for_cpu_fallback(self, cp):
+        """Best-effort release of the CuPy pool's retained free blocks before a
+        CPU fallback re-reads live RAM (Lot C rework-1).
+
+        A GPU OOM/kernel failure leaves reusable free blocks in the default
+        pool; releasing them before the CPU memory policy re-reads RAM/RSS
+        means the measurement reflects post-cleanup state.  Never classifies a
+        non-OOM as OOM and never raises.
+        """
+        if cp is None:
+            return
+        try:
+            pool = cp.get_default_memory_pool()
+            release_cupy_pool_retained_blocks(pool, 0)
+        except Exception:
+            pass
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
     def _gpu_reduce_winsorized(
         self,
         fn_cpu,
         images,
         weights=None,
         reserve_bytes=WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+        masks=None,
         **kwargs,
     ):
         """Phase F (Track P4): planner-driven GPU dispatch of the winsorized
         reduction (FULL_GPU / TILED_GPU / CPU_FALLBACK).
+
+        ``masks`` is an optional per-image 2-D validity map (True/nonzero ==
+        valid) parallel to ``images``.  When provided, ``images`` are the RAW
+        aligned frames (never modified in place): the FULL_GPU and CPU paths
+        materialise NaN-masked copies lazily only when needed, while the
+        TILED_GPU path passes ``images`` + ``masks`` straight to the tiled
+        driver so each tile's mask is applied at tile materialisation time
+        (no full-frame masked copy).  When ``masks is None`` the images are
+        already NaN-masked (legacy callers / tests), so behaviour is exactly
+        as before.
 
         Replaces the coarse whole-stack ``_GPU_FOOTPRINT_FACTOR_WINSORIZED``
         guard used by the B7-era dispatch.  When the policy backend is cupy
@@ -3373,10 +3721,96 @@ class SeestarQueuedStacker:
         eligible = getattr(self, "effective_backend", "cpu") == "cupy"
         backend_requested = "cupy" if requested else "cpu"
 
+        # ---- Lot D: conjoint host-RAM plan + low-RAM spill/memmap ----------
+        # Resolve the host strategy (in_memory / memmap_outputs / refuse)
+        # from LIVE RAM + RSS + BASE named reserve + explicit float32 output
+        # (spill_inputs/spill_and_memmap are never selected here: the wiring
+        # proves zero freed bytes, ``freed_input_bytes=0``, so spill provides no
+        # budget benefit and is honest dead vocabulary).  A host refusal or a
+        # scratch/quota failure is a CONTROLLED refusal (telemetry + cleanup +
+        # raise) — never fail-open to a greedier, less-safe path.
+        host_plan = None
+        host_scratch = None
+        host_out_sci = None
+        host_out_wht = None
+        if images is not None and len(images):
+            _frame0 = np.asarray(images[0]).shape
+            _channels0 = 3 if len(_frame0) >= 3 else 1
+            host_plan, _a, _r, _res, _resid, _out = (
+                self._winsorized_host_ram_plan(
+                    images, masks, n_batch, _frame0[:2], _channels0
+                )
+            )
+            if host_plan.is_refusal:
+                self._emit_provenance_block(
+                    "WINSOR_HOST_RAM_REFUSAL",
+                    {
+                        "reason": host_plan.reason or "host_refusal",
+                        "scientific_n": host_plan.n,
+                        "available_ram_bytes": host_plan.available_ram_bytes,
+                        "reserve_bytes": host_plan.reserve_bytes,
+                        "effective_budget_bytes": host_plan.effective_budget_bytes,
+                    },
+                )
+                raise CpuWinsorMemoryRefused(
+                    host_plan.reason or "host_refusal",
+                    details={
+                        "n": host_plan.n,
+                        "available_ram_bytes": host_plan.available_ram_bytes,
+                        "reserve_bytes": host_plan.reserve_bytes,
+                        "effective_budget_bytes": host_plan.effective_budget_bytes,
+                    },
+                )
+            if host_plan.memmaps_outputs:
+                try:
+                    host_scratch = self._make_winsorized_scratch()
+                    self._register_winsorized_scratch(host_scratch)
+                    host_out_sci, host_out_wht = (
+                        self._winsorized_memmap_outputs(
+                            _frame0[:2], _channels0, host_scratch
+                        )
+                    )
+                except Exception as exc:
+                    # Partial write / disk-quota refusal: clean up the store
+                    # NOW (never orphan), then controlled refusal.
+                    self._cleanup_winsorized_scratch()
+                    self._emit_provenance_block(
+                        "WINSOR_HOST_RAM_REFUSAL",
+                        {"reason": "scratch_failure", "error": str(exc)},
+                    )
+                    raise CpuWinsorMemoryRefused(
+                        "scratch_failure", details={"error": str(exc)}
+                    ) from exc
+
+        def _masked_images():
+            """NaN-masked full-frame copies, materialised lazily ONLY for the
+            FULL_GPU and CPU paths (the TILED_GPU path masks per tile and
+            never calls this).  ``masks is None`` -> already masked."""
+            if masks is None:
+                return images
+            return [
+                _nan_mask_image(np.asarray(im), m)
+                for im, m in zip(images, masks)
+            ]
+
         def _record_cpu(reason, *, attempted=False, planner_mode="none",
                         gpu_memory_mode=None, decision=None, cp_module=None):
             """Record executed=cpu AFTER the CPU reducer completed."""
-            out = fn_cpu(images, weights, **kwargs)
+            # Lot C rework-1: when the GPU was actually ATTEMPTED (OOM or
+            # kernel failure), finish best-effort GPU cleanup first — release
+            # the pool's retained free blocks and GC (never classifying a
+            # non-OOM as OOM; that already happened upstream) — and DISCARD any
+            # partial pre-GPU host scratch/memmap so a partially-written SCI/WHT
+            # is never presented as success.  Then let the CPU policy re-resolve
+            # a FRESH host plan from live RAM (never a stale pre-GPU plan).
+            if attempted:
+                self._release_gpu_pool_for_cpu_fallback(cp_module)
+            self._discard_winsorized_scratch(host_scratch)
+            self._winsorized_host_ctx = None  # force live host re-plan
+            try:
+                out = fn_cpu(images, weights, masks=masks, **kwargs)
+            finally:
+                self._winsorized_host_ctx = None
             _record_gpu_execution_safely(self,
                 operation=operation,
                 scientific_N_batch=n_batch,
@@ -3400,6 +3834,14 @@ class SeestarQueuedStacker:
                 effective_vram_budget_bytes=getattr(
                     decision, "effective_budget_bytes", None
                 ),
+                path_class=getattr(decision, "path_class", None),
+                demand_full_bytes=getattr(
+                    decision, "demand_full_bytes", None
+                ),
+                demand_tile_bytes=getattr(
+                    decision, "demand_tile_bytes", None
+                ),
+                reserve_bytes=getattr(decision, "reserve_bytes", None),
             )
             return out
 
@@ -3444,6 +3886,17 @@ class SeestarQueuedStacker:
             return _record_cpu(GPU_EXEC_REASON_RUNTIME_MEMORY)
         try:
             frame = images[0].shape
+            host_cap = (
+                host_plan.host_tile_outputs_cap
+                if host_plan is not None
+                else None
+            )
+            # Disk-backed outputs can only be written per-tile, so a
+            # ``memmap_outputs`` host plan forces the spatial (TILED) path
+            # (the untiled twin materialises full-frame in-RAM SCI/WHT).
+            force_tiled_host = bool(
+                host_plan is not None and host_plan.memmaps_outputs
+            )
             decision = plan_winsorized_gpu_execution(
                 n_batch=n_batch,
                 frame_shape=frame[:2],
@@ -3455,6 +3908,8 @@ class SeestarQueuedStacker:
                 driver_free_bytes=int(free),
                 pool_free_bytes=int(pool_free),
                 reserve_bytes=int(reserve_bytes),
+                host_tile_outputs_cap=host_cap,
+                force_tiled=force_tiled_host,
             )
         except Exception as exc:
             self._log_gpu_fallback_once(
@@ -3464,82 +3919,302 @@ class SeestarQueuedStacker:
                 exc,
             )
             return _record_cpu(GPU_EXEC_REASON_PLANNER, planner_mode="fallback")
-        if decision.kind == FULL_GPU:
-            try:
-                out = stack_winsorized_sigma_gpu(images, weights, **kwargs)
-            except Exception:
-                self.logger.warning(
-                    "GPU winsorized reduction failed; falling back to CPU",
-                    exc_info=True,
+        if decision.kind == FULL_GPU or decision.kind == TILED_GPU:
+            # ---- Lot C (Track P7): bounded GPU OOM recovery ----------------
+            # A recognised recoverable GPU OOM (CuPy pool OOM or CUDA
+            # cudaErrorMemoryAllocation) is recovered, then retried with a
+            # strictly-smaller geometry (FULL -> TILED -> smaller tiles),
+            # capped at WINSOR_GPU_OOM_MAX_ATTEMPTS and never replaying a
+            # geometry that already failed.  A non-OOM kernel exception keeps
+            # the historical single CPU fallback.  N is never changed and
+            # WINSOR_MIN_TILE_OUT is always honoured.  This block ALWAYS
+            # returns (success / fallback), so the initial CPU_FALLBACK branch
+            # below is reachable only for the initial planner decision.
+
+            def _replan(free_bytes, pool_free_bytes, force_tiled, max_tile_out):
+                host_cap = (
+                    host_plan.host_tile_outputs_cap
+                    if host_plan is not None
+                    else None
+                )
+                return plan_winsorized_gpu_execution(
+                    n_batch=n_batch,
+                    frame_shape=frame[:2],
+                    channels=3 if len(frame) >= 3 else 1,
+                    dtype_itemsize=int(np.dtype(images[0].dtype).itemsize),
+                    winsor_limits=kwargs.get("winsor_limits", (0.05, 0.05)),
+                    driver_free_bytes=int(free_bytes),
+                    pool_free_bytes=int(pool_free_bytes),
+                    reserve_bytes=int(reserve_bytes),
+                    force_tiled=force_tiled,
+                    max_tile_outputs=max_tile_out,
+                    host_tile_outputs_cap=host_cap,
+                )
+
+            def _emit_attempt(rec):
+                self._emit_provenance_block("GPU_WINSOR_OOM_RETRY", rec)
+
+            mode = decision.kind
+            tile = decision.tile_shape
+            force_tiled = False
+            max_tile_out = None
+            _h, _w = int(frame[0]), int(frame[1])
+            _s_full = _h * _w
+            for attempt_idx in range(1, WINSOR_GPU_OOM_MAX_ATTEMPTS + 1):
+                if attempt_idx > 1:
+                    # Re-plan from LIVE VRAM after the cleanup, forcing a
+                    # spatial strategy and (for a TILED OOM) a strictly
+                    # smaller tile than the one that just failed.
+                    try:
+                        free, _total = cp.cuda.runtime.memGetInfo()
+                        pool_free = cp.get_default_memory_pool().free_bytes()
+                    except Exception:
+                        # Live-VRAM query failed: stop retrying and fall back.
+                        _emit_attempt({
+                            "attempt": attempt_idx,
+                            "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                            "mode": "tiled" if mode == TILED_GPU else "full",
+                            "n_batch": n_batch,
+                            "result": "vram_query_failure",
+                            "next": "cpu_fallback",
+                        })
+                        self._log_gpu_fallback_once(
+                            REASON_MEMINFO_FAILURE,
+                            "Winsorized VRAM planner: live VRAM re-query "
+                            "failed after a GPU OOM; using CPU",
+                        )
+                        return _record_cpu(
+                            GPU_EXEC_REASON_RUNTIME_MEMORY,
+                            attempted=True,
+                            planner_mode="tiled" if mode == TILED_GPU
+                            else "full",
+                            decision=decision,
+                            cp_module=cp,
+                        )
+                    decision = _replan(
+                        free, pool_free, force_tiled, max_tile_out
+                    )
+                    if decision.kind == CPU_FALLBACK:
+                        # No smaller valid geometry remains -> CPU.
+                        _emit_attempt({
+                            "attempt": attempt_idx,
+                            "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                            "mode": "tiled",
+                            "n_batch": n_batch,
+                            "result": WINSOR_OOM_RESULT_OOM,
+                            "next": "cpu_fallback",
+                            "reason": decision.reason or REASON_VRAM_NO_VALID_TILE,
+                        })
+                        return _record_cpu(
+                            _gpu_execution_reason_token(
+                                decision.reason or REASON_VRAM_NO_VALID_TILE
+                            ) or GPU_EXEC_REASON_VRAM_NO_VALID_TILE,
+                            attempted=True,
+                            planner_mode="tiled",
+                            decision=decision,
+                            cp_module=cp,
+                        )
+                    mode = decision.kind
+                    tile = decision.tile_shape
+
+                vram_at_start = _winsorized_vram_sample(cp)
+
+                error_kind = None
+                error_type = None
+                error_message = None
+                oom_phase = None
+                oom_tile_index = None
+                try:
+                    if mode == FULL_GPU:
+                        out = stack_winsorized_sigma_gpu(
+                            _masked_images(), weights, **kwargs
+                        )
+                    else:
+                        out = stack_winsorized_sigma_gpu_tiled(
+                            images,
+                            weights,
+                            tile_shape=tile,
+                            masks=masks,
+                            out_result=host_out_sci,
+                            out_sum_w=host_out_wht,
+                            **kwargs,
+                        )
+                except Exception as exc:
+                    # Capture ONLY bounded scalars inside the boundary; the
+                    # exception object + traceback are dropped on exit.
+                    error_kind = _winsorized_gpu_oom_kind(exc, cp)
+                    error_type, error_message = _winsorized_exc_scalars(exc)
+                    oom_phase, oom_tile_index = winsor_gpu_last_stage()
+
+                if error_kind is None:
+                    # SUCCESS: release the retained pool and record the truth.
+                    _emit_attempt({
+                        "attempt": attempt_idx,
+                        "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                        "mode": "full" if mode == FULL_GPU else "tiled",
+                        "tile_shape": _prov_token(tile),
+                        "n_batch": n_batch,
+                        "measured_driver_free_at_attempt_start_bytes": vram_at_start["driver_free"],
+                        "measured_driver_total_at_attempt_start_bytes": vram_at_start["driver_total"],
+                        "measured_pool_used_at_attempt_start_bytes": vram_at_start["pool_used"],
+                        "measured_pool_total_at_attempt_start_bytes": vram_at_start["pool_total"],
+                        "measured_pool_free_at_attempt_start_bytes": vram_at_start["pool_free"],
+                        "demand_full_bytes": decision.demand_full_bytes,
+                        "demand_tile_bytes": decision.demand_tile_bytes,
+                        "effective_budget_bytes": decision.effective_budget_bytes,
+                        "result": WINSOR_OOM_RESULT_SUCCESS,
+                        "next": "none",
+                    })
+                    self._release_pool_after_winsorized_reduction(cp)
+                    _record_gpu_execution_safely(self,
+                        operation=operation,
+                        scientific_N_batch=n_batch,
+                        workload_shape=workload_shape,
+                        backend_requested=backend_requested,
+                        eligible=True,
+                        attempted=True,
+                        executed="gpu",
+                        gpu_memory_mode="full" if mode == FULL_GPU
+                        else "tiled",
+                        fallback_reason="none",
+                        planner_mode="full" if mode == FULL_GPU else "tiled",
+                        tile_shape=tile,
+                        n_tiles=decision.n_tiles,
+                        estimated_peak_vram_bytes=(
+                            decision.demand_full_bytes
+                            if mode == FULL_GPU
+                            else decision.demand_tile_bytes
+                        ),
+                        effective_vram_budget_bytes=decision.effective_budget_bytes,
+                        path_class=decision.path_class,
+                        demand_full_bytes=decision.demand_full_bytes,
+                        demand_tile_bytes=decision.demand_tile_bytes,
+                        reserve_bytes=decision.reserve_bytes,
+                    )
+                    if mode == TILED_GPU:
+                        self.update_progress(
+                            f"GPU winsorized : exécution tuilée spatiale "
+                            f"(tile_shape={tile}, {decision.n_tiles} tuiles, "
+                            f"N_batch={n_batch} conservé)",
+                            "INFO",
+                        )
+                    if host_scratch is not None:
+                        # Durability of disk-backed SCI/WHT before the caller
+                        # consumes them (memmap pages must hit the file).
+                        host_scratch.flush()
+                    return out
+
+                if error_kind != "oom":
+                    # Non-OOM kernel exception: historical single CPU
+                    # fallback (NEVER disguised as a retryable OOM).  The
+                    # event/log carry only the bounded scalar error_type +
+                    # message — never a traceback or the exception object.
+                    _emit_attempt({
+                        "attempt": attempt_idx,
+                        "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                        "mode": "full" if mode == FULL_GPU else "tiled",
+                        "tile_shape": _prov_token(tile),
+                        "n_batch": n_batch,
+                        "error_type": error_type,
+                        "error_message": error_message,
+                        "result": WINSOR_OOM_RESULT_KERNEL_FAILURE,
+                        "next": "cpu_fallback",
+                    })
+                    self.logger.warning(
+                        "GPU winsorized reduction failed (%s: %s); "
+                        "falling back to CPU",
+                        error_type,
+                        error_message,
+                    )
+                    return _record_cpu(
+                        GPU_EXEC_REASON_GPU_KERNEL,
+                        attempted=True,
+                        planner_mode="full" if mode == FULL_GPU else "tiled",
+                        decision=decision,
+                        cp_module=cp,
+                    )
+
+                # Recoverable OOM: sample PRE-CLEANUP state first (the failed
+                # attempt's frame/traceback have just been dropped, but its
+                # device buffers are still live in the pool), then run the
+                # cleanup, then sample POST-CLEANUP state.
+                vram_pre_cleanup = _winsorized_vram_sample(cp)
+                gc.collect()
+                synced, released = _winsorized_oom_cleanup(cp)
+                vram_post_cleanup = _winsorized_vram_sample(cp)
+                if mode == FULL_GPU:
+                    # FULL OOM -> strictly spatial next attempt: surface < H*W
+                    # AND >= 2 effective tiles.  Halve the full-frame surface
+                    # so a single full-height band (which would re-delegate to
+                    # the untiled twin) can never be chosen.
+                    force_tiled = True
+                    max_tile_out = max(WINSOR_MIN_TILE_OUT, _s_full // 2)
+                    next_action = "tiled"
+                else:
+                    # TILED OOM -> contract to <= 50% of the surface that just
+                    # failed (never a 1-pixel shrink).
+                    force_tiled = True
+                    max_tile_out = max(
+                        WINSOR_MIN_TILE_OUT, decision.tile_outputs // 2
+                    )
+                    next_action = "smaller_tile"
+                if attempt_idx >= WINSOR_GPU_OOM_MAX_ATTEMPTS:
+                    # No next attempt remains: the following step is CPU.
+                    next_action = "cpu_fallback"
+                _emit_attempt({
+                    "attempt": attempt_idx,
+                    "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
+                    "mode": "full" if mode == FULL_GPU else "tiled",
+                    "tile_shape": _prov_token(tile),
+                    "n_batch": n_batch,
+                    "tile_count": decision.n_tiles,
+                    "oom_phase": oom_phase,
+                    "oom_tile_index": oom_tile_index,
+                    "error_type": error_type,
+                    "error_message": error_message,
+                    "measured_driver_free_at_attempt_start_bytes": vram_at_start["driver_free"],
+                    "measured_driver_total_at_attempt_start_bytes": vram_at_start["driver_total"],
+                    "measured_pool_used_at_attempt_start_bytes": vram_at_start["pool_used"],
+                    "measured_pool_total_at_attempt_start_bytes": vram_at_start["pool_total"],
+                    "measured_pool_free_at_attempt_start_bytes": vram_at_start["pool_free"],
+                    "measured_driver_free_pre_cleanup_bytes": vram_pre_cleanup["driver_free"],
+                    "measured_driver_total_pre_cleanup_bytes": vram_pre_cleanup["driver_total"],
+                    "measured_pool_used_pre_cleanup_bytes": vram_pre_cleanup["pool_used"],
+                    "measured_pool_total_pre_cleanup_bytes": vram_pre_cleanup["pool_total"],
+                    "measured_pool_free_pre_cleanup_bytes": vram_pre_cleanup["pool_free"],
+                    "measured_driver_free_post_cleanup_bytes": vram_post_cleanup["driver_free"],
+                    "measured_driver_total_post_cleanup_bytes": vram_post_cleanup["driver_total"],
+                    "measured_pool_used_post_cleanup_bytes": vram_post_cleanup["pool_used"],
+                    "measured_pool_total_post_cleanup_bytes": vram_post_cleanup["pool_total"],
+                    "measured_pool_free_post_cleanup_bytes": vram_post_cleanup["pool_free"],
+                    "estimated_demand_bytes": (
+                        decision.demand_tile_bytes
+                        if mode == TILED_GPU
+                        else decision.demand_full_bytes
+                    ),
+                    "demand_full_bytes": decision.demand_full_bytes,
+                    "demand_tile_bytes": decision.demand_tile_bytes,
+                    "effective_budget_bytes": decision.effective_budget_bytes,
+                    "result": WINSOR_OOM_RESULT_OOM,
+                    "cleanup_synced": synced,
+                    "cleanup_released_bytes": released,
+                    "next": next_action,
+                })
+            else:
+                # Attempts exhausted without success -> CPU fallback.
+                self._log_gpu_fallback_once(
+                    GPU_EXEC_REASON_GPU_OOM,
+                    "GPU winsorized reduction: out of memory after %d "
+                    "attempt(s) (bounded retry exhausted); using CPU",
+                    WINSOR_GPU_OOM_MAX_ATTEMPTS,
                 )
                 return _record_cpu(
-                    GPU_EXEC_REASON_GPU_KERNEL,
+                    GPU_EXEC_REASON_GPU_OOM,
                     attempted=True,
-                    planner_mode="full",
+                    planner_mode="tiled" if mode == TILED_GPU else "full",
                     decision=decision,
+                    cp_module=cp,
                 )
-            self._release_pool_after_winsorized_reduction(cp)
-            _record_gpu_execution_safely(self,
-                operation=operation,
-                scientific_N_batch=n_batch,
-                workload_shape=workload_shape,
-                backend_requested=backend_requested,
-                eligible=True,
-                attempted=True,
-                executed="gpu",
-                gpu_memory_mode="full",
-                fallback_reason="none",
-                planner_mode="full",
-                tile_shape=None,
-                n_tiles=None,
-                estimated_peak_vram_bytes=decision.demand_full_bytes,
-                effective_vram_budget_bytes=decision.effective_budget_bytes,
-            )
-            return out
-        if decision.kind == TILED_GPU:
-            self.update_progress(
-                f"GPU winsorized : exécution tuilée spatiale "
-                f"(tile_shape={decision.tile_shape}, {decision.n_tiles} tuiles, "
-                f"N_batch={decision.n_batch} conservé)",
-                "INFO",
-            )
-            try:
-                out = stack_winsorized_sigma_gpu_tiled(
-                    images,
-                    weights,
-                    tile_shape=decision.tile_shape,
-                    **kwargs,
-                )
-            except Exception:
-                self.logger.warning(
-                    "GPU winsorized tiled reduction failed; falling back to "
-                    "CPU",
-                    exc_info=True,
-                )
-                return _record_cpu(
-                    GPU_EXEC_REASON_GPU_KERNEL,
-                    attempted=True,
-                    planner_mode="tiled",
-                    decision=decision,
-                )
-            self._release_pool_after_winsorized_reduction(cp)
-            _record_gpu_execution_safely(self,
-                operation=operation,
-                scientific_N_batch=n_batch,
-                workload_shape=workload_shape,
-                backend_requested=backend_requested,
-                eligible=True,
-                attempted=True,
-                executed="gpu",
-                gpu_memory_mode="tiled",
-                fallback_reason="none",
-                planner_mode="tiled",
-                tile_shape=decision.tile_shape,
-                n_tiles=decision.n_tiles,
-                estimated_peak_vram_bytes=decision.demand_tile_bytes,
-                effective_vram_budget_bytes=decision.effective_budget_bytes,
-            )
-            return out
         # CPU_FALLBACK: durable once-per-reason diagnostics.
         reason = decision.reason or REASON_PLANNER_FAILURE
         if reason == REASON_VRAM_NO_VALID_TILE:
@@ -3716,7 +4391,7 @@ class SeestarQueuedStacker:
             tokens["gpu_effective_backend"] = str(
                 getattr(self, "effective_backend", "cpu") or "cpu"
             )
-            tokens["cpu_fallback_viable"] = "true"
+            tokens["cpu_fallback_viable"] = "re_evaluated_at_batch"
             tokens["pool_workers_capability"] = pool_capability
             tokens["pool_overhead_excluded"] = "true"
             self._emit_provenance_block("MEMORY_POLICY", tokens)
@@ -3741,24 +4416,33 @@ class SeestarQueuedStacker:
             return rec
         return self._capture_cpu_memory_policy_preflight()
 
-    def _run_cpu_winsor_policy(self, imgs, w=None, **kw):
-        """Automatic CPU memory policy resolution + dispatch (stage E1).
+    def _run_cpu_winsor_policy(self, imgs, w=None, masks=None, **kw):
+        """Automatic CPU memory policy resolution + live-replan dispatch.
 
         Called at EVERY CPU winsorized execution — the plain CPU path AND the
         GPU ``CPU_FALLBACK`` closure (no hidden legacy memory defaults, no
-        scientific-N subdivision).  Re-reads the RAM available NOW, recomputes
-        the named reserve, resolves ``effective_budget = min(policy_ceiling,
-        available_ram_now - reserve)`` through the pure policy module, emits
-        the per-execution provenance, then dispatches:
+        scientific-N subdivision).  Re-reads the RAM available + RSS at the
+        start of EVERY attempt, recomputes the named reserve, resolves
+        ``effective_budget = min(policy_ceiling, available_ram_now -
+        reserve)`` through the pure policy module, emits the per-attempt
+        provenance, then dispatches:
 
         * ``FULL_CPU`` -> queue wrapper ``_stack_winsorized_sigma`` (untiled)
-          with the explicit resolved budget;
+          with the explicit resolved budget (masks applied full-frame only
+          AFTER the FULL decision — never a blind full-frame copy before it);
         * ``SPATIAL_TILED_CPU`` -> stage-C exact-N spatial tiled driver with
-          the planner ``tile_shape`` and the explicit budget (bounded spatial
-          retry / minimum-tile refusal preserved inside the driver);
+          the planner ``tile_shape`` and the explicit budget (masks applied
+          PER TILE — no full-frame masked copy);
         * ``CPU_MEMORY_REFUSAL`` -> raises ``CpuWinsorMemoryRefused`` so stage
           D converts it into a truthful terminal FAILED (never an empty
           success, never a reduced N, never the subgroup path).
+
+        Lot C rework-1: the geometry is re-planned from LIVE RAM on every
+        attempt (never a stale budget).  A recoverable ``MemoryError`` on
+        FULL contracts to a strictly spatial attempt with surface <= 50% of
+        the full frame; on TILED it contracts to <= 50% of the failed
+        surface.  At most 3 attempts total; the last failure is a terminal
+        refusal (``next=refusal``).  A non-memory CPU error is never retried.
         """
         preflight = self._cpu_mem_preflight_record()
         mode = MODE_AUTO if preflight is None else preflight.mode
@@ -3773,84 +4457,314 @@ class SeestarQueuedStacker:
         frame = np.asarray(imgs[0])
         H, W = int(frame.shape[0]), int(frame.shape[1])
         C = int(frame.shape[2]) if frame.ndim >= 3 else 1
-        available = self._cpu_available_ram_bytes_now()
-        if available is None:
-            available = 0
+        s_full = H * W
         limits = tuple(kw.get("winsor_limits", self.winsor_limits))
-        # Closure REWORK-1 (Nono false-cpu_budget_negative): the per-reduction
-        # reserve NEVER includes the process-pool duplication overhead (448 MiB
-        # per extra worker) — a high configured ``max_stack_workers`` must not
-        # refuse a valid small batch on a low-RAM multi-core machine.  Pool
-        # duplication is a capability quantity recorded at preflight
-        # (``pool_workers_capability`` / ``pool_overhead_excluded``), not part
-        # of this reduction's effective budget.
-        decision = resolve_cpu_winsor_decision(
-            mode=mode,
-            n=n,
-            frame_shape=(H, W),
-            channels=C,
-            dtype_itemsize=int(np.asarray(frame).dtype.itemsize),
-            winsor_limits=limits,
-            apply_rewinsor=bool(kw.get("apply_rewinsor", True)),
-            weighted=w is not None,
-            available_ram_bytes=available,
-            policy_ceiling_bytes=ceiling,
-        )
-        self._emit_provenance_block(
-            "CPU_WINSOR_MEMORY_DECISION",
-            cpu_winsor_decision_tokens(decision, available),
-        )
-        if decision.is_refusal:
-            self._emit_provenance_block(
-                "CPU_WINSOR_MEMORY_REFUSAL",
-                cpu_winsor_refusal_tokens(
-                    scientific_n=decision.n,
-                    effective_budget_bytes=decision.effective_budget_bytes,
-                    minimum_estimated_bytes=decision.estimated_peak_bytes,
-                    reason=decision.reason or REASON_NO_VALID_TILE,
-                ),
-            )
-            raise CpuWinsorMemoryRefused(
-                decision.reason or REASON_NO_VALID_TILE,
-                details={
-                    "n": decision.n,
-                    "effective_budget_bytes": decision.effective_budget_bytes,
-                    "minimum_estimated_bytes": decision.estimated_peak_bytes,
-                },
-            )
-        budget = decision.effective_budget_bytes
-        if decision.strategy == FULL_CPU:
-            return self._stack_winsorized_sigma(
-                imgs, w, max_mem_bytes=budget, **kw
-            )
-        # SPATIAL_TILED_CPU -> stage-C exact-N spatial tiled driver.
-        def _record_spatial_retry(**retry):
-            self._emit_provenance_block(
-                "CPU_WINSOR_MEMORY_RETRY",
-                cpu_winsor_retry_tokens(**retry),
-            )
+        dtype_isize = int(np.asarray(frame).dtype.itemsize)
+        apply_rewinsor = bool(kw.get("apply_rewinsor", True))
 
-        try:
-            return stack_winsorized_sigma_cpu_tiled(
-                imgs,
-                weights=w,
-                tile_shape=decision.tile_shape,
-                max_mem_bytes=budget,
-                min_tile_out=CPU_MIN_TILE_OUT,
-                _retry_callback=_record_spatial_retry,
-                **kw,
+        # Lot C rework-2: resolve the conjoint host-RAM plan LIVE per attempt
+        # (a post-OOM RAM drop can flip in_memory -> memmap/refusal).  Host
+        # refusal / scratch failure is a CONTROLLED terminal refusal.
+        def _resolve_host_live():
+            host_plan, _a, _r, _res, _resid, _out = (
+                self._winsorized_host_ram_plan(imgs, masks, n, (H, W), C)
             )
-        except CpuWinsorMemoryRefused as ref:
+            if host_plan.is_refusal:
+                self._emit_provenance_block(
+                    "WINSOR_HOST_RAM_REFUSAL",
+                    {
+                        "reason": host_plan.reason or "host_refusal",
+                        "scientific_n": host_plan.n,
+                        "available_ram_bytes": host_plan.available_ram_bytes,
+                        "reserve_bytes": host_plan.reserve_bytes,
+                        "effective_budget_bytes":
+                            host_plan.effective_budget_bytes,
+                    },
+                )
+                raise CpuWinsorMemoryRefused(
+                    host_plan.reason or "host_refusal",
+                    details={
+                        "n": host_plan.n,
+                        "available_ram_bytes": host_plan.available_ram_bytes,
+                        "reserve_bytes": host_plan.reserve_bytes,
+                        "effective_budget_bytes":
+                            host_plan.effective_budget_bytes,
+                    },
+                )
+            host_scratch = None
+            host_out_sci = None
+            host_out_wht = None
+            if host_plan.memmaps_outputs:
+                try:
+                    host_scratch = self._make_winsorized_scratch()
+                    self._register_winsorized_scratch(host_scratch)
+                    host_out_sci, host_out_wht = (
+                        self._winsorized_memmap_outputs(
+                            (H, W), C, host_scratch
+                        )
+                    )
+                except Exception as exc:
+                    self._cleanup_winsorized_scratch()
+                    self._emit_provenance_block(
+                        "WINSOR_HOST_RAM_REFUSAL",
+                        {"reason": "scratch_failure", "error": str(exc)},
+                    )
+                    raise CpuWinsorMemoryRefused(
+                        "scratch_failure", details={"error": str(exc)}
+                    ) from exc
+            return host_plan, host_scratch, host_out_sci, host_out_wht
+
+        max_attempts = 3
+        force_spatial = False
+        max_tile_outputs = None
+        host_plan = None
+        host_scratch = None
+        host_out_sci = None
+        host_out_wht = None
+
+        def _emit_refusal(decision, budget, reason):
             self._emit_provenance_block(
                 "CPU_WINSOR_MEMORY_REFUSAL",
                 cpu_winsor_refusal_tokens(
                     scientific_n=decision.n,
                     effective_budget_bytes=budget,
-                    minimum_estimated_bytes=decision.estimated_peak_bytes,
-                    reason=ref.reason or decision.reason or REASON_NO_VALID_TILE,
+                    estimated_full_peak_bytes=decision.estimated_peak_bytes,
+                    estimated_tile_peak_bytes=decision.per_tile_peak_bytes,
+                    output_sci_wht_bytes=decision.details.get(
+                        "output_sci_wht_bytes"
+                    ),
+                    reason=reason or REASON_NO_VALID_TILE,
+                    next_action="refusal",
                 ),
             )
-            raise
+            if host_scratch is not None:
+                self._discard_winsorized_scratch(host_scratch)
+            raise CpuWinsorMemoryRefused(
+                reason or REASON_NO_VALID_TILE,
+                details={
+                    "n": decision.n,
+                    "effective_budget_bytes": budget,
+                    "estimated_full_peak_bytes": decision.estimated_peak_bytes,
+                    "estimated_tile_peak_bytes": decision.per_tile_peak_bytes,
+                },
+            )
+
+        def _tile_surface(ts):
+            """Spatial surface (outputs) of a tile shape: ``(th,)`` -> th*W,
+            ``(th, tw)`` -> th*tw, ``None`` -> full frame H*W."""
+            if ts is None:
+                return s_full
+            if isinstance(ts, (tuple, list)):
+                th = int(ts[0])
+                tw = int(ts[1]) if len(ts) >= 2 else W
+                return th * tw
+            return int(ts) * W
+
+        for attempt in range(1, max_attempts + 1):
+            # Fresh LIVE host plan per attempt (never reuse a partially-written
+            # scratch from a prior failed attempt).
+            host_plan, host_scratch, host_out_sci, host_out_wht = (
+                _resolve_host_live()
+            )
+            available = self._cpu_available_ram_bytes_now()
+            if available is None:
+                available = 0
+            rss = self._cpu_process_rss_bytes()
+            decision = resolve_cpu_winsor_decision(
+                mode=mode,
+                n=n,
+                frame_shape=(H, W),
+                channels=C,
+                dtype_itemsize=dtype_isize,
+                winsor_limits=limits,
+                apply_rewinsor=apply_rewinsor,
+                weighted=w is not None,
+                available_ram_bytes=available,
+                policy_ceiling_bytes=ceiling,
+                force_spatial=force_spatial,
+                max_tile_outputs=max_tile_outputs,
+            )
+            tokens = cpu_winsor_decision_tokens(
+                decision, available, rss_bytes=rss
+            )
+            tokens["attempt"] = attempt
+            self._emit_provenance_block("CPU_WINSOR_MEMORY_DECISION", tokens)
+
+            # Resolve THIS attempt's execution geometry + budget.  A refusal
+            # may still become a SAFE disk-backed execution via the conjoint
+            # host plan (``memmaps_outputs``): that downgrade is a CANDIDATE
+            # of the current attempt (mono-attempt tiled driver, same
+            # MemoryError handling) — never an opaque sub-loop, never a static
+            # internal retry, never a stale host plan.
+            exec_is_full = False
+            exec_tile_shape = None
+            if decision.is_refusal:
+                downgrade = (
+                    host_plan is not None
+                    and not host_plan.is_refusal
+                    and host_plan.memmaps_outputs
+                )
+                if not downgrade:
+                    _emit_refusal(
+                        decision, decision.effective_budget_bytes,
+                        decision.reason,
+                    )
+                # The downgrade tile derives from the host cap, CLAMPED by the
+                # live contraction knob (``max_tile_outputs``) so a downgrade
+                # MemoryError contracts to a strictly smaller surface on the
+                # next attempt (<= 50%), exactly like the normal spatial path.
+                cap = host_plan.host_tile_outputs_cap
+                if max_tile_outputs is not None:
+                    cap = min(int(cap), int(max_tile_outputs))
+                exec_tile_shape = winsorized_tile_from_cap(
+                    (H, W), cap, CPU_MIN_TILE_OUT
+                )
+                if exec_tile_shape is None:
+                    _emit_refusal(
+                        decision, decision.effective_budget_bytes,
+                        REASON_NO_VALID_TILE,
+                    )
+                exec_budget = host_plan.effective_budget_bytes
+                # Explicit transition: refusal -> disk-backed spatial execution.
+                self._emit_provenance_block(
+                    "CPU_WINSOR_MEMORY_RETRY",
+                    cpu_winsor_retry_tokens(
+                        old_tile_shape=None,
+                        new_tile_shape=exec_tile_shape,
+                        reason="host_memmap_downgrade",
+                        attempt=attempt,
+                        outcome="fallback",
+                        next_action="fallback",
+                    ),
+                )
+            elif decision.strategy == FULL_CPU and not host_plan.memmaps_outputs:
+                exec_is_full = True
+                exec_budget = decision.effective_budget_bytes
+            else:
+                exec_tile_shape = decision.tile_shape
+                if decision.strategy == FULL_CPU and host_plan.memmaps_outputs:
+                    exec_tile_shape = winsorized_tile_from_cap(
+                        (H, W), host_plan.host_tile_outputs_cap,
+                        CPU_MIN_TILE_OUT,
+                    )
+                    if exec_tile_shape is None:
+                        _emit_refusal(
+                            decision, decision.effective_budget_bytes,
+                            REASON_NO_VALID_TILE,
+                        )
+                exec_budget = decision.effective_budget_bytes
+            exec_surface = _tile_surface(
+                None if exec_is_full else exec_tile_shape
+            )
+
+            budget = exec_budget
+            masked_imgs = None
+            out = None
+            error_type = None
+            try:
+                if exec_is_full:
+                    # Lot C: masks applied full-frame ONLY here, AFTER the
+                    # FULL decision (the untiled wrapper needs NaN-masked
+                    # observations) — never a blind full-frame copy before it.
+                    if masks is not None:
+                        masked_imgs = [
+                            _nan_mask_image(np.asarray(im), m)
+                            for im, m in zip(imgs, masks)
+                        ]
+                    else:
+                        masked_imgs = imgs
+                    out = self._stack_winsorized_sigma(
+                        masked_imgs, w, max_mem_bytes=budget, **kw
+                    )
+                else:
+                    out = stack_winsorized_sigma_cpu_tiled(
+                        imgs,
+                        weights=w,
+                        tile_shape=exec_tile_shape,
+                        max_mem_bytes=budget,
+                        min_tile_out=CPU_MIN_TILE_OUT,
+                        max_retries=0,
+                        _re_raise_memory_error=True,
+                        out_result=host_out_sci,
+                        out_sum_w=host_out_wht,
+                        masks=masks,
+                        **kw,
+                    )
+                if host_scratch is not None:
+                    host_scratch.flush()
+                return out
+            except CpuWinsorMemoryRefused as ref:
+                # Terminal planner refusal (a MemoryError subclass): never
+                # treat it as a retryable allocation OOM.
+                _emit_refusal(decision, budget, ref.reason)
+            except MemoryError as exc:
+                # Bounded scalar only — the exception/traceback is dropped here
+                # (never retained into the event or the next attempt).
+                error_type = type(exc).__name__
+            except Exception:
+                # Non-memory CPU error: never retried, BUT the failed attempt's
+                # partial scratch/memmap is discarded + removed from the
+                # registry before propagation (run fails cleanly, no partial
+                # store registered, no flush).
+                if host_scratch is not None:
+                    self._discard_winsorized_scratch(host_scratch)
+                    host_scratch = None
+                    host_out_sci = None
+                    host_out_wht = None
+                raise
+
+            # ---- exited the except: measure pre-cleanup FIRST (BEFORE
+            # dropping refs / discarding scratch / gc), then post-cleanup ----
+            pre_avail = self._cpu_available_ram_bytes_now()
+            pre_rss = self._cpu_process_rss_bytes()
+            masked_imgs = None
+            out = None
+            if host_scratch is not None:
+                # Discard any partially-written memmap from the failed attempt
+                # AND remove it from the registry (never a stale/partial store).
+                self._discard_winsorized_scratch(host_scratch)
+                host_scratch = None
+                host_out_sci = None
+                host_out_wht = None
+            gc.collect()
+            post_avail = self._cpu_available_ram_bytes_now()
+            post_rss = self._cpu_process_rss_bytes()
+
+            # Recoverable allocation failure: contract + live-replan.
+            force_spatial = True
+            if exec_is_full:
+                max_tile_outputs = max(CPU_MIN_TILE_OUT, s_full // 2)
+            else:
+                max_tile_outputs = max(
+                    CPU_MIN_TILE_OUT, exec_surface // 2
+                )
+            if attempt >= max_attempts:
+                _emit_refusal(
+                    decision, budget, REASON_MIN_TILE_EXCEEDS_BUDGET
+                )
+            self._emit_provenance_block(
+                "CPU_WINSOR_MEMORY_RETRY",
+                cpu_winsor_retry_tokens(
+                    old_tile_shape=exec_tile_shape,
+                    new_tile_shape=None,
+                    reason="allocation_failure",
+                    attempt=attempt,
+                    outcome="retrying",
+                    next_action="smaller_tile",
+                    error_type=error_type,
+                    measured_available_at_attempt_start_bytes=available,
+                    measured_rss_at_attempt_start_bytes=rss,
+                    measured_available_pre_cleanup_bytes=pre_avail,
+                    measured_rss_pre_cleanup_bytes=pre_rss,
+                    measured_available_post_cleanup_bytes=post_avail,
+                    measured_rss_post_cleanup_bytes=post_rss,
+                ),
+            )
+        # Unreachable in practice: the loop returns on success or raises.
+        raise CpuWinsorMemoryRefused(
+            REASON_MIN_TILE_EXCEEDS_BUDGET,
+            details={"n": n, "attempts": max_attempts},
+        )
 
     def __getstate__(self):
         """Return picklable state for multiprocessing."""
@@ -4992,6 +5906,39 @@ class SeestarQueuedStacker:
         self.processing_active = False
         self.stop_processing = False
         self.processing_error = None
+        # C5: streaming calibration state.  ``_calibration_enabled`` /
+        # ``_calibration_master_folder`` are engine-instance seam fields (set by
+        # the Qt backend adapter); the integrator is opened lazily at Start and
+        # closed on stop.  ``_calibration_masks`` carries each frame's provider
+        # DQ mask (``mask != 0`` == invalid) for C6 — never silently dropped.
+        self._calibration_enabled = False
+        self._calibration_master_folder = ""
+        # C16: neutral fallback-only session declaration ("identity" when the
+        # user checked the orientation checkbox; "" otherwise -> no declaration).
+        self._calibration_orientation = ""
+        self._calibration_integrator = None
+        self._calibration_masks: dict = {}
+        # C6 audit counter: number of pixels invalidated by the calibration DQ
+        # (``mask != 0``) when combined into the support/valid mask.
+        self._dq_invalidated_count = 0
+        # C7: the frozen calibration signature (7 fields) persisted into the run
+        # contract ``calibration`` section and compared at resume (hard refusal).
+        self._calibration_freeze: dict = {}
+        # C-provenance: bounded runtime counters captured at session close
+        # (requested / applied / skipped / failed + reasons + roles + DQ).
+        self._calibration_provenance: dict = {}
+        # Whether THIS run requested calibration (enabled=True), independent of
+        # whether a session actually opened — drives whether a durable proof
+        # artifact is written at close.
+        self._calibration_enabled_requested = False
+        # Idempotence guard: once the final provenance was emitted/written, a
+        # second close (worker finally + explicit stop) must not re-emit nor
+        # overwrite a good snapshot with a minimal one.
+        self._calibration_provenance_finalized = False
+        # Real, stable reason the calibration session could not open (probe
+        # INCOMPATIBLE / import failure / no usable masters) — surfaced
+        # actionably, never as a bare traceback.
+        self._calibration_unavailable_reason = None
         # ZSSS-LIFECYCLE-01: structured startup refusal (reset per start attempt)
         # and fail-open lifecycle callback (installed by the Qt adapter so the
         # engine can record durable lifecycle events without ever touching Qt).
@@ -11066,6 +12013,363 @@ class SeestarQueuedStacker:
                 exc_info=True,
             )
 
+    def _open_calibration_session(self) -> None:
+        """Open the calibration integrator at Start (C5).
+
+        Lazily imports the integrator; a provider that is absent/unavailable or
+        a masters folder with zero usable masters is an *information*, never a
+        fatal error (the run continues on the historical path).  The exact cause
+        (INCOMPATIBLE / NOT_INSTALLED / UNHEALTHY / no usable masters) is
+        surfaced actionably — never a bare traceback, never a secret.
+        """
+        # F3: reset per-run provenance/reason state on every Start attempt.
+        self._calibration_integrator = None
+        self._calibration_provenance = {}
+        self._calibration_unavailable_reason = None
+        self._calibration_provenance_finalized = False
+        # Robust to a bare engine instance (e.g. a minimal test stacker) that
+        # never set the C5 seam fields: calibration is OPTIONAL, so absence of
+        # the fields means "disabled".
+        enabled = getattr(self, "_calibration_enabled", False)
+        master_folder = getattr(self, "_calibration_master_folder", "")
+        self._calibration_enabled_requested = bool(enabled)
+        if not enabled:
+            return
+        if not master_folder:
+            # C23: enabled but no master folder -> clear, actionable message
+            # (never a silent uncalibrated run).  Recorded so the final proof
+            # artifact explains WHY no session opened.
+            self._calibration_unavailable_reason = "no_master_folder"
+            if self.update_progress:
+                self.update_progress(
+                    "Calibration enabled but no master folder selected; "
+                    "continuing without calibration.",
+                    "INFO",
+                )
+            return
+        try:
+            from seestar.calibration.streaming import CalibrationIntegrator
+        except Exception as exc:
+            self._calibration_unavailable_reason = f"integrator_import_failed: {type(exc).__name__}"
+            if self.update_progress:
+                self.update_progress(
+                    f"Calibration unavailable ({type(exc).__name__}); continuing "
+                    "with the historical path.",
+                    "INFO",
+                )
+            return
+        integrator = CalibrationIntegrator(
+            master_folder,
+            sensor_orientation=(getattr(self, "_calibration_orientation", "") or None),
+        )
+        # Expose the provider negotiation result actionably: a C26 version-skew
+        # (missing ``light_route_key``) reports INCOMPATIBLE with a message, not
+        # the misleading "no usable masters".  ``probe_info`` never raises (F4).
+        info = integrator.probe_info()
+        if not getattr(info, "available", False):
+            # Provider diagnostics are untrusted observational text.  Keep the
+            # actionable state/message, but collapse whitespace and cap the
+            # value before it reaches the user log or provenance artifact.
+            state = getattr(getattr(info, "state", None), "value", None) or str(
+                getattr(info, "state", "unavailable")
+            )
+            message = " ".join(
+                str(getattr(info, "message", "") or "provider unavailable").split()
+            )[:_CALIBRATION_REASON_MAX_CHARS]
+            self._calibration_unavailable_reason = (
+                f"{state}: {message}"
+            )[:_CALIBRATION_REASON_MAX_CHARS]
+            if self.update_progress:
+                self.update_progress(
+                    "Calibration unavailable (%s); continuing with the "
+                    "historical path." % self._calibration_unavailable_reason,
+                    "INFO",
+                )
+            return
+        try:
+            opened = integrator.open()
+        except Exception as exc:
+            opened = False
+            self._calibration_unavailable_reason = f"open_failed: {type(exc).__name__}"
+        if opened:
+            self._calibration_integrator = integrator
+            logger.debug(
+                "[C5] calibration session open (fingerprint=%s)",
+                integrator.fingerprint,
+            )
+            # C7: freeze the calibration signature (provider + fingerprint +
+            # plan map) so it can be persisted and compared at resume.
+            self._build_calibration_freeze()
+        else:
+            self._calibration_unavailable_reason = (
+                self._calibration_unavailable_reason
+                or integrator.open_reason
+                or "no usable masters"
+            )
+            integrator.close()
+            self._calibration_integrator = None
+            if self.update_progress:
+                self.update_progress(
+                    "Calibration unavailable (%s); continuing with the "
+                    "historical path." % self._calibration_unavailable_reason,
+                    "INFO",
+                )
+
+    def _minimal_calibration_provenance(self) -> dict:
+        """Bounded minimal snapshot for a run that requested calibration but
+        whose session never opened (INCOMPATIBLE / no folder / import / open
+        failure).  ``session_open=false`` + a stable ``open_reason`` + coherent
+        zero counters — the exact user-facing case to explain durably.
+        """
+        return {
+            "calibration_enabled_requested": True,
+            "calibration_requested": 0,
+            "calibration_session_open": False,
+            "calibration_library_fingerprint": "",
+            "calibration_classes_planned": 0,
+            "calibration_plan_reason": None,
+            "calibration_open_reason": self._calibration_unavailable_reason,
+            "calibration_close_reason": None,
+            "calibration_frames_applied": 0,
+            "calibration_frames_skipped": 0,
+            "calibration_frames_failed": 0,
+            "calibration_skip_reasons": {},
+            "calibration_failure_reasons": {},
+            "calibration_resolve_reasons": {},
+            "calibration_effective_roles": [],
+            "calibration_dq_present": False,
+        }
+
+    def _close_calibration_session(self) -> None:
+        # F3: emit/write a durable proof whenever calibration was REQUESTED —
+        # even when no session ever opened (that is the user-facing case to
+        # explain).  Calibration disabled => no artifact (absence == disabled).
+        # Idempotent: worker finally + explicit stop both call this; finalize once.
+        if getattr(self, "_calibration_provenance_finalized", False):
+            return
+        close_failed = None
+        if self._calibration_integrator is not None:
+            try:
+                # C-provenance: snapshot the bounded runtime counters (requested /
+                # applied / skipped / failed + reasons + roles + DQ) BEFORE the
+                # session is closed, so the final log/freeze can distinguish
+                # "session open" from "plan resolved" from "pixels calibrated".
+                self._calibration_provenance = (
+                    self._calibration_integrator.provenance_snapshot()
+                )
+            except Exception:
+                self._calibration_provenance = {}
+            finally:
+                integ = self._calibration_integrator
+                try:
+                    integ.close()
+                except Exception as exc:
+                    # Robustness: a raising close must not break the worker
+                    # finally nor lose the artifact; aggregate a bounded reason.
+                    close_failed = f"close_failed:{type(exc).__name__}"
+                else:
+                    # The integrator's close() is fail-open and records a bounded
+                    # close_reason when the provider's session.close() raised.
+                    cr = getattr(integ, "close_reason", "")
+                    if cr:
+                        close_failed = cr
+                self._calibration_integrator = None
+        elif getattr(self, "_calibration_enabled_requested", False):
+            # Calibration requested but never opened -> minimal bounded snapshot.
+            self._calibration_provenance = self._minimal_calibration_provenance()
+        if close_failed:
+            prov = dict(self._calibration_provenance or {})
+            prov["calibration_close_reason"] = close_failed
+            self._calibration_provenance = prov
+        # Durable final proof (success / failure / cancellation / never-opened):
+        # emit a throttle-exempt run-log block AND persist a versioned JSON-safe
+        # artifact in the output folder.  Never part of the immutable scientific
+        # freeze / resume digest.
+        if getattr(self, "_calibration_provenance", None):
+            self._emit_calibration_provenance()
+            self._write_calibration_provenance_artifact()
+        self._calibration_provenance_finalized = True
+        # C22: release any per-frame DQ masks still retained (bounded memory).
+        masks = getattr(self, "_calibration_masks", None)
+        if masks is not None:
+            masks.clear()
+
+    def _emit_calibration_provenance(self) -> None:
+        """Emit the bounded runtime calibration counters as a durable log block."""
+        prov = getattr(self, "_calibration_provenance", None) or {}
+        self._emit_provenance_block(
+            "CALIBRATION_PROVENANCE",
+            {
+                "enabled_requested": prov.get("calibration_enabled_requested"),
+                "requested": prov.get("calibration_requested"),
+                "session_open": prov.get("calibration_session_open"),
+                "open_reason": prov.get("calibration_open_reason"),
+                "close_reason": prov.get("calibration_close_reason"),
+                "classes_planned": prov.get("calibration_classes_planned"),
+                "applied": prov.get("calibration_frames_applied"),
+                "skipped": prov.get("calibration_frames_skipped"),
+                "failed": prov.get("calibration_frames_failed"),
+                "roles": prov.get("calibration_effective_roles"),
+                "dq_present": prov.get("calibration_dq_present"),
+            },
+        )
+
+    def _write_calibration_provenance_artifact(self) -> None:
+        """Persist a versioned, JSON-safe, bounded final provenance artifact.
+
+        Written atomically into the output folder alongside ``run_config.cfg``
+        (temp + ``os.replace``).  A failure to write is fail-open for science
+        BUT is never silent: it emits a bounded durable
+        ``CALIBRATION_PROVENANCE_WRITE_FAILURE`` block and cleans the temp file.
+        Distinct fields requested / session_open / classes_planned / applied /
+        skipped / failed / roles / DQ / reasons — never the dynamic counters in
+        the scientific freeze, so resume digests stay untouched.
+        """
+        prov = getattr(self, "_calibration_provenance", None) or {}
+        out_dir = getattr(self, "output_folder", None)
+        if not out_dir:
+            return
+        payload = {"schema_version": 1, **prov}
+        path = os.path.join(out_dir, _CALIBRATION_PROVENANCE_FILENAME)
+        tmp = path + ".tmp"
+        try:
+            import json as _json
+
+            with open(tmp, "w", encoding="utf-8") as fh:
+                _json.dump(payload, fh, sort_keys=True, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except Exception as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            # Robustness: never silent — a bounded durable failure event.
+            self._emit_provenance_block(
+                "CALIBRATION_PROVENANCE_WRITE_FAILURE",
+                {"reason": f"{type(exc).__name__}"},
+            )
+
+    def _build_calibration_freeze(self, lights=()) -> dict:
+        """Build + cache the frozen calibration signature (7 fields).
+
+        Returns ``{}`` when calibration is disabled / no session (the absence
+        means "calibration disabled", never an invented value).  Never carries a
+        provider object — only ids, fingerprint and JSON-safe composition.
+        """
+        integrator = getattr(self, "_calibration_integrator", None)
+        if integrator is None:
+            self._calibration_freeze = {}
+        else:
+            try:
+                self._calibration_freeze = integrator.freeze_snapshot(lights)
+            except Exception:
+                self._calibration_freeze = {}
+        return self._calibration_freeze
+
+    def _check_calibration_resume(self, checkpoint_freeze):
+        """Hard-refusal resume check (C7 §26).
+
+        Returns ``(ok, refusal_reason)``.  ``ok`` is True when the frozen
+        signature matches (or both disabled / legacy); otherwise False with a
+        reason naming the FIRST diverging field.  Never recalibrates silently
+        and never falls back to the uncalibrated path.
+        """
+        from seestar.calibration.resume import (
+            calibration_refusal_reason,
+            compare_calibration_freeze,
+        )
+
+        ok, field = compare_calibration_freeze(
+            dict(checkpoint_freeze or {}),
+            dict(getattr(self, "_calibration_freeze", {}) or {}),
+        )
+        if ok:
+            return True, None
+        return False, calibration_refusal_reason(field)
+
+    def _calibrate_frame_to_working(self, file_path):
+        """Calibrate one frame (C5) -> ``(working_float32, header, mask)`` or None.
+
+        Reads the physical frame + header, resolves the light's plan, calibrates
+        (ZeCalibrator reads the file itself) and normalises to the working
+        domain through the single normalisation seam.  Returns ``None`` when the
+        light has no plan or calibration fails — the caller falls back to the
+        historical path (never a hard failure).
+        """
+        integrator = getattr(self, "_calibration_integrator", None)
+        if integrator is None:
+            return None
+        integrator.record_requested()
+        phys = load_and_validate_fits(
+            file_path, normalize_to_float32=False, attempt_fix_nonfinite=False
+        )
+        if not phys or phys[0] is None:
+            integrator.record_failed("light_load_failed")
+            return None
+        physical, header_from_load = phys[0], phys[1]
+        header = header_from_load.copy() if header_from_load else fits.Header()
+        plan = integrator.resolve(file_path)
+        if plan is None:
+            # The integrator already recorded the real skip reason (route_key /
+            # not_planned / resolve:<outcome>); never double-count.
+            return None
+        cal = integrator.calibrate(file_path, plan)
+        if cal is None:
+            # The integrator already recorded the real failure reason; never
+            # double-count.
+            return None
+        calibrated_physical, mask = cal
+        if calibrated_physical is None:
+            integrator.record_failed("empty_data")
+            return None
+        working = normalize_physical_to_working(calibrated_physical)
+        integrator.record_applied(dq_present=mask is not None)
+        return working, header, mask
+
+    def _combine_dq_into_valid_mask(self, file_name, valid_mask, M, is_original_grid):
+        """AND the calibration DQ invalidity into the valid mask (C6, §5).
+
+        DQ is PRIMARY: a DQ-invalid pixel is excluded from support regardless of
+        the luminance mask (never the reverse).  ``is_original_grid`` selects the
+        grid: Drizzle Standard keeps the ORIGINAL frame (the DQ mask already
+        lives there -> direct AND); Classic warps the DQ mask by ``M``
+        (nearest-neighbour) into the aligned grid.  A malformed/unwarpable DQ
+        mask never degrades the existing support truthfulness (returns the mask
+        unchanged).  Increments the C6 audit counter.
+        """
+        # C22: consume the mask ONCE and free it immediately (pop, not get) so
+        # the per-frame DQ masks never accumulate session-wide (small-RAM
+        # configs: a 2822x4144 uint16 mask is ~23 MB/frame).
+        dq = getattr(self, "_calibration_masks", {}).pop(file_name, None)
+        if dq is None:
+            return valid_mask
+        dq_arr = np.asarray(dq)
+        if dq_arr.size == 0:
+            return valid_mask
+        try:
+            dq_invalid = dq_arr != 0
+            if is_original_grid or dq_invalid.shape == valid_mask.shape:
+                combined = valid_mask & ~dq_invalid
+            else:
+                if M is None:
+                    return valid_mask
+                warped = cv2.warpAffine(
+                    dq_invalid.astype(np.uint8),
+                    np.asarray(M, dtype=np.float64),
+                    (int(valid_mask.shape[1]), int(valid_mask.shape[0])),
+                    flags=cv2.INTER_NEAREST,
+                )
+                combined = valid_mask & (warped == 0)
+        except Exception:
+            return valid_mask
+        n_new_invalid = int(np.sum(valid_mask) - np.sum(combined))
+        self._dq_invalidated_count = (
+            getattr(self, "_dq_invalidated_count", 0) + max(0, n_new_invalid)
+        )
+        return combined
+
     def _process_file(
         self,
         file_path,
@@ -11126,39 +12430,66 @@ class SeestarQueuedStacker:
         self._p1_carrier_slot().support_carrier = None
 
         try:
-            logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
-            if _p1_active:
-                # Opt-in loader invalidity report (truthful ORIGINAL non-finite
-                # before repair).  The returned science is bit-identical to the
-                # default path; only the extra spatial mask is added.
-                loaded_data_tuple = load_and_validate_fits(
-                    file_path, report_invalidity=True
-                )
-            else:
-                loaded_data_tuple = load_and_validate_fits(file_path)
-            if loaded_data_tuple and loaded_data_tuple[0] is not None:
+            # C5 seam: calibrate (physical) BEFORE the historical normalize.
+            # When calibration is off (default) or the light has no plan, the
+            # historical loader runs unchanged (zero change by default).
+            calibration_mask = None
+            calibration_applied = False
+            if getattr(self, "_calibration_integrator", None) is not None:
+                cal_tuple = self._calibrate_frame_to_working(file_path)
+                if cal_tuple is not None:
+                    img_data_array_loaded, header_final_pour_retour, calibration_mask = (
+                        cal_tuple
+                    )
+                    calibration_applied = True
+                    # C6: carry the provider DQ mask (never silently dropped).
+                    self._calibration_masks[file_name] = calibration_mask
+                    # C23: publish the content-validity evidence from the
+                    # provider DQ mask.  ``mask != 0`` is content invalidity
+                    # (non-finite, saturated, additive/flat-invalid) — the
+                    # same semantics as the historical loader non-finite
+                    # report — so the P1 support-aware normalization applies on
+                    # the calibrated path instead of silently degrading to
+                    # neutral (no_source_content_validity).
+                    if _p1_active and calibration_mask is not None:
+                        _p1_invalid_raw = np.asarray(calibration_mask) != 0
+                    logger.debug(
+                        f"     - [C5] Frame calibrée. Range: [{np.nanmin(img_data_array_loaded):.4g}, {np.nanmax(img_data_array_loaded):.4g}], Shape: {img_data_array_loaded.shape}, Dtype: {img_data_array_loaded.dtype}"
+                    )
+            if not calibration_applied:
+                logger.debug(f"  -> [1/7] Chargement/Validation FITS pour '{file_name}'...")
                 if _p1_active:
-                    img_data_array_loaded, header_from_load, _p1_invalid_raw = (
-                        loaded_data_tuple
+                    # Opt-in loader invalidity report (truthful ORIGINAL non-finite
+                    # before repair).  The returned science is bit-identical to the
+                    # default path; only the extra spatial mask is added.
+                    loaded_data_tuple = load_and_validate_fits(
+                        file_path, report_invalidity=True
                     )
                 else:
-                    img_data_array_loaded, header_from_load = loaded_data_tuple
-                header_final_pour_retour = (
-                    header_from_load.copy() if header_from_load else fits.Header()
-                )
-            else:
-                header_temp_fallback = None
-                if loaded_data_tuple and loaded_data_tuple[1] is not None:
-                    header_temp_fallback = loaded_data_tuple[1].copy()
+                    loaded_data_tuple = load_and_validate_fits(file_path)
+                if loaded_data_tuple and loaded_data_tuple[0] is not None:
+                    if _p1_active:
+                        img_data_array_loaded, header_from_load, _p1_invalid_raw = (
+                            loaded_data_tuple
+                        )
+                    else:
+                        img_data_array_loaded, header_from_load = loaded_data_tuple
+                    header_final_pour_retour = (
+                        header_from_load.copy() if header_from_load else fits.Header()
+                    )
                 else:
-                    try:
-                        header_temp_fallback = fits.getheader(file_path)
-                    except:
-                        header_temp_fallback = fits.Header()
-                header_final_pour_retour = header_temp_fallback
-                raise ValueError(
-                    "Échec chargement/validation FITS (données non retournées)."
-                )
+                    header_temp_fallback = None
+                    if loaded_data_tuple and loaded_data_tuple[1] is not None:
+                        header_temp_fallback = loaded_data_tuple[1].copy()
+                    else:
+                        try:
+                            header_temp_fallback = fits.getheader(file_path)
+                        except:
+                            header_temp_fallback = fits.Header()
+                    header_final_pour_retour = header_temp_fallback
+                    raise ValueError(
+                        "Échec chargement/validation FITS (données non retournées)."
+                    )
             header_final_pour_retour["_SRCFILE"] = (
                 file_name,
                 "Original source filename",
@@ -11689,6 +13020,17 @@ class SeestarQueuedStacker:
                         f"     - Masque créé (seuil: {mask_threshold:.4g}). Shape: {valid_pixel_mask_2d.shape}, Dtype: {valid_pixel_mask_2d.dtype}, Sum (True): {np.sum(valid_pixel_mask_2d)}"
                     )
 
+            # C6: combine the calibration DQ (PRIMARY) into the valid mask.
+            # Drizzle Standard keeps the ORIGINAL grid (same as the DQ mask ->
+            # direct AND); Classic warps the DQ mask by M into the aligned grid.
+            # Zero change when no calibration DQ is present (default path).
+            valid_pixel_mask_2d = self._combine_dq_into_valid_mask(
+                file_name,
+                valid_pixel_mask_2d,
+                matrice_M_calculee,
+                bool(self.drizzle_active_session and not self.is_mosaic_run),
+            )
+
             # --- Background equalization for batch_size == 1 -------------------
             # Phase-1 (support-aware overlap): the hidden additive sky
             # subtraction below is a COMPETING plain-Classic correction that
@@ -12137,6 +13479,10 @@ class SeestarQueuedStacker:
         if getattr(self, "batch_size", 1) == 1:
             getattr(self, "_indices_cache", {}).clear()
         gc.collect()
+        # Lot D: run-scoped low-RAM scratch (spilled inputs + disk-backed
+        # SCI/WHT) is consumed by the batch commit; release it now so no
+        # orphan scratch survives a success / no-commit / retry path.
+        self._cleanup_winsorized_scratch()
         logger.debug(
             f"DEBUG QM [_process_completed_batch]: Fin pour lot #{current_batch_num}."
         )
@@ -14857,12 +16203,15 @@ class SeestarQueuedStacker:
                 # non-Winsorized ``_combine_hq_by_tiles`` callers — median /
                 # kappa-sigma / linear-fit-clip — remain unchanged, documented
                 # debt.)  max_hq_mem is intentionally NOT consulted here.
-                images_for_stack = [
-                    _nan_mask_image(img, mask)
-                    for img, mask in zip(image_data_list, coverage_maps_list)
-                ]
+                #
+                # Lot B: the aligned images are passed RAW together with their
+                # validity masks.  The GPU TILED path applies the mask per
+                # tile (no full-frame masked copy), while FULL_GPU and the CPU
+                # fallback materialise masked copies lazily inside
+                # _gpu_reduce_winsorized.  The shared aligned images are never
+                # modified in place.
 
-                def _cpu_winsorized_auto(imgs, w=None, **_kw):
+                def _cpu_winsorized_auto(imgs, w=None, masks=None, **_kw):
                     # Automatic CPU memory policy closure: FULL_CPU -> untiled
                     # wrapper with the explicit resolved budget;
                     # SPATIAL_TILED_CPU -> stage-C exact-N tiled driver;
@@ -14870,7 +16219,7 @@ class SeestarQueuedStacker:
                     # truthful terminal FAILED).  Also the CPU_FALLBACK target
                     # of the GPU dispatch seam below (same policy, no hidden
                     # legacy memory defaults, no scientific-N subdivision).
-                    return self._run_cpu_winsor_policy(imgs, w, **_kw)
+                    return self._run_cpu_winsor_policy(imgs, w, masks=masks, **_kw)
 
                 # B7 + phase F (Track P4): when the policy backend is
                 # cupy, the adaptive VRAM execution planner
@@ -14888,8 +16237,9 @@ class SeestarQueuedStacker:
                 # (stage E1).
                 winsor_res = self._gpu_reduce_winsorized(
                     _cpu_winsorized_auto,
-                    images_for_stack,
+                    image_data_list,
                     quality_weights,
+                    masks=coverage_maps_list,
                     kappa=max(self.stack_kappa_low, self.stack_kappa_high),
                     winsor_limits=self.winsor_limits,
                     return_weights=True,
@@ -16817,6 +18167,11 @@ class SeestarQueuedStacker:
                 cfg.scientific[name] = value
             elif fd.section == run_contract.Section.EXECUTION:
                 cfg.execution[name] = value
+        # C7: persist the frozen calibration signature into the run contract
+        # ``calibration`` section (absent == "calibration disabled").
+        cal_freeze = dict(getattr(self, "_calibration_freeze", {}) or {})
+        if cal_freeze:
+            cfg.calibration.update(cal_freeze)
         self._run_config_canonical = cfg
         if fingerprint is not None:
             self._run_config_canonical_fingerprint = fingerprint
@@ -17521,6 +18876,24 @@ class SeestarQueuedStacker:
                     )
             except Exception:  # noqa: BLE001 - fail-open adoption only
                 pass
+            # C19: rebuild the calibration freeze with the persisted light
+            # paths (resume validation runs BEFORE the batch freeze point), so
+            # the plan_map matches the persisted freeze; then hard-refuse on
+            # any calibration divergence naming the diverging field.
+            if getattr(self, "_calibration_integrator", None) is not None:
+                persisted_lights = [
+                    p for p in (result.resolved_plan_paths or ())
+                    if isinstance(p, str)
+                ]
+                ref = result.resolved_reference
+                if isinstance(ref, str) and ref not in persisted_lights:
+                    persisted_lights.append(ref)
+                self._build_calibration_freeze(persisted_lights)
+            ok_cal, field = self._check_calibration_resume(
+                dict(getattr(result.config, "calibration", {}) or {})
+            )
+            if not ok_cal:
+                return (False, field, None)
             current_cfg = build_drizzle_canonical_config(
                 self, product_version=self._canonical_product_version()
             )
@@ -21927,6 +23300,10 @@ class SeestarQueuedStacker:
         _support_lifecycle_failopen(
             self, "memmap_cleanup_entered", drizzle_support_released=False
         )
+        # Lot D: run-scoped low-RAM winsorized scratch (spilled inputs +
+        # disk-backed SCI/WHT) is also released here, so a FAILED / CANCELLED /
+        # RESUMED run never leaves orphan scratch files under the output folder.
+        self._cleanup_winsorized_scratch()
         logger.debug("DEBUG QM [_close_memmaps]: Tentative de fermeture des memmaps...")
         closed_sum = False
         if (
@@ -22779,6 +24156,10 @@ class SeestarQueuedStacker:
         n_tiles=None,
         estimated_peak_vram_bytes=None,
         effective_vram_budget_bytes=None,
+        path_class=None,
+        demand_full_bytes=None,
+        demand_tile_bytes=None,
+        reserve_bytes=None,
     ) -> None:
         """Append ONE per-reduction execution-truth record (dispatch seam).
 
@@ -22814,6 +24195,7 @@ class SeestarQueuedStacker:
                     "fallback": executed == "cpu",
                     "fallback_reason": fallback_reason or "none",
                     "planner_mode": planner_mode or "none",
+                    "path_class": path_class or "none",
                     "tile_shape": tuple(tile_shape) if tile_shape else None,
                     "n_tiles": int(n_tiles) if n_tiles else None,
                     "estimated_peak_vram_bytes": (
@@ -22824,6 +24206,21 @@ class SeestarQueuedStacker:
                     "effective_vram_budget_bytes": (
                         int(effective_vram_budget_bytes)
                         if effective_vram_budget_bytes
+                        else None
+                    ),
+                    "demand_full_bytes": (
+                        int(demand_full_bytes)
+                        if demand_full_bytes
+                        else None
+                    ),
+                    "demand_tile_bytes": (
+                        int(demand_tile_bytes)
+                        if demand_tile_bytes
+                        else None
+                    ),
+                    "reserve_bytes": (
+                        int(reserve_bytes)
+                        if reserve_bytes
                         else None
                     ),
                 }
@@ -22840,7 +24237,7 @@ class SeestarQueuedStacker:
         (nothing executed -- no summary is emitted, mirroring the fact that
         no execution claim is made).  Aggregate fields:
         operation / reductions / gpu_full / gpu_tiled / cpu_fallback /
-        max_N_batch / peak_vram (bytes) / fallback_reasons (ordered, dedup).
+        max_N_batch / peak_vram_estimated_bytes / fallback_reasons (ordered, dedup).
         """
         events = self._gpu_execution_store()
         if not events:
@@ -22883,7 +24280,9 @@ class SeestarQueuedStacker:
             "gpu_tiled": gpu_tiled,
             "cpu_fallback": cpu_fallback,
             "max_N_batch": max_n_batch,
-            "peak_vram": peak_vram,
+            # Lot B: this is the MAX MODELED DEMAND (an estimate), never a
+            # measured physical peak — the key names that explicitly.
+            "peak_vram_estimated_bytes": peak_vram,
             "fallback_reasons": reasons if reasons else None,
         }
 
@@ -23721,6 +25120,9 @@ class SeestarQueuedStacker:
 
         self.stop_processing = False
         self.user_requested_stop = False
+        # C5: open the calibration integrator once per run (if enabled).  A
+        # closed/unavailable session is informational, never fatal.
+        self._open_calibration_session()
         # ZSSS-LIFECYCLE-01: reset any stale refusal from a previous start
         # attempt so a new attempt starts with a clean carrier.
         self.startup_refusal = None
@@ -24938,6 +26340,29 @@ class SeestarQueuedStacker:
                 self.update_progress(
                     "⚠️ Aucun fichier initial trouvé dans le dossier principal et aucun dossier supplémentaire en attente."
                 )
+
+        # C11: (re)build the calibration freeze with the ACTUAL light list.
+        # The preflight groups lights by acquisition signature (header-only) and
+        # resolves ONE representative per class, so the plan_map is keyed by
+        # acquisition signature and the per-frame lookup never decodes all
+        # frames.  No-op when no calibration session is open (disabled path).
+        if getattr(self, "_calibration_integrator", None) is not None:
+            lights = list(self.all_input_filepaths)
+            if not lights:
+                # The common folder-scan path populates the queue, not
+                # ``all_input_filepaths`` (which is only set for the mosaic/CSV
+                # branches).  Derive the light paths from the queue, filtering
+                # the batch-break sentinel.
+                lights = [
+                    p for p in list(getattr(self.queue, "queue", ()) or ())
+                    if isinstance(p, str) and p.lower().endswith((".fit", ".fits"))
+                ]
+            self._build_calibration_freeze(lights)
+            # C16: invalidate the cached canonical run config so the next
+            # manifest write recollects the populated calibration plan map
+            # (the bootstrap write may have cached an empty plan_map).
+            self._run_config_canonical = None
+            self._run_config_canonical_fingerprint = None
 
         # =====================================================================
         # Phase B1 — FREEZE POINT: B_resolved is frozen HERE, once, before any
@@ -26641,6 +28066,8 @@ class SeestarQueuedStacker:
         if getattr(self, "quality_executor", None):
             self.quality_executor.shutdown(wait=True, cancel_futures=True)
             self.quality_executor = None
+        # C5: close the calibration session (idempotent).
+        self._close_calibration_session()
 
     ################################################################################################################################################
 

@@ -58,6 +58,7 @@ for both regimes).
 
 from __future__ import annotations
 
+import gc as _gc
 from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
@@ -311,19 +312,57 @@ def _winsorized_tile_finalize_np(
     return np.asarray(result, dtype=np.float32), np.asarray(sum_w, dtype=np.float32)
 
 
-def _materialize_spatial_tile(images, y0, y1, x0, x1):
+def _materialize_spatial_tile(images, y0, y1, x0, x1, masks=None):
     """Materialize exactly one ``N x tile_h x tile_w [x C]`` float32 cube.
 
-    ``np.asarray`` on an ndarray or memmap is a zero-copy view; spatial
-    slicing therefore happens before ``np.stack`` allocates the tile cube.
-    In particular, this helper never asks NumPy to stack complete frames.
+    F6 single-allocation: preallocates the FINAL float32 cube and fills each
+    slice directly from the (zero-copy) source view, so there is NO second
+    conversion cube even for uint16/float64 inputs (cast straight into the
+    float32 destination).  ``np.asarray`` on an ndarray or memmap is a
+    zero-copy view; spatial slicing therefore happens before the cube is
+    filled.  In particular, this helper never asks NumPy to stack complete
+    frames and never builds a temporary per-image tile.
+
+    ``masks`` is an optional per-image 2-D validity map (True/nonzero ==
+    valid) parallel to ``images``: when given, the mask is applied to the TILE
+    SLICE ONLY (no full-frame masked copy — Lot C), mirroring the GPU tiled
+    driver.  ``masks=None`` means the images are already NaN-masked.
     """
-    views = [np.asarray(image)[y0:y1, x0:x1, ...] for image in images]
-    return np.stack(views, axis=0).astype(np.float32, copy=False)
+    n = len(images)
+    first = np.asarray(images[0])
+    th = y1 - y0
+    tw = x1 - x0
+    if first.ndim == 3:
+        c = int(first.shape[2])
+        cube = np.empty((n, th, tw, c), dtype=np.float32)
+        for i, image in enumerate(images):
+            src = np.asarray(image)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = np.asarray(masks[i])[y0:y1, x0:x1]
+                if m.dtype != bool:
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m[..., None])
+    else:
+        cube = np.empty((n, th, tw), dtype=np.float32)
+        for i, image in enumerate(images):
+            src = np.asarray(image)[y0:y1, x0:x1]
+            if masks is None:
+                cube[i, ...] = src
+            else:
+                m = np.asarray(masks[i])[y0:y1, x0:x1]
+                if m.dtype != bool:
+                    m = m != 0
+                cube[i, ...] = np.nan
+                np.copyto(cube[i, ...], src, where=m)
+    return cube
 
 
 def _run_tiled_geometry(
     images,
+    masks,
     frame_shape,
     spatial,
     weights,
@@ -332,18 +371,32 @@ def _run_tiled_geometry(
     apply_rewinsor,
     max_iters,
     kappa_decay,
+    out_result=None,
+    out_sum_w=None,
 ):
     """Two-pass exact-N spatial reduction over ``spatial`` slices.
 
-    ``images`` contains the already-resident observations.  Only the current
-    spatial tile is stacked, independently in each pass.  Returns
-    ``(result, sum_w, rejected_pct, z_eff)`` with exact placement.
+    ``images`` contains the already-resident observations (ndarray OR read-only
+    memmap — both are sliced per tile; the stack axis is never split).
+    ``masks`` (optional) is a per-image validity map applied to the TILE SLICE
+    ONLY (no full-frame masked copy — Lot C).  Only the current spatial tile
+    is stacked, independently in each pass.  When ``out_result`` / ``out_sum_w``
+    are given (disk-backed ``np.memmap``), the SCI and WHT outputs are written
+    PER TILE into them instead of allocating two full-frame in-RAM arrays
+    (low-RAM path).  Returns ``(result, sum_w, rejected_pct, z_eff)`` with
+    exact placement.
     """
     H, W = int(frame_shape[0]), int(frame_shape[1])
     trailing_shape = tuple(frame_shape[2:])
     out_shape = (H, W) + trailing_shape
-    result = np.empty(out_shape, dtype=np.float32)
-    sum_w = np.empty(out_shape, dtype=np.float32)
+    if out_result is not None:
+        result = out_result
+    else:
+        result = np.empty(out_shape, dtype=np.float32)
+    if out_sum_w is not None:
+        sum_w = out_sum_w
+    else:
+        sum_w = np.empty(out_shape, dtype=np.float32)
 
     # ---- pass 1: schedule discovery (deterministic kappa schedule, no
     # early exit, LOCAL rejection counts summed globally)
@@ -352,7 +405,7 @@ def _run_tiled_geometry(
     else:
         global_counts = [0] * int(max_iters)
         for (y0, y1, x0, x1) in spatial:
-            arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
+            arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1, masks=masks)
             _, counts = _winsorized_tile_iterations_np(
                 arr_t, kappa, winsor_limits, int(max_iters), kappa_decay,
                 collect_counts=True,
@@ -370,7 +423,7 @@ def _run_tiled_geometry(
     n_valid_total = 0
     n_surv_total = 0
     for (y0, y1, x0, x1) in spatial:
-        arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1)
+        arr_t = _materialize_spatial_tile(images, y0, y1, x0, x1, masks=masks)
         valid_t = ~np.isnan(arr_t)
         # Always run the tile helper: it applies the one-pass gross-outlier
         # guard to zero-rank columns AND replays ``z_eff`` Winsor iterations
@@ -408,9 +461,13 @@ def stack_winsorized_sigma_cpu_tiled(
     tile_shape=None,
     max_mem_bytes=None,
     min_tile_out=CPU_MIN_TILE_OUT,
-    max_retries=4,
+    max_retries=3,
     _tile_order="rowmajor",
     _retry_callback: Optional[Callable[..., None]] = None,
+    out_result=None,
+    out_sum_w=None,
+    masks=None,
+    _re_raise_memory_error: bool = False,
 ):
     """Exact-N SPATIAL CPU tiling of the Winsorized sigma reduction.
 
@@ -432,6 +489,9 @@ def stack_winsorized_sigma_cpu_tiled(
     allowed after the initial planned attempt (total attempts are therefore
     at most ``max_retries + 1``).  ``_retry_callback`` is an internal
     provenance seam called for every allocation recovery transition.
+    ``out_result`` / ``out_sum_w`` are optional disk-backed ``np.memmap``
+    targets: when given, the SCI and WHT outputs are written PER TILE into
+    them (low-RAM path) instead of allocating two full-frame in-RAM arrays.
     """
     n = int(len(images))
     if n == 0:  # pragma: no cover - degenerate, mirrors CPU failure
@@ -471,8 +531,23 @@ def stack_winsorized_sigma_cpu_tiled(
                 )
         from seestar.core.stack_methods import _stack_winsorized_sigma_iter
 
+        # Lot C: the untiled twin is only reachable when the whole frame fits
+        # (its per-frame masked copy is the untiled working set itself).  When
+        # masks are supplied, materialise the masked full-frame copies once
+        # here so the reference iterator sees NaN-masked observations.
+        if masks is not None:
+            masked = [
+                np.where(
+                    np.asarray(m)[..., None] if np.asarray(im).ndim == 3 else np.asarray(m),
+                    np.asarray(im),
+                    np.nan,
+                )
+                for im, m in zip(images, masks)
+            ]
+        else:
+            masked = images
         return _stack_winsorized_sigma_iter(
-            images,
+            masked,
             weights,
             kappa=kappa,
             winsor_limits=winsor_limits,
@@ -545,12 +620,18 @@ def stack_winsorized_sigma_cpu_tiled(
         attempted_shapes.append(
             tuple(cand) if isinstance(cand, (tuple, list)) else (int(cand),)
         )
+        # Exit the ``except`` block BEFORE any gc / measurement / retry so the
+        # failed cube + reducer temporaries and the exception traceback are no
+        # longer referenced during the next lower-memory attempt (Lot C
+        # rework-1).  Only a bounded error_type scalar survives the boundary.
+        error_type = None
         try:
             spatial_cand = winsor_tile_slices((H, W), cand)
             if _tile_order == "reversed" and spatial_cand:
                 spatial_cand = list(reversed(spatial_cand))
             result, sum_w, rejected_pct, z_eff = _run_tiled_geometry(
                 images,
+                masks,
                 frame,
                 spatial_cand,
                 weights,
@@ -559,7 +640,19 @@ def stack_winsorized_sigma_cpu_tiled(
                 apply_rewinsor,
                 max_iters,
                 kappa_decay,
+                out_result=out_result,
+                out_sum_w=out_sum_w,
             )
+        except CpuWinsorMemoryRefused:
+            # Terminal planner refusal (a MemoryError subclass): NEVER treat
+            # it as a retryable allocation OOM (explicit catch order).
+            raise
+        except MemoryError as exc:
+            had_memory_error = True
+            error_type = type(exc).__name__
+
+        if error_type is None:
+            # Success (or a non-memory exception propagated out of the try).
             if attempts > 1 and _retry_callback is not None:
                 _retry_callback(
                     attempt=attempts,
@@ -571,26 +664,30 @@ def stack_winsorized_sigma_cpu_tiled(
             if return_weights:
                 return result, sum_w, rejected_pct
             return result, rejected_pct
-        except MemoryError:
-            # Do not retain the exception/traceback: its frames can keep the
-            # failed tile cube and reducer temporaries alive during the next
-            # lower-memory attempt.  Only the fact of allocation failure is
-            # required for the terminal refusal.
-            had_memory_error = True
-            next_cand = (
-                bounded_candidates[candidate_index + 1]
-                if candidate_index + 1 < len(bounded_candidates)
-                else None
+
+        # Recoverable MemoryError: reclaim before the next attempt (the
+        # traceback is already dropped; the failed cube is now collectable).
+        _gc.collect()
+        next_cand = (
+            bounded_candidates[candidate_index + 1]
+            if candidate_index + 1 < len(bounded_candidates)
+            else None
+        )
+        if _re_raise_memory_error:
+            # Live-replan contract (Lot C rework-1): propagate the allocation
+            # failure to the caller's live loop so GEOMETRY + BUDGET are
+            # re-resolved from live RAM (never a static precomputed candidate).
+            raise MemoryError(
+                "CPU winsorized tile allocation failure (%s)" % error_type
+            ) from None
+        if _retry_callback is not None:
+            _retry_callback(
+                attempt=attempts,
+                old_tile_shape=cand,
+                new_tile_shape=next_cand,
+                reason="allocation_failure",
+                outcome="retrying" if next_cand is not None else "exhausted",
             )
-            if _retry_callback is not None:
-                _retry_callback(
-                    attempt=attempts,
-                    old_tile_shape=cand,
-                    new_tile_shape=next_cand,
-                    reason="allocation_failure",
-                    outcome="retrying" if next_cand is not None else "exhausted",
-                )
-            continue
 
     if not had_memory_error:  # defensive: candidates existed but none ran
         raise CpuWinsorMemoryRefused(
