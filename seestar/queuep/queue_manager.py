@@ -291,6 +291,7 @@ from seestar.core.gpu_vram_planner import (
     REASON_POOL_QUERY_FAILURE,
     REASON_VRAM_NO_VALID_TILE,
     TILED_GPU,
+    WINSOR_MIN_TILE_OUT,
     WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
     plan_winsorized_gpu_execution,
 )
@@ -3862,6 +3863,8 @@ class SeestarQueuedStacker:
             tile = decision.tile_shape
             force_tiled = False
             max_tile_out = None
+            _h, _w = int(frame[0]), int(frame[1])
+            _s_full = _h * _w
             for attempt_idx in range(1, WINSOR_GPU_OOM_MAX_ATTEMPTS + 1):
                 if attempt_idx > 1:
                     # Re-plan from LIVE VRAM after the cleanup, forcing a
@@ -3919,12 +3922,18 @@ class SeestarQueuedStacker:
 
                 vram_free = None
                 vram_pool_free = None
+                vram_total = None
+                vram_pool_used = None
+                vram_pool_total = None
                 try:
-                    vram_free, _total = cp.cuda.runtime.memGetInfo()
+                    vram_free, vram_total = cp.cuda.runtime.memGetInfo()
                 except Exception:
                     pass
                 try:
-                    vram_pool_free = cp.get_default_memory_pool().free_bytes()
+                    _pool = cp.get_default_memory_pool()
+                    vram_pool_free = _pool.free_bytes()
+                    vram_pool_used = _pool.used_bytes()
+                    vram_pool_total = _pool.total_bytes()
                 except Exception:
                     pass
 
@@ -4032,22 +4041,52 @@ class SeestarQueuedStacker:
                 # the pool free list), then derive the next geometry.
                 gc.collect()
                 synced, released = _winsorized_oom_cleanup(cp)
+                # Measured post-cleanup driver state (bounded, scalar-only) —
+                # clearly separated from the modeled ``estimated_demand_bytes``.
+                vram_free_after = None
+                vram_total_after = None
+                try:
+                    vram_free_after, vram_total_after = cp.cuda.runtime.memGetInfo()
+                except Exception:
+                    pass
                 if mode == FULL_GPU:
+                    # FULL OOM -> strictly spatial next attempt: surface < H*W
+                    # AND >= 2 effective tiles.  Halve the full-frame surface
+                    # so a single full-height band (which would re-delegate to
+                    # the untiled twin) can never be chosen.
                     force_tiled = True
-                    max_tile_out = None
+                    max_tile_out = max(WINSOR_MIN_TILE_OUT, _s_full // 2)
                     next_action = "tiled"
                 else:
+                    # TILED OOM -> contract to <= 50% of the surface that just
+                    # failed (never a 1-pixel shrink).
                     force_tiled = True
-                    max_tile_out = decision.tile_outputs
+                    max_tile_out = max(
+                        WINSOR_MIN_TILE_OUT, decision.tile_outputs // 2
+                    )
                     next_action = "smaller_tile"
+                if attempt_idx >= WINSOR_GPU_OOM_MAX_ATTEMPTS:
+                    # No next attempt remains: the following step is CPU.
+                    next_action = "cpu_fallback"
                 _emit_attempt({
                     "attempt": attempt_idx,
                     "max_attempts": WINSOR_GPU_OOM_MAX_ATTEMPTS,
                     "mode": "full" if mode == FULL_GPU else "tiled",
                     "tile_shape": _prov_token(tile),
                     "n_batch": n_batch,
-                    "vram_free_bytes": vram_free,
-                    "vram_pool_free_bytes": vram_pool_free,
+                    "tile_count": decision.n_tiles,
+                    "measured_driver_free_before_bytes": vram_free,
+                    "measured_driver_total_before_bytes": vram_total,
+                    "measured_pool_used_before_bytes": vram_pool_used,
+                    "measured_pool_total_before_bytes": vram_pool_total,
+                    "measured_pool_free_before_bytes": vram_pool_free,
+                    "measured_driver_free_after_bytes": vram_free_after,
+                    "measured_driver_total_after_bytes": vram_total_after,
+                    "estimated_demand_bytes": (
+                        decision.demand_tile_bytes
+                        if mode == TILED_GPU
+                        else decision.demand_full_bytes
+                    ),
                     "demand_full_bytes": decision.demand_full_bytes,
                     "demand_tile_bytes": decision.demand_tile_bytes,
                     "effective_budget_bytes": decision.effective_budget_bytes,
@@ -23984,7 +24023,7 @@ class SeestarQueuedStacker:
         (nothing executed -- no summary is emitted, mirroring the fact that
         no execution claim is made).  Aggregate fields:
         operation / reductions / gpu_full / gpu_tiled / cpu_fallback /
-        max_N_batch / peak_vram (bytes) / fallback_reasons (ordered, dedup).
+        max_N_batch / peak_vram_estimated_bytes / fallback_reasons (ordered, dedup).
         """
         events = self._gpu_execution_store()
         if not events:
@@ -24027,7 +24066,9 @@ class SeestarQueuedStacker:
             "gpu_tiled": gpu_tiled,
             "cpu_fallback": cpu_fallback,
             "max_N_batch": max_n_batch,
-            "peak_vram": peak_vram,
+            # Lot B: this is the MAX MODELED DEMAND (an estimate), never a
+            # measured physical peak — the key names that explicitly.
+            "peak_vram_estimated_bytes": peak_vram,
             "fallback_reasons": reasons if reasons else None,
         }
 

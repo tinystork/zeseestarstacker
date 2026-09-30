@@ -1429,7 +1429,7 @@ def stack_winsorized_sigma_gpu_tiled(
         for t, (y0, y1, x0, x1) in enumerate(spatial):
             arr_t = cp.asarray(_materialize_tile(images, masks, y0, y1, x0, x1))
             _p_event("tiled_p1_tile%d" % t)
-            _, counts = _winsorized_tile_iterations_cp(
+            _mask_t, counts = _winsorized_tile_iterations_cp(
                 cp,
                 arr_t,
                 kappa,
@@ -1441,6 +1441,12 @@ def stack_winsorized_sigma_gpu_tiled(
             )
             for i, c in enumerate(counts):
                 global_counts[i] += c
+            # Release this tile's device references before the next tile's
+            # allocation (Lot B req 5): the pass-1 mask and tile cube are
+            # already consumed (only the counts are needed downstream), so
+            # dropping them returns their blocks to the pool free list — a
+            # pure reference drop, never a synchronisation or science change.
+            del arr_t, _mask_t
         z_eff = int(max_iters)
         for i, c in enumerate(global_counts):
             if c == 0:
@@ -1498,6 +1504,12 @@ def stack_winsorized_sigma_gpu_tiled(
         result[y0:y1, x0:x1] = cp.asnumpy(res_t.astype(cp.float32))
         sum_w[y0:y1, x0:x1] = cp.asnumpy(sumw_t.astype(cp.float32))
         _p_event("tiled_tile_placed")
+        # Release this tile's device references before the next tile's
+        # allocation (Lot B req 5): arr_t / valid_t / mask_t / res_t / sumw_t
+        # are fully consumed once placed into the host output, so dropping
+        # them returns their blocks to the pool free list for the next tile —
+        # a pure reference drop, never a synchronisation or science change.
+        del arr_t, valid_t, mask_t, res_t, sumw_t
 
     if n_valid_total == 0:
         rejected_pct = 0.0

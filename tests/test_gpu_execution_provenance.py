@@ -198,7 +198,7 @@ def test_summary_max_n_batch_and_peak_vram():
     _record(s, scientific_N_batch=12, estimated_peak_vram_bytes=300)
     tok = s._gpu_execution_summary_tokens()
     assert tok["max_N_batch"] == 50
-    assert tok["peak_vram"] == 700
+    assert tok["peak_vram_estimated_bytes"] == 700
 
 
 def test_summary_none_when_no_dispatch():

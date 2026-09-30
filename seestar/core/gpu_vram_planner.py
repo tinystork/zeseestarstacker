@@ -44,6 +44,17 @@ Design rules (mission Track P4):
     full-stack ``cp.sort`` contexts are SEQUENTIAL, so the peak is their
     maximum (the ``apply_rewinsor`` bounds sort), modeled as the sum of the
     kernel's NAMED per-tile allocations (see ``_zero_rank_peak_factor``).
+
+  MODEL IS AN ESTIMATE, NOT A FIRM BOUND (Lot B): every factor/scratch
+  constant is a *measured lower estimate* of the per-tile peak, derived from
+  the executed phase D/E rows.  The Lot B MX150 probe (N=3, RGB 2822x4144,
+  zero-rank small-N path) OOM'd on a 1712-row full-width band whose modeled
+  demand was ~0.09% under the effective budget — so the model cannot be a
+  certified upper bound at the boundary.  Convergence is therefore NOT
+  guaranteed by model precision but by the wiring's bounded halving
+  contraction (``max_tile_outputs`` <= 50% of the failed surface per OOM,
+  combined with a live VRAM re-read) — see the Lot C OOM-retry seam.  No
+  per-card cap, no N reduction, no sort/winsor bypass is introduced here.
 * Budget: ``driver_free + pool_free``; a decision (full or per-tile) is
   admissible iff its modeled demand + the EXPLICIT RESERVE fits the budget.
   Query failures never reach this module: the wiring converts them into

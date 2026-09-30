@@ -578,3 +578,162 @@ def test_retry_success_preserves_n_results_weights_rejection(monkeypatch):
     assert np.array_equal(W, W_u)
     # N was never reduced across the retry.
     assert n == 5
+
+
+# ---------------------------------------------------------------------------
+# E. Lot B — substantial contraction + strict-spatial FULL OOM invariant
+# ---------------------------------------------------------------------------
+
+def test_full_oom_halves_full_surface_and_forces_two_tiles():
+    """FULL OOM contraction: capping the next geometry at <= 50% of the full
+    frame guarantees surface < H*W AND >= 2 effective tiles (never a single
+    full-height band that would re-delegate to the untiled twin)."""
+    H, W = 2822, 4144
+    s_full = H * W
+    d = plan_winsorized_gpu_execution(
+        n_batch=1,
+        frame_shape=(H, W),
+        channels=3,
+        winsor_limits=(0.05, 0.05),
+        driver_free_bytes=2 * GIB,
+        pool_free_bytes=0,
+        reserve_bytes=WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+        force_tiled=True,
+        max_tile_outputs=max(WINSOR_MIN_TILE_OUT, s_full // 2),
+    )
+    assert d.kind == TILED_GPU
+    assert d.tile_outputs < s_full          # surface strictly < H*W
+    assert d.n_tiles >= 2                   # at least 2 effective tiles
+    assert d.n_batch == 1
+
+
+def test_tiled_oom_halves_failed_surface():
+    """TILED OOM contraction: the next geometry is <= 50% of the surface that
+    just failed (a genuine contraction, never a 1-pixel shrink)."""
+    H, W = 2822, 4144
+    base = plan_winsorized_gpu_execution(
+        n_batch=3,
+        frame_shape=(H, W),
+        channels=3,
+        winsor_limits=(0.05, 0.05),
+        driver_free_bytes=2 * GIB,
+        pool_free_bytes=0,
+        reserve_bytes=WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+    )
+    assert base.kind == TILED_GPU
+    failed = base.tile_outputs
+    d = plan_winsorized_gpu_execution(
+        n_batch=3,
+        frame_shape=(H, W),
+        channels=3,
+        winsor_limits=(0.05, 0.05),
+        driver_free_bytes=2 * GIB,
+        pool_free_bytes=0,
+        reserve_bytes=WINSOR_PLANNER_DEFAULT_RESERVE_BYTES,
+        force_tiled=True,
+        max_tile_outputs=max(WINSOR_MIN_TILE_OUT, failed // 2),
+    )
+    assert d.kind == TILED_GPU
+    assert d.tile_outputs <= failed // 2   # <= 50% of the failed surface
+    assert d.n_batch == 3
+
+
+@pytestmark_wiring
+def test_full_oom_n1_forces_strictly_spatial_retry(monkeypatch):
+    """N=1 FULL OOM -> the next attempt is STRICTLY spatial (surface < H*W,
+    >= 2 tiles) — never a single full-height band that re-runs the untiled
+    full-frame twin."""
+    real_tiled = queue_manager_module.stack_winsorized_sigma_gpu_tiled
+    tiled_calls = []
+
+    def boom_full(*a, **k):
+        raise _oom()
+
+    def spy_tiled(*args, **kwargs):
+        tiled_calls.append(kwargs.get("tile_shape"))
+        return real_tiled(*args, **kwargs)
+
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu", boom_full
+    )
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu_tiled", spy_tiled
+    )
+    _patch_mem_seq(monkeypatch, [2 * GIB, 600 * MIB, 600 * MIB])
+    stack = _winsor_stack(request_gpu=True, shape=_FRAME_1080P)
+    V, _hdr, W = stack._stack_batch(_winsor_batch(shape=_FRAME_1080P, n_in=1), 1, 1)
+    assert tiled_calls, "expected a spatial retry after the N=1 FULL OOM"
+    ts = tiled_calls[0]
+    # Strictly spatial: the retried tile band is strictly shorter than the full
+    # frame height (>= 2 effective tiles), never a single full-height band.
+    assert isinstance(ts, tuple) and len(ts) == 1
+    assert ts[0] < _FRAME_1080P[0]
+    ev = stack._gpu_execution_events[-1]
+    assert ev["executed"] == "gpu"
+    assert ev["gpu_memory_mode"] == "tiled"
+
+
+@pytestmark_wiring
+def test_last_oom_attempt_logs_next_cpu_fallback(monkeypatch):
+    """The final OOM attempt must log next=cpu_fallback (there is no next
+    spatial attempt), never smaller_tile without a following attempt."""
+    def boom(*a, **k):
+        raise _oom()
+
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu", boom
+    )
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu_tiled", boom
+    )
+    _patch_mem(monkeypatch, free_bytes=2 * GIB)
+    stack = _winsor_stack(request_gpu=True, shape=(300, 400))
+    blocks = _capture_provenance(monkeypatch, stack)
+    stack._stack_batch(_winsor_batch(shape=(300, 400)), 1, 1)
+    oom_blocks = [
+        b for b in blocks
+        if b[0] == "GPU_WINSOR_OOM_RETRY"
+        and b[1].get("result") == WINSOR_OOM_RESULT_OOM
+    ]
+    assert oom_blocks
+    # The last OOM attempt (the one that exhausts the bounded retry) must point
+    # at CPU, never at a smaller tile that will not be attempted.
+    assert oom_blocks[-1][1]["next"] == "cpu_fallback"
+    # Earlier OOM attempts point at the next spatial strategy.
+    assert oom_blocks[0][1]["next"] in ("tiled", "smaller_tile")
+
+
+@pytestmark_wiring
+def test_oom_attempt_separates_estimated_from_measured(monkeypatch):
+    """Lot B instrumentation: the OOM attempt record separates the MODELED
+    ``estimated_demand_bytes`` from MEASURED driver/pool telemetry (never a
+    single ambiguous ``peak_vram``), and never retains an array/traceback."""
+    def boom(*a, **k):
+        raise _oom()
+
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu", boom
+    )
+    monkeypatch.setattr(
+        queue_manager_module, "stack_winsorized_sigma_gpu_tiled", boom
+    )
+    _patch_mem(monkeypatch, free_bytes=2 * GIB)
+    stack = _winsor_stack(request_gpu=True, shape=(300, 400))
+    blocks = _capture_provenance(monkeypatch, stack)
+    stack._stack_batch(_winsor_batch(shape=(300, 400)), 1, 1)
+    oom_blocks = [
+        b[1] for b in blocks
+        if b[0] == "GPU_WINSOR_OOM_RETRY"
+        and b[1].get("result") == WINSOR_OOM_RESULT_OOM
+    ]
+    assert oom_blocks
+    rec = oom_blocks[0]
+    # Estimated demand is distinct from every measured field.
+    assert "estimated_demand_bytes" in rec
+    assert "measured_driver_free_before_bytes" in rec
+    assert "measured_driver_free_after_bytes" in rec
+    assert "measured_pool_used_before_bytes" in rec
+    # Every retained value is a bounded scalar/token, never an array/traceback.
+    import numbers
+    for k, v in rec.items():
+        assert v is None or isinstance(v, (numbers.Number, str, bool, tuple))
