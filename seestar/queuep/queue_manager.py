@@ -1500,6 +1500,7 @@ _RESUME_MANIFEST_VERSION_MIN = 1
 _RESUME_MANIFEST_FILENAME = "resume_manifest.json"
 _RUN_CONFIG_FILENAME = "run_config.cfg"
 _CALIBRATION_PROVENANCE_FILENAME = "calibration_provenance.json"
+_CALIBRATION_REASON_MAX_CHARS = 200
 _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
@@ -11813,10 +11814,18 @@ class SeestarQueuedStacker:
         # the misleading "no usable masters".  ``probe_info`` never raises (F4).
         info = integrator.probe_info()
         if not getattr(info, "available", False):
-            self._calibration_unavailable_reason = (
-                f"{getattr(info, 'state', 'unavailable')}: "
-                f"{getattr(info, 'message', '') or 'provider unavailable'}"
+            # Provider diagnostics are untrusted observational text.  Keep the
+            # actionable state/message, but collapse whitespace and cap the
+            # value before it reaches the user log or provenance artifact.
+            state = getattr(getattr(info, "state", None), "value", None) or str(
+                getattr(info, "state", "unavailable")
             )
+            message = " ".join(
+                str(getattr(info, "message", "") or "provider unavailable").split()
+            )[:_CALIBRATION_REASON_MAX_CHARS]
+            self._calibration_unavailable_reason = (
+                f"{state}: {message}"
+            )[:_CALIBRATION_REASON_MAX_CHARS]
             if self.update_progress:
                 self.update_progress(
                     "Calibration unavailable (%s); continuing with the "

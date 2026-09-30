@@ -418,6 +418,36 @@ def test_f3_incompatible_provider_writes_minimal_artifact(tmp_path):
     assert any("CALIBRATION_PROVENANCE" in m for m in messages)
 
 
+def test_f3_provider_message_is_bounded_before_log_and_artifact(tmp_path):
+    """Provider diagnostics must not inject unbounded/multiline text into the
+    durable user log or the final observational artifact."""
+    s, messages = _engine_stackers(tmp_path, folder=str(tmp_path))
+
+    import seestar.calibration.streaming as streaming_mod
+
+    class _Incompat(_FakeProvider):
+        def probe(self):
+            return ProviderInfo(
+                state=ProviderState.INCOMPATIBLE,
+                message=("provider diagnostic\n" + "x" * 1000),
+            )
+
+    integ = CalibrationIntegrator(str(tmp_path), provider=_Incompat())
+    orig = streaming_mod.CalibrationIntegrator
+    streaming_mod.CalibrationIntegrator = lambda *a, **k: integ
+    try:
+        s._open_calibration_session()
+    finally:
+        streaming_mod.CalibrationIntegrator = orig
+    s._close_calibration_session()
+
+    artifact = _read_artifact(tmp_path)
+    reason = artifact["calibration_open_reason"]
+    assert len(reason) <= 200
+    assert "\n" not in reason
+    assert all("\n" not in message for message in messages)
+
+
 def test_f3_missing_folder_writes_minimal_artifact(tmp_path):
     """F3: enabled but no master folder -> minimal artifact (no session)."""
     s, _ = _engine_stackers(tmp_path, folder="")
