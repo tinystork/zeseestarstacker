@@ -271,6 +271,8 @@ def plan_cpu_winsor_execution(
     mode: str = MODE_AUTO,
     pool_workers: int = 1,
     min_tile_out: int = CPU_MIN_TILE_OUT,
+    force_spatial: bool = False,
+    max_tile_outputs: Optional[int] = None,
 ) -> CpuMemoryDecision:
     """Plan the CPU execution strategy for one frozen-N Winsorized reduction.
 
@@ -308,6 +310,16 @@ def plan_cpu_winsor_execution(
         per-extra-worker import/duplication overhead to the reserve.
     min_tile_out : int
         Minimum viable spatial outputs per tile.
+    force_spatial : bool
+        When True the planner NEVER returns ``FULL_CPU`` (even if the whole
+        frame fits): it goes straight to spatial tiling.  Used by the live
+        retry loop after a FULL-frame ``MemoryError`` to contract to a
+        strictly spatial geometry (surface <= 50% via ``max_tile_outputs``).
+    max_tile_outputs : int | None
+        Inclusive cap on per-tile spatial outputs (a strict contraction
+        knob for the live retry loop, mirroring the GPU planner).  When set,
+        ``s_cap`` is clamped to this value so the next geometry has surface
+        <= the failed surface; ``None`` = no cap.
 
     Returns a frozen :class:`CpuMemoryDecision`.  Raises ``ValueError`` only
     for caller bugs (invalid N / frame / itemsize / negative memory state).
@@ -411,14 +423,19 @@ def plan_cpu_winsor_execution(
             available_ram=available, ceiling=ceiling, details=details,
         )
 
-    # 1) Whole-frame decision.
-    if estimated_full <= effective_budget:
+    # 1) Whole-frame decision (never when force_spatial — the live retry loop
+    #    after a FULL MemoryError contracts to spatial, surface <= 50%).
+    if estimated_full <= effective_budget and not force_spatial:
         return _full()
 
     # 2) Spatial tiling: only the tile's incremental working set must fit
     #    (the resident full input is already counted in the process baseline).
     #    Largest per-tile spatial output count whose modeled demand fits.
     s_cap = int((effective_budget - scratch) / (factor * n * C * isz))
+    if max_tile_outputs is not None:
+        # Strict contraction cap (live retry): the next tile's surface is
+        # <= the failed surface (never the same, never larger).
+        s_cap = min(s_cap, int(max_tile_outputs))
     if s_cap < min_tile_out:
         return _refusal(
             REASON_MIN_TILE_EXCEEDS_BUDGET,

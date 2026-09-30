@@ -122,7 +122,11 @@ def test_scratch_failure_raises_controlled_and_cleans_up():
         assert store._created == []
 
 
-def test_cpu_fallback_reuses_host_context_no_double_plan():
+def test_cpu_fallback_discards_stale_host_and_replans_live():
+    """Lot C rework-1: the CPU fallback does NOT reuse the pre-GPU host plan
+    (which may hold a partially-written memmap from a GPU OOM); it discards any
+    pre-GPU scratch and re-plans host RAM live inside ``_run_cpu_winsor_policy``
+    (no stale ctx transport)."""
     o = _bare_stacker(available=333 * MiB, output_folder=tempfile.mkdtemp())
     imgs = [np.zeros((2822, 4144), np.float32) for _ in range(3)]
     decision, _a, _r, _res, _resid, _out = o._winsorized_host_ram_plan(
@@ -134,13 +138,12 @@ def test_cpu_fallback_reuses_host_context_no_double_plan():
 
     def fn_cpu(sp_images, w=None, **kw):
         ctx_seen["ctx"] = getattr(o, "_winsorized_host_ctx", None)
-        # The CPU path must see the transported plan (memmap_outputs).
-        assert ctx_seen["ctx"] is not None
+        # The CPU path must NOT see a transported (stale) pre-GPU plan.
         return (np.zeros((2822, 4144), np.float32),
                 np.ones((2822, 4144), np.float32), 0.0)
 
     o._gpu_reduce_winsorized(fn_cpu, imgs, np.ones(3, np.float32))
-    # Context cleared after the CPU fallback.
+    # Context cleared (never transported).
     assert getattr(o, "_winsorized_host_ctx", None) is None
-    # The transported plan was the memmap_outputs plan (no re-resolution).
-    assert ctx_seen["ctx"][0].strategy == HOST_MEMMAP_OUTPUTS
+    # No stale pre-GPU plan reached the CPU closure.
+    assert ctx_seen["ctx"] is None

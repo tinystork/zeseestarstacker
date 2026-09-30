@@ -58,6 +58,7 @@ for both regimes).
 
 from __future__ import annotations
 
+import gc as _gc
 from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
@@ -466,6 +467,7 @@ def stack_winsorized_sigma_cpu_tiled(
     out_result=None,
     out_sum_w=None,
     masks=None,
+    _re_raise_memory_error: bool = False,
 ):
     """Exact-N SPATIAL CPU tiling of the Winsorized sigma reduction.
 
@@ -618,6 +620,11 @@ def stack_winsorized_sigma_cpu_tiled(
         attempted_shapes.append(
             tuple(cand) if isinstance(cand, (tuple, list)) else (int(cand),)
         )
+        # Exit the ``except`` block BEFORE any gc / measurement / retry so the
+        # failed cube + reducer temporaries and the exception traceback are no
+        # longer referenced during the next lower-memory attempt (Lot C
+        # rework-1).  Only a bounded error_type scalar survives the boundary.
+        error_type = None
         try:
             spatial_cand = winsor_tile_slices((H, W), cand)
             if _tile_order == "reversed" and spatial_cand:
@@ -636,6 +643,16 @@ def stack_winsorized_sigma_cpu_tiled(
                 out_result=out_result,
                 out_sum_w=out_sum_w,
             )
+        except CpuWinsorMemoryRefused:
+            # Terminal planner refusal (a MemoryError subclass): NEVER treat
+            # it as a retryable allocation OOM (explicit catch order).
+            raise
+        except MemoryError as exc:
+            had_memory_error = True
+            error_type = type(exc).__name__
+
+        if error_type is None:
+            # Success (or a non-memory exception propagated out of the try).
             if attempts > 1 and _retry_callback is not None:
                 _retry_callback(
                     attempt=attempts,
@@ -647,26 +664,30 @@ def stack_winsorized_sigma_cpu_tiled(
             if return_weights:
                 return result, sum_w, rejected_pct
             return result, rejected_pct
-        except MemoryError:
-            # Do not retain the exception/traceback: its frames can keep the
-            # failed tile cube and reducer temporaries alive during the next
-            # lower-memory attempt.  Only the fact of allocation failure is
-            # required for the terminal refusal.
-            had_memory_error = True
-            next_cand = (
-                bounded_candidates[candidate_index + 1]
-                if candidate_index + 1 < len(bounded_candidates)
-                else None
+
+        # Recoverable MemoryError: reclaim before the next attempt (the
+        # traceback is already dropped; the failed cube is now collectable).
+        _gc.collect()
+        next_cand = (
+            bounded_candidates[candidate_index + 1]
+            if candidate_index + 1 < len(bounded_candidates)
+            else None
+        )
+        if _re_raise_memory_error:
+            # Live-replan contract (Lot C rework-1): propagate the allocation
+            # failure to the caller's live loop so GEOMETRY + BUDGET are
+            # re-resolved from live RAM (never a static precomputed candidate).
+            raise MemoryError(
+                "CPU winsorized tile allocation failure (%s)" % error_type
+            ) from None
+        if _retry_callback is not None:
+            _retry_callback(
+                attempt=attempts,
+                old_tile_shape=cand,
+                new_tile_shape=next_cand,
+                reason="allocation_failure",
+                outcome="retrying" if next_cand is not None else "exhausted",
             )
-            if _retry_callback is not None:
-                _retry_callback(
-                    attempt=attempts,
-                    old_tile_shape=cand,
-                    new_tile_shape=next_cand,
-                    reason="allocation_failure",
-                    outcome="retrying" if next_cand is not None else "exhausted",
-                )
-            continue
 
     if not had_memory_error:  # defensive: candidates existed but none ran
         raise CpuWinsorMemoryRefused(

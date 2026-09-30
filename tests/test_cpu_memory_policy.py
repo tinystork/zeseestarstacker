@@ -542,13 +542,11 @@ def test_spatial_tiled_dispatch_uses_exact_n_driver_with_planner_tile(
     def spy_tiled(images, weights=None, **_kw):
         seen["tile_shape"] = _kw.get("tile_shape")
         seen["max_mem_bytes"] = _kw.get("max_mem_bytes")
-        _kw["_retry_callback"](
-            attempt=1,
-            old_tile_shape=_kw["tile_shape"],
-            new_tile_shape=(max(1, int(_kw["tile_shape"][0]) // 2),),
-            reason="allocation_failure",
-            outcome="retrying",
-        )
+        # Lot C rework-1: the policy drives the live-replan loop itself, so the
+        # driver is invoked single-attempt with memory-error propagation (no
+        # internal retry callback).
+        seen["re_raise"] = _kw.get("_re_raise_memory_error")
+        seen["max_retries"] = _kw.get("max_retries")
         img0 = np.asarray(images[0])
         return (
             np.zeros(img0.shape, dtype=np.float32),
@@ -568,14 +566,13 @@ def test_spatial_tiled_dispatch_uses_exact_n_driver_with_planner_tile(
     pre = o._cpu_mem_preflight_record()
     assert pre.mode == MODE_OVERRIDE
     assert seen["max_mem_bytes"] == 300 * MIB
+    # Single-attempt + memory-error propagation (live-replan contract).
+    assert seen["re_raise"] is True
+    assert seen["max_retries"] == 0
     dec_lines = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_DECISION ")]
     assert len(dec_lines) == 1
     assert "strategy=spatial_tiled" in dec_lines[0]
     assert f"tile_shape={seen['tile_shape'][0]}" in dec_lines[0]
-    retry_lines = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_RETRY ")]
-    assert len(retry_lines) == 1
-    assert "attempt=1" in retry_lines[0]
-    assert "outcome=retrying" in retry_lines[0]
 
 
 def test_real_spatial_retry_recovers_and_batch_commits(
@@ -637,9 +634,12 @@ def test_real_spatial_retry_recovers_and_batch_commits(
     assert o.stacked_batches_count == 1
     assert o.images_in_cumulative_stack == 20
     assert np.any(o.cumulative_wht_memmap > 0)
+    # Lot C rework-1: recovery is driven by the policy's live-replan loop —
+    # the first attempt OOMs (RETRY next=smaller_tile), the second succeeds.
     assert any(
         line.startswith("CPU_WINSOR_MEMORY_RETRY ")
-        and "outcome=recovered" in line
+        and "outcome=retrying" in line
+        and "next=smaller_tile" in line
         for line in lines
     )
 
@@ -675,17 +675,23 @@ def test_real_spatial_retry_exhaustion_is_unconsumed(
     with pytest.raises(BatchReductionError):
         o._process_completed_batch(items, 1, 1, None)
 
-    assert len(calls) == 4  # initial + default max_retries=3
+    assert len(calls) == 3  # max 3 attempts TOTAL (Lot C rework-1)
     assert all(n == 20 for n, _ in calls)
     assert o.stacked_batches_count == 0
     assert o.images_in_cumulative_stack == 0
     assert all(os.path.exists(path) for path in paths)
     assert not (source_dir / "stacked").exists()
     retry_lines = [l for l in lines if l.startswith("CPU_WINSOR_MEMORY_RETRY ")]
-    assert len(retry_lines) == 4
-    assert "outcome=exhausted" in retry_lines[-1]
-    assert "next=refusal" in retry_lines[-1]
-    assert any(l.startswith("CPU_WINSOR_MEMORY_REFUSAL ") for l in lines)
+    assert len(retry_lines) == 2  # attempts 1 & 2 retry; attempt 3 refuses
+    assert "outcome=retrying" in retry_lines[-1]
+    assert "next=smaller_tile" in retry_lines[-1]
+    # The terminal event is a REFUSAL with next=refusal (never a bare
+    # "smaller_tile" without a following attempt).
+    assert any(
+        l.startswith("CPU_WINSOR_MEMORY_REFUSAL ")
+        and "next=refusal" in l
+        for l in lines
+    )
 
 
 def test_refusal_raises_truthfully_through_stack_batch(tmp_path):

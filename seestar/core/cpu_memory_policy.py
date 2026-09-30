@@ -177,6 +177,8 @@ def resolve_cpu_winsor_decision(
     reserve_bytes: Optional[int] = None,
     pool_workers: int = 1,
     min_tile_out: int = CPU_MIN_TILE_OUT,
+    force_spatial: bool = False,
+    max_tile_outputs: Optional[int] = None,
 ) -> CpuMemoryDecision:
     """One CPU execution decision from (workload, RAM now, reserve, ceiling,
     mode) — pure, deterministic, delegating to the stage-B planner.
@@ -187,7 +189,9 @@ def resolve_cpu_winsor_decision(
     ``reserve_bytes`` is omitted it applies the named
     :func:`recommended_reserve_bytes` policy).  The frozen scientific ``N``
     is passed verbatim; only FULL_CPU / SPATIAL_TILED_CPU geometry /
-    CPU_MEMORY_REFUSAL may differ between RAM simulations.
+    CPU_MEMORY_REFUSAL may differ between RAM simulations.  ``force_spatial``
+    and ``max_tile_outputs`` are the live-retry contraction knobs forwarded
+    verbatim to the planner.
     """
     return plan_cpu_winsor_execution(
         n=n,
@@ -210,6 +214,10 @@ def resolve_cpu_winsor_decision(
         mode=mode,
         pool_workers=int(pool_workers),
         min_tile_out=int(min_tile_out),
+        force_spatial=bool(force_spatial),
+        max_tile_outputs=(
+            int(max_tile_outputs) if max_tile_outputs is not None else None
+        ),
     )
 
 
