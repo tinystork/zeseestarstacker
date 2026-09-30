@@ -282,6 +282,20 @@ class RouteResolution:
     error: CalibrationError | None = None
 
 
+@dataclass(frozen=True)
+class RouteKeyResult:
+    """Neutral route-class key outcome for one light (C26 helper envelope).
+
+    ``key`` is the canonical route-class key when the light could be decoded;
+    ``reason`` is a stable, ZSSS-owned token explaining why ``key`` is ``None``
+    (never a provider object, never a traceback).  Consumers aggregate
+    ``reason -> count`` — the envelope is not a per-frame log entry.
+    """
+
+    key: str | None = None
+    reason: str | None = None
+
+
 @dataclass
 class CalibrationResult:
     """Transport-neutral calibration result for one light (in-memory).
@@ -368,6 +382,7 @@ __all__ = [
     "ProviderInfo",
     "ProviderState",
     "RejectionDiagnostic",
+    "RouteKeyResult",
     "RouteResolution",
     "SessionResult",
 ]

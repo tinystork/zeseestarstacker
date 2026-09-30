@@ -493,6 +493,10 @@ _QM_DURABLE_REFERENCE_PREFIXES = (
     # Lot D: conjoint host-RAM plan for the winsorized reduction.
     "WINSOR_HOST_RAM_DECISION ",
     "WINSOR_HOST_RAM_REFUSAL ",
+    # Lot A calibration: the run-completion runtime-counter aggregate must be
+    # durable so the shipped run log alone proves what actually calibrated
+    # (requested/applied/skipped/failed + roles/DQ), not just the frozen plan.
+    "CALIBRATION_PROVENANCE ",
 )
 
 
@@ -1494,6 +1498,7 @@ _RESUME_MANIFEST_VERSION = 2
 _RESUME_MANIFEST_VERSION_MIN = 1
 _RESUME_MANIFEST_FILENAME = "resume_manifest.json"
 _RUN_CONFIG_FILENAME = "run_config.cfg"
+_CALIBRATION_PROVENANCE_FILENAME = "calibration_provenance.json"
 _RESUME_STATE_CLEAN = "clean"
 _RESUME_STATE_DIRTY = "dirty"
 _RESUME_MODE_CLASSIC_SUMW = "classic_sumw"
@@ -5664,6 +5669,13 @@ class SeestarQueuedStacker:
         # C7: the frozen calibration signature (7 fields) persisted into the run
         # contract ``calibration`` section and compared at resume (hard refusal).
         self._calibration_freeze: dict = {}
+        # C-provenance: bounded runtime counters captured at session close
+        # (requested / applied / skipped / failed + reasons + roles + DQ).
+        self._calibration_provenance: dict = {}
+        # Real, stable reason the calibration session could not open (probe
+        # INCOMPATIBLE / import failure / no usable masters) — surfaced
+        # actionably, never as a bare traceback.
+        self._calibration_unavailable_reason = None
         # ZSSS-LIFECYCLE-01: structured startup refusal (reset per start attempt)
         # and fail-open lifecycle callback (installed by the Qt adapter so the
         # engine can record durable lifecycle events without ever touching Qt).
@@ -11743,7 +11755,9 @@ class SeestarQueuedStacker:
 
         Lazily imports the integrator; a provider that is absent/unavailable or
         a masters folder with zero usable masters is an *information*, never a
-        fatal error (the run continues on the historical path).
+        fatal error (the run continues on the historical path).  The exact cause
+        (INCOMPATIBLE / NOT_INSTALLED / UNHEALTHY / no usable masters) is
+        surfaced actionably — never a bare traceback, never a secret.
         """
         self._calibration_integrator = None
         # Robust to a bare engine instance (e.g. a minimal test stacker) that
@@ -11765,16 +11779,40 @@ class SeestarQueuedStacker:
             return
         try:
             from seestar.calibration.streaming import CalibrationIntegrator
-        except Exception:
+        except Exception as exc:
+            self._calibration_unavailable_reason = f"integrator_import_failed: {type(exc).__name__}"
+            if self.update_progress:
+                self.update_progress(
+                    f"Calibration unavailable ({type(exc).__name__}); continuing "
+                    "with the historical path.",
+                    "INFO",
+                )
             return
         integrator = CalibrationIntegrator(
             master_folder,
             sensor_orientation=(getattr(self, "_calibration_orientation", "") or None),
         )
+        # Expose the provider negotiation result actionably: a C26 version-skew
+        # (missing ``light_route_key``) reports INCOMPATIBLE with a message, not
+        # the misleading "no usable masters".
+        info = integrator.probe_info()
+        if not getattr(info, "available", False):
+            self._calibration_unavailable_reason = (
+                f"{getattr(info, 'state', 'unavailable')}: "
+                f"{getattr(info, 'message', '') or 'provider unavailable'}"
+            )
+            if self.update_progress:
+                self.update_progress(
+                    "Calibration unavailable (%s); continuing with the "
+                    "historical path." % self._calibration_unavailable_reason,
+                    "INFO",
+                )
+            return
         try:
             opened = integrator.open()
-        except Exception:
+        except Exception as exc:
             opened = False
+            self._calibration_unavailable_reason = f"open_failed: {type(exc).__name__}"
         if opened:
             self._calibration_integrator = integrator
             logger.debug(
@@ -11785,25 +11823,93 @@ class SeestarQueuedStacker:
             # plan map) so it can be persisted and compared at resume.
             self._build_calibration_freeze()
         else:
+            self._calibration_unavailable_reason = (
+                self._calibration_unavailable_reason
+                or integrator.open_reason
+                or "no usable masters"
+            )
             integrator.close()
             self._calibration_integrator = None
             if self.update_progress:
                 self.update_progress(
-                    "Calibration unavailable (no usable masters); continuing "
-                    "with the historical path.",
+                    "Calibration unavailable (%s); continuing with the "
+                    "historical path." % self._calibration_unavailable_reason,
                     "INFO",
                 )
 
     def _close_calibration_session(self) -> None:
         if self._calibration_integrator is not None:
             try:
-                self._calibration_integrator.close()
+                # C-provenance: snapshot the bounded runtime counters (requested /
+                # applied / skipped / failed + reasons + roles + DQ) BEFORE the
+                # session is closed, so the final log/freeze can distinguish
+                # "session open" from "plan resolved" from "pixels calibrated".
+                self._calibration_provenance = (
+                    self._calibration_integrator.provenance_snapshot()
+                )
+            except Exception:
+                self._calibration_provenance = {}
             finally:
+                self._calibration_integrator.close()
                 self._calibration_integrator = None
+            # Durable final proof (success / failure / cancellation): emit a
+            # throttle-exempt run-log block AND persist a versioned JSON-safe
+            # artifact in the output folder.  Never part of the immutable
+            # scientific freeze / resume digest.
+            self._emit_calibration_provenance()
+            self._write_calibration_provenance_artifact()
         # C22: release any per-frame DQ masks still retained (bounded memory).
         masks = getattr(self, "_calibration_masks", None)
         if masks is not None:
             masks.clear()
+
+    def _emit_calibration_provenance(self) -> None:
+        """Emit the bounded runtime calibration counters as a durable log block."""
+        prov = getattr(self, "_calibration_provenance", None) or {}
+        self._emit_provenance_block(
+            "CALIBRATION_PROVENANCE",
+            {
+                "requested": prov.get("calibration_requested"),
+                "session_open": prov.get("calibration_session_open"),
+                "classes_planned": prov.get("calibration_classes_planned"),
+                "applied": prov.get("calibration_frames_applied"),
+                "skipped": prov.get("calibration_frames_skipped"),
+                "failed": prov.get("calibration_frames_failed"),
+                "roles": prov.get("calibration_effective_roles"),
+                "dq_present": prov.get("calibration_dq_present"),
+            },
+        )
+
+    def _write_calibration_provenance_artifact(self) -> None:
+        """Persist a versioned, JSON-safe, bounded final provenance artifact.
+
+        Written atomically into the output folder alongside ``run_config.cfg``
+        (temp + ``os.replace``); a failure to write is fail-open (provenance is
+        observational, never science).  Distinct fields
+        requested / session_open / classes_planned / applied / skipped / failed /
+        roles / DQ / reasons — never the dynamic counters in the scientific
+        freeze, so resume digests stay untouched.
+        """
+        prov = getattr(self, "_calibration_provenance", None) or {}
+        out_dir = getattr(self, "output_folder", None)
+        if not out_dir:
+            return
+        payload = {"schema_version": 1, **prov}
+        path = os.path.join(out_dir, _CALIBRATION_PROVENANCE_FILENAME)
+        tmp = path + ".tmp"
+        try:
+            import json as _json
+
+            with open(tmp, "w", encoding="utf-8") as fh:
+                _json.dump(payload, fh, sort_keys=True, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def _build_calibration_freeze(self, lights=()) -> dict:
         """Build + cache the frozen calibration signature (7 fields).
@@ -11855,23 +11961,31 @@ class SeestarQueuedStacker:
         integrator = getattr(self, "_calibration_integrator", None)
         if integrator is None:
             return None
+        integrator.record_requested()
         phys = load_and_validate_fits(
             file_path, normalize_to_float32=False, attempt_fix_nonfinite=False
         )
         if not phys or phys[0] is None:
+            integrator.record_failed("light_load_failed")
             return None
         physical, header_from_load = phys[0], phys[1]
         header = header_from_load.copy() if header_from_load else fits.Header()
         plan = integrator.resolve(file_path)
         if plan is None:
+            # The integrator already recorded the real skip reason (route_key /
+            # not_planned / resolve:<outcome>); never double-count.
             return None
         cal = integrator.calibrate(file_path, plan)
         if cal is None:
+            # The integrator already recorded the real failure reason; never
+            # double-count.
             return None
         calibrated_physical, mask = cal
         if calibrated_physical is None:
+            integrator.record_failed("empty_data")
             return None
         working = normalize_physical_to_working(calibrated_physical)
+        integrator.record_applied(dq_present=mask is not None)
         return working, header, mask
 
     def _combine_dq_into_valid_mask(self, file_name, valid_mask, M, is_original_grid):

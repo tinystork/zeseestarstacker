@@ -36,6 +36,7 @@ from seestar.core.calibration_port import (
     ProviderInfo,
     ProviderState,
     RejectionDiagnostic,
+    RouteKeyResult,
     RouteResolution,
     SessionResult,
 )
@@ -54,6 +55,13 @@ REQUIRED_API_MAJOR = "1"
 REQUIRED_CAPABILITIES = frozenset(
     {"session_library", "auto_route", "calibrate_frame", "cancel"}
 )
+
+# Hard requirement on the public *symbol* surface (C26 ``light_route_key``).
+# C26 is additive under API 1.1 (no capability/version bump), so it cannot be
+# negotiated through ``REQUIRED_CAPABILITIES``; the adapter's ``route_key``
+# depends on it, so its absence must be detected here and reported as
+# INCOMPATIBLE (never silently swallowed into an empty plan map).
+REQUIRED_API_SYMBOLS = frozenset({"light_route_key"})
 
 # The light import contract source (raw 2-D sensor/CFA light, decoded by the
 # provider).  Acquisition/geometry facts come from the FITS header; this only
@@ -163,6 +171,26 @@ def probe() -> ProviderInfo:
             product_version=product_version,
             capabilities=capabilities,
             message=f"missing capabilities: {missing}",
+        )
+
+    # C26: the canonical route-class key is a hard dependency of ``route_key``.
+    # It is additive (not a capability), so negotiate its presence directly via
+    # the public ``__all__`` contract; a provider without it cannot build a plan
+    # map and must be reported INCOMPATIBLE rather than silently degrading.
+    _all = tuple(getattr(api, "__all__", ()) or ())
+    missing_symbols = sorted(s for s in REQUIRED_API_SYMBOLS if s not in _all)
+    if missing_symbols:
+        return ProviderInfo(
+            state=ProviderState.INCOMPATIBLE,
+            provider_id=PROVIDER_ID,
+            api_version=api_version,
+            api_major=major,
+            product_version=product_version,
+            capabilities=capabilities,
+            message=(
+                f"missing public API symbol(s): {missing_symbols} "
+                "(provider predates the C26 canonical route-class key)"
+            ),
         )
 
     return ProviderInfo(
@@ -499,19 +527,36 @@ class ZeCalibratorProvider:
         ``light_route_key``.  ``None`` when the light cannot be decoded (absent
         / conflicting facts).  ZSSS never recomputes its own key.
         """
+        return self.route_key_result(path).key
+
+    def route_key_result(self, path: str) -> RouteKeyResult:
+        """Return the canonical route-class key **plus a stable reason** when absent.
+
+        Same contract as :meth:`route_key`, but the ``None`` key carries a
+        bounded, ZSSS-owned reason token so consumers can aggregate ``reason ->
+        count`` (never a provider object, never a traceback, never a per-frame
+        log entry).  The C26 symbol absence is reported distinctly so the probe
+        INCOMPATIBLE surface stays actionable.
+        """
         try:
             api = _import_api()
+        except Exception:
+            return RouteKeyResult(key=None, reason="api_import_failed")
+        try:
             src = _light_source(api, LightSource(path=path))
             res = api.inspect_frame(src)
         except Exception:
-            return None
+            return RouteKeyResult(key=None, reason="inspect_failed")
         if getattr(res, "operation_status", None) != "COMPLETED" or getattr(res, "inspection", None) is None:
-            return None
+            return RouteKeyResult(key=None, reason="inspection_incomplete")
         try:
             lc = api.light_constraints_from_sensor_metadata(res.inspection.metadata)
-            return api.light_route_key(lc)
+            key = api.light_route_key(lc)
+        except AttributeError:
+            return RouteKeyResult(key=None, reason="light_route_key_missing")
         except Exception:
-            return None
+            return RouteKeyResult(key=None, reason="constraints_failed")
+        return RouteKeyResult(key=key)
 
 
 __all__ = [

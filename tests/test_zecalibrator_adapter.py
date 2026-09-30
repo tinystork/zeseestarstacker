@@ -238,6 +238,16 @@ def _make_v1(*, api_version="1.1", capabilities=None, handle=None):
     v1.LibraryClosedError = _FakeLibraryClosedError
     v1.ImportDeclaration = _FakeImportDeclaration
     v1.FitsFrameSource = _FakeFitsFrameSource
+    # Public symbol contract (C26 additive): probe() negotiates ``light_route_key``
+    # presence via ``__all__``.  The fake must advertise it (and provide a trivial
+    # callable) so a compatible provider passes the C26 symbol check.
+    v1.__all__ = (
+        "get_api_info", "open_session_library", "CancellationToken",
+        "OperationCancelled", "InvalidRequestError", "PlanSourceMismatchError",
+        "LibraryClosedError", "ImportDeclaration", "FitsFrameSource",
+        "light_route_key",
+    )
+    v1.light_route_key = lambda light: "route-key"
 
     def open_session_library(root, *, cancel=None):
         return _FakeSessionLibraryResult(
@@ -352,6 +362,33 @@ def test_open_session_missing_capability_returns_unavailable(monkeypatch):
     )
     result = adapter.ZeCalibratorProvider().open_session("/x")
     assert result.state is port.CalibrationState.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# C26 — missing ``light_route_key`` public symbol -> INCOMPATIBLE (never a
+# silent empty plan map)
+# ---------------------------------------------------------------------------
+def test_probe_missing_light_route_key_symbol_reports_incompatible(monkeypatch):
+    v1 = _make_v1(api_version="1.1")
+    # Drop ``light_route_key`` from the public __all__ contract (a provider that
+    # predates C26): probe must report INCOMPATIBLE, not AVAILABLE.
+    v1.__all__ = tuple(s for s in v1.__all__ if s != "light_route_key")
+    del v1.light_route_key
+    _install_zecalibrator(monkeypatch, v1)
+    info = adapter.probe()
+    assert info.state is port.ProviderState.INCOMPATIBLE
+    assert info.available is False
+    assert "light_route_key" in info.message
+
+
+def test_open_session_missing_light_route_key_returns_unavailable(monkeypatch):
+    v1 = _make_v1(api_version="1.1")
+    v1.__all__ = tuple(s for s in v1.__all__ if s != "light_route_key")
+    del v1.light_route_key
+    _install_zecalibrator(monkeypatch, v1)
+    result = adapter.ZeCalibratorProvider().open_session("/x")
+    assert result.state is port.CalibrationState.UNAVAILABLE
+    assert result.session is None
 
 
 # ---------------------------------------------------------------------------
